@@ -1,0 +1,44 @@
+{
+  "app": {
+    "name": "TFRobot Client"
+  },
+  "mcp": {
+    "servers": "MCP Servers",
+    "addServer": "Add Server",
+    "startAll": "Start All",
+    "stopAll": "Stop All",
+    "description": "Manage your MCP servers here.",
+    "status": {
+      "running": "Running",
+      "stopped": "Stopped",
+      "error": "Error"
+    }
+  },
+  "connection": {
+    "smcpServer": "SMCP Server",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "description": "Connect to SMCP server."
+  },
+  "resources": {
+    "title": "Resources",
+    "description": "Browse desktop resources.",
+    "refresh": "Refresh"
+  },
+  "logs": {
+    "title": "Logs",
+    "description": "View tool call logs.",
+    "export": "Export Logs",
+    "clear": "Clear"
+  },
+  "settings": {
+    "title": "Settings",
+    "language": "Language",
+    "theme": "Theme",
+    "description": "Configure application settings.",
+    "errorReporting": "Error Reporting",
+    "errorReportingDesc": "Help improve TFRobot by sending anonymous error reports"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "app": {
+    "name": "TFRobot 客户端"
+  },
+  "mcp": {
+    "servers": "MCP 服务器",
+    "addServer": "添加服务器",
+    "startAll": "全部启动",
+    "stopAll": "全部停止",
+    "description": "在此管理您的 MCP 服务器。",
+    "status": {
+      "running": "运行中",
+      "stopped": "已停止",
+      "error": "错误"
+    }
+  },
+  "connection": {
+    "smcpServer": "SMCP 服务器",
+    "connect": "连接",
+    "disconnect": "断开",
+    "connected": "已连接",
+    "disconnected": "未连接",
+    "description": "连接到 SMCP 服务器。"
+  },
+  "resources": {
+    "title": "资源",
+    "description": "浏览桌面资源。",
+    "refresh": "刷新"
+  },
+  "logs": {
+    "title": "日志",
+    "description": "查看工具调用日志。",
+    "export": "导出日志",
+    "clear": "清除"
+  },
+  "settings": {
+    "title": "设置",
+    "language": "语言",
+    "theme": "主题",
+    "description": "配置应用程序设置。",
+    "errorReporting": "错误上报",
+    "errorReportingDesc": "通过发送匿名错误报告帮助改进 TFRobot"
+  }
+}
