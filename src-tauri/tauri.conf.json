@@ -55,10 +55,7 @@
       "endpoints": []
     },
     "shell": {
-      "all": false,
-      "execute": true,
-      "sidecar": true,
-      "scope": []
+      "open": true
     }
   }
 }

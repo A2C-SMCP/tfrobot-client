@@ -2,16 +2,69 @@
   "app": {
     "name": "TFRobot Client"
   },
+  "common": {
+    "add": "Add",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "refresh": "Refresh",
+    "yes": "Yes",
+    "no": "No",
+    "error": "Error",
+    "success": "Success"
+  },
   "mcp": {
     "servers": "MCP Servers",
     "addServer": "Add Server",
+    "editServer": "Edit Server",
     "startAll": "Start All",
     "stopAll": "Stop All",
     "description": "Manage your MCP servers here.",
+    "confirmRemove": "Are you sure you want to remove this server?",
     "status": {
       "running": "Running",
       "stopped": "Stopped",
       "error": "Error"
+    },
+    "table": {
+      "name": "Name",
+      "status": "Status",
+      "message": "Message",
+      "actions": "Actions"
+    },
+    "actions": {
+      "start": "Start",
+      "stop": "Stop",
+      "edit": "Edit",
+      "remove": "Remove"
+    },
+    "form": {
+      "type": "Server Type",
+      "name": "Server Name",
+      "nameRequired": "Server name is required",
+      "command": "Command",
+      "commandRequired": "Command is required",
+      "args": "Arguments",
+      "arg": "Argument",
+      "addArg": "Add Argument",
+      "cwd": "Working Directory",
+      "envVars": "Environment Variables",
+      "addEnv": "Add Variable",
+      "url": "URL",
+      "urlRequired": "URL is required",
+      "headers": "HTTP Headers",
+      "addHeader": "Add Header"
+    },
+    "messages": {
+      "added": "Server added successfully",
+      "updated": "Server updated successfully",
+      "removed": "Server removed successfully",
+      "started": "Server {{name}} started",
+      "stopped": "Server {{name}} stopped",
+      "allStarted": "All servers started",
+      "allStopped": "All servers stopped",
+      "editNotImplemented": "Edit functionality coming soon"
     }
   },
   "connection": {

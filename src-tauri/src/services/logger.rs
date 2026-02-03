@@ -33,11 +33,11 @@ impl LogManager {
     pub fn log_tool_call(
         &self,
         tool_name: &str,
-        params: &serde_json::Value,
+        _params: &serde_json::Value,
         result: Result<&serde_json::Value, &str>,
         duration_ms: u64,
     ) {
-        let level = if result.is_ok() {
+        let _level = if result.is_ok() {
             LogLevel::Info
         } else {
             LogLevel::Error

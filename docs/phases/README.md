@@ -6,7 +6,7 @@
 
 | Phase | 名称 | 状态 | 说明 |
 |-------|------|------|------|
-| [Phase 1](./PHASE-1-MCP-SERVER.md) | MCP Server 管理 | 🔴 未开始 | 核心功能，集成 smcp-computer |
+| [Phase 1](./PHASE-1-MCP-SERVER.md) | MCP Server 管理 | 🟢 已完成 | 核心功能，集成 smcp-computer |
 | [Phase 2](./PHASE-2-SMCP-CONNECTION.md) | SMCP Server 连接 | 🔴 未开始 | 远程连接和钥匙串 |
 | [Phase 3](./PHASE-3-RESOURCES.md) | Desktop 资源浏览器 | 🔴 未开始 | 资源查看功能 |
 | [Phase 4](./PHASE-4-LOGGING.md) | 日志系统 | 🔴 未开始 | 双层日志架构 |
