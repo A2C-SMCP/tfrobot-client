@@ -2,14 +2,19 @@ import { Layout, Menu, Typography } from 'antd';
 import {
   SettingOutlined,
   ApiOutlined,
-  FolderOutlined,
   FileTextOutlined,
   CloudServerOutlined,
+  DashboardOutlined,
+  FormOutlined,
+  BugOutlined,
+  DesktopOutlined,
 } from '@ant-design/icons';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
 import { McpConfig } from './components/McpConfig';
+import { InputVariables } from './components/InputVariables';
+import { SmcpConnection } from './components/SmcpConnection';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -20,48 +25,109 @@ function App() {
 
   const menuItems = [
     {
-      key: 'mcp',
-      icon: <ApiOutlined />,
-      label: t('mcp.servers'),
+      key: 'overview-group',
+      label: t('nav.overview'),
+      type: 'group' as const,
+      children: [
+        {
+          key: 'dashboard',
+          icon: <DashboardOutlined />,
+          label: t('nav.dashboard'),
+        },
+      ],
     },
     {
-      key: 'connection',
-      icon: <CloudServerOutlined />,
-      label: t('connection.smcpServer'),
+      key: 'config-group',
+      label: t('nav.config'),
+      type: 'group' as const,
+      children: [
+        {
+          key: 'mcp',
+          icon: <ApiOutlined />,
+          label: t('mcp.servers'),
+        },
+        {
+          key: 'inputs',
+          icon: <FormOutlined />,
+          label: t('inputs.title'),
+        },
+      ],
     },
     {
-      key: 'resources',
-      icon: <FolderOutlined />,
-      label: t('resources.title'),
+      key: 'connection-group',
+      label: t('nav.connection'),
+      type: 'group' as const,
+      children: [
+        {
+          key: 'smcp',
+          icon: <CloudServerOutlined />,
+          label: t('connection.smcpServer'),
+        },
+        {
+          key: 'resources',
+          icon: <DesktopOutlined />,
+          label: t('resources.title'),
+        },
+      ],
     },
     {
-      key: 'logs',
-      icon: <FileTextOutlined />,
-      label: t('logs.title'),
+      key: 'dev-group',
+      label: t('nav.development'),
+      type: 'group' as const,
+      children: [
+        {
+          key: 'debug',
+          icon: <BugOutlined />,
+          label: t('nav.debugPanel'),
+        },
+        {
+          key: 'logs',
+          icon: <FileTextOutlined />,
+          label: t('logs.title'),
+        },
+      ],
     },
     {
-      key: 'settings',
-      icon: <SettingOutlined />,
-      label: t('settings.title'),
+      key: 'system-group',
+      label: t('nav.system'),
+      type: 'group' as const,
+      children: [
+        {
+          key: 'settings',
+          icon: <SettingOutlined />,
+          label: t('settings.title'),
+        },
+      ],
     },
   ];
 
   const renderContent = () => {
     switch (selectedKey) {
-      case 'mcp':
-        return <McpConfig />;
-      case 'connection':
+      case 'dashboard':
         return (
           <div>
-            <Title level={4}>{t('connection.smcpServer')}</Title>
-            <p>{t('connection.description')}</p>
+            <Title level={4}>{t('nav.dashboard')}</Title>
+            <p>{t('dashboard.description')}</p>
           </div>
         );
+      case 'mcp':
+        return <McpConfig />;
+      case 'inputs':
+        return <InputVariables />;
+      case 'smcp':
+        return <SmcpConnection />;
       case 'resources':
         return (
           <div>
             <Title level={4}>{t('resources.title')}</Title>
             <p>{t('resources.description')}</p>
+          </div>
+        );
+      case 'debug':
+        return (
+          <div>
+            <Title level={4}>{t('nav.debugPanel')}</Title>
+            <p>{t('debug.description')}</p>
           </div>
         );
       case 'logs':

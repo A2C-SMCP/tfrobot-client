@@ -12,7 +12,22 @@
     "yes": "Yes",
     "no": "No",
     "error": "Error",
-    "success": "Success"
+    "success": "Success",
+    "import": "Import",
+    "export": "Export",
+    "confirm": "Confirm"
+  },
+  "nav": {
+    "overview": "OVERVIEW",
+    "dashboard": "Dashboard",
+    "config": "CONFIGURATION",
+    "connection": "CONNECTION",
+    "development": "DEVELOPMENT",
+    "system": "SYSTEM",
+    "debugPanel": "Debug Panel"
+  },
+  "dashboard": {
+    "description": "System status overview. (Coming in Phase 4)"
   },
   "mcp": {
     "servers": "MCP Servers",
@@ -22,6 +37,8 @@
     "stopAll": "Stop All",
     "description": "Manage your MCP servers here.",
     "confirmRemove": "Are you sure you want to remove this server?",
+    "importConfig": "Import Config",
+    "exportConfig": "Export Config",
     "status": {
       "running": "Running",
       "stopped": "Stopped",
@@ -64,25 +81,107 @@
       "stopped": "Server {{name}} stopped",
       "allStarted": "All servers started",
       "allStopped": "All servers stopped",
-      "editNotImplemented": "Edit functionality coming soon"
+      "editNotImplemented": "Edit functionality coming soon",
+      "importSuccess": "Imported {{servers}} servers and {{inputs}} inputs",
+      "exportSuccess": "Configuration exported successfully"
+    }
+  },
+  "inputs": {
+    "title": "Input Variables",
+    "addInput": "Add Variable",
+    "editInput": "Edit Variable",
+    "setValue": "Set Value",
+    "selectValue": "Select a value",
+    "enterValue": "Enter value",
+    "clearValues": "Clear All Values",
+    "confirmRemove": "Are you sure you want to remove this variable?",
+    "confirmClearValues": "Are you sure you want to clear all cached values?",
+    "setValueFor": "Set value for: {{id}}",
+    "table": {
+      "id": "ID",
+      "type": "Type",
+      "label": "Label",
+      "currentValue": "Current Value",
+      "actions": "Actions"
+    },
+    "form": {
+      "type": "Variable Type",
+      "id": "Variable ID",
+      "idRequired": "Variable ID is required",
+      "label": "Display Label",
+      "labelRequired": "Display label is required",
+      "description": "Description",
+      "defaultValue": "Default Value",
+      "password": "Password Mode",
+      "options": "Options",
+      "addOption": "Add Option",
+      "command": "Command",
+      "args": "Arguments",
+      "addArg": "Add Argument"
+    },
+    "messages": {
+      "saved": "Variable saved successfully",
+      "removed": "Variable removed successfully",
+      "valueSet": "Value set successfully",
+      "valuesCleared": "All cached values cleared"
     }
   },
   "connection": {
     "smcpServer": "SMCP Server",
+    "profiles": "Connection Profiles",
+    "addProfile": "Add Profile",
+    "editProfile": "Edit Profile",
     "connect": "Connect",
     "disconnect": "Disconnect",
     "connected": "Connected",
     "disconnected": "Disconnected",
-    "description": "Connect to SMCP server."
+    "statusTitle": "Connection Status",
+    "notConnected": "Not connected to any SMCP server.",
+    "connectedAt": "Connected At",
+    "confirmDelete": "Are you sure you want to delete this profile?",
+    "description": "Connect to SMCP server.",
+    "table": {
+      "name": "Profile Name",
+      "url": "Server URL",
+      "office": "Office ID",
+      "computer": "Computer Name",
+      "actions": "Actions"
+    },
+    "form": {
+      "name": "Profile Name",
+      "nameRequired": "Profile name is required",
+      "url": "Server URL",
+      "urlRequired": "Server URL is required",
+      "namespace": "Namespace",
+      "officeId": "Office ID",
+      "officeIdRequired": "Office ID is required",
+      "computerName": "Computer Name",
+      "computerNameRequired": "Computer name is required",
+      "apiKey": "API Key",
+      "apiKeyUnchanged": "Leave empty to keep current key",
+      "headers": "Custom Headers",
+      "addHeader": "Add Header",
+      "autoConnect": "Auto Connect",
+      "autoReconnect": "Auto Reconnect"
+    },
+    "messages": {
+      "profileSaved": "Profile saved successfully",
+      "profileDeleted": "Profile deleted successfully",
+      "connected": "Connected to SMCP server",
+      "disconnected": "Disconnected from SMCP server"
+    }
   },
   "resources": {
-    "title": "Resources",
-    "description": "Browse desktop resources.",
+    "title": "Desktop Resources",
+    "description": "Browse desktop resources. (Coming in Phase 3)",
     "refresh": "Refresh"
+  },
+  "debug": {
+    "description": "Tool browser and call testing. (Coming in Phase 3)"
   },
   "logs": {
     "title": "Logs",
-    "description": "View tool call logs.",
+    "description": "View tool call logs. (Coming in Phase 4)",
     "export": "Export Logs",
     "clear": "Clear"
   },
@@ -90,7 +189,7 @@
     "title": "Settings",
     "language": "Language",
     "theme": "Theme",
-    "description": "Configure application settings.",
+    "description": "Configure application settings. (Coming in Phase 5)",
     "errorReporting": "Error Reporting",
     "errorReportingDesc": "Help improve TFRobot by sending anonymous error reports"
   }

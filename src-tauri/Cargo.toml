@@ -42,6 +42,7 @@ anyhow = "1"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-dialog = "2.6.0"
 
 [features]
 default = ["custom-protocol"]

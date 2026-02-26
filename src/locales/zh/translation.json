@@ -12,7 +12,22 @@
     "yes": "是",
     "no": "否",
     "error": "错误",
-    "success": "成功"
+    "success": "成功",
+    "import": "导入",
+    "export": "导出",
+    "confirm": "确认"
+  },
+  "nav": {
+    "overview": "概览",
+    "dashboard": "仪表盘",
+    "config": "配置",
+    "connection": "连接",
+    "development": "开发",
+    "system": "系统",
+    "debugPanel": "调试面板"
+  },
+  "dashboard": {
+    "description": "系统状态概览。（Phase 4 实现）"
   },
   "mcp": {
     "servers": "MCP 服务器",
@@ -22,6 +37,8 @@
     "stopAll": "全部停止",
     "description": "在此管理您的 MCP 服务器。",
     "confirmRemove": "确定要删除此服务器吗？",
+    "importConfig": "导入配置",
+    "exportConfig": "导出配置",
     "status": {
       "running": "运行中",
       "stopped": "已停止",
@@ -64,25 +81,107 @@
       "stopped": "服务器 {{name}} 已停止",
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
-      "editNotImplemented": "编辑功能即将推出"
+      "editNotImplemented": "编辑功能即将推出",
+      "importSuccess": "已导入 {{servers}} 个服务器和 {{inputs}} 个变量",
+      "exportSuccess": "配置导出成功"
+    }
+  },
+  "inputs": {
+    "title": "输入变量",
+    "addInput": "添加变量",
+    "editInput": "编辑变量",
+    "setValue": "设置值",
+    "selectValue": "请选择一个值",
+    "enterValue": "请输入值",
+    "clearValues": "清空所有值",
+    "confirmRemove": "确定要删除此变量吗？",
+    "confirmClearValues": "确定要清空所有缓存值吗？",
+    "setValueFor": "设置变量值：{{id}}",
+    "table": {
+      "id": "ID",
+      "type": "类型",
+      "label": "标签",
+      "currentValue": "当前值",
+      "actions": "操作"
+    },
+    "form": {
+      "type": "变量类型",
+      "id": "变量 ID",
+      "idRequired": "请输入变量 ID",
+      "label": "显示名称",
+      "labelRequired": "请输入显示名称",
+      "description": "描述",
+      "defaultValue": "默认值",
+      "password": "密码模式",
+      "options": "选项列表",
+      "addOption": "添加选项",
+      "command": "命令",
+      "args": "参数",
+      "addArg": "添加参数"
+    },
+    "messages": {
+      "saved": "变量保存成功",
+      "removed": "变量删除成功",
+      "valueSet": "值设置成功",
+      "valuesCleared": "所有缓存值已清空"
     }
   },
   "connection": {
     "smcpServer": "SMCP 服务器",
+    "profiles": "连接配置",
+    "addProfile": "添加配置",
+    "editProfile": "编辑配置",
     "connect": "连接",
     "disconnect": "断开",
     "connected": "已连接",
     "disconnected": "未连接",
-    "description": "连接到 SMCP 服务器。"
+    "statusTitle": "连接状态",
+    "notConnected": "未连接到任何 SMCP 服务器。",
+    "connectedAt": "连接时间",
+    "confirmDelete": "确定要删除此连接配置吗？",
+    "description": "连接到 SMCP 服务器。",
+    "table": {
+      "name": "配置名称",
+      "url": "服务器地址",
+      "office": "Office ID",
+      "computer": "计算机名称",
+      "actions": "操作"
+    },
+    "form": {
+      "name": "配置名称",
+      "nameRequired": "请输入配置名称",
+      "url": "服务器地址",
+      "urlRequired": "请输入服务器地址",
+      "namespace": "命名空间",
+      "officeId": "Office ID",
+      "officeIdRequired": "请输入 Office ID",
+      "computerName": "计算机名称",
+      "computerNameRequired": "请输入计算机名称",
+      "apiKey": "API 密钥",
+      "apiKeyUnchanged": "留空则保留当前密钥",
+      "headers": "自定义请求头",
+      "addHeader": "添加请求头",
+      "autoConnect": "自动连接",
+      "autoReconnect": "自动重连"
+    },
+    "messages": {
+      "profileSaved": "连接配置保存成功",
+      "profileDeleted": "连接配置删除成功",
+      "connected": "已连接到 SMCP 服务器",
+      "disconnected": "已断开 SMCP 服务器连接"
+    }
   },
   "resources": {
-    "title": "资源",
-    "description": "浏览桌面资源。",
+    "title": "桌面资源",
+    "description": "浏览桌面资源。（Phase 3 实现）",
     "refresh": "刷新"
+  },
+  "debug": {
+    "description": "工具浏览与调用测试。（Phase 3 实现）"
   },
   "logs": {
     "title": "日志",
-    "description": "查看工具调用日志。",
+    "description": "查看工具调用日志。（Phase 4 实现）",
     "export": "导出日志",
     "clear": "清除"
   },
@@ -90,7 +189,7 @@
     "title": "设置",
     "language": "语言",
     "theme": "主题",
-    "description": "配置应用程序设置。",
+    "description": "配置应用程序设置。（Phase 5 实现）",
     "errorReporting": "错误上报",
     "errorReportingDesc": "通过发送匿名错误报告帮助改进 TFRobot"
   }

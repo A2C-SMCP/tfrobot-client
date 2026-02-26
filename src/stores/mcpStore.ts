@@ -59,12 +59,17 @@ export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse'
   return 'stdio';
 }
 
+export interface ImportResult {
+  servers_imported: number;
+  inputs_imported: number;
+  servers_skipped: string[];
+}
+
 interface McpServerState {
   servers: McpServerStatus[];
   loading: boolean;
   error: string | null;
 
-  // Actions
   fetchServers: () => Promise<void>;
   addServer: (config: McpServerConfig) => Promise<void>;
   updateServer: (config: McpServerConfig) => Promise<void>;
@@ -73,6 +78,8 @@ interface McpServerState {
   stopServer: (name: string) => Promise<void>;
   startAll: () => Promise<void>;
   stopAll: () => Promise<void>;
+  importConfig: (path: string) => Promise<ImportResult>;
+  exportConfig: (path: string, serverNames?: string[]) => Promise<void>;
 }
 
 export const useMcpStore = create<McpServerState>((set, get) => ({
@@ -161,6 +168,29 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     try {
       await invoke('stop_all_servers');
       await get().fetchServers();
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  importConfig: async (path: string) => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke<ImportResult>('import_config', { path, format: null });
+      await get().fetchServers();
+      return result;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  exportConfig: async (path: string, serverNames?: string[]) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('export_config', { path, serverNames: serverNames || null });
+      set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;

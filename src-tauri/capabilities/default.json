@@ -8,6 +8,7 @@
     "shell:allow-execute",
     "shell:allow-spawn",
     "shell:allow-kill",
-    "updater:default"
+    "updater:default",
+    "dialog:default"
   ]
 }

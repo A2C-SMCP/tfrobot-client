@@ -1,74 +1,117 @@
+use crate::commands::connection::ConnectionProfile;
+use crate::commands::inputs::InputDefinition;
 use smcp_computer::mcp_clients::MCPServerConfig;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Service for persisting MCP server configurations to disk
+/// Service for persisting all configuration data to disk
 pub struct ConfigService {
     config_dir: PathBuf,
-    config_file: PathBuf,
+    servers_file: PathBuf,
+    inputs_file: PathBuf,
+    input_values_file: PathBuf,
+    profiles_file: PathBuf,
 }
 
 impl ConfigService {
     /// Create a new ConfigService with the given app data directory
     pub fn new(app_data_dir: PathBuf) -> Result<Self, std::io::Error> {
-        // Ensure the config directory exists
         fs::create_dir_all(&app_data_dir)?;
 
-        let config_file = app_data_dir.join("mcp_servers.json");
-
         Ok(Self {
+            servers_file: app_data_dir.join("mcp_servers.json"),
+            inputs_file: app_data_dir.join("inputs.json"),
+            input_values_file: app_data_dir.join("input_values.json"),
+            profiles_file: app_data_dir.join("connection_profiles.json"),
             config_dir: app_data_dir,
-            config_file,
         })
     }
 
-    /// Load MCP server configurations from disk
+    // --- MCP Server Configs ---
+
     pub fn load_configs(&self) -> Result<Vec<MCPServerConfig>, ConfigError> {
-        if !self.config_file.exists() {
-            return Ok(vec![]);
-        }
-
-        let content = fs::read_to_string(&self.config_file)?;
-        let configs: Vec<MCPServerConfig> = serde_json::from_str(&content)?;
-        Ok(configs)
+        load_json_file(&self.servers_file)
     }
 
-    /// Save MCP server configurations to disk
     pub fn save_configs(&self, configs: &[MCPServerConfig]) -> Result<(), ConfigError> {
-        let content = serde_json::to_string_pretty(configs)?;
-        fs::write(&self.config_file, content)?;
-        Ok(())
+        save_json_file(&self.servers_file, configs)
     }
 
-    /// Add a new server configuration (or update if exists)
     pub fn add_config(&self, config: MCPServerConfig) -> Result<(), ConfigError> {
         let mut configs = self.load_configs()?;
         let name = config.name().to_string();
-
-        // Remove existing config with same name if present
         configs.retain(|c| c.name() != name);
         configs.push(config);
-
         self.save_configs(&configs)
     }
 
-    /// Remove a server configuration by name
     pub fn remove_config(&self, name: &str) -> Result<(), ConfigError> {
         let mut configs = self.load_configs()?;
         let original_len = configs.len();
         configs.retain(|c| c.name() != name);
-
         if configs.len() == original_len {
             return Err(ConfigError::NotFound(name.to_string()));
         }
-
         self.save_configs(&configs)
     }
 
-    /// Get the config directory path
+    // --- Input Definitions ---
+
+    pub fn load_inputs(&self) -> Result<Vec<InputDefinition>, ConfigError> {
+        load_json_file(&self.inputs_file)
+    }
+
+    pub fn save_inputs(&self, inputs: &[InputDefinition]) -> Result<(), ConfigError> {
+        save_json_file(&self.inputs_file, inputs)
+    }
+
+    // --- Input Values ---
+
+    pub fn load_input_values(&self) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
+        load_json_file(&self.input_values_file)
+    }
+
+    pub fn save_input_values(
+        &self,
+        values: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), ConfigError> {
+        save_json_file(&self.input_values_file, values)
+    }
+
+    // --- Connection Profiles ---
+
+    pub fn load_profiles(&self) -> Result<Vec<ConnectionProfile>, ConfigError> {
+        load_json_file(&self.profiles_file)
+    }
+
+    pub fn save_profiles(&self, profiles: &[ConnectionProfile]) -> Result<(), ConfigError> {
+        save_json_file(&self.profiles_file, profiles)
+    }
+
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
+}
+
+fn load_json_file<T: serde::de::DeserializeOwned + Default>(
+    path: &PathBuf,
+) -> Result<T, ConfigError> {
+    if !path.exists() {
+        return Ok(T::default());
+    }
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(T::default());
+    }
+    let data: T = serde_json::from_str(&content)?;
+    Ok(data)
+}
+
+fn save_json_file<T: serde::Serialize + ?Sized>(path: &PathBuf, data: &T) -> Result<(), ConfigError> {
+    let content = serde_json::to_string_pretty(data)?;
+    fs::write(path, content)?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

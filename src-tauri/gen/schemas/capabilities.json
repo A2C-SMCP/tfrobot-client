@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for TFRobot Client","local":true,"windows":["main"],"permissions":["core:default","shell:allow-execute","shell:allow-spawn","shell:allow-kill","updater:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for TFRobot Client","local":true,"windows":["main"],"permissions":["core:default","shell:allow-execute","shell:allow-spawn","shell:allow-kill","updater:default","dialog:default"]}}
