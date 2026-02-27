@@ -1,0 +1,126 @@
+import { useEffect, useState } from 'react';
+import { Button, Input, Select, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
+import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
+import { useDebugStore, type ToolInfo } from '@/stores/debugStore';
+import { ToolCallTest } from './ToolCallTest';
+
+const { Text, Paragraph } = Typography;
+
+export function ToolBrowser() {
+  const { t } = useTranslation();
+  const { tools, toolsLoading, selectedTool, fetchTools, selectTool } = useDebugStore();
+  const [search, setSearch] = useState('');
+  const [serverFilter, setServerFilter] = useState<string | undefined>();
+
+  useEffect(() => {
+    fetchTools();
+  }, [fetchTools]);
+
+  const servers = [...new Set(tools.map((t) => t.server))];
+
+  const filtered = tools.filter((tool) => {
+    if (search && !tool.name.toLowerCase().includes(search.toLowerCase()) && !tool.description.toLowerCase().includes(search.toLowerCase())) {
+      return false;
+    }
+    if (serverFilter && tool.server !== serverFilter) return false;
+    return true;
+  });
+
+  return (
+    <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 220px)' }}>
+      {/* Left: Tool List */}
+      <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+        <Space style={{ marginBottom: 8, width: '100%' }} direction="vertical">
+          <Space.Compact style={{ width: '100%' }}>
+            <Input
+              prefix={<SearchOutlined />}
+              placeholder={t('debug.searchTools')}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              allowClear
+            />
+            <Button icon={<ReloadOutlined />} onClick={() => fetchTools()} loading={toolsLoading} />
+          </Space.Compact>
+          <Select
+            style={{ width: '100%' }}
+            placeholder={t('debug.allServers')}
+            value={serverFilter}
+            onChange={setServerFilter}
+            allowClear
+            options={servers.map((s) => ({ label: s, value: s }))}
+          />
+        </Space>
+
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {toolsLoading ? (
+            <Spin style={{ display: 'block', marginTop: 40 }} />
+          ) : filtered.length === 0 ? (
+            <Empty description={t('debug.noTools')} />
+          ) : (
+            <List
+              size="small"
+              dataSource={filtered}
+              renderItem={(tool) => (
+                <List.Item
+                  onClick={() => selectTool(tool)}
+                  style={{
+                    cursor: 'pointer',
+                    background: selectedTool?.name === tool.name ? '#e6f4ff' : undefined,
+                    padding: '8px 12px',
+                  }}
+                >
+                  <List.Item.Meta
+                    title={
+                      <Space>
+                        <Text strong>{tool.name}</Text>
+                        <Tag>{tool.server}</Tag>
+                      </Space>
+                    }
+                    description={
+                      <Text type="secondary" ellipsis>
+                        {tool.description}
+                      </Text>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Right: Tool Detail + Call Test */}
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {selectedTool ? (
+          <ToolDetail tool={selectedTool} />
+        ) : (
+          <Empty description={t('debug.selectTool')} style={{ marginTop: 80 }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToolDetail({ tool }: { tool: ToolInfo }) {
+  const { t } = useTranslation();
+
+  return (
+    <div>
+      <Typography.Title level={5}>{tool.name}</Typography.Title>
+      <Space style={{ marginBottom: 8 }}>
+        <Tag color="blue">{tool.server}</Tag>
+        {tool.tags?.map((tag) => <Tag key={tag}>{tag}</Tag>)}
+      </Space>
+      <Paragraph>{tool.description}</Paragraph>
+
+      <Divider orientation="left">{t('debug.inputSchema')}</Divider>
+      <pre style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
+        {JSON.stringify(tool.inputSchema, null, 2)}
+      </pre>
+
+      <Divider orientation="left">{t('debug.callTest')}</Divider>
+      <ToolCallTest tool={tool} />
+    </div>
+  );
+}

@@ -15,6 +15,8 @@ import styles from './styles/App.module.css';
 import { McpConfig } from './components/McpConfig';
 import { InputVariables } from './components/InputVariables';
 import { SmcpConnection } from './components/SmcpConnection';
+import { DebugPanel } from './components/DebugPanel';
+import { DesktopResources } from './components/DesktopResources';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -117,19 +119,9 @@ function App() {
       case 'smcp':
         return <SmcpConnection />;
       case 'resources':
-        return (
-          <div>
-            <Title level={4}>{t('resources.title')}</Title>
-            <p>{t('resources.description')}</p>
-          </div>
-        );
+        return <DesktopResources />;
       case 'debug':
-        return (
-          <div>
-            <Title level={4}>{t('nav.debugPanel')}</Title>
-            <p>{t('debug.description')}</p>
-          </div>
-        );
+        return <DebugPanel />;
       case 'logs':
         return (
           <div>

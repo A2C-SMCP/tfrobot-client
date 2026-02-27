@@ -173,11 +173,44 @@
   },
   "resources": {
     "title": "Desktop Resources",
-    "description": "Browse desktop resources. (Coming in Phase 3)",
+    "description": "Browse desktop resources.",
     "refresh": "Refresh"
   },
+  "desktop": {
+    "title": "Desktop Resources",
+    "windowUri": "URI",
+    "windowTitle": "Title",
+    "sourceServer": "Source Server",
+    "noWindows": "No desktop windows detected"
+  },
   "debug": {
-    "description": "Tool browser and call testing. (Coming in Phase 3)"
+    "description": "Tool browser and call testing.",
+    "tabs": {
+      "tools": "Tools",
+      "resources": "Resources",
+      "history": "History"
+    },
+    "searchTools": "Search tools...",
+    "allServers": "All Servers",
+    "noTools": "No tools available",
+    "selectTool": "Select a tool from the list",
+    "inputSchema": "Input Schema",
+    "callTest": "Call Test",
+    "formMode": "Form",
+    "jsonMode": "JSON",
+    "timeout": "Timeout",
+    "execute": "Execute",
+    "historyColumns": {
+      "time": "Time",
+      "tool": "Tool",
+      "server": "Server",
+      "status": "Status",
+      "params": "Parameters"
+    },
+    "noHistory": "No call history",
+    "replay": "Replay",
+    "noResources": "No resources available",
+    "resourcesNotAvailable": "Resource browsing will be available when smcp-computer exposes resource APIs."
   },
   "logs": {
     "title": "Logs",

@@ -173,11 +173,44 @@
   },
   "resources": {
     "title": "桌面资源",
-    "description": "浏览桌面资源。（Phase 3 实现）",
+    "description": "浏览桌面资源。",
     "refresh": "刷新"
   },
+  "desktop": {
+    "title": "桌面资源",
+    "windowUri": "URI",
+    "windowTitle": "标题",
+    "sourceServer": "来源服务器",
+    "noWindows": "未检测到桌面窗口"
+  },
   "debug": {
-    "description": "工具浏览与调用测试。（Phase 3 实现）"
+    "description": "工具浏览与调用测试。",
+    "tabs": {
+      "tools": "工具",
+      "resources": "资源",
+      "history": "历史记录"
+    },
+    "searchTools": "搜索工具...",
+    "allServers": "所有服务器",
+    "noTools": "暂无可用工具",
+    "selectTool": "请从列表中选择一个工具",
+    "inputSchema": "输入模式",
+    "callTest": "调用测试",
+    "formMode": "表单",
+    "jsonMode": "JSON",
+    "timeout": "超时时间",
+    "execute": "执行",
+    "historyColumns": {
+      "time": "时间",
+      "tool": "工具",
+      "server": "服务器",
+      "status": "状态",
+      "params": "参数"
+    },
+    "noHistory": "暂无调用记录",
+    "replay": "重放",
+    "noResources": "暂无可用资源",
+    "resourcesNotAvailable": "资源浏览功能将在 smcp-computer 开放资源 API 后可用。"
   },
   "logs": {
     "title": "日志",

@@ -115,6 +115,12 @@ pub fn run() {
             commands::config_io::detect_config_format,
             commands::config_io::import_config,
             commands::config_io::export_config,
+            // Debug & tools
+            commands::debug::get_available_tools,
+            commands::debug::execute_tool,
+            commands::debug::get_tool_history,
+            // Desktop resources
+            commands::desktop::get_desktop,
             // Logs
             commands::logs::get_logs,
             commands::logs::export_logs,
