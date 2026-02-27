@@ -1,5 +1,6 @@
 pub mod config_io;
 pub mod connection;
+pub mod dashboard;
 pub mod debug;
 pub mod desktop;
 pub mod inputs;

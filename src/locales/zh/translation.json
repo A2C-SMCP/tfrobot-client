@@ -27,7 +27,16 @@
     "debugPanel": "调试面板"
   },
   "dashboard": {
-    "description": "系统状态概览。（Phase 4 实现）"
+    "connection": "连接状态",
+    "mcpServers": "MCP 服务器",
+    "tools": "工具",
+    "runtimes": "运行时",
+    "recentActivity": "最近活动",
+    "total": "总计",
+    "running": "运行中",
+    "stopped": "已停止",
+    "toolsAvailable": "个可用工具",
+    "noActivity": "暂无最近活动"
   },
   "mcp": {
     "servers": "MCP 服务器",
@@ -214,9 +223,17 @@
   },
   "logs": {
     "title": "日志",
-    "description": "查看工具调用日志。（Phase 4 实现）",
-    "export": "导出日志",
-    "clear": "清除"
+    "export": "导出",
+    "clear": "清除",
+    "time": "时间",
+    "level": "级别",
+    "category": "分类",
+    "message": "消息",
+    "filterLevel": "按级别筛选",
+    "filterCategory": "按分类筛选",
+    "searchKeyword": "搜索关键词...",
+    "allTime": "全部",
+    "confirmClear": "确定清除所有日志？"
   },
   "settings": {
     "title": "设置",

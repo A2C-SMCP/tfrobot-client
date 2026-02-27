@@ -49,6 +49,7 @@ pub async fn add_mcp_server(
         .map_err(|e| e.to_string())?;
 
     tracing::info!("MCP server added: {}", name);
+    let _ = state.log_service.write("info", "mcp", &format!("Server added: {}", name), None);
     Ok(())
 }
 
@@ -68,6 +69,7 @@ pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Resu
         .map_err(|e| e.to_string())?;
 
     tracing::info!("MCP server removed: {}", name);
+    let _ = state.log_service.write("info", "mcp", &format!("Server removed: {}", name), None);
     Ok(())
 }
 
@@ -91,6 +93,7 @@ pub async fn update_mcp_server(
         .map_err(|e| e.to_string())?;
 
     tracing::info!("MCP server updated: {}", name);
+    let _ = state.log_service.write("info", "mcp", &format!("Server updated: {}", name), None);
     Ok(())
 }
 
@@ -105,6 +108,7 @@ pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Resul
         .map_err(|e| e.to_string())?;
 
     tracing::info!("MCP server started: {}", name);
+    let _ = state.log_service.write("info", "mcp", &format!("Server started: {}", name), None);
     Ok(())
 }
 
@@ -119,6 +123,7 @@ pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result
         .map_err(|e| e.to_string())?;
 
     tracing::info!("MCP server stopped: {}", name);
+    let _ = state.log_service.write("info", "mcp", &format!("Server stopped: {}", name), None);
     Ok(())
 }
 

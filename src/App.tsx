@@ -17,13 +17,15 @@ import { InputVariables } from './components/InputVariables';
 import { SmcpConnection } from './components/SmcpConnection';
 import { DebugPanel } from './components/DebugPanel';
 import { DesktopResources } from './components/DesktopResources';
+import { Dashboard } from './components/Dashboard';
+import { LogViewer } from './components/LogViewer';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
 function App() {
   const { t } = useTranslation();
-  const [selectedKey, setSelectedKey] = useState('mcp');
+  const [selectedKey, setSelectedKey] = useState('dashboard');
 
   const menuItems = [
     {
@@ -106,12 +108,7 @@ function App() {
   const renderContent = () => {
     switch (selectedKey) {
       case 'dashboard':
-        return (
-          <div>
-            <Title level={4}>{t('nav.dashboard')}</Title>
-            <p>{t('dashboard.description')}</p>
-          </div>
-        );
+        return <Dashboard onNavigate={setSelectedKey} />;
       case 'mcp':
         return <McpConfig />;
       case 'inputs':
@@ -123,12 +120,7 @@ function App() {
       case 'debug':
         return <DebugPanel />;
       case 'logs':
-        return (
-          <div>
-            <Title level={4}>{t('logs.title')}</Title>
-            <p>{t('logs.description')}</p>
-          </div>
-        );
+        return <LogViewer />;
       case 'settings':
         return (
           <div>

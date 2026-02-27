@@ -27,7 +27,16 @@
     "debugPanel": "Debug Panel"
   },
   "dashboard": {
-    "description": "System status overview. (Coming in Phase 4)"
+    "connection": "Connection",
+    "mcpServers": "MCP Servers",
+    "tools": "Tools",
+    "runtimes": "Runtimes",
+    "recentActivity": "Recent Activity",
+    "total": "Total",
+    "running": "Running",
+    "stopped": "Stopped",
+    "toolsAvailable": "tools available",
+    "noActivity": "No recent activity"
   },
   "mcp": {
     "servers": "MCP Servers",
@@ -214,9 +223,17 @@
   },
   "logs": {
     "title": "Logs",
-    "description": "View tool call logs. (Coming in Phase 4)",
-    "export": "Export Logs",
-    "clear": "Clear"
+    "export": "Export",
+    "clear": "Clear",
+    "time": "Time",
+    "level": "Level",
+    "category": "Category",
+    "message": "Message",
+    "filterLevel": "Filter by level",
+    "filterCategory": "Filter by category",
+    "searchKeyword": "Search keyword...",
+    "allTime": "All",
+    "confirmClear": "Clear all logs?"
   },
   "settings": {
     "title": "Settings",

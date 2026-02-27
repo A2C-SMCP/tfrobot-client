@@ -144,6 +144,7 @@ pub async fn connect_smcp(
     });
 
     tracing::info!("Connected to SMCP server: {}", profile.url);
+    let _ = state.log_service.write("info", "connection", &format!("Connected to {}", profile.url), None);
     Ok(())
 }
 
@@ -159,6 +160,7 @@ pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
 
+    let _ = state.log_service.write("info", "connection", "Disconnected from SMCP server", None);
     Ok(())
 }
 

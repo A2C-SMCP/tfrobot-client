@@ -1,43 +1,38 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use crate::services::logger::LogFilter;
+use crate::AppState;
+use tauri::State;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserFriendlyLog {
-    pub id: String,
-    pub timestamp: DateTime<Utc>,
-    pub tool_name: String,
-    pub status: CallStatus,
-    pub summary: String,
-    pub duration_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CallStatus {
-    Pending,
-    Success,
-    Failed { error: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogFilter {
-    pub start_time: Option<DateTime<Utc>>,
-    pub end_time: Option<DateTime<Utc>>,
-    pub tool_name: Option<String>,
-    pub status: Option<String>,
-    pub limit: Option<usize>,
+#[tauri::command]
+pub async fn get_logs(
+    state: State<'_, AppState>,
+    filter: Option<LogFilter>,
+) -> Result<Vec<crate::services::logger::LogEntry>, String> {
+    let f = filter.unwrap_or_default();
+    state.log_service.query(&f)
 }
 
 #[tauri::command]
-pub async fn get_logs(filter: Option<LogFilter>) -> Result<Vec<UserFriendlyLog>, String> {
-    tracing::debug!("Getting logs with filter: {:?}", filter);
-    // TODO: Implement log retrieval from log storage
-    Ok(vec![])
-}
-
-#[tauri::command]
-pub async fn export_logs(path: String) -> Result<(), String> {
-    tracing::info!("Exporting logs to: {}", path);
-    // TODO: Implement log export functionality
+pub async fn export_logs(
+    state: State<'_, AppState>,
+    path: String,
+    filter: Option<LogFilter>,
+) -> Result<(), String> {
+    let f = filter.unwrap_or_default();
+    let json = state.log_service.export(&f)?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_logs(
+    state: State<'_, AppState>,
+    before_days: Option<i64>,
+) -> Result<u64, String> {
+    match before_days {
+        Some(days) => state.log_service.cleanup(days),
+        None => {
+            state.log_service.clear_all()?;
+            Ok(0)
+        }
+    }
 }

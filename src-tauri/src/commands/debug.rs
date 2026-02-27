@@ -100,18 +100,34 @@ pub async fn execute_tool(
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match result {
-        Ok(call_result) => Ok(ToolCallResponse {
-            success: !call_result.is_error,
-            result: Some(call_result),
-            error: None,
-            duration_ms,
-        }),
-        Err(e) => Ok(ToolCallResponse {
-            success: false,
-            result: None,
-            error: Some(e.to_string()),
-            duration_ms,
-        }),
+        Ok(call_result) => {
+            let _ = state.log_service.write(
+                if call_result.is_error { "error" } else { "info" },
+                "tool",
+                &format!("Tool {} executed ({}ms)", tool_name, duration_ms),
+                None,
+            );
+            Ok(ToolCallResponse {
+                success: !call_result.is_error,
+                result: Some(call_result),
+                error: None,
+                duration_ms,
+            })
+        }
+        Err(e) => {
+            let _ = state.log_service.write(
+                "error",
+                "tool",
+                &format!("Tool {} failed: {}", tool_name, e),
+                None,
+            );
+            Ok(ToolCallResponse {
+                success: false,
+                result: None,
+                error: Some(e.to_string()),
+                duration_ms,
+            })
+        }
     }
 }
 

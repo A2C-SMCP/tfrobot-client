@@ -3,6 +3,7 @@ pub mod services;
 
 use commands::connection::ConnectionState;
 use services::config::ConfigService;
+use services::logger::LogService;
 use smcp_computer::mcp_clients::model::MCPServerInput;
 use smcp_computer::mcp_clients::MCPServerManager;
 use std::collections::HashMap;
@@ -20,15 +21,18 @@ pub struct AppState {
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     /// Active SMCP connection
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
+    /// Log service for SQLite-backed logging
+    pub log_service: Arc<LogService>,
 }
 
 impl AppState {
-    pub fn new(config: ConfigService) -> Self {
+    pub fn new(config: ConfigService, log_service: LogService) -> Self {
         Self {
             manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
             config: Arc::new(config),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             connection: Arc::new(RwLock::new(None)),
+            log_service: Arc::new(log_service),
         }
     }
 }
@@ -55,10 +59,17 @@ pub fn run() {
             let config_service = ConfigService::new(app_data_dir.clone())
                 .expect("Failed to initialize config service");
 
+            let log_service = LogService::new(&app_data_dir)
+                .expect("Failed to initialize log service");
+
             let saved_configs = config_service.load_configs().unwrap_or_default();
             tracing::info!("Loaded {} MCP server configurations", saved_configs.len());
 
-            let state = AppState::new(config_service);
+            let state = AppState::new(config_service, log_service);
+
+            // Write startup log and cleanup old entries
+            let _ = state.log_service.write("info", "system", "Application started", None);
+            let _ = state.log_service.cleanup(30);
 
             // Initialize manager with saved configs in background
             let manager = state.manager.clone();
@@ -124,6 +135,9 @@ pub fn run() {
             // Logs
             commands::logs::get_logs,
             commands::logs::export_logs,
+            commands::logs::clear_logs,
+            // Dashboard
+            commands::dashboard::get_dashboard_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

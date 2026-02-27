@@ -1,0 +1,55 @@
+import { invoke } from '@tauri-apps/api/core';
+import { useDashboardStore, type DashboardData } from '@/stores/dashboardStore';
+
+const mockedInvoke = vi.mocked(invoke);
+
+function resetStore() {
+  useDashboardStore.setState({
+    data: null,
+    loading: false,
+    error: null,
+  });
+}
+
+const mockData: DashboardData = {
+  connected: true,
+  connection_url: 'http://localhost:3000',
+  connection_profile: 'default',
+  mcp_total: 3,
+  mcp_running: 2,
+  mcp_stopped: 1,
+  tools_count: 10,
+  recent_logs: [],
+  runtimes: [
+    { name: 'Node.js', path: '/usr/bin/node', available: true },
+    { name: 'Python', path: undefined, available: false },
+  ],
+};
+
+describe('dashboardStore', () => {
+  beforeEach(() => {
+    resetStore();
+    mockedInvoke.mockReset();
+  });
+
+  describe('fetchDashboard', () => {
+    it('populates dashboard data', async () => {
+      mockedInvoke.mockResolvedValueOnce(mockData);
+
+      await useDashboardStore.getState().fetchDashboard();
+
+      expect(mockedInvoke).toHaveBeenCalledWith('get_dashboard_data');
+      expect(useDashboardStore.getState().data).toEqual(mockData);
+      expect(useDashboardStore.getState().loading).toBe(false);
+    });
+
+    it('sets error on failure', async () => {
+      mockedInvoke.mockRejectedValueOnce('network error');
+
+      await useDashboardStore.getState().fetchDashboard();
+
+      expect(useDashboardStore.getState().error).toBe('network error');
+      expect(useDashboardStore.getState().loading).toBe(false);
+    });
+  });
+});
