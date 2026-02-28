@@ -51,5 +51,18 @@ describe('dashboardStore', () => {
       expect(useDashboardStore.getState().error).toBe('network error');
       expect(useDashboardStore.getState().loading).toBe(false);
     });
+
+    it('sets loading during fetch', async () => {
+      let resolveFn: (v: unknown) => void;
+      mockedInvoke.mockImplementationOnce(() => new Promise((r) => { resolveFn = r; }));
+
+      const promise = useDashboardStore.getState().fetchDashboard();
+      expect(useDashboardStore.getState().loading).toBe(true);
+
+      resolveFn!(mockData);
+      await promise;
+      expect(useDashboardStore.getState().loading).toBe(false);
+      expect(useDashboardStore.getState().data).toEqual(mockData);
+    });
   });
 });

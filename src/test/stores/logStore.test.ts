@@ -37,6 +37,18 @@ describe('logStore', () => {
       expect(useLogStore.getState().loading).toBe(false);
     });
 
+    it('sets loading during fetch', async () => {
+      let resolveFn: (v: unknown) => void;
+      mockedInvoke.mockImplementationOnce(() => new Promise((r) => { resolveFn = r; }));
+
+      const promise = useLogStore.getState().fetchLogs();
+      expect(useLogStore.getState().loading).toBe(true);
+
+      resolveFn!([]);
+      await promise;
+      expect(useLogStore.getState().loading).toBe(false);
+    });
+
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('db error');
 
@@ -71,6 +83,14 @@ describe('logStore', () => {
         filter: { limit: 50, offset: 0 },
       });
     });
+
+    it('sets error on failure', async () => {
+      mockedInvoke.mockRejectedValueOnce('write failed');
+
+      await useLogStore.getState().exportLogs('/bad/path');
+
+      expect(useLogStore.getState().error).toBe('write failed');
+    });
   });
 
   describe('clearLogs', () => {
@@ -90,6 +110,14 @@ describe('logStore', () => {
       await useLogStore.getState().clearLogs(7);
 
       expect(mockedInvoke).toHaveBeenCalledWith('clear_logs', { beforeDays: 7 });
+    });
+
+    it('sets error on failure', async () => {
+      mockedInvoke.mockRejectedValueOnce('clear failed');
+
+      await useLogStore.getState().clearLogs();
+
+      expect(useLogStore.getState().error).toBe('clear failed');
     });
   });
 });
