@@ -49,6 +49,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Runtime path detection
 which = "7"
 tauri-plugin-dialog = "2.6.0"
+tauri-plugin-single-instance = "2"
 
 [features]
 default = ["custom-protocol"]

@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
-import { Descriptions, Space, Button } from 'antd';
+import { Descriptions, Space, Button, Modal, message } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';
+import { check } from '@tauri-apps/plugin-updater';
 import { useSettingsStore } from '@/stores/settingsStore';
 
 export function AboutSection() {
@@ -11,6 +12,25 @@ export function AboutSection() {
   useEffect(() => {
     fetchAppInfo();
   }, []);
+
+  const checkForUpdates = async () => {
+    try {
+      const update = await check();
+      if (update) {
+        Modal.confirm({
+          title: t('settings.updateAvailable'),
+          content: `${t('settings.newVersion')}: ${update.version}`,
+          onOk: async () => {
+            await update.downloadAndInstall();
+          },
+        });
+      } else {
+        message.info(t('settings.upToDate'));
+      }
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
 
   return (
     <div>
@@ -25,6 +45,7 @@ export function AboutSection() {
       </Descriptions>
 
       <Space style={{ marginTop: 16 }}>
+        <Button onClick={checkForUpdates}>{t('settings.checkUpdate')}</Button>
         <Button type="link" onClick={() => open('https://github.com/nicepkg/tfrobot-client')}>
           {t('settings.feedback')}
         </Button>

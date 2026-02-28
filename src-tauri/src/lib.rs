@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod services;
+pub mod tray;
 
 use commands::connection::ConnectionState;
 use services::config::ConfigService;
@@ -54,6 +55,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // When a second instance launches, focus the existing window
+            if let Some(window) = app.get_webview_window("main") {
+                window.show().ok();
+                window.set_focus().ok();
+            }
+        }))
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -95,11 +103,24 @@ pub fn run() {
 
             app.manage(state);
 
+            // Setup system tray
+            tray::setup_tray(app.handle())?;
+
+            // Minimize to tray on window close
+            let window = app.get_webview_window("main").unwrap();
+
             #[cfg(debug_assertions)]
-            {
-                let window = app.get_webview_window("main").unwrap();
-                window.open_devtools();
-            }
+            window.open_devtools();
+
+            let app_handle = app.handle().clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        w.hide().ok();
+                    }
+                }
+            });
 
             Ok(())
         })
@@ -153,6 +174,25 @@ pub fn run() {
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Graceful shutdown: close connections and log exit
+                let state = app_handle.state::<AppState>();
+                tauri::async_runtime::block_on(async {
+                    // Disconnect SMCP if connected
+                    let mut conn = state.connection.write().await;
+                    if let Some(connection) = conn.take() {
+                        let _ = connection.client.leave_office(&connection.office_id).await;
+                    }
+                    // Stop all MCP servers
+                    let lock = state.manager.read().await;
+                    if let Some(mgr) = lock.as_ref() {
+                        let _ = mgr.stop_all().await;
+                    }
+                });
+                let _ = state.log_service.write("info", "system", "Application shutting down", None);
+            }
+        });
 }

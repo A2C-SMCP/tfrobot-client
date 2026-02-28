@@ -269,6 +269,10 @@
     "appVersion": "App Version",
     "sdkVersion": "SDK Version",
     "license": "License",
-    "feedback": "Feedback"
+    "feedback": "Feedback",
+    "checkUpdate": "Check for Updates",
+    "updateAvailable": "Update Available",
+    "newVersion": "New version",
+    "upToDate": "You are running the latest version"
   }
 }
