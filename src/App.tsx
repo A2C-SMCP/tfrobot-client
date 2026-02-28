@@ -1,4 +1,4 @@
-import { Layout, Menu, Typography } from 'antd';
+import { Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
   ApiOutlined,
@@ -8,8 +8,10 @@ import {
   FormOutlined,
   BugOutlined,
   DesktopOutlined,
+  SunOutlined,
+  MoonOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
 import { McpConfig } from './components/McpConfig';
@@ -19,13 +21,34 @@ import { DebugPanel } from './components/DebugPanel';
 import { DesktopResources } from './components/DesktopResources';
 import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
+import { Settings } from './components/Settings';
+import { useThemeStore } from './stores/themeStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
 function App() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [selectedKey, setSelectedKey] = useState('dashboard');
+  const { resolved, setMode, initFromSettings } = useThemeStore();
+
+  // Initialize theme from persisted settings
+  useEffect(() => {
+    initFromSettings();
+  }, []);
+
+  // Listen for system theme changes
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = () => {
+      const { mode: currentMode } = useThemeStore.getState();
+      if (currentMode === 'system') {
+        useThemeStore.setState({ resolved: mediaQuery.matches ? 'dark' : 'light' });
+      }
+    };
+    mediaQuery.addEventListener('change', handler);
+    return () => mediaQuery.removeEventListener('change', handler);
+  }, []);
 
   const menuItems = [
     {
@@ -122,12 +145,7 @@ function App() {
       case 'logs':
         return <LogViewer />;
       case 'settings':
-        return (
-          <div>
-            <Title level={4}>{t('settings.title')}</Title>
-            <p>{t('settings.description')}</p>
-          </div>
-        );
+        return <Settings />;
       default:
         return null;
     }
@@ -139,6 +157,21 @@ function App() {
         <Title level={4} className={styles.title}>
           {t('app.name')}
         </Title>
+        <Space>
+          <Button
+            type="text"
+            className={styles.headerBtn}
+            icon={resolved === 'dark' ? <SunOutlined /> : <MoonOutlined />}
+            onClick={() => setMode(resolved === 'dark' ? 'light' : 'dark')}
+          />
+          <Button
+            type="text"
+            className={styles.headerBtn}
+            onClick={() => i18n.changeLanguage(i18n.language === 'zh' ? 'en' : 'zh')}
+          >
+            {i18n.language === 'zh' ? 'EN' : '中'}
+          </Button>
+        </Space>
       </Header>
       <Layout>
         <Sider width={200} className={styles.sider}>

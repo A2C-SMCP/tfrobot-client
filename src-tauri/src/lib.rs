@@ -4,6 +4,7 @@ pub mod services;
 use commands::connection::ConnectionState;
 use services::config::ConfigService;
 use services::logger::LogService;
+use services::settings::SettingsService;
 use smcp_computer::mcp_clients::model::MCPServerInput;
 use smcp_computer::mcp_clients::MCPServerManager;
 use std::collections::HashMap;
@@ -23,16 +24,19 @@ pub struct AppState {
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
+    /// Settings persistence service
+    pub settings_service: Arc<SettingsService>,
 }
 
 impl AppState {
-    pub fn new(config: ConfigService, log_service: LogService) -> Self {
+    pub fn new(config: ConfigService, log_service: LogService, settings_service: SettingsService) -> Self {
         Self {
             manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
             config: Arc::new(config),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             connection: Arc::new(RwLock::new(None)),
             log_service: Arc::new(log_service),
+            settings_service: Arc::new(settings_service),
         }
     }
 }
@@ -62,14 +66,19 @@ pub fn run() {
             let log_service = LogService::new(&app_data_dir)
                 .expect("Failed to initialize log service");
 
+            let settings_service = SettingsService::new(app_data_dir.clone());
+
+            // Use configured log retention days for cleanup
+            let settings = settings_service.load();
+
             let saved_configs = config_service.load_configs().unwrap_or_default();
             tracing::info!("Loaded {} MCP server configurations", saved_configs.len());
 
-            let state = AppState::new(config_service, log_service);
+            let state = AppState::new(config_service, log_service, settings_service);
 
             // Write startup log and cleanup old entries
             let _ = state.log_service.write("info", "system", "Application started", None);
-            let _ = state.log_service.cleanup(30);
+            let _ = state.log_service.cleanup(settings.log_retention_days as i64);
 
             // Initialize manager with saved configs in background
             let manager = state.manager.clone();
@@ -138,6 +147,11 @@ pub fn run() {
             commands::logs::clear_logs,
             // Dashboard
             commands::dashboard::get_dashboard_data,
+            // Settings
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::settings::detect_runtimes,
+            commands::settings::get_app_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

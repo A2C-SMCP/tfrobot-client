@@ -1,4 +1,4 @@
-import { Form, Input, Select, Button, Space, Card } from 'antd';
+import { Form, Input, Select, Button, Space, Card, Collapse, Switch } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig, StdioServerConfig, HttpServerConfig, SseServerConfig } from '@/stores/mcpStore';
@@ -18,6 +18,11 @@ interface FormValues {
   env?: { key: string; value: string }[];
   headers?: { key: string; value: string }[];
   disabled?: boolean;
+  // Advanced
+  forbidden_tools?: string[];
+  default_tool_meta?: { tags?: string[]; auto_apply?: boolean };
+  tool_meta_json?: string;
+  vrl?: string;
 }
 
 interface McpServerFormProps {
@@ -74,6 +79,21 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
   const handleFinish = async (values: FormValues) => {
     let config: McpServerConfig;
 
+    // Parse advanced fields
+    let toolMeta: Record<string, unknown> = {};
+    if (values.tool_meta_json) {
+      try {
+        toolMeta = JSON.parse(values.tool_meta_json);
+      } catch {
+        // ignore parse errors
+      }
+    }
+    const advancedFields = {
+      disabled: values.disabled || false,
+      forbidden_tools: values.forbidden_tools || [],
+      tool_meta: toolMeta,
+    };
+
     if (values.type === 'stdio') {
       const envObj: Record<string, string> = {};
       values.env?.forEach(({ key, value }) => {
@@ -86,9 +106,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
         args: values.args || [],
         env: envObj,
         cwd: values.cwd,
-        disabled: values.disabled || false,
-        forbidden_tools: [],
-        tool_meta: {},
+        ...advancedFields,
       };
       config = { Stdio: stdioConfig };
     } else if (values.type === 'http') {
@@ -101,9 +119,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
         name: values.name,
         url: values.url || '',
         headers: headersObj,
-        disabled: values.disabled || false,
-        forbidden_tools: [],
-        tool_meta: {},
+        ...advancedFields,
       };
       config = { Http: httpConfig };
     } else {
@@ -116,9 +132,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
         name: values.name,
         url: values.url || '',
         headers: headersObj,
-        disabled: values.disabled || false,
-        forbidden_tools: [],
-        tool_meta: {},
+        ...advancedFields,
       };
       config = { Sse: sseConfig };
     }
@@ -258,6 +272,38 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
           </Card>
         </>
       )}
+
+      <Collapse ghost style={{ marginBottom: 16 }}>
+        <Collapse.Panel header={t('mcp.form.advancedSettings')} key="advanced">
+          <Form.Item name="disabled" label={t('mcp.form.disabled')} valuePropName="checked">
+            <Switch />
+          </Form.Item>
+
+          <Form.Item name="forbidden_tools" label={t('mcp.form.forbiddenTools')}>
+            <Select
+              mode="tags"
+              placeholder={t('mcp.form.forbiddenToolsPlaceholder')}
+              tokenSeparators={[',']}
+            />
+          </Form.Item>
+
+          <Form.Item name="tool_meta_json" label={t('mcp.form.toolMeta')}>
+            <Input.TextArea
+              rows={6}
+              style={{ fontFamily: 'monospace' }}
+              placeholder='{ "tool_name": { "alias": "...", "tags": [...] } }'
+            />
+          </Form.Item>
+
+          <Form.Item name="vrl" label={t('mcp.form.vrl')}>
+            <Input.TextArea
+              rows={6}
+              style={{ fontFamily: 'monospace', fontSize: 13 }}
+              placeholder="# VRL transformation script"
+            />
+          </Form.Item>
+        </Collapse.Panel>
+      </Collapse>
 
       <Form.Item>
         <Space>
