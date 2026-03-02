@@ -1,7 +1,7 @@
 import { Form, Input, Select, Button, Space, Card, Collapse, Switch } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import type { McpServerConfig, StdioServerConfig, HttpServerConfig, SseServerConfig } from '@/stores/mcpStore';
+import type { McpServerConfig } from '@/stores/mcpStore';
 
 type ServerType = 'stdio' | 'http' | 'sse';
 
@@ -41,36 +41,38 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
   const getInitialFormValues = (): FormValues | undefined => {
     if (!initialValues) return { type: 'stdio', name: '', env: [], args: [] };
 
-    if ('Stdio' in initialValues) {
-      const cfg = initialValues.Stdio;
+    const base = {
+      name: initialValues.name,
+      disabled: initialValues.disabled,
+    };
+
+    if (initialValues.type === 'Stdio') {
+      const sp = initialValues.server_parameters;
       return {
+        ...base,
         type: 'stdio',
-        name: cfg.name,
-        command: cfg.command,
-        args: cfg.args,
-        cwd: cfg.cwd,
-        env: Object.entries(cfg.env).map(([key, value]) => ({ key, value })),
-        disabled: cfg.disabled,
+        command: sp.command,
+        args: sp.args,
+        cwd: sp.cwd ?? undefined,
+        env: Object.entries(sp.env).map(([key, value]) => ({ key, value })),
       };
     }
-    if ('Http' in initialValues) {
-      const cfg = initialValues.Http;
+    if (initialValues.type === 'Http') {
+      const sp = initialValues.server_parameters;
       return {
+        ...base,
         type: 'http',
-        name: cfg.name,
-        url: cfg.url,
-        headers: Object.entries(cfg.headers).map(([key, value]) => ({ key, value })),
-        disabled: cfg.disabled,
+        url: sp.url,
+        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
       };
     }
-    if ('Sse' in initialValues) {
-      const cfg = initialValues.Sse;
+    if (initialValues.type === 'Sse') {
+      const sp = initialValues.server_parameters;
       return {
+        ...base,
         type: 'sse',
-        name: cfg.name,
-        url: cfg.url,
-        headers: Object.entries(cfg.headers).map(([key, value]) => ({ key, value })),
-        disabled: cfg.disabled,
+        url: sp.url,
+        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
       };
     }
     return { type: 'stdio', name: '', env: [], args: [] };
@@ -94,47 +96,57 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       tool_meta: toolMeta,
     };
 
+    const commonFields = {
+      name: values.name,
+      ...advancedFields,
+      default_tool_meta: values.default_tool_meta ?? null,
+      vrl: values.vrl ?? null,
+    };
+
     if (values.type === 'stdio') {
       const envObj: Record<string, string> = {};
       values.env?.forEach(({ key, value }) => {
         if (key) envObj[key] = value;
       });
 
-      const stdioConfig: StdioServerConfig = {
-        name: values.name,
-        command: values.command || '',
-        args: values.args || [],
-        env: envObj,
-        cwd: values.cwd,
-        ...advancedFields,
+      config = {
+        type: 'Stdio' as const,
+        ...commonFields,
+        server_parameters: {
+          command: values.command || '',
+          args: values.args || [],
+          env: envObj,
+          cwd: values.cwd || null,
+        },
       };
-      config = { Stdio: stdioConfig };
     } else if (values.type === 'http') {
       const headersObj: Record<string, string> = {};
       values.headers?.forEach(({ key, value }) => {
         if (key) headersObj[key] = value;
       });
 
-      const httpConfig: HttpServerConfig = {
-        name: values.name,
-        url: values.url || '',
-        headers: headersObj,
-        ...advancedFields,
+      config = {
+        type: 'Http' as const,
+        ...commonFields,
+        server_parameters: {
+          url: values.url || '',
+          headers: headersObj,
+        },
       };
-      config = { Http: httpConfig };
     } else {
       const headersObj: Record<string, string> = {};
       values.headers?.forEach(({ key, value }) => {
         if (key) headersObj[key] = value;
       });
 
-      const sseConfig: SseServerConfig = {
-        name: values.name,
-        url: values.url || '',
-        headers: headersObj,
-        ...advancedFields,
+      config = {
+        type: 'Sse' as const,
+        ...commonFields,
+        server_parameters: {
+          url: values.url || '',
+          headers: headersObj,
+        },
       };
-      config = { Sse: sseConfig };
     }
 
     await onSubmit(config);

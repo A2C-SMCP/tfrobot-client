@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 
-// Types matching the Rust backend
+// Types matching the Rust backend (internally tagged via serde(tag = "type"))
+
 export interface McpServerStatus {
   name: string;
   running: boolean;
@@ -9,54 +10,68 @@ export interface McpServerStatus {
   disabled: boolean;
 }
 
-export interface StdioServerConfig {
-  name: string;
+// server_parameters sub-types
+export interface StdioServerParameters {
   command: string;
   args: string[];
   env: Record<string, string>;
-  cwd?: string;
+  cwd?: string | null;
+}
+
+export interface HttpServerParameters {
+  url: string;
+  headers: Record<string, string>;
+}
+
+export interface SseServerParameters {
+  url: string;
+  headers: Record<string, string>;
+}
+
+// Internally tagged discriminated union configs
+export interface StdioServerConfig {
+  type: 'Stdio';
+  name: string;
   disabled: boolean;
   forbidden_tools: string[];
   tool_meta: Record<string, unknown>;
+  default_tool_meta?: unknown | null;
+  vrl?: string | null;
+  server_parameters: StdioServerParameters;
 }
 
 export interface HttpServerConfig {
+  type: 'Http';
   name: string;
-  url: string;
-  headers: Record<string, string>;
   disabled: boolean;
   forbidden_tools: string[];
   tool_meta: Record<string, unknown>;
+  default_tool_meta?: unknown | null;
+  vrl?: string | null;
+  server_parameters: HttpServerParameters;
 }
 
 export interface SseServerConfig {
+  type: 'Sse';
   name: string;
-  url: string;
-  headers: Record<string, string>;
   disabled: boolean;
   forbidden_tools: string[];
   tool_meta: Record<string, unknown>;
+  default_tool_meta?: unknown | null;
+  vrl?: string | null;
+  server_parameters: SseServerParameters;
 }
 
-export type McpServerConfig =
-  | { Stdio: StdioServerConfig }
-  | { Http: HttpServerConfig }
-  | { Sse: SseServerConfig };
+export type McpServerConfig = StdioServerConfig | HttpServerConfig | SseServerConfig;
 
 // Helper to get server name from config
 export function getConfigName(config: McpServerConfig): string {
-  if ('Stdio' in config) return config.Stdio.name;
-  if ('Http' in config) return config.Http.name;
-  if ('Sse' in config) return config.Sse.name;
-  return '';
+  return config.name;
 }
 
 // Helper to get config type
 export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse' {
-  if ('Stdio' in config) return 'stdio';
-  if ('Http' in config) return 'http';
-  if ('Sse' in config) return 'sse';
-  return 'stdio';
+  return config.type.toLowerCase() as 'stdio' | 'http' | 'sse';
 }
 
 export interface ImportResult {

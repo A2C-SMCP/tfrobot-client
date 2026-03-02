@@ -150,3 +150,139 @@ pub async fn stop_all_servers(state: State<'_, AppState>) -> Result<(), String> 
     tracing::info!("All MCP servers stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use smcp_computer::mcp_clients::MCPServerConfig;
+
+    #[test]
+    fn test_stdio_config_from_frontend_json() {
+        let json = serde_json::json!({
+            "type": "Stdio",
+            "name": "test-server",
+            "disabled": false,
+            "forbidden_tools": [],
+            "tool_meta": {},
+            "default_tool_meta": null,
+            "vrl": null,
+            "server_parameters": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                "env": { "HOME": "/tmp" },
+                "cwd": "/workspace"
+            }
+        });
+
+        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Stdio config from frontend JSON");
+        assert_eq!(config.name(), "test-server");
+        match &config {
+            MCPServerConfig::Stdio(c) => {
+                assert_eq!(c.server_parameters.command, "npx");
+                assert_eq!(c.server_parameters.args, vec!["-y", "@modelcontextprotocol/server-filesystem"]);
+                assert_eq!(c.server_parameters.env.get("HOME").unwrap(), "/tmp");
+                assert_eq!(c.server_parameters.cwd.as_deref(), Some("/workspace"));
+                assert!(!c.disabled);
+            }
+            _ => panic!("expected Stdio variant"),
+        }
+    }
+
+    #[test]
+    fn test_http_config_from_frontend_json() {
+        let json = serde_json::json!({
+            "type": "Http",
+            "name": "http-server",
+            "disabled": false,
+            "forbidden_tools": [],
+            "tool_meta": {},
+            "default_tool_meta": null,
+            "vrl": null,
+            "server_parameters": {
+                "url": "https://api.example.com/mcp",
+                "headers": { "Authorization": "Bearer token123" }
+            }
+        });
+
+        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Http config from frontend JSON");
+        assert_eq!(config.name(), "http-server");
+        match &config {
+            MCPServerConfig::Http(c) => {
+                assert_eq!(c.server_parameters.url, "https://api.example.com/mcp");
+                assert_eq!(c.server_parameters.headers.get("Authorization").unwrap(), "Bearer token123");
+            }
+            _ => panic!("expected Http variant"),
+        }
+    }
+
+    #[test]
+    fn test_sse_config_from_frontend_json() {
+        let json = serde_json::json!({
+            "type": "Sse",
+            "name": "sse-server",
+            "disabled": false,
+            "forbidden_tools": [],
+            "tool_meta": {},
+            "default_tool_meta": null,
+            "vrl": null,
+            "server_parameters": {
+                "url": "https://sse.example.com/events",
+                "headers": {}
+            }
+        });
+
+        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Sse config from frontend JSON");
+        assert_eq!(config.name(), "sse-server");
+        match &config {
+            MCPServerConfig::Sse(c) => {
+                assert_eq!(c.server_parameters.url, "https://sse.example.com/events");
+            }
+            _ => panic!("expected Sse variant"),
+        }
+    }
+
+    #[test]
+    fn test_lowercase_type_alias() {
+        let json = serde_json::json!({
+            "type": "stdio",
+            "name": "lowercase-test",
+            "server_parameters": {
+                "command": "node",
+                "args": ["server.js"],
+                "env": {}
+            }
+        });
+
+        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize lowercase 'stdio' type alias");
+        assert_eq!(config.name(), "lowercase-test");
+        assert!(matches!(config, MCPServerConfig::Stdio(_)));
+    }
+
+    #[test]
+    fn test_serde_round_trip() {
+        let json = serde_json::json!({
+            "type": "Stdio",
+            "name": "roundtrip",
+            "disabled": true,
+            "forbidden_tools": ["dangerous_tool"],
+            "tool_meta": {},
+            "default_tool_meta": null,
+            "vrl": null,
+            "server_parameters": {
+                "command": "python",
+                "args": ["-m", "mcp_server"],
+                "env": { "PYTHONPATH": "/lib" },
+                "cwd": "/app"
+            }
+        });
+
+        let config: MCPServerConfig = serde_json::from_value(json).expect("deserialize");
+        let serialized = serde_json::to_value(&config).expect("serialize");
+        let roundtrip: MCPServerConfig = serde_json::from_value(serialized.clone()).expect("deserialize again");
+
+        assert_eq!(config, roundtrip);
+        // Verify the serialized JSON has the expected structure
+        assert_eq!(serialized["type"], "Stdio");
+        assert_eq!(serialized["name"], "roundtrip");
+        assert_eq!(serialized["server_parameters"]["command"], "python");
+    }
+}
