@@ -45,7 +45,7 @@ interface FormValues {
   disabled?: boolean;
   // Advanced
   forbidden_tools?: string[];
-  default_tool_meta?: { tags?: string[]; auto_apply?: boolean };
+  default_tool_meta?: { tags?: string[]; auto_apply?: boolean; alias?: string };
   tool_meta_json?: string;
   vrl?: string;
 }
@@ -71,10 +71,20 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       disabled: initialValues.disabled,
     };
 
+    const advanced = {
+      default_tool_meta: initialValues.default_tool_meta ?? undefined,
+      tool_meta_json: initialValues.tool_meta && Object.keys(initialValues.tool_meta).length > 0
+        ? JSON.stringify(initialValues.tool_meta, null, 2)
+        : undefined,
+      vrl: initialValues.vrl ?? undefined,
+      forbidden_tools: initialValues.forbidden_tools,
+    };
+
     if (initialValues.type === 'Stdio') {
       const sp = initialValues.server_parameters;
       return {
         ...base,
+        ...advanced,
         type: 'stdio',
         command: sp.command,
         args: sp.args,
@@ -86,6 +96,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       const sp = initialValues.server_parameters;
       return {
         ...base,
+        ...advanced,
         type: 'http',
         url: sp.url,
         headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
@@ -95,6 +106,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       const sp = initialValues.server_parameters;
       return {
         ...base,
+        ...advanced,
         type: 'sse',
         url: sp.url,
         headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
@@ -324,6 +336,22 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
               tokenSeparators={[',']}
             />
           </Form.Item>
+
+          <Card size="small" title={t('mcp.form.defaultToolMeta')} style={{ marginBottom: 16 }}>
+            <Form.Item name={['default_tool_meta', 'auto_apply']} label={t('mcp.form.defaultToolMetaAutoApply')} valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item name={['default_tool_meta', 'alias']} label={t('mcp.form.defaultToolMetaAlias')}>
+              <Input />
+            </Form.Item>
+            <Form.Item name={['default_tool_meta', 'tags']} label={t('mcp.form.defaultToolMetaTags')}>
+              <Select
+                mode="tags"
+                placeholder={t('mcp.form.defaultToolMetaTagsPlaceholder')}
+                tokenSeparators={[',']}
+              />
+            </Form.Item>
+          </Card>
 
           <Form.Item name="tool_meta_json" label={t('mcp.form.toolMeta')}>
             <Input.TextArea
