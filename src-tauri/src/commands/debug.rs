@@ -13,6 +13,8 @@ pub struct ToolInfo {
     pub server: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_apply: Option<bool>,
 }
 
 /// Tool call response
@@ -61,11 +63,18 @@ pub async fn get_available_tools(
                 .unwrap_or("unknown")
                 .to_string();
 
-            let tags = t
+            let a2c_meta = t
                 .meta
                 .as_ref()
+                .and_then(|m| m.get("a2c_tool_meta"));
+
+            let tags = a2c_meta
                 .and_then(|m| m.get("tags"))
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
+
+            let auto_apply = a2c_meta
+                .and_then(|m| m.get("auto_apply"))
+                .and_then(|v| v.as_bool());
 
             ToolInfo {
                 name: t.name,
@@ -73,6 +82,7 @@ pub async fn get_available_tools(
                 input_schema: t.input_schema,
                 server,
                 tags,
+                auto_apply,
             }
         })
         .collect();
