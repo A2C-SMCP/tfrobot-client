@@ -3,6 +3,13 @@ import { create } from 'zustand';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
+export interface ToolMeta {
+  auto_apply?: boolean;
+  alias?: string;
+  tags?: string[];
+  ret_object_mapper?: Record<string, string>;
+}
+
 export interface McpServerStatus {
   name: string;
   running: boolean;
@@ -34,8 +41,8 @@ export interface StdioServerConfig {
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
-  tool_meta: Record<string, unknown>;
-  default_tool_meta?: unknown | null;
+  tool_meta: Record<string, ToolMeta>;
+  default_tool_meta?: ToolMeta | null;
   vrl?: string | null;
   server_parameters: StdioServerParameters;
 }
@@ -45,8 +52,8 @@ export interface HttpServerConfig {
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
-  tool_meta: Record<string, unknown>;
-  default_tool_meta?: unknown | null;
+  tool_meta: Record<string, ToolMeta>;
+  default_tool_meta?: ToolMeta | null;
   vrl?: string | null;
   server_parameters: HttpServerParameters;
 }
@@ -56,8 +63,8 @@ export interface SseServerConfig {
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
-  tool_meta: Record<string, unknown>;
-  default_tool_meta?: unknown | null;
+  tool_meta: Record<string, ToolMeta>;
+  default_tool_meta?: ToolMeta | null;
   vrl?: string | null;
   server_parameters: SseServerParameters;
 }

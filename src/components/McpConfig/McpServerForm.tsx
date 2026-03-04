@@ -1,9 +1,34 @@
 import { Form, Input, Select, Button, Space, Card, Collapse, Switch } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import type { McpServerConfig } from '@/stores/mcpStore';
+import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';
 
 type ServerType = 'stdio' | 'http' | 'sse';
+
+export type ToolMetaParseResult =
+  | { ok: true; value: Record<string, ToolMeta> }
+  | { ok: false; error: 'invalid_json' | 'invalid_format' };
+
+export function parseToolMetaJson(json: string | undefined): ToolMetaParseResult {
+  if (!json) return { ok: true, value: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { ok: false, error: 'invalid_json' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, error: 'invalid_format' };
+  }
+  const result: Record<string, ToolMeta> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { ok: false, error: 'invalid_format' };
+    }
+    result[key] = value as ToolMeta;
+  }
+  return { ok: true, value: result };
+}
 
 interface FormValues {
   type: ServerType;
@@ -81,15 +106,16 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
   const handleFinish = async (values: FormValues) => {
     let config: McpServerConfig;
 
-    // Parse advanced fields
-    let toolMeta: Record<string, unknown> = {};
-    if (values.tool_meta_json) {
-      try {
-        toolMeta = JSON.parse(values.tool_meta_json);
-      } catch {
-        // ignore parse errors
-      }
+    // Parse and validate tool_meta JSON
+    const toolMetaResult = parseToolMetaJson(values.tool_meta_json);
+    if (!toolMetaResult.ok) {
+      const errorKey = toolMetaResult.error === 'invalid_json'
+        ? 'mcp.form.toolMetaInvalidJson'
+        : 'mcp.form.toolMetaInvalidFormat';
+      form.setFields([{ name: 'tool_meta_json', errors: [t(errorKey)] }]);
+      return;
     }
+    const toolMeta = toolMetaResult.value;
     const advancedFields = {
       disabled: values.disabled || false,
       forbidden_tools: values.forbidden_tools || [],

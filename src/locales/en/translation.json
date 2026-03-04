@@ -86,7 +86,9 @@
       "forbiddenTools": "Forbidden Tools",
       "forbiddenToolsPlaceholder": "Enter tool names to disable",
       "toolMeta": "Per-Tool Metadata (JSON)",
-      "vrl": "VRL Transformation Script"
+      "vrl": "VRL Transformation Script",
+      "toolMetaInvalidJson": "Invalid JSON format",
+      "toolMetaInvalidFormat": "Each tool_meta value must be an object (e.g. {\"auto_apply\": true})"
     },
     "messages": {
       "added": "Server added successfully",

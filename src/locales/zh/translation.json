@@ -86,7 +86,9 @@
       "forbiddenTools": "禁用工具",
       "forbiddenToolsPlaceholder": "输入要禁用的工具名称",
       "toolMeta": "工具元数据 (JSON)",
-      "vrl": "VRL 转换脚本"
+      "vrl": "VRL 转换脚本",
+      "toolMetaInvalidJson": "JSON 格式无效",
+      "toolMetaInvalidFormat": "每个 tool_meta 的值必须是对象（如 {\"auto_apply\": true}）"
     },
     "messages": {
       "added": "服务器添加成功",
