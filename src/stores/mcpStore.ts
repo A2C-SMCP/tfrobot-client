@@ -100,6 +100,7 @@ interface McpServerState {
   stopServer: (name: string) => Promise<void>;
   startAll: () => Promise<void>;
   stopAll: () => Promise<void>;
+  getServerConfig: (name: string) => Promise<McpServerConfig>;
   importConfig: (path: string) => Promise<ImportResult>;
   exportConfig: (path: string, serverNames?: string[]) => Promise<void>;
 }
@@ -194,6 +195,10 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       set({ error: String(e), loading: false });
       throw e;
     }
+  },
+
+  getServerConfig: async (name: string) => {
+    return await invoke<McpServerConfig>('get_mcp_server_config', { name });
   },
 
   importConfig: async (path: string) => {

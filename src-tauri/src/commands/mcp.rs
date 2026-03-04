@@ -30,6 +30,18 @@ pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServer
 }
 
 #[tauri::command]
+pub async fn get_mcp_server_config(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<MCPServerConfig, String> {
+    let configs = state.config.load_configs().map_err(|e| e.to_string())?;
+    configs
+        .into_iter()
+        .find(|c| c.name() == name)
+        .ok_or(format!("Server not found: {}", name))
+}
+
+#[tauri::command]
 pub async fn add_mcp_server(
     state: State<'_, AppState>,
     config: MCPServerConfig,

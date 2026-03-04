@@ -29,6 +29,7 @@ export function McpConfig() {
     stopServer,
     startAll,
     stopAll,
+    getServerConfig,
     importConfig,
     exportConfig,
   } = useMcpStore();
@@ -45,10 +46,14 @@ export function McpConfig() {
     setFormVisible(true);
   };
 
-  const handleEdit = (_name: string) => {
-    // For now, we don't have the full config from the status
-    // TODO: Add API to get full config by name
-    message.info(t('mcp.messages.editNotImplemented'));
+  const handleEdit = async (name: string) => {
+    try {
+      const config = await getServerConfig(name);
+      setEditingServer(config);
+      setFormVisible(true);
+    } catch (e) {
+      message.error(String(e));
+    }
   };
 
   const handleFormSubmit = async (config: McpServerConfig) => {
