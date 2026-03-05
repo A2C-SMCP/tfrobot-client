@@ -217,7 +217,7 @@ export function SmcpConnection() {
         open={formVisible}
         onCancel={() => setFormVisible(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={600}
       >
         <ProfileForm

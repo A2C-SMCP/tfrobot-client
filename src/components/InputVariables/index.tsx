@@ -195,7 +195,7 @@ export function InputVariables() {
         open={formVisible}
         onCancel={() => setFormVisible(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={600}
       >
         <InputForm
@@ -211,7 +211,7 @@ export function InputVariables() {
         open={valueEditorVisible}
         onCancel={() => setValueEditorVisible(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={400}
       >
         <InputValueEditor

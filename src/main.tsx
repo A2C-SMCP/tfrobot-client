@@ -17,6 +17,13 @@ function Root() {
         token: {
           colorPrimary: '#1890ff',
         },
+        components: {
+          Menu: {
+            groupTitleColor: resolved === 'dark'
+              ? 'rgba(255, 255, 255, 0.85)'
+              : undefined,
+          },
+        },
       }}
     >
       <App />

@@ -194,7 +194,7 @@ export function McpConfig() {
         open={formVisible}
         onCancel={() => setFormVisible(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={600}
       >
         <McpServerForm
