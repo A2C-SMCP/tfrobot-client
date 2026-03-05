@@ -20,7 +20,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 
 # A2C-SMCP Computer implementation
-smcp-computer = "0.1.7"
+smcp-computer = "0.1.8"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
