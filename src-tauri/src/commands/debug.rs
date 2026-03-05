@@ -77,9 +77,9 @@ pub async fn get_available_tools(
                 .and_then(|v| v.as_bool());
 
             ToolInfo {
-                name: t.name,
-                description: t.description,
-                input_schema: t.input_schema,
+                name: t.name.to_string(),
+                description: t.description.map(|d| d.to_string()).unwrap_or_default(),
+                input_schema: serde_json::Value::Object((*t.input_schema).clone()),
                 server,
                 tags,
                 auto_apply,
@@ -112,13 +112,13 @@ pub async fn execute_tool(
     match result {
         Ok(call_result) => {
             let _ = state.log_service.write(
-                if call_result.is_error { "error" } else { "info" },
+                if call_result.is_error.unwrap_or(false) { "error" } else { "info" },
                 "tool",
                 &format!("Tool {} executed ({}ms)", tool_name, duration_ms),
                 None,
             );
             Ok(ToolCallResponse {
-                success: !call_result.is_error,
+                success: !call_result.is_error.unwrap_or(false),
                 result: Some(call_result),
                 error: None,
                 duration_ms,
