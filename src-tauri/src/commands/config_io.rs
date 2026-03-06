@@ -199,6 +199,6 @@ pub async fn export_config(
     let content = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
 
-    tracing::info!("Configuration exported to: {}", path);
+    log::info!("Configuration exported to: {}", path);
     Ok(())
 }

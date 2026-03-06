@@ -44,6 +44,15 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
   check: vi.fn(),
 }));
 
+// Mock Tauri log plugin
+vi.mock('@tauri-apps/plugin-log', () => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+  attachConsole: vi.fn(() => Promise.resolve()),
+}));
+
 // Ant Design needs ResizeObserver
 global.ResizeObserver = class ResizeObserver {
   observe() {}

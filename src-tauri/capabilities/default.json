@@ -9,6 +9,7 @@
     "shell:allow-spawn",
     "shell:allow-kill",
     "updater:default",
-    "dialog:default"
+    "dialog:default",
+    "log:default"
   ]
 }

@@ -47,7 +47,7 @@ pub async fn add_mcp_server(
     config: MCPServerConfig,
 ) -> Result<(), String> {
     let name = config.name().to_string();
-    tracing::info!("Adding MCP server: {}", name);
+    log::info!("Adding MCP server: {}", name);
 
     state
         .config
@@ -60,14 +60,14 @@ pub async fn add_mcp_server(
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("MCP server added: {}", name);
+    log::info!("MCP server added: {}", name);
     let _ = state.log_service.write("info", "mcp", &format!("Server added: {}", name), None);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    tracing::info!("Removing MCP server: {}", name);
+    log::info!("Removing MCP server: {}", name);
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
@@ -80,7 +80,7 @@ pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Resu
         .remove_config(&name)
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("MCP server removed: {}", name);
+    log::info!("MCP server removed: {}", name);
     let _ = state.log_service.write("info", "mcp", &format!("Server removed: {}", name), None);
     Ok(())
 }
@@ -91,7 +91,7 @@ pub async fn update_mcp_server(
     config: MCPServerConfig,
 ) -> Result<(), String> {
     let name = config.name().to_string();
-    tracing::info!("Updating MCP server: {}", name);
+    log::info!("Updating MCP server: {}", name);
 
     state
         .config
@@ -104,14 +104,14 @@ pub async fn update_mcp_server(
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("MCP server updated: {}", name);
+    log::info!("MCP server updated: {}", name);
     let _ = state.log_service.write("info", "mcp", &format!("Server updated: {}", name), None);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    tracing::info!("Starting MCP server: {}", name);
+    log::info!("Starting MCP server: {}", name);
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
@@ -119,14 +119,14 @@ pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Resul
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("MCP server started: {}", name);
+    log::info!("MCP server started: {}", name);
     let _ = state.log_service.write("info", "mcp", &format!("Server started: {}", name), None);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    tracing::info!("Stopping MCP server: {}", name);
+    log::info!("Stopping MCP server: {}", name);
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
@@ -134,32 +134,32 @@ pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("MCP server stopped: {}", name);
+    log::info!("MCP server stopped: {}", name);
     let _ = state.log_service.write("info", "mcp", &format!("Server stopped: {}", name), None);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn start_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("Starting all MCP servers");
+    log::info!("Starting all MCP servers");
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
     mgr.start_all().await.map_err(|e| e.to_string())?;
 
-    tracing::info!("All MCP servers started");
+    log::info!("All MCP servers started");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("Stopping all MCP servers");
+    log::info!("Stopping all MCP servers");
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
     mgr.stop_all().await.map_err(|e| e.to_string())?;
 
-    tracing::info!("All MCP servers stopped");
+    log::info!("All MCP servers stopped");
     Ok(())
 }
 

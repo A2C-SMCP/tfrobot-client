@@ -54,7 +54,7 @@ pub async fn save_profile(
     api_key: Option<String>,
 ) -> Result<(), String> {
     let name = profile.name.clone();
-    tracing::info!("Saving connection profile: {}", name);
+    log::info!("Saving connection profile: {}", name);
 
     // Store API key in keychain if provided
     if let Some(key) = &api_key {
@@ -79,7 +79,7 @@ pub async fn save_profile(
 /// Delete a connection profile
 #[tauri::command]
 pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    tracing::info!("Deleting connection profile: {}", name);
+    log::info!("Deleting connection profile: {}", name);
 
     let keychain_id = format!("profile:{}", name);
     let _ = crate::services::keychain::delete_credential(&keychain_id);
@@ -100,7 +100,7 @@ pub async fn connect_smcp(
     state: State<'_, AppState>,
     profile_name: String,
 ) -> Result<(), String> {
-    tracing::info!("Connecting with profile: {}", profile_name);
+    log::info!("Connecting with profile: {}", profile_name);
 
     let profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
     let profile = profiles
@@ -143,7 +143,7 @@ pub async fn connect_smcp(
         connected_at: chrono::Utc::now(),
     });
 
-    tracing::info!("Connected to SMCP server: {}", profile.url);
+    log::info!("Connected to SMCP server: {}", profile.url);
     let _ = state.log_service.write("info", "connection", &format!("Connected to {}", profile.url), None);
     Ok(())
 }
@@ -151,12 +151,12 @@ pub async fn connect_smcp(
 /// Disconnect from SMCP server
 #[tauri::command]
 pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("Disconnecting from SMCP server");
+    log::info!("Disconnecting from SMCP server");
 
     let mut conn = state.connection.write().await;
     if let Some(connection) = conn.take() {
         if let Err(e) = connection.client.leave_office(&connection.office_id).await {
-            tracing::warn!("Error leaving office: {}", e);
+            log::warn!("Error leaving office: {}", e);
         }
     }
 

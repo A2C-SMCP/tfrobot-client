@@ -9,8 +9,10 @@ use services::settings::SettingsService;
 use smcp_computer::mcp_clients::model::MCPServerInput;
 use smcp_computer::mcp_clients::MCPServerManager;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
+use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 use tokio::sync::RwLock;
 
 /// Application state shared across all Tauri commands
@@ -42,16 +44,41 @@ impl AppState {
     }
 }
 
+/// Remove log files older than `retention_days` from the given directory.
+fn cleanup_old_log_files(log_dir: &Path, retention_days: u64) {
+    if let Ok(entries) = std::fs::read_dir(log_dir) {
+        let cutoff = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(retention_days * 86400);
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if modified < cutoff {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir {
+                        file_name: Some("tfrobot-client".into()),
+                    }),
+                    Target::new(TargetKind::Webview),
+                ])
+                .timezone_strategy(TimezoneStrategy::UseLocal)
+                .level(log::LevelFilter::Info)
+                .max_file_size(5_000_000) // 5MB per file
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -63,6 +90,11 @@ pub fn run() {
             }
         }))
         .setup(|app| {
+            // Clean up old log files from the system log directory
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                cleanup_old_log_files(&log_dir, 3);
+            }
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -80,7 +112,7 @@ pub fn run() {
             let settings = settings_service.load();
 
             let saved_configs = config_service.load_configs().unwrap_or_default();
-            tracing::info!("Loaded {} MCP server configurations", saved_configs.len());
+            log::info!("Loaded {} MCP server configurations", saved_configs.len());
 
             let state = AppState::new(config_service, log_service, settings_service);
 
@@ -95,9 +127,9 @@ pub fn run() {
                 let lock = manager.read().await;
                 if let Some(mgr) = lock.as_ref() {
                     if let Err(e) = mgr.initialize(configs).await {
-                        tracing::error!("Failed to initialize MCP servers: {}", e);
+                        log::error!("Failed to initialize MCP servers: {}", e);
                     }
-                    tracing::info!("MCP servers initialized");
+                    log::info!("MCP servers initialized");
                 }
             });
 
@@ -196,4 +228,70 @@ pub fn run() {
                 let _ = state.log_service.write("info", "system", "Application shutting down", None);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn set_file_modified_time(path: &std::path::Path, time: SystemTime) {
+        let since_epoch = time.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let ft = filetime::FileTime::from_unix_time(since_epoch.as_secs() as i64, 0);
+        filetime::set_file_mtime(path, ft).unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_removes_old_log_files() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a file modified 5 days ago
+        let old_file = dir.path().join("old.log");
+        fs::write(&old_file, "old log content").unwrap();
+        let five_days_ago = SystemTime::now() - Duration::from_secs(5 * 86400);
+        set_file_modified_time(&old_file, five_days_ago);
+
+        // Create a recent file
+        let new_file = dir.path().join("new.log");
+        fs::write(&new_file, "new log content").unwrap();
+
+        cleanup_old_log_files(dir.path(), 3);
+
+        assert!(!old_file.exists(), "Old log file should be removed");
+        assert!(new_file.exists(), "Recent log file should be kept");
+    }
+
+    #[test]
+    fn test_cleanup_keeps_files_within_retention() {
+        let dir = TempDir::new().unwrap();
+
+        let file_1day = dir.path().join("recent.log");
+        fs::write(&file_1day, "recent").unwrap();
+        let one_day_ago = SystemTime::now() - Duration::from_secs(86400);
+        set_file_modified_time(&file_1day, one_day_ago);
+
+        let file_now = dir.path().join("now.log");
+        fs::write(&file_now, "now").unwrap();
+
+        cleanup_old_log_files(dir.path(), 3);
+
+        assert!(file_1day.exists(), "1-day-old file should be kept");
+        assert!(file_now.exists(), "Current file should be kept");
+    }
+
+    #[test]
+    fn test_cleanup_handles_empty_directory() {
+        let dir = TempDir::new().unwrap();
+        // Should not panic
+        cleanup_old_log_files(dir.path(), 3);
+    }
+
+    #[test]
+    fn test_cleanup_handles_nonexistent_directory() {
+        let path = std::path::Path::new("/tmp/nonexistent_log_dir_test_12345");
+        // Should not panic
+        cleanup_old_log_files(path, 3);
+    }
 }

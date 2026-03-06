@@ -70,7 +70,7 @@ pub async fn add_or_update_input(
     input: InputDefinition,
 ) -> Result<(), String> {
     let id = input.id().to_string();
-    tracing::info!("Adding/updating input: {}", id);
+    log::info!("Adding/updating input: {}", id);
 
     let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
     inputs.retain(|i| i.id() != id);
@@ -83,7 +83,7 @@ pub async fn add_or_update_input(
 /// Remove an input variable definition
 #[tauri::command]
 pub async fn remove_input(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    tracing::info!("Removing input: {}", id);
+    log::info!("Removing input: {}", id);
 
     let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
     let original_len = inputs.len();
@@ -128,7 +128,7 @@ pub async fn set_input_value(
     id: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    tracing::info!("Setting input value: {}", id);
+    log::info!("Setting input value: {}", id);
 
     let mut values = state.config.load_input_values().map_err(|e| e.to_string())?;
     values.insert(id, value);

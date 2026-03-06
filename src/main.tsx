@@ -3,8 +3,11 @@ import ReactDOM from 'react-dom/client';
 import { theme as antTheme, ConfigProvider } from 'antd';
 import App from './App';
 import { useThemeStore } from './stores/themeStore';
+import { initLogger } from './utils/logger';
 import './i18n';
 import './styles/index.css';
+
+initLogger().catch(console.error);
 
 function Root() {
   const resolved = useThemeStore((s) => s.resolved);

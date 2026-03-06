@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { info } from '@/utils/logger';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -129,6 +130,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('add_mcp_server', { config });
+      info(`MCP server added: ${config.name}`);
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -151,6 +153,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('remove_mcp_server', { name });
+      info(`MCP server removed: ${name}`);
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -162,6 +165,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('start_mcp_server', { name });
+      info(`MCP server started: ${name}`);
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -173,6 +177,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('stop_mcp_server', { name });
+      info(`MCP server stopped: ${name}`);
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -184,6 +189,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('start_all_servers');
+      info('All MCP servers started');
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -195,6 +201,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('stop_all_servers');
+      info('All MCP servers stopped');
       await get().fetchServers();
     } catch (e) {
       set({ error: String(e), loading: false });

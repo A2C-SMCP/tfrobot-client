@@ -27,6 +27,6 @@ pub async fn get_desktop(
 ) -> Result<Vec<DesktopWindow>, String> {
     let _ = state;
     // TODO: Implement when smcp-computer exposes window listing on MCPServerManager
-    tracing::info!("get_desktop called - awaiting smcp-computer API support");
+    log::info!("get_desktop called - awaiting smcp-computer API support");
     Ok(vec![])
 }

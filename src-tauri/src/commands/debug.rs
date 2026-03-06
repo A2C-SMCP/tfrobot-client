@@ -98,7 +98,7 @@ pub async fn execute_tool(
     params: serde_json::Value,
     timeout: Option<f64>,
 ) -> Result<ToolCallResponse, String> {
-    tracing::info!("Executing tool: {}", tool_name);
+    log::info!("Executing tool: {}", tool_name);
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;

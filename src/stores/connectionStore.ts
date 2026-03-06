@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { info } from '@/utils/logger';
 
 export interface ConnectionProfile {
   name: string;
@@ -92,6 +93,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('connect_smcp', { profileName });
+      info(`SMCP connected: ${profileName}`);
       await get().fetchStatus();
       set({ loading: false });
     } catch (e) {
@@ -106,6 +108,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('disconnect_smcp');
+      info('SMCP disconnected');
       await get().fetchStatus();
       set({ loading: false });
     } catch (e) {
