@@ -297,4 +297,47 @@ mod tests {
         assert_eq!(serialized["name"], "roundtrip");
         assert_eq!(serialized["server_parameters"]["command"], "python");
     }
+
+    #[test]
+    fn test_deserialize_missing_required_fields() {
+        // Missing server_parameters
+        let json = serde_json::json!({
+            "type": "Stdio",
+            "name": "incomplete"
+        });
+        let result: Result<MCPServerConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_http_serde_roundtrip() {
+        let json = serde_json::json!({
+            "type": "Http",
+            "name": "http-roundtrip",
+            "server_parameters": {
+                "url": "https://api.example.com/mcp",
+                "headers": { "X-Custom": "value" }
+            }
+        });
+        let config: MCPServerConfig = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        let roundtrip: MCPServerConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn test_sse_serde_roundtrip() {
+        let json = serde_json::json!({
+            "type": "Sse",
+            "name": "sse-roundtrip",
+            "server_parameters": {
+                "url": "https://sse.example.com/events",
+                "headers": {}
+            }
+        });
+        let config: MCPServerConfig = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        let roundtrip: MCPServerConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(config, roundtrip);
+    }
 }

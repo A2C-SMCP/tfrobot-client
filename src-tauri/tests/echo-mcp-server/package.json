@@ -1,0 +1,6 @@
+{
+  "name": "echo-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal MCP stdio server for integration testing"
+}

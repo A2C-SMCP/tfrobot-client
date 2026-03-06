@@ -46,6 +46,10 @@ pids/
 # Test coverage
 coverage/
 
+# Playwright
+test-results/
+e2e/playwright-report/
+
 # Temporary files
 *.tmp
 *.temp

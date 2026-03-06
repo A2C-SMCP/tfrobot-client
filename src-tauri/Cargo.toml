@@ -51,6 +51,14 @@ which = "7"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-single-instance = "2"
 
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

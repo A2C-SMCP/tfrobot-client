@@ -9,7 +9,13 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
+    "test:bench": "cargo bench --manifest-path src-tauri/Cargo.toml --bench benchmarks",
+    "test:smoke": "cd e2e/smoke && npx wdio run wdio.config.ts",
+    "test:all": "pnpm test:coverage && pnpm test:e2e"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",
@@ -26,6 +32,7 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tauri-apps/cli": "^2.2.4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -33,6 +40,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^4.0.18",
     "jsdom": "^28.1.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",

@@ -1,0 +1,48 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/src/services/**'
+      - 'src-tauri/benches/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Rust Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Run benchmarks
+        working-directory: src-tauri
+        run: cargo bench --bench benchmarks -- --output-format bencher | tee output.txt
+
+      - uses: benchmark-action/github-action-benchmark@v1
+        if: github.event_name == 'push'
+        with:
+          tool: 'cargo'
+          output-file-path: src-tauri/output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false
+          auto-push: true

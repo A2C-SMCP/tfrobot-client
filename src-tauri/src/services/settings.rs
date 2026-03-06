@@ -64,3 +64,69 @@ impl SettingsService {
         fs::write(&self.settings_file, content)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn setup() -> (SettingsService, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let svc = SettingsService::new(tmp.path().to_path_buf());
+        (svc, tmp)
+    }
+
+    #[test]
+    fn test_load_default_settings() {
+        let (svc, _tmp) = setup();
+        let settings = svc.load();
+        assert_eq!(settings.language, "en");
+        assert_eq!(settings.log_retention_days, 30);
+        assert!(matches!(settings.theme, ThemeMode::System));
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let (svc, _tmp) = setup();
+        let mut settings = svc.load();
+        settings.language = "zh".to_string();
+        settings.log_retention_days = 7;
+        settings.theme = ThemeMode::Dark;
+        svc.save(&settings).unwrap();
+
+        let loaded = svc.load();
+        assert_eq!(loaded.language, "zh");
+        assert_eq!(loaded.log_retention_days, 7);
+        assert!(matches!(loaded.theme, ThemeMode::Dark));
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_defaults() {
+        let (svc, _tmp) = setup();
+        let settings = svc.load();
+        assert_eq!(settings.language, "en");
+    }
+
+    #[test]
+    fn test_load_corrupted_file_returns_defaults() {
+        let (svc, tmp) = setup();
+        fs::write(tmp.path().join("settings.json"), "invalid json").unwrap();
+        let settings = svc.load();
+        // Should fall back to defaults
+        assert_eq!(settings.language, "en");
+    }
+
+    #[test]
+    fn test_custom_runtime_paths() {
+        let (svc, _tmp) = setup();
+        let mut settings = svc.load();
+        settings.custom_runtime_paths.node = Some("/usr/local/bin/node".to_string());
+        svc.save(&settings).unwrap();
+
+        let loaded = svc.load();
+        assert_eq!(
+            loaded.custom_runtime_paths.node.as_deref(),
+            Some("/usr/local/bin/node")
+        );
+    }
+}

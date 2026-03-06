@@ -162,3 +162,134 @@ impl LogService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn setup() -> (LogService, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let svc = LogService::new(tmp.path()).unwrap();
+        (svc, tmp)
+    }
+
+    #[test]
+    fn test_write_and_query_log() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "test", "hello world", None).unwrap();
+
+        let logs = svc.query(&LogFilter::default()).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "hello world");
+        assert_eq!(logs[0].level, "info");
+        assert_eq!(logs[0].category, "test");
+    }
+
+    #[test]
+    fn test_query_with_level_filter() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "cat", "msg1", None).unwrap();
+        svc.write("error", "cat", "msg2", None).unwrap();
+
+        let filter = LogFilter {
+            levels: Some(vec!["error".to_string()]),
+            ..Default::default()
+        };
+        let logs = svc.query(&filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "msg2");
+    }
+
+    #[test]
+    fn test_query_with_category_filter() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "mcp", "msg1", None).unwrap();
+        svc.write("info", "smcp", "msg2", None).unwrap();
+
+        let filter = LogFilter {
+            categories: Some(vec!["mcp".to_string()]),
+            ..Default::default()
+        };
+        let logs = svc.query(&filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "msg1");
+    }
+
+    #[test]
+    fn test_query_with_keyword_filter() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "cat", "hello world", None).unwrap();
+        svc.write("info", "cat", "goodbye", None).unwrap();
+
+        let filter = LogFilter {
+            keyword: Some("hello".to_string()),
+            ..Default::default()
+        };
+        let logs = svc.query(&filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "hello world");
+    }
+
+    #[test]
+    fn test_query_with_limit_offset() {
+        let (svc, _tmp) = setup();
+        for i in 0..20 {
+            svc.write("info", "cat", &format!("msg{i}"), None).unwrap();
+        }
+
+        let filter = LogFilter {
+            limit: Some(5),
+            offset: Some(10),
+            ..Default::default()
+        };
+        let logs = svc.query(&filter).unwrap();
+        assert_eq!(logs.len(), 5);
+    }
+
+    #[test]
+    fn test_clear_all() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "cat", "msg", None).unwrap();
+        svc.clear_all().unwrap();
+        let logs = svc.query(&LogFilter::default()).unwrap();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_export_returns_json() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "cat", "msg", None).unwrap();
+        let json = svc.export(&LogFilter::default()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_write_with_details() {
+        let (svc, _tmp) = setup();
+        svc.write("error", "cat", "msg", Some("stack trace here"))
+            .unwrap();
+        let logs = svc.query(&LogFilter::default()).unwrap();
+        assert_eq!(logs[0].details.as_deref(), Some("stack trace here"));
+    }
+
+    #[test]
+    fn test_cleanup_old_logs() {
+        let (svc, _tmp) = setup();
+        svc.write("info", "cat", "recent msg", None).unwrap();
+        // cleanup with 0 days should delete everything (cutoff = now)
+        let deleted = svc.cleanup(0).unwrap();
+        assert!(deleted >= 1);
+        let logs = svc.query(&LogFilter::default()).unwrap();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_query_empty_db() {
+        let (svc, _tmp) = setup();
+        let logs = svc.query(&LogFilter::default()).unwrap();
+        assert!(logs.is_empty());
+    }
+}

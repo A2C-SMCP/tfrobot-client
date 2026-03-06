@@ -83,6 +83,33 @@ t('section.key')
 ### 路径别名
 TypeScript 导入中 `@/` 解析为 `src/`。
 
+## 测试
+
+```bash
+# 前端单元测试（Vitest + React Testing Library）
+pnpm test              # 运行所有测试
+pnpm test:watch        # 监听模式
+pnpm test:coverage     # 运行测试并生成覆盖率报告
+
+# Rust 后端测试
+cd src-tauri && cargo test
+
+# E2E 测试（Playwright，仅 Chromium）
+pnpm test:e2e
+pnpm test:e2e:ui       # 带 UI 的交互模式
+
+# 全部测试
+pnpm test:all          # 前端覆盖率 + E2E
+```
+
+### 前端测试约定
+- 测试文件位于 `src/test/`，使用 Vitest + jsdom 环境
+- 使用 `src/test/helpers/render.tsx` 中的 `render()` 替代原生 render，已集成 Ant Design ConfigProvider 和 I18nextProvider
+- 使用 `src/test/helpers/store.ts` 中的 `resetAllStores()` 在 `beforeEach` 中重置 Zustand store 状态
+- 所有 Zustand store 均实现 `reset()` 方法（基于 `initialState` 模式）
+- 组件测试断言真实翻译文本（如 `'MCP Servers'`），而非 i18n key（如 `'mcp.servers'`）
+- Tauri API（invoke、dialog、event、shell）在 `src/test/setup.ts` 中全局 mock
+
 ## 开发注意事项
 
 - `smcp-computer` crate 依赖在 `Cargo.toml` 中已被注释 - 待发布到 crates.io 后取消注释
