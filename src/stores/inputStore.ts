@@ -29,13 +29,20 @@ interface InputState {
   removeValue: (id: string) => Promise<void>;
   clearValues: () => Promise<void>;
   importInputs: (path: string) => Promise<number>;
+  reset: () => void;
 }
 
-export const useInputStore = create<InputState>((set, get) => ({
-  inputs: [],
-  values: {},
+const initialState = {
+  inputs: [] as InputDefinition[],
+  values: {} as Record<string, unknown>,
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useInputStore = create<InputState>((set, get) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   fetchInputs: async () => {
     set({ loading: true, error: null });

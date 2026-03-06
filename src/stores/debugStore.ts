@@ -55,17 +55,24 @@ interface DebugState {
   selectTool: (tool: ToolInfo | null) => void;
   executeTool: (toolName: string, params: Record<string, unknown>, timeout?: number) => Promise<ToolCallResponse>;
   fetchHistory: () => Promise<void>;
+  reset: () => void;
 }
 
-export const useDebugStore = create<DebugState>((set, get) => ({
-  tools: [],
+const initialState = {
+  tools: [] as ToolInfo[],
   toolsLoading: false,
-  selectedTool: null,
-  lastCallResult: null,
+  selectedTool: null as ToolInfo | null,
+  lastCallResult: null as ToolCallResponse | null,
   calling: false,
-  history: [],
+  history: [] as ToolCallHistoryRecord[],
   historyLoading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useDebugStore = create<DebugState>((set, get) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   fetchTools: async () => {
     set({ toolsLoading: true, error: null });

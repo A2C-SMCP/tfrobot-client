@@ -26,12 +26,19 @@ interface DashboardState {
   error: string | null;
 
   fetchDashboard: () => Promise<void>;
+  reset: () => void;
 }
 
-export const useDashboardStore = create<DashboardState>((set) => ({
-  data: null,
+const initialState = {
+  data: null as DashboardData | null,
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useDashboardStore = create<DashboardState>((set) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   fetchDashboard: async () => {
     set({ loading: true, error: null });

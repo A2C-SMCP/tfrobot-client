@@ -103,12 +103,17 @@ interface McpServerState {
   getServerConfig: (name: string) => Promise<McpServerConfig>;
   importConfig: (path: string) => Promise<ImportResult>;
   exportConfig: (path: string, serverNames?: string[]) => Promise<void>;
+  reset: () => void;
 }
 
-export const useMcpStore = create<McpServerState>((set, get) => ({
-  servers: [],
+const initialState = {
+  servers: [] as McpServerStatus[],
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useMcpStore = create<McpServerState>((set, get) => ({
+  ...initialState,
 
   fetchServers: async () => {
     set({ loading: true, error: null });
@@ -212,6 +217,8 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       throw e;
     }
   },
+
+  reset: () => set(initialState),
 
   exportConfig: async (path: string, serverNames?: string[]) => {
     set({ loading: true, error: null });

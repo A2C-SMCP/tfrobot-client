@@ -38,14 +38,21 @@ interface SettingsState {
   updateSettings: (settings: AppSettings) => Promise<void>;
   fetchRuntimes: () => Promise<void>;
   fetchAppInfo: () => Promise<void>;
+  reset: () => void;
 }
 
-export const useSettingsStore = create<SettingsState>((set) => ({
-  settings: null,
-  runtimes: [],
-  appInfo: null,
+const initialState = {
+  settings: null as AppSettings | null,
+  runtimes: [] as RuntimeInfo[],
+  appInfo: null as AppInfo | null,
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useSettingsStore = create<SettingsState>((set) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   fetchSettings: async () => {
     set({ loading: true, error: null });

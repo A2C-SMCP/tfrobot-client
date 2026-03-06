@@ -8,15 +8,22 @@ interface ThemeState {
   resolved: 'light' | 'dark';
   setMode: (mode: ThemeMode) => void;
   initFromSettings: () => Promise<void>;
+  reset: () => void;
 }
 
 function getSystemTheme(): 'light' | 'dark' {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
+const initialState = {
+  mode: 'system' as ThemeMode,
+  resolved: getSystemTheme() as 'light' | 'dark',
+};
+
 export const useThemeStore = create<ThemeState>((set) => ({
-  mode: 'system',
-  resolved: getSystemTheme(),
+  ...initialState,
+
+  reset: () => set(initialState),
 
   setMode: (mode) => {
     const resolved = mode === 'system' ? getSystemTheme() : mode;

@@ -34,13 +34,18 @@ interface ConnectionState {
   deleteProfile: (name: string) => Promise<void>;
   connect: (profileName: string) => Promise<void>;
   disconnect: () => Promise<void>;
+  reset: () => void;
 }
 
-export const useConnectionStore = create<ConnectionState>((set, get) => ({
-  profiles: [],
-  status: { connected: false },
+const initialState = {
+  profiles: [] as ConnectionProfile[],
+  status: { connected: false } as ConnectionStatusInfo,
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useConnectionStore = create<ConnectionState>((set, get) => ({
+  ...initialState,
 
   fetchProfiles: async () => {
     set({ loading: true, error: null });
@@ -94,6 +99,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       throw e;
     }
   },
+
+  reset: () => set(initialState),
 
   disconnect: async () => {
     set({ loading: true, error: null });

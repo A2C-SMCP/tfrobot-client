@@ -15,12 +15,19 @@ interface DesktopState {
   error: string | null;
 
   fetchDesktop: (size?: string, uri?: string) => Promise<void>;
+  reset: () => void;
 }
 
-export const useDesktopStore = create<DesktopState>((set) => ({
-  windows: [],
+const initialState = {
+  windows: [] as DesktopWindow[],
   loading: false,
-  error: null,
+  error: null as string | null,
+};
+
+export const useDesktopStore = create<DesktopState>((set) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   fetchDesktop: async (size?: string, uri?: string) => {
     set({ loading: true, error: null });

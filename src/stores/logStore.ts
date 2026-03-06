@@ -30,13 +30,20 @@ interface LogState {
   fetchLogs: () => Promise<void>;
   exportLogs: (path: string) => Promise<void>;
   clearLogs: (beforeDays?: number) => Promise<void>;
+  reset: () => void;
 }
 
-export const useLogStore = create<LogState>((set, get) => ({
-  logs: [],
+const initialState = {
+  logs: [] as LogEntry[],
   loading: false,
-  error: null,
-  filter: { limit: 50, offset: 0 },
+  error: null as string | null,
+  filter: { limit: 50, offset: 0 } as LogFilter,
+};
+
+export const useLogStore = create<LogState>((set, get) => ({
+  ...initialState,
+
+  reset: () => set(initialState),
 
   setFilter: (partial) => {
     set((s) => ({ filter: { ...s.filter, ...partial } }));
