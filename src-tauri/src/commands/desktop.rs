@@ -254,7 +254,7 @@ mod tests {
     fn test_window_detail_empty_contents() {
         let detail = WindowDetail {
             uri: "window://empty".to_string(),
-            title: "Empty Window".to_string(),
+            title: Some("Empty Window".to_string()),
             server: "server".to_string(),
             contents: vec![],
         };

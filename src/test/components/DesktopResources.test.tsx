@@ -132,6 +132,7 @@ describe('DesktopResources', () => {
     mockUseDesktopStore.mockReturnValue({
       ...mockStore,
       windows: mockWindows,
+      windowDetails: { 'window://main': mockDetail },
     } as any);
     render(<DesktopResources />);
 
@@ -141,8 +142,9 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(screen.getByText('Sample text content')).toBeInTheDocument();
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
     });
+    expect(screen.getByText('Sample text content')).toBeInTheDocument();
   });
 
   it('renders image content in expanded row', async () => {
@@ -163,6 +165,7 @@ describe('DesktopResources', () => {
     mockUseDesktopStore.mockReturnValue({
       ...mockStore,
       windows: mockWindows,
+      windowDetails: { 'window://main': mockDetail },
     } as any);
     render(<DesktopResources />);
 
@@ -172,10 +175,11 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      // Check for image element with base64 src
-      const img = document.querySelector('img[src*="base64"]');
-      expect(img).toBeInTheDocument();
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
     });
+    // Check for image element with base64 src
+    const img = document.querySelector('img[src*="base64"]');
+    expect(img).toBeInTheDocument();
   });
 
   it('shows no content message when contents are empty', async () => {
@@ -189,6 +193,7 @@ describe('DesktopResources', () => {
     mockUseDesktopStore.mockReturnValue({
       ...mockStore,
       windows: mockWindows,
+      windowDetails: { 'window://main': mockDetail },
     } as any);
     render(<DesktopResources />);
 
@@ -198,8 +203,9 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(screen.getByText('No content available')).toBeInTheDocument();
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
     });
+    expect(screen.getByText('No content available')).toBeInTheDocument();
   });
 
   it('collapses expanded row when clicked again', async () => {
@@ -232,39 +238,22 @@ describe('DesktopResources', () => {
   });
 
   it('shows loading spinner while fetching detail', async () => {
-    let resolveFn!: (value: unknown) => void;
-    mockFetchWindowDetail.mockImplementation(
-      () => new Promise((resolve) => {
-        resolveFn = resolve;
-      })
-    );
-
+    // Mock store with loading state for the window
     mockUseDesktopStore.mockReturnValue({
       ...mockStore,
       windows: mockWindows,
+      loadingDetails: new Set(['window://main']),
     } as any);
     render(<DesktopResources />);
 
+    // Expand first row
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
     expect(expandButtons.length).toBeGreaterThan(0);
     fireEvent.click(expandButtons[0]);
 
-    // Should show loading spinner immediately after click
+    // Should show loading spinner when loadingDetails contains the URI
     await waitFor(() => {
       expect(document.querySelector('.ant-spin')).toBeInTheDocument();
-    });
-
-    // Resolve the promise
-    resolveFn({
-      uri: 'window://main',
-      title: 'Main Window',
-      server: 'desktop-server',
-      contents: [],
-    });
-
-    // Loading spinner should be gone
-    await waitFor(() => {
-      expect(document.querySelector('.ant-spin')).not.toBeInTheDocument();
     });
   });
 });
