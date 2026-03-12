@@ -207,7 +207,8 @@
     "windowContent": "窗口内容",
     "noContent": "无可用内容",
     "clickToLoadDetail": "点击加载详情",
-    "binaryData": "二进制数据"
+    "binaryData": "二进制数据",
+    "failedToLoadDetail": "加载窗口详情失败"
   },
   "debug": {
     "description": "工具浏览与调用测试。",

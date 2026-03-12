@@ -34,7 +34,7 @@ pub struct WindowContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowDetail {
     pub uri: String,
-    pub title: String,
+    pub title: Option<String>,
     pub server: String,
     pub contents: Vec<WindowContent>,
 }
@@ -128,7 +128,7 @@ pub async fn get_window_detail(
 
     Ok(WindowDetail {
         uri: uri.clone(),
-        title: uri, // Title not available in detail response, use URI
+        title: None, // Title not available in detail response
         server: server_name,
         contents,
     })
@@ -210,7 +210,7 @@ mod tests {
     fn test_window_detail_serialization() {
         let detail = WindowDetail {
             uri: "window://test".to_string(),
-            title: "Test Window".to_string(),
+            title: Some("Test Window".to_string()),
             server: "test-server".to_string(),
             contents: vec![
                 WindowContent {
@@ -234,6 +234,20 @@ mod tests {
         assert!(json.contains("contents"));
         assert!(json.contains("Sample content"));
         assert!(json.contains("iVBORw0KGgo"));
+    }
+
+    #[test]
+    fn test_window_detail_with_none_title() {
+        let detail = WindowDetail {
+            uri: "window://notitle".to_string(),
+            title: None,
+            server: "test-server".to_string(),
+            contents: vec![],
+        };
+        let json = serde_json::to_string(&detail).unwrap();
+        assert!(json.contains("window://notitle"));
+        // title should be null or not present when None
+        assert!(!json.contains("\"title\"") || json.contains("\"title\":null"));
     }
 
     #[test]
@@ -283,5 +297,17 @@ mod tests {
         assert_eq!(detail.contents.len(), 1);
         assert_eq!(detail.contents[0].content_type, "text");
         assert_eq!(detail.contents[0].text, Some("Window text content".to_string()));
+    }
+
+    #[test]
+    fn test_window_detail_deserialization_without_title() {
+        let json = r#"{
+            "uri": "window://notitle",
+            "server": "mcp-server",
+            "contents": []
+        }"#;
+        let detail: WindowDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(detail.uri, "window://notitle");
+        assert_eq!(detail.title, None);
     }
 }

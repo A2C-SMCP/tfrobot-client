@@ -207,7 +207,8 @@
     "windowContent": "Window Content",
     "noContent": "No content available",
     "clickToLoadDetail": "Click to load details",
-    "binaryData": "Binary data"
+    "binaryData": "Binary data",
+    "failedToLoadDetail": "Failed to load window detail"
   },
   "debug": {
     "description": "Tool browser and call testing.",

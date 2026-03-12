@@ -1,41 +1,40 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { Button, Space, Typography, Table, Empty, Alert, Spin, Image } from 'antd';
+import { Button, Space, Typography, Table, Empty, Alert, Spin, Image, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useDesktopStore, WindowContent, WindowDetail } from '@/stores/desktopStore';
+import { useDesktopStore, WindowContent } from '@/stores/desktopStore';
 
 const { Title, Text } = Typography;
 
+// Constants
+const MAX_TEXT_PREVIEW_LENGTH = 500;
+
 export function DesktopResources() {
   const { t } = useTranslation();
-  const { windows, loading, error, fetchDesktop } = useDesktopStore();
+  const {
+    windows,
+    loading,
+    error,
+    fetchDesktop,
+    windowDetails,
+    loadingDetails,
+    detailErrors,
+    fetchWindowDetail,
+  } = useDesktopStore();
   const [expandedUris, setExpandedUris] = useState<Set<string>>(new Set());
-  const [windowDetails, setWindowDetails] = useState<Record<string, WindowDetail>>({});
-  const [loadingDetails, setLoadingDetails] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchDesktop();
   }, [fetchDesktop]);
 
-  const loadWindowDetail = async (server: string, uri: string) => {
-    setLoadingDetails((prev) => new Set(prev).add(uri));
-    try {
-      const detail = await invoke<WindowDetail>('get_window_detail', {
-        serverName: server,
-        uri,
-      });
-      setWindowDetails((prev) => ({ ...prev, [uri]: detail }));
-    } catch (e) {
-      console.error('Failed to load window detail:', e);
-    } finally {
-      setLoadingDetails((prev) => {
-        const next = new Set(prev);
-        next.delete(uri);
-        return next;
-      });
-    }
-  };
+  // Show error message when detail fetch fails
+  useEffect(() => {
+    Object.entries(detailErrors).forEach(([err]) => {
+      if (err) {
+        message.error(`${t('desktop.failedToLoadDetail')}: ${err}`);
+      }
+    });
+  }, [detailErrors, t]);
 
   const handleRowExpand = async (expanded: boolean, record: { uri: string; server: string }) => {
     const newExpanded = new Set(expandedUris);
@@ -45,7 +44,7 @@ export function DesktopResources() {
     } else {
       newExpanded.add(record.uri);
       setExpandedUris(newExpanded);
-      await loadWindowDetail(record.server, record.uri);
+      await fetchWindowDetail(record.server, record.uri);
     }
   };
 
@@ -79,8 +78,8 @@ export function DesktopResources() {
                   fontSize: 12,
                 }}
               >
-                {content.text.length > 500
-                  ? content.text.slice(0, 500) + '...'
+                {content.text.length > MAX_TEXT_PREVIEW_LENGTH
+                  ? content.text.slice(0, MAX_TEXT_PREVIEW_LENGTH) + '...'
                   : content.text}
               </Text>
             </div>
@@ -221,7 +220,7 @@ export function DesktopResources() {
                     <Button
                       size="small"
                       icon={<ReloadOutlined />}
-                      onClick={() => loadWindowDetail(record.server, record.uri)}
+                      onClick={() => fetchWindowDetail(record.server, record.uri)}
                       loading={isLoading}
                     />
                   </div>
