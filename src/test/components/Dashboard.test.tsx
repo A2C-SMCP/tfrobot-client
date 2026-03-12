@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '../helpers/render';
+import { render, screen } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Dashboard } from '@/components/Dashboard';
 
