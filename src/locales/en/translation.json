@@ -203,7 +203,11 @@
     "windowUri": "URI",
     "windowTitle": "Title",
     "sourceServer": "Source Server",
-    "noWindows": "No desktop windows detected"
+    "noWindows": "No desktop windows detected",
+    "windowContent": "Window Content",
+    "noContent": "No content available",
+    "clickToLoadDetail": "Click to load details",
+    "binaryData": "Binary data"
   },
   "debug": {
     "description": "Tool browser and call testing.",

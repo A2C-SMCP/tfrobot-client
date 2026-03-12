@@ -195,6 +195,7 @@ pub fn run() {
             commands::debug::get_tool_history,
             // Desktop resources
             commands::desktop::get_desktop,
+            commands::desktop::get_window_detail,
             // Logs
             commands::logs::get_logs,
             commands::logs::export_logs,

@@ -9,6 +9,21 @@ export interface DesktopWindow {
   mime_type?: string;
 }
 
+export interface WindowContent {
+  type: 'text' | 'blob';
+  uri: string;
+  mime_type?: string;
+  text?: string;
+  blob?: string;
+}
+
+export interface WindowDetail {
+  uri: string;
+  title: string;
+  server: string;
+  contents: WindowContent[];
+}
+
 interface DesktopState {
   windows: DesktopWindow[];
   loading: boolean;
