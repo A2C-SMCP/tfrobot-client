@@ -136,57 +136,8 @@ pub async fn get_window_detail(
 
 // =============================================================================
 // TODO: Batch window details API (future implementation)
-// =============================================================================
-// smcp-computer provides: mgr.get_windows_details(uri).await
-// Returns: Vec<(ServerName, Resource, ReadResourceResult)>
-//
-// Example implementation:
-//
-// #[tauri::command]
-// pub async fn get_desktop_with_details(
-//     state: State<'_, AppState>,
-//     uri: Option<String>,
-// ) -> Result<Vec<WindowDetail>, String> {
-//     let lock = state.manager.read().await;
-//     let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
-//
-//     let windows = mgr.get_windows_details(uri.as_deref()).await;
-//
-//     Ok(windows
-//         .into_iter()
-//         .map(|(server, resource, detail)| {
-//             let contents = detail.contents.into_iter().map(|rc| {
-//                 match rc {
-//                     ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
-//                         WindowContent {
-//                             content_type: "text".to_string(),
-//                             uri,
-//                             mime_type,
-//                             text: Some(text),
-//                             blob: None,
-//                         }
-//                     }
-//                     ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => {
-//                         WindowContent {
-//                             content_type: "blob".to_string(),
-//                             uri,
-//                             mime_type,
-//                             text: None,
-//                             blob: Some(blob),
-//                         }
-//                     }
-//                 }
-//             }).collect();
-//
-//             WindowDetail {
-//                 uri: resource.uri,
-//                 title: resource.name,
-//                 server,
-//                 contents,
-//             }
-//         })
-//         .collect())
-// }
+// 已经实现get_windows_details的api在smcp-computer依赖当中,如需批量获取window信息
+// 可调用该api进行获取.
 // =============================================================================
 
 #[cfg(test)]
