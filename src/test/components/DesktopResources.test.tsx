@@ -10,14 +10,14 @@ const mockStore = {
   loading: false,
   error: null as string | null,
   windowDetails: {} as Record<string, import('@/stores/desktopStore').WindowDetail>,
-  loadingDetails: new Set<string>(),
+  loadingDetails: {} as Record<string, boolean>,
   detailErrors: {} as Record<string, string>,
   fetchDesktop: mockFetchDesktop,
   fetchWindowDetail: mockFetchWindowDetail,
   reset: vi.fn(),
 };
 
- vi.mock('@/stores/desktopStore', () => ({
+vi.mock('@/stores/desktopStore', () => ({
   useDesktopStore: vi.fn(() => mockStore),
 }));
 
@@ -242,7 +242,7 @@ describe('DesktopResources', () => {
     mockUseDesktopStore.mockReturnValue({
       ...mockStore,
       windows: mockWindows,
-      loadingDetails: new Set(['window://main']),
+      loadingDetails: { 'window://main': true },
     } as any);
     render(<DesktopResources />);
 

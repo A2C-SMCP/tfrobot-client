@@ -29,7 +29,7 @@ export function DesktopResources() {
 
   // Show error message when detail fetch fails
   useEffect(() => {
-    Object.entries(detailErrors).forEach(([err]) => {
+    Object.entries(detailErrors).forEach(([_uri, err]) => {
       if (err) {
         message.error(`${t('desktop.failedToLoadDetail')}: ${err}`);
       }
@@ -107,7 +107,7 @@ export function DesktopResources() {
             </Text>
             <div style={{ marginTop: 4 }}>
               <Text type="secondary">
-                [{t('desktop.binaryData')}: {content.blob?.length || 0} bytes]
+                [{t('desktop.binaryData')}: {Math.floor((content.blob?.length || 0) * 3 / 4)} bytes]
               </Text>
             </div>
           </div>
@@ -188,7 +188,7 @@ export function DesktopResources() {
             onExpand: handleRowExpand,
             expandedRowRender: (record) => {
               const detail = windowDetails[record.uri];
-              const isLoading = loadingDetails.has(record.uri);
+              const isLoading = loadingDetails[record.uri];
 
               if (isLoading) {
                 return (
