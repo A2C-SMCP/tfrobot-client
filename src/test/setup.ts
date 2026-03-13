@@ -54,7 +54,7 @@ vi.mock('@tauri-apps/plugin-log', () => ({
 }));
 
 // Ant Design needs ResizeObserver
-global.ResizeObserver = class ResizeObserver {
+globalThis.ResizeObserver = class ResizeObserver {
   observe() {}
   unobserve() {}
   disconnect() {}
