@@ -7,11 +7,9 @@ dist-ssr/
 
 # Rust / Cargo
 target/
-Cargo.lock
 
 # Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
 
 # IDE
 .idea/
