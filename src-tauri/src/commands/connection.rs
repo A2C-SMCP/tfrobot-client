@@ -124,6 +124,7 @@ pub async fn connect_smcp(
         profile.computer_name.clone(),
         api_key,
         inputs,
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;
