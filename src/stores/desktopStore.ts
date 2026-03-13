@@ -31,10 +31,10 @@ interface DesktopState {
 
   // Window detail states
   windowDetails: Record<string, WindowDetail>;
-  loadingDetails: Set<string>;
+  loadingDetails: Record<string, boolean>;
   detailErrors: Record<string, string>;
 
-  fetchDesktop: (size?: string, uri?: string) => Promise<void>;
+  fetchDesktop: (uri?: string) => Promise<void>;
   fetchWindowDetail: (server: string, uri: string) => Promise<void>;
   reset: () => void;
 }
@@ -44,20 +44,19 @@ const initialState = {
   loading: false,
   error: null as string | null,
   windowDetails: {} as Record<string, WindowDetail>,
-  loadingDetails: new Set<string>(),
+  loadingDetails: {} as Record<string, boolean>,
   detailErrors: {} as Record<string, string>,
 };
 
-export const useDesktopStore = create<DesktopState>((set, get) => ({
+export const useDesktopStore = create<DesktopState>((set) => ({
   ...initialState,
 
   reset: () => set(initialState),
 
-  fetchDesktop: async (size?: string, uri?: string) => {
+  fetchDesktop: async (uri?: string) => {
     set({ loading: true, error: null });
     try {
       const windows = await invoke<DesktopWindow[]>('get_desktop', {
-        size: size ?? null,
         uri: uri ?? null,
       });
       set({ windows, loading: false });
@@ -67,39 +66,33 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   },
 
   fetchWindowDetail: async (server: string, uri: string) => {
-    // Add to loading set
+    // Add to loading record
     set((state) => ({
-      loadingDetails: new Set(state.loadingDetails).add(uri),
+      loadingDetails: { ...state.loadingDetails, [uri]: true },
     }));
-
-    // Clear previous error for this uri
-    const { detailErrors } = get();
-    const newErrors = { ...detailErrors };
-    delete newErrors[uri];
 
     try {
       const detail = await invoke<WindowDetail>('get_window_detail', {
         serverName: server,
         uri,
       });
-      set((state) => ({
-        windowDetails: { ...state.windowDetails, [uri]: detail },
-        loadingDetails: (() => {
-          const next = new Set(state.loadingDetails);
-          next.delete(uri);
-          return next;
-        })(),
-        detailErrors: newErrors,
-      }));
+      set((state) => {
+        const { [uri]: _, ...remainingLoading } = state.loadingDetails;
+        const { [uri]: __, ...remainingErrors } = state.detailErrors;
+        return {
+          windowDetails: { ...state.windowDetails, [uri]: detail },
+          loadingDetails: remainingLoading,
+          detailErrors: remainingErrors,
+        };
+      });
     } catch (e) {
-      set((state) => ({
-        loadingDetails: (() => {
-          const next = new Set(state.loadingDetails);
-          next.delete(uri);
-          return next;
-        })(),
-        detailErrors: { ...state.detailErrors, [uri]: String(e) },
-      }));
+      set((state) => {
+        const { [uri]: _, ...remainingLoading } = state.loadingDetails;
+        return {
+          loadingDetails: remainingLoading,
+          detailErrors: { ...state.detailErrors, [uri]: String(e) },
+        };
+      });
     }
   },
 }));

@@ -46,7 +46,6 @@ pub struct WindowDetail {
 #[tauri::command]
 pub async fn get_desktop(
     state: State<'_, AppState>,
-    _size: Option<String>,
     uri: Option<String>,
 ) -> Result<Vec<DesktopWindow>, String> {
     let lock = state.manager.read().await;
