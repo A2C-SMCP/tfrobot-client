@@ -1,4 +1,4 @@
-import { render, screen } from '../helpers/render';
+import { render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { LogViewer } from '@/components/LogViewer';
 
@@ -7,10 +7,10 @@ const mockStore = {
   loading: false,
   error: null,
   filter: {},
-  setFilter: vi.fn(),
-  fetchLogs: vi.fn(),
-  exportLogs: vi.fn(),
-  clearLogs: vi.fn(),
+  setFilter: vi.fn().mockResolvedValue(undefined),
+  fetchLogs: vi.fn().mockResolvedValue(undefined),
+  exportLogs: vi.fn().mockResolvedValue(undefined),
+  clearLogs: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@/stores/logStore', () => ({
@@ -32,9 +32,11 @@ describe('LogViewer', () => {
     mockUseLogStore.mockReturnValue({ ...mockStore } as any);
   });
 
-  it('calls fetchLogs on mount', () => {
+  it('calls fetchLogs on mount', async () => {
     render(<LogViewer />);
-    expect(mockStore.fetchLogs).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(mockStore.fetchLogs).toHaveBeenCalledOnce();
+    });
   });
 
   it('renders title', () => {
