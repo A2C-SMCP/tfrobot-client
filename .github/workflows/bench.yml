@@ -32,6 +32,15 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # Build frontend (Tauri needs ../dist to exist)
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
       - name: Run benchmarks
         working-directory: src-tauri
         run: cargo bench --bench benchmarks -- --output-format bencher | tee output.txt
