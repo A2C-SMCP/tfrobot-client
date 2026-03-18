@@ -3666,7 +3666,7 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3971,7 +3971,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -4640,7 +4640,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6045,9 +6045,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smcp"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cee20efcbd280f0f524188f9acbab86b8455da3bc415f8ef8f5bcc28f79fc8ea"
+checksum = "fc8b2ed814f1a2ea7d1b56142183435f5a93b8576b51007038ead0c740faf623"
 dependencies = [
  "serde",
  "serde_json",
@@ -6057,9 +6057,9 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9e3b0370cd6d126aca1e424fa251120d3ad392b958d099475eb6becd56a6caf"
+checksum = "d5c4f1fc0e39807f18908bb985164a5080a390e2db9c8cf8ecbf09d0768bc8af"
 dependencies = [
  "async-recursion",
  "async-trait",
