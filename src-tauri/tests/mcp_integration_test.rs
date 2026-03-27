@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{create_test_app_state, echo_server_config};
+use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
 use smcp_computer::mcp_clients::MCPServerConfig;
 
 /// Panics if Node.js is not available — CI must have Node.js installed.
@@ -431,4 +431,64 @@ fn test_profiles_crud() {
 
     let after = state.config.load_profiles().unwrap();
     assert!(after.is_empty());
+}
+
+// ── Issue #19 regression: stderr pipe deadlock ──
+// The stderr-flood server writes >64 KB to stderr on startup and per tool call.
+// If smcp-computer does not consume the stderr pipe, the child process blocks
+// and tool calls time out.  This test will FAIL until smcp-computer is fixed.
+
+/// Longer timeout for this test — the server may be slow to initialize while
+/// flushing stderr, but 30 s is more than enough if the pipe is being consumed.
+const STDERR_FLOOD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[tokio::test]
+async fn test_manager_stderr_flood_does_not_block() {
+    require_node();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    let config = stderr_flood_server_config("stderr-flood-test");
+
+    let lock = state.manager.read().await;
+    let mgr = lock.as_ref().unwrap();
+    mgr.add_or_update_server(config).await.unwrap();
+
+    // Start the server — this itself may hang if stderr blocks during init.
+    match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.start_client("stderr-flood-test")).await {
+        Ok(Ok(())) => {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            // Execute a tool call.  The server writes another burst of stderr
+            // during this call, so if the pipe is not being drained this will
+            // time out.
+            let params = serde_json::json!({"message": "hello through stderr storm"});
+            match tokio::time::timeout(
+                STDERR_FLOOD_TIMEOUT,
+                mgr.execute_tool("echo", params, None),
+            )
+            .await
+            {
+                Ok(Ok(call_result)) => {
+                    assert!(
+                        !call_result.is_error.unwrap_or(false),
+                        "Tool call should succeed despite heavy stderr output"
+                    );
+                    assert!(!call_result.content.is_empty(), "Should have content");
+                }
+                Ok(Err(e)) => panic!("Tool call failed: {e}"),
+                Err(_) => panic!(
+                    "Tool call timed out after {STDERR_FLOOD_TIMEOUT:?} — \
+                     stderr pipe is likely blocked (Issue #19)"
+                ),
+            }
+
+            let _ = mgr.stop_client("stderr-flood-test").await;
+        }
+        Ok(Err(e)) => panic!("start_client failed: {e}"),
+        Err(_) => panic!(
+            "start_client timed out after {STDERR_FLOOD_TIMEOUT:?} — \
+             stderr pipe is likely blocked during initialization (Issue #19)"
+        ),
+    }
 }

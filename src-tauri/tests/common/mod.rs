@@ -36,3 +36,26 @@ pub fn echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerCo
     }))
     .expect("Failed to build echo server config")
 }
+
+/// Path to the stderr-flood echo MCP server (Issue #19 regression)
+pub fn stderr_flood_server_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/echo-mcp-server/index-stderr-flood.js")
+}
+
+/// Build an MCPServerConfig for the stderr-flood echo server.
+/// This server writes >64 KB to stderr on startup and on each tool call,
+/// reproducing the pipe-buffer deadlock from Issue #19.
+pub fn stderr_flood_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
+    let server_path = stderr_flood_server_path();
+    serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": name,
+        "server_parameters": {
+            "command": "node",
+            "args": [server_path.to_str().unwrap()],
+            "env": {}
+        }
+    }))
+    .expect("Failed to build stderr-flood server config")
+}
