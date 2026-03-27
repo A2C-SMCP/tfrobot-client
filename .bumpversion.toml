@@ -1,0 +1,63 @@
+[tool.bumpversion]
+current_version = "0.1.0"
+# SemVer with optional pre-release: MAJOR.MINOR.PATCH[-rc.N]
+# Compatible with Cargo (Rust), npm, and Tauri conventions.
+#
+# Workflow:
+#   bump-my-version bump major|minor|patch  → enters -rc.1 stage
+#   bump-my-version bump pre_n              → increments rc number
+#   bump-my-version bump pre_l              → promotes rc to release
+#
+# Examples:
+#   0.1.0 → bump minor → 0.2.0-rc.1 → bump pre_l → 0.2.0
+#   0.2.0 → bump patch → 0.2.1-rc.1 → bump pre_n → 0.2.1-rc.2 → bump pre_l → 0.2.1
+parse = """(?x)
+    ^
+    (?P<major>0|[1-9]\\d*)\\.
+    (?P<minor>0|[1-9]\\d*)\\.
+    (?P<patch>0|[1-9]\\d*)
+    (?:
+        -
+        (?P<pre_l>rc)
+        \\.
+        (?P<pre_n>[1-9]\\d*)
+    )?
+    $
+"""
+serialize = [
+    "{major}.{minor}.{patch}-{pre_l}.{pre_n}",
+    "{major}.{minor}.{patch}",
+]
+tag = true
+sign_tags = false
+tag_name = "v{new_version}"
+tag_message = "chore(release): bump version {current_version} → {new_version}"
+allow_dirty = false
+commit = true
+message = "chore(release): bump version {current_version} → {new_version}"
+commit_args = ""
+
+[tool.bumpversion.parts.pre_l]
+values = ["rc", "release"]
+optional_value = "release"
+
+[tool.bumpversion.parts.pre_n]
+first_value = 1
+optional_value = ""
+
+# ── Managed files ──
+
+[[tool.bumpversion.files]]
+filename = "package.json"
+search = "\"version\": \"{current_version}\""
+replace = "\"version\": \"{new_version}\""
+
+[[tool.bumpversion.files]]
+filename = "src-tauri/Cargo.toml"
+search = "version = \"{current_version}\""
+replace = "version = \"{new_version}\""
+
+[[tool.bumpversion.files]]
+filename = "src-tauri/tauri.conf.json"
+search = "\"version\": \"{current_version}\""
+replace = "\"version\": \"{new_version}\""

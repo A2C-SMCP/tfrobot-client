@@ -11,11 +11,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:rust": "cargo nextest run --manifest-path src-tauri/Cargo.toml",
+    "test:rust:lib": "cargo nextest run --manifest-path src-tauri/Cargo.toml --lib",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "test:bench": "cargo bench --manifest-path src-tauri/Cargo.toml --bench benchmarks",
     "test:smoke": "cd e2e/smoke && npx wdio run wdio.config.ts",
-    "test:all": "pnpm test:coverage && pnpm test:e2e"
+    "test:all": "pnpm test:coverage && pnpm test:rust && pnpm test:e2e"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",
