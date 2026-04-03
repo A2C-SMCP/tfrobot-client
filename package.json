@@ -16,7 +16,7 @@
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "test:bench": "cargo bench --manifest-path src-tauri/Cargo.toml --bench benchmarks",
-    "test:smoke": "cd e2e/smoke && npx wdio run wdio.config.ts",
+    "test:smoke": "cd e2e/smoke && npx @wdio/cli run wdio.config.ts",
     "test:all": "pnpm test:coverage && pnpm test:rust && pnpm test:e2e"
   },
   "dependencies": {
