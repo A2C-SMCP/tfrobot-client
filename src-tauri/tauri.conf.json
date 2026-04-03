@@ -59,8 +59,10 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwMDZBOTVDQkFEQzQ3ODIKUldTQ1I5eTZYS2tHc0JZbDBONU5mSWliTTFXZUYwdlJUcTI5UWdOc2ZrOENFRHdaaTVTZVF6VDgK",
+      "endpoints": [
+        "https://github.com/A2C-SMCP/tfrobot-client/releases/latest/download/latest.json"
+      ]
     },
     "shell": {
       "open": true
