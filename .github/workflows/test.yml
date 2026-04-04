@@ -167,8 +167,11 @@ jobs:
       # Install tauri-driver
       - run: cargo install tauri-driver
 
-      # Run smoke tests
-      - run: pnpm test:smoke
+      # Start tauri-driver in background and run smoke tests
+      - run: |
+          tauri-driver &
+          sleep 2
+          pnpm test:smoke
         timeout-minutes: 5
 
       - uses: actions/upload-artifact@v4
