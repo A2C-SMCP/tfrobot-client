@@ -138,48 +138,9 @@ jobs:
           retention-days: 7
 
   # ══════════════════════════════════════════
-  # Smoke Tests (Tauri Driver, macOS only)
+  # Smoke Tests — disabled: tauri-driver only supports Linux,
+  # re-enable when Tauri provides macOS WebDriver support.
   # ══════════════════════════════════════════
-  smoke-test:
-    name: Smoke Test (macOS)
-    needs: [frontend-test, rust-test, e2e-test]
-    runs-on: macos-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'pnpm'
-
-      - run: pnpm install --frozen-lockfile
-
-      # Build release
-      - run: pnpm tauri build
-
-      # Install tauri-driver
-      - run: cargo install tauri-driver
-
-      # Start tauri-driver in background and run smoke tests
-      - run: |
-          tauri-driver &
-          sleep 2
-          pnpm test:smoke
-        timeout-minutes: 5
-
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: smoke-test-screenshots
-          path: e2e/smoke/screenshots/
-          retention-days: 7
 
   # ══════════════════════════════════════════
   # Quality Gate
