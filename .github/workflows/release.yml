@@ -58,7 +58,21 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'TFRobot Client v__VERSION__'
-          releaseBody: 'See CHANGELOG.md for details.'
+          releaseBody: |
+            See CHANGELOG.md for details.
+
+            ## macOS 安装说明
+
+            macOS 用户首次安装时可能被 Gatekeeper 拦截，请按以下步骤操作：
+
+            1. 双击 `.dmg` 文件挂载，将应用拖入 Applications
+            2. **右键点击** Applications 中的 TFRobot Client → 选择「打开」
+            3. 弹出安全提示后点击「打开」即可（仅首次需要）
+
+            或使用终端命令：
+            ```bash
+            xattr -cr /Applications/TFRobot\ Client.app
+            ```
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
