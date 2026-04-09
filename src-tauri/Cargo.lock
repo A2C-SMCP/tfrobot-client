@@ -6045,9 +6045,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smcp"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a384c7c569acd11a5088c48cb09401f87d189642cf325c5946bafae6eec6bd7a"
+checksum = "a4a090b64c615b193415b31c0256e82fc81383ce391c2116d5e5274cff7277f7"
 dependencies = [
  "serde",
  "serde_json",
@@ -6057,14 +6057,15 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ed2f485e091f150766b7cdc89dd1b4f2aed6e06fc84c34e70c615906a39dd75"
+checksum = "04736d4f8fec2e6e04981c4043afc6bf084652c98a34cc0575a5c6c0e14ba283"
 dependencies = [
  "async-recursion",
  "async-trait",
  "chrono",
  "dashmap",
+ "dirs",
  "eventsource-client",
  "futures",
  "futures-util",
