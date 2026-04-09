@@ -20,6 +20,7 @@ export interface AppSettings {
   language: string;
   log_retention_days: number;
   custom_runtime_paths: CustomRuntimePaths;
+  custom_path?: string | null;
 }
 
 export interface AppInfo {
@@ -31,6 +32,7 @@ interface SettingsState {
   settings: AppSettings | null;
   runtimes: RuntimeInfo[];
   appInfo: AppInfo | null;
+  detectedPath: string;
   loading: boolean;
   error: string | null;
 
@@ -38,6 +40,7 @@ interface SettingsState {
   updateSettings: (settings: AppSettings) => Promise<void>;
   fetchRuntimes: () => Promise<void>;
   fetchAppInfo: () => Promise<void>;
+  fetchDetectedPath: () => Promise<void>;
   reset: () => void;
 }
 
@@ -45,6 +48,7 @@ const initialState = {
   settings: null as AppSettings | null,
   runtimes: [] as RuntimeInfo[],
   appInfo: null as AppInfo | null,
+  detectedPath: '',
   loading: false,
   error: null as string | null,
 };
@@ -88,6 +92,15 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     try {
       const appInfo = await invoke<AppInfo>('get_app_info');
       set({ appInfo });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  fetchDetectedPath: async () => {
+    try {
+      const detectedPath = await invoke<string>('get_detected_path');
+      set({ detectedPath });
     } catch (e) {
       set({ error: String(e) });
     }

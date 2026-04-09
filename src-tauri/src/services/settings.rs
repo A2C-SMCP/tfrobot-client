@@ -8,6 +8,9 @@ pub struct AppSettings {
     pub language: String,
     pub log_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
+    /// User-configured PATH override. When set, takes priority over auto-detected PATH.
+    #[serde(default)]
+    pub custom_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +36,7 @@ impl Default for AppSettings {
             language: "en".to_string(),
             log_retention_days: 30,
             custom_runtime_paths: CustomRuntimePaths::default(),
+            custom_path: None,
         }
     }
 }

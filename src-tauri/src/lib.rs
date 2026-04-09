@@ -111,6 +111,19 @@ pub fn run() {
             // Use configured log retention days for cleanup
             let settings = settings_service.load();
 
+            // Apply user's custom PATH override if configured
+            if let Some(ref custom_path) = settings.custom_path {
+                if !custom_path.is_empty() {
+                    std::env::set_var("PATH", custom_path);
+                    log::info!("PATH overridden by user setting");
+                }
+            } else {
+                log::info!(
+                    "PATH auto-detected ({} entries)",
+                    std::env::var("PATH").unwrap_or_default().split(':').count()
+                );
+            }
+
             let saved_configs = config_service.load_configs().unwrap_or_default();
             log::info!("Loaded {} MCP server configurations", saved_configs.len());
 
@@ -207,6 +220,7 @@ pub fn run() {
             commands::settings::update_settings,
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
+            commands::settings::get_detected_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

@@ -1,6 +1,6 @@
 [package]
 name = "tfrobot-client"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "TFRobot Client - A2C-SMCP Computer GUI"
 authors = ["TFRobot Team"]
@@ -50,6 +50,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 which = "7"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-single-instance = "2"
+dirs = "6.0.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -13,10 +13,29 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<(), String> {
+    // Apply custom PATH change immediately (no restart needed)
+    match &settings.custom_path {
+        Some(path) if !path.is_empty() => {
+            std::env::set_var("PATH", path);
+            log::info!("PATH updated by user setting");
+        }
+        _ => {
+            // Revert to auto-detected PATH
+            let detected = crate::services::shell_env::get_detected_path();
+            std::env::set_var("PATH", &detected);
+            log::info!("PATH reverted to auto-detected");
+        }
+    }
+
     state
         .settings_service
         .save(&settings)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_detected_path() -> Result<String, String> {
+    Ok(crate::services::shell_env::get_detected_path())
 }
 
 #[derive(Debug, Clone, Serialize)]

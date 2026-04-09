@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
-import { Table, Tag, Button, Collapse, Form, Input, Typography } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import { Table, Tag, Button, Collapse, Form, Input, Typography, Space } from 'antd';
+import { ReloadOutlined, UndoOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';
 import { useSettingsStore, type RuntimeInfo } from '@/stores/settingsStore';
 
 const { Text } = Typography;
+const { TextArea } = Input;
 
 const INSTALL_URLS: Record<string, string> = {
   'Node.js': 'https://nodejs.org/',
@@ -16,10 +17,11 @@ const INSTALL_URLS: Record<string, string> = {
 
 export function RuntimeSettings() {
   const { t } = useTranslation();
-  const { runtimes, settings, updateSettings, fetchRuntimes } = useSettingsStore();
+  const { runtimes, settings, updateSettings, fetchRuntimes, detectedPath, fetchDetectedPath } = useSettingsStore();
 
   useEffect(() => {
     fetchRuntimes();
+    fetchDetectedPath();
   }, []);
 
   const columns = [
@@ -55,6 +57,16 @@ export function RuntimeSettings() {
     },
   ];
 
+  const handleCustomPathChange = (value: string) => {
+    if (!settings) return;
+    updateSettings({ ...settings, custom_path: value || null });
+  };
+
+  const handleResetPath = () => {
+    if (!settings) return;
+    updateSettings({ ...settings, custom_path: null });
+  };
+
   const handlePathChange = (key: string, value: string) => {
     if (!settings) return;
     const paths = { ...settings.custom_runtime_paths, [key]: value || undefined };
@@ -63,6 +75,32 @@ export function RuntimeSettings() {
 
   return (
     <div>
+      <Form layout="vertical" style={{ marginBottom: 24 }}>
+        <Form.Item
+          label={t('settings.pathConfig')}
+          help={t('settings.pathDescription')}
+        >
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <TextArea
+              value={settings?.custom_path || ''}
+              onChange={(e) => handleCustomPathChange(e.target.value)}
+              placeholder={detectedPath || t('settings.pathPlaceholder')}
+              autoSize={{ minRows: 2, maxRows: 6 }}
+              style={{ fontFamily: 'monospace', fontSize: 12 }}
+            />
+            {settings?.custom_path && (
+              <Button
+                icon={<UndoOutlined />}
+                size="small"
+                onClick={handleResetPath}
+              >
+                {t('settings.resetPath')}
+              </Button>
+            )}
+          </Space>
+        </Form.Item>
+      </Form>
+
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <span />
         <Button icon={<ReloadOutlined />} onClick={fetchRuntimes}>
