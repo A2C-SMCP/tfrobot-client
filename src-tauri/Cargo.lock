@@ -2633,6 +2633,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -5115,6 +5116,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6045,9 +6047,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smcp"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a090b64c615b193415b31c0256e82fc81383ce391c2116d5e5274cff7277f7"
+checksum = "3b7c6157dd336a81505481e5e098ef88f1758040cb8fd5e5caad5932c5d3c2f2"
 dependencies = [
  "serde",
  "serde_json",
@@ -6057,9 +6059,9 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04736d4f8fec2e6e04981c4043afc6bf084652c98a34cc0575a5c6c0e14ba283"
+checksum = "b8794a8160047e1d2b03743e9552df01852677f5a87f3595cfa656ffc98c9dbc"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -6929,11 +6931,14 @@ dependencies = [
  "criterion",
  "dirs",
  "filetime",
+ "hex",
  "keyring",
  "log",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "smcp-computer",
  "tauri",
  "tauri-build",
@@ -8019,6 +8024,15 @@ name = "webpki-root-certs"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "804f18a4ac2676ffb4e8b5b5fa9ae38af06df08162314f96a68d2a363e21a8ca"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
 dependencies = [
  "rustls-pki-types",
 ]

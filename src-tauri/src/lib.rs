@@ -5,6 +5,7 @@ pub mod tray;
 use commands::connection::ConnectionState;
 use services::config::ConfigService;
 use services::logger::LogService;
+use services::manager_client::ManagerClient;
 use services::settings::SettingsService;
 use smcp_computer::mcp_clients::model::MCPServerInput;
 use smcp_computer::mcp_clients::MCPServerManager;
@@ -29,6 +30,8 @@ pub struct AppState {
     pub log_service: Arc<LogService>,
     /// Settings persistence service
     pub settings_service: Arc<SettingsService>,
+    /// TFRSManager HTTP client (login / list / connection-info)
+    pub manager_client: Arc<ManagerClient>,
 }
 
 impl AppState {
@@ -40,6 +43,7 @@ impl AppState {
             connection: Arc::new(RwLock::new(None)),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
+            manager_client: Arc::new(ManagerClient::new()),
         }
     }
 }
@@ -221,6 +225,12 @@ pub fn run() {
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
             commands::settings::get_detected_path,
+            // TFRSManager HTTP client (issue #23)
+            commands::manager::manager_login,
+            commands::manager::manager_select_account,
+            commands::manager::manager_list_digital_employees,
+            commands::manager::manager_get_connection_info,
+            commands::manager::manager_logout,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

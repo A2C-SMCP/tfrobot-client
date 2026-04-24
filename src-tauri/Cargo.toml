@@ -20,7 +20,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 
 # A2C-SMCP Computer implementation
-smcp-computer = "0.1.14"
+smcp-computer = "0.1.15"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -52,6 +52,13 @@ tauri-plugin-dialog = "2.6.0"
 tauri-plugin-single-instance = "2"
 dirs = "6.0.0"
 
+# HTTP client for TFRSManager REST APIs (rustls to avoid OpenSSL dep)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Hashing for keychain key derivation (base_url → stable short hash)
+sha2 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"
@@ -64,3 +71,6 @@ harness = false
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Enable TFRM-16 acceptance tests against smcp-computer >= 0.1.15.
+# See docs/proposals/tfrm-16-rust-sdk-handshake-config.md.
+verify-smcp-0-1-15 = []

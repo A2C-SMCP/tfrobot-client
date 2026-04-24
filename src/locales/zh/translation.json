@@ -290,5 +290,19 @@
     "updateAvailable": "发现新版本",
     "newVersion": "新版本",
     "upToDate": "当前已是最新版本"
+  },
+  "manager": {
+    "errors": {
+      "network_error": "无法连接到 Manager 服务器，请检查网络或 Manager 地址是否正确。",
+      "unauthorized": "登录已过期，请重新登录 Manager。",
+      "forbidden": "当前账号没有访问该资源的权限。",
+      "payment_required": "账号已欠费或被暂停，请前往续费页面。",
+      "not_found": "未找到对应的资源。",
+      "other": "Manager 返回了意料之外的响应。",
+      "no_session": "尚未登录 Manager，请先登录。",
+      "missing_base_url": "未配置 Manager 地址，请设置环境变量 TFRS_MANAGER_BASE_URL 或在登录表单中填写。",
+      "invalid_response": "无法解析 Manager 返回的响应。",
+      "keychain_error": "读取或写入安全凭据存储失败。"
+    }
   }
 }

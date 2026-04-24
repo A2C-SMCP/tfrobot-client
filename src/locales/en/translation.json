@@ -290,5 +290,19 @@
     "updateAvailable": "Update Available",
     "newVersion": "New version",
     "upToDate": "You are running the latest version"
+  },
+  "manager": {
+    "errors": {
+      "network_error": "Cannot reach the Manager server. Check your connection or the Manager URL.",
+      "unauthorized": "Your Manager session has expired. Please sign in again.",
+      "forbidden": "You do not have permission to access this resource.",
+      "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
+      "not_found": "The requested resource was not found.",
+      "other": "Manager returned an unexpected response.",
+      "no_session": "You are not signed in. Please sign in to the Manager first.",
+      "missing_base_url": "The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.",
+      "invalid_response": "Manager returned a response we could not understand.",
+      "keychain_error": "Failed to read or write the secure credential store."
+    }
   }
 }
