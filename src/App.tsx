@@ -10,6 +10,7 @@ import {
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -22,6 +23,7 @@ import { DesktopResources } from './components/DesktopResources';
 import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
+import { ManagerAccount } from './components/ManagerAccount';
 import { useThemeStore } from './stores/themeStore';
 
 const { Header, Sider, Content } = Layout;
@@ -86,6 +88,11 @@ function App() {
       type: 'group' as const,
       children: [
         {
+          key: 'manager',
+          icon: <UserOutlined />,
+          label: t('managerAccount.navLabel'),
+        },
+        {
           key: 'smcp',
           icon: <CloudServerOutlined />,
           label: t('connection.smcpServer'),
@@ -136,6 +143,8 @@ function App() {
         return <McpConfig />;
       case 'inputs':
         return <InputVariables />;
+      case 'manager':
+        return <ManagerAccount />;
       case 'smcp':
         return <SmcpConnection />;
       case 'resources':

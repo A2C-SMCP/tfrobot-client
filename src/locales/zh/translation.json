@@ -304,5 +304,46 @@
       "invalid_response": "无法解析 Manager 返回的响应。",
       "keychain_error": "读取或写入安全凭据存储失败。"
     }
+  },
+  "managerAccount": {
+    "navLabel": "Manager 账号",
+    "login": {
+      "title": "登录 TFRSManager",
+      "description": "登录后可挑选数字员工并自动填充 SMCP 连接。",
+      "baseUrl": "Manager 地址",
+      "baseUrlHint": "留空将使用环境变量 TFRS_MANAGER_BASE_URL。",
+      "phone": "手机号",
+      "phoneRequired": "请输入手机号",
+      "password": "密码",
+      "passwordRequired": "请输入密码",
+      "submit": "登录",
+      "logout": "退出登录",
+      "logoutSuccess": "已退出登录"
+    },
+    "accountSelection": {
+      "title": "选择账号",
+      "description": "当前凭证匹配到多个账号，请选择其一继续。",
+      "select": "选择",
+      "back": "返回登录"
+    },
+    "employees": {
+      "title": "数字员工",
+      "signedInAs": "当前登录：{{name}}",
+      "empty": "当前账号下没有可用的数字员工。",
+      "robotId": "Robot ID",
+      "namespace": "命名空间",
+      "cluster": "集群",
+      "description": "描述",
+      "connect": "连接",
+      "connected": "已连接",
+      "disconnect": "断开连接",
+      "disconnectSuccess": "已断开 SMCP 连接",
+      "connectSuccess": "正在连接 {{name}}…",
+      "conflictTitle": "同名连接配置已存在",
+      "conflictDescription": "\"{{name}}\" 已存在，是覆盖还是另存副本？",
+      "overwrite": "覆盖",
+      "createCopy": "另存副本",
+      "renew": "去续费"
+    }
   }
 }

@@ -304,5 +304,46 @@
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store."
     }
+  },
+  "managerAccount": {
+    "navLabel": "Manager Account",
+    "login": {
+      "title": "Sign in to TFRSManager",
+      "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
+      "baseUrl": "Manager Base URL",
+      "baseUrlHint": "Leave empty to use the TFRS_MANAGER_BASE_URL environment variable.",
+      "phone": "Phone",
+      "phoneRequired": "Phone is required",
+      "password": "Password",
+      "passwordRequired": "Password is required",
+      "submit": "Sign In",
+      "logout": "Sign Out",
+      "logoutSuccess": "Signed out successfully"
+    },
+    "accountSelection": {
+      "title": "Choose an account",
+      "description": "Your credentials match multiple accounts. Pick one to continue.",
+      "select": "Select",
+      "back": "Back to sign in"
+    },
+    "employees": {
+      "title": "Digital Employees",
+      "signedInAs": "Signed in as {{name}}",
+      "empty": "No digital employees are available for this account.",
+      "robotId": "Robot ID",
+      "namespace": "Namespace",
+      "cluster": "Cluster",
+      "description": "Description",
+      "connect": "Connect",
+      "connected": "Connected",
+      "disconnect": "Disconnect",
+      "disconnectSuccess": "Disconnected from SMCP server",
+      "connectSuccess": "Connecting to {{name}}…",
+      "conflictTitle": "A profile with this name already exists",
+      "conflictDescription": "\"{{name}}\" already exists. Overwrite it, or save a copy?",
+      "overwrite": "Overwrite",
+      "createCopy": "Save a copy",
+      "renew": "Renew subscription"
+    }
   }
 }
