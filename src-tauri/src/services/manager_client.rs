@@ -79,57 +79,110 @@ impl From<keychain::KeychainError> for ManagerError {
 }
 
 // ───────────────────────── DTOs ─────────────────────────
+//
+// 契约对齐：TFRSManager 所有 user-facing 接口统一使用 `{code, message, data}` envelope，
+// 分页接口进一步使用扁平 `{total, page, pageSize, items}`。
+// 参考：tfrsmanager/docs/local-dev/client-uat-guide.md §5.0。
 
-/// 登录请求体。`POST /auth/login-by-password`
+/// Server 统一响应 envelope。`data` 可能是业务体或 null（错误）。
+#[derive(Debug, Deserialize)]
+struct ApiEnvelope<T> {
+    #[serde(default)]
+    #[allow(dead_code)]
+    code: i32,
+    #[serde(default)]
+    #[allow(dead_code)]
+    message: String,
+    data: T,
+}
+
+/// 扁平分页响应（14 接口已整改统一）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListResponse<T> {
+    #[serde(default)]
+    #[allow(dead_code)]
+    total: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    page: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    page_size: i64,
+    #[serde(default = "Vec::new")]
+    items: Vec<T>,
+}
+
+/// 登录请求体。`POST /auth/login-by-password` —— server 接 `phone` 字段，不是 `username`。
 #[derive(Debug, Serialize)]
 struct LoginRequestBody<'a> {
-    username: &'a str,
+    phone: &'a str,
     password: &'a str,
 }
 
-/// select-account 请求体。`POST /auth/select-account`
+/// select-account 请求体。`POST /auth/select-account`。
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SelectAccountRequestBody<'a> {
-    #[serde(rename = "sessionToken")]
-    session_token: &'a str,
-    #[serde(rename = "accountId")]
-    account_id: &'a str,
+    temp_token: &'a str,
+    account_id: u64,
 }
 
-/// 用户简要信息（登录 / select-account 成功后由 Manager 返回）。
+/// 登录成功后 Manager 下发的用户/账户信息（扁平 4 字段，**无嵌套 user 对象**）。
+/// 结构与 select-account 成功响应一致。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
-    pub id: String,
-    pub username: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub user_id: u64,
+    pub account_id: u64,
+    pub account_name: String,
+}
+
+/// 单账户登录 / select-account 的成功响应 data 体（含 token，未暴露给前端）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatedPayload {
+    token: String,
+    #[serde(flatten)]
+    user: UserInfo,
 }
 
 /// 多账户候选项。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AccountBrief {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
+#[serde(rename_all = "camelCase")]
+pub struct AccountOption {
+    pub account_id: u64,
+    pub account_name: String,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(default)]
+    pub organization_id: u64,
+    #[serde(default)]
+    pub organization_name: String,
+    #[serde(default)]
+    pub organization_type: String,
 }
 
-/// Manager 登录原始响应——两分支共存，用 untagged 兼容两种形态。
+/// 多账户登录响应 data 体。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiAccountPayload {
+    #[serde(default)]
+    #[allow(dead_code)]
+    message: String,
+    temp_token: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    expires_in: i32,
+    accounts: Vec<AccountOption>,
+}
+
+/// 登录响应的 data 体——两种形态，按内容区分。
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum RawLoginResponse {
-    Authenticated {
-        token: String,
-        user: UserInfo,
-    },
-    AccountSelectionRequired {
-        #[serde(rename = "sessionToken")]
-        session_token: String,
-        accounts: Vec<AccountBrief>,
-    },
+enum LoginData {
+    SingleAccount(AuthenticatedPayload),
+    MultiAccount(MultiAccountPayload),
 }
 
 /// 前端可感知的登录结果（JWT 不透出；存 keychain + 内存 session）。
@@ -139,31 +192,36 @@ pub enum LoginResult {
     /// 登录成功，JWT 已存 keychain。
     Authenticated { user: UserInfo },
     /// 命中多账户，需要前端让用户挑选账号后调 `manager_select_account`。
-    AccountSelectionRequired { accounts: Vec<AccountBrief> },
+    AccountSelectionRequired { accounts: Vec<AccountOption> },
 }
 
-/// 数字员工列表项（`GET /api/v1/digital-employees`）。
+/// 数字员工列表项（`GET /api/v1/digital-employees`，data.items 元素）。
+/// 按真实响应补全业务字段，UI 可展示；未列出的字段由 serde 自动忽略。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DigitalEmployeeBrief {
-    pub id: String,
+    pub id: u64,
     pub name: String,
-    /// 所在 K8s namespace（冗余，connection-info 会再返回一次）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-    /// robotId（== office_id）。
+    #[serde(default)]
+    pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    /// `tfrobot` / `openclaw`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_type: Option<String>,
-    /// 业务状态（`running` / `suspended` / `stopped` …）。
+    /// `running` / `stopped` / `init_failed` / … 完整状态集见 UAT guide。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_display_name: Option<String>,
+    /// `tfrserver` / `tfropenclaw` 等。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_name: Option<String>,
 }
 
-/// connection-info 响应（`GET /api/v1/digital-employees/{id}/connection-info`）。
-/// 字段与 TFRM-18 规格对齐；`routingHeaders` 是客户端注入 smcp-computer 的权威契约。
+/// connection-info 响应 data 体（`GET /api/v1/digital-employees/{id}/connection-info`）。
+/// 字段与 TFRM-18 / UAT guide §5.5 对齐；`routingHeaders` 是客户端注入 smcp-computer 的权威契约。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInfoResponse {
@@ -185,19 +243,35 @@ pub struct ConnectionInfoResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_name: Option<String>,
     /// **客户端必须整 dict 注入 smcp-computer 的 headers 参数**，不要自组装 header 名。
+    /// 唯一的 snake_case 例外：`routingHeaders.access_token`（物化契约，下游 server 按此校验）。
     pub routing_headers: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 }
 
-/// 402 欠费响应体。
-#[derive(Debug, Deserialize)]
+/// 402 欠费响应。兼容两种形态用同一个结构：
+/// - envelope：`{code, message, data: {message?, redirectUrl?}}` —— `data` 非空
+/// - 裸对象：`{message?, redirectUrl?}` —— `data` 缺省
+///
+/// 解析时优先使用 `data` 内的字段（envelope 语义），回退到顶层字段（裸对象语义）。
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct PaymentRequiredBody {
+struct PaymentRequiredData {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     redirect_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PaymentRequiredAny {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    redirect_url: Option<String>,
+    #[serde(default)]
+    data: Option<PaymentRequiredData>,
 }
 
 // ───────────────────────── 内存 session ─────────────────────────
@@ -220,6 +294,19 @@ pub struct ManagerClient {
     session: Arc<RwLock<Option<Session>>>,
 }
 
+/// 把 reqwest 错误的 source chain 展平成一行便于前端展示与诊断。
+/// reqwest 的 `Display` 只给顶层消息（如 "error sending request for url (...)"），
+/// 真实原因（connect refused / connection reset / TLS 错）在 `source()` 链里。
+fn flatten_reqwest_err(e: reqwest::Error) -> String {
+    let mut parts: Vec<String> = vec![e.to_string()];
+    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&e);
+    while let Some(s) = src {
+        parts.push(s.to_string());
+        src = s.source();
+    }
+    parts.join(" -> ")
+}
+
 impl ManagerClient {
     pub fn new() -> Self {
         let user_agent = format!(
@@ -227,8 +314,13 @@ impl ManagerClient {
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS
         );
+        // Manager 场景下更偏向"每个请求独立连接"，不用连接池：
+        // - 避免 Go server idle 关停导致 pool 里的 stale 连接拿出来直接 fail
+        // - Manager 调用本身很少（login + list + connection-info），性能影响可忽略
         let http = reqwest::Client::builder()
             .user_agent(user_agent)
+            .pool_max_idle_per_host(0)
+            .tcp_keepalive(std::time::Duration::from_secs(10))
             .build()
             .expect("reqwest::Client::builder should not fail with rustls + default settings");
         Self {
@@ -292,14 +384,7 @@ impl ManagerClient {
             StatusCode::NOT_FOUND => ManagerError::NotFound,
             StatusCode::PAYMENT_REQUIRED => {
                 let body = resp.text().await.unwrap_or_default();
-                let parsed: Option<PaymentRequiredBody> = serde_json::from_str(&body).ok();
-                let (message, redirect_url) = match parsed {
-                    Some(p) => (
-                        p.message.unwrap_or_else(|| "Payment required".to_string()),
-                        p.redirect_url,
-                    ),
-                    None => ("Payment required".to_string(), None),
-                };
+                let (message, redirect_url) = parse_payment_required(&body);
                 ManagerError::PaymentRequired { message, redirect_url }
             }
             s => {
@@ -327,10 +412,14 @@ impl ManagerClient {
     // ───────── 公共 API ─────────
 
     /// `POST {base}/auth/login-by-password` — 登录。
+    ///
+    /// server 按 `phone` 字段接收（不是 `username`）。响应 envelope `{code, message, data}`，
+    /// data 为两种形态之一：单账户 `{token, userId, accountId, accountName}` 或
+    /// 多账户 `{message, tempToken, expiresIn, accounts}`。
     pub async fn login(
         &self,
         base_url: Option<String>,
-        username: &str,
+        phone: &str,
         password: &str,
     ) -> Result<LoginResult, ManagerError> {
         let base = Self::resolve_base_url(base_url)?;
@@ -339,40 +428,42 @@ impl ManagerClient {
         let resp = self
             .http
             .post(&url)
-            .json(&LoginRequestBody { username, password })
+            .json(&LoginRequestBody { phone, password })
             .send()
             .await
-            .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if !resp.status().is_success() {
             return Err(self.classify_error(resp).await);
         }
 
-        let raw: RawLoginResponse = resp
+        let envelope: ApiEnvelope<LoginData> = resp
             .json()
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
-        match raw {
-            RawLoginResponse::Authenticated { token, user } => {
+        match envelope.data {
+            LoginData::SingleAccount(payload) => {
                 // 写 keychain + 建立内存 session（清空 pending token）
                 let key = Self::keychain_key(&base);
-                keychain::save_credential(&key, &token)?;
+                keychain::save_credential(&key, &payload.token)?;
                 *self.session.write().await = Some(Session {
                     base_url: base,
-                    jwt: token,
+                    jwt: payload.token,
                     pending_session_token: None,
                 });
-                Ok(LoginResult::Authenticated { user })
+                Ok(LoginResult::Authenticated { user: payload.user })
             }
-            RawLoginResponse::AccountSelectionRequired { session_token, accounts } => {
+            LoginData::MultiAccount(payload) => {
                 // 多账户：记住 base_url + pending token；JWT 尚未产生，不写 keychain
                 *self.session.write().await = Some(Session {
                     base_url: base,
                     jwt: String::new(),
-                    pending_session_token: Some(session_token),
+                    pending_session_token: Some(payload.temp_token),
                 });
-                Ok(LoginResult::AccountSelectionRequired { accounts })
+                Ok(LoginResult::AccountSelectionRequired {
+                    accounts: payload.accounts,
+                })
             }
         }
     }
@@ -380,7 +471,8 @@ impl ManagerClient {
     /// `POST {base}/auth/select-account` — 多账户登录二次确认。
     ///
     /// 必须在 `login()` 返回 `AccountSelectionRequired` 之后调用。
-    pub async fn select_account(&self, account_id: &str) -> Result<UserInfo, ManagerError> {
+    /// 请求体字段：`{tempToken, accountId}`；响应同单账户登录。
+    pub async fn select_account(&self, account_id: u64) -> Result<UserInfo, ManagerError> {
         let session = self.require_session().await?;
         let pending = session
             .pending_session_token
@@ -392,38 +484,35 @@ impl ManagerClient {
             .http
             .post(&url)
             .json(&SelectAccountRequestBody {
-                session_token: &pending,
+                temp_token: &pending,
                 account_id,
             })
             .send()
             .await
-            .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if !resp.status().is_success() {
             return Err(self.classify_error(resp).await);
         }
 
-        #[derive(Deserialize)]
-        struct SelectResp {
-            token: String,
-            user: UserInfo,
-        }
-        let body: SelectResp = resp
+        let envelope: ApiEnvelope<AuthenticatedPayload> = resp
             .json()
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
         let key = Self::keychain_key(&session.base_url);
-        keychain::save_credential(&key, &body.token)?;
+        keychain::save_credential(&key, &envelope.data.token)?;
         *self.session.write().await = Some(Session {
             base_url: session.base_url,
-            jwt: body.token,
+            jwt: envelope.data.token,
             pending_session_token: None,
         });
-        Ok(body.user)
+        Ok(envelope.data.user)
     }
 
     /// `GET {base}/api/v1/digital-employees` — 当前账号的数字员工列表。
+    ///
+    /// 响应走标准分页 envelope：`{code, message, data: {total, page, pageSize, items}}`。
     pub async fn list_digital_employees(&self) -> Result<Vec<DigitalEmployeeBrief>, ManagerError> {
         let session = self.require_session().await?;
         if session.jwt.is_empty() {
@@ -437,20 +526,23 @@ impl ManagerClient {
             .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
             .send()
             .await
-            .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if !resp.status().is_success() {
             return Err(self.classify_error(resp).await);
         }
-        resp.json::<Vec<DigitalEmployeeBrief>>()
+        let envelope: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> = resp
+            .json()
             .await
-            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))
+            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+        Ok(envelope.data.items)
     }
 
     /// `GET {base}/api/v1/digital-employees/{id}/connection-info` — 拿 SMCP 握手参数。
+    /// `id` 是 Manager 侧的数字主键（DigitalEmployeeBrief.id）。
     pub async fn get_connection_info(
         &self,
-        id: &str,
+        id: u64,
     ) -> Result<ConnectionInfoResponse, ManagerError> {
         let session = self.require_session().await?;
         if session.jwt.is_empty() {
@@ -467,14 +559,16 @@ impl ManagerClient {
             .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
             .send()
             .await
-            .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if !resp.status().is_success() {
             return Err(self.classify_error(resp).await);
         }
-        resp.json::<ConnectionInfoResponse>()
+        let envelope: ApiEnvelope<ConnectionInfoResponse> = resp
+            .json()
             .await
-            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))
+            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+        Ok(envelope.data)
     }
 
     /// 本地登出：清 keychain + 内存 session。无服务端 logout API。
@@ -509,6 +603,26 @@ fn strip_trailing_slash(url: String) -> String {
     } else {
         url
     }
+}
+
+/// 解析 402 响应体。兼容两种形态：
+/// - envelope：`{code, message, data: {message?, redirectUrl?}}`
+/// - 裸对象：`{message?, redirectUrl?}`
+/// 缺省返回 `("Payment required", None)`。
+fn parse_payment_required(body: &str) -> (String, Option<String>) {
+    if let Ok(any) = serde_json::from_str::<PaymentRequiredAny>(body) {
+        // 两种形态共用一个 struct：data 存在时走 envelope 语义，否则走裸对象语义。
+        let (data_msg, data_url) = any
+            .data
+            .map(|d| (d.message, d.redirect_url))
+            .unwrap_or((None, None));
+        let msg = data_msg
+            .or(any.message)
+            .unwrap_or_else(|| "Payment required".to_string());
+        let url = data_url.or(any.redirect_url);
+        return (msg, url);
+    }
+    ("Payment required".to_string(), None)
 }
 
 // ───────────────────────── 单元测试 ─────────────────────────
@@ -558,40 +672,126 @@ mod tests {
     }
 
     #[test]
-    fn raw_login_response_deserializes_authenticated_branch() {
+    fn login_data_deserializes_single_account_branch() {
+        // Server 返回 envelope 包裹；data 是扁平 4 字段。
         let json = r#"{
-            "token": "jwt-abc",
-            "user": {"id": "u1", "username": "alice"}
-        }"#;
-        let parsed: RawLoginResponse = serde_json::from_str(json).unwrap();
-        match parsed {
-            RawLoginResponse::Authenticated { token, user } => {
-                assert_eq!(token, "jwt-abc");
-                assert_eq!(user.id, "u1");
-                assert_eq!(user.username, "alice");
+            "code": 200,
+            "message": "success",
+            "data": {
+                "token": "jwt-abc",
+                "userId": 9,
+                "accountId": 16,
+                "accountName": "client_uat"
             }
-            _ => panic!("expected Authenticated branch"),
+        }"#;
+        let env: ApiEnvelope<LoginData> = serde_json::from_str(json).unwrap();
+        match env.data {
+            LoginData::SingleAccount(payload) => {
+                assert_eq!(payload.token, "jwt-abc");
+                assert_eq!(payload.user.user_id, 9);
+                assert_eq!(payload.user.account_id, 16);
+                assert_eq!(payload.user.account_name, "client_uat");
+            }
+            _ => panic!("expected SingleAccount branch"),
         }
     }
 
     #[test]
-    fn raw_login_response_deserializes_account_selection_branch() {
+    fn login_data_deserializes_multi_account_branch() {
         let json = r#"{
-            "sessionToken": "sess-xyz",
-            "accounts": [
-                {"id": "a1", "name": "Primary"},
-                {"id": "a2", "name": "Secondary", "role": "admin"}
-            ]
-        }"#;
-        let parsed: RawLoginResponse = serde_json::from_str(json).unwrap();
-        match parsed {
-            RawLoginResponse::AccountSelectionRequired { session_token, accounts } => {
-                assert_eq!(session_token, "sess-xyz");
-                assert_eq!(accounts.len(), 2);
-                assert_eq!(accounts[1].role.as_deref(), Some("admin"));
+            "code": 200,
+            "message": "success",
+            "data": {
+                "message": "请选择要登录的账户",
+                "tempToken": "temp-xyz",
+                "expiresIn": 300,
+                "accounts": [
+                    {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "测试用户2",
+                     "organizationId": 2, "organizationName": "测试企业", "organizationType": "enterprise"},
+                    {"accountId": 3, "accountName": "testuser2_personal", "nickname": "测试用户2",
+                     "organizationId": 1, "organizationName": "one-person-org-1", "organizationType": "personal"}
+                ]
             }
-            _ => panic!("expected AccountSelectionRequired branch"),
+        }"#;
+        let env: ApiEnvelope<LoginData> = serde_json::from_str(json).unwrap();
+        match env.data {
+            LoginData::MultiAccount(payload) => {
+                assert_eq!(payload.temp_token, "temp-xyz");
+                assert_eq!(payload.expires_in, 300);
+                assert_eq!(payload.accounts.len(), 2);
+                assert_eq!(payload.accounts[0].account_id, 2);
+                assert_eq!(payload.accounts[0].organization_type, "enterprise");
+                assert_eq!(payload.accounts[1].account_name, "testuser2_personal");
+            }
+            _ => panic!("expected MultiAccount branch"),
         }
+    }
+
+    #[test]
+    fn list_response_deserializes_paginated_employees() {
+        let json = r#"{
+            "code": 200,
+            "message": "success",
+            "data": {
+                "total": 1,
+                "page": 1,
+                "pageSize": 20,
+                "items": [
+                    {"id": 11, "name": "本地联调员工", "robotId": "5f4b...", "status": "running",
+                     "templateType": "tfrserver", "templateDisplayName": "智能客服机器人", "namespace": "tfrobotserver"}
+                ]
+            }
+        }"#;
+        let env: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> =
+            serde_json::from_str(json).unwrap();
+        assert_eq!(env.data.total, 1);
+        assert_eq!(env.data.items.len(), 1);
+        assert_eq!(env.data.items[0].id, 11);
+        assert_eq!(env.data.items[0].robot_id.as_deref(), Some("5f4b..."));
+        assert_eq!(env.data.items[0].status.as_deref(), Some("running"));
+        assert_eq!(
+            env.data.items[0].template_type.as_deref(),
+            Some("tfrserver")
+        );
+    }
+
+    #[test]
+    fn list_response_tolerates_empty_items() {
+        let json = r#"{
+            "code": 200, "message": "success",
+            "data": {"total": 0, "page": 1, "pageSize": 20, "items": []}
+        }"#;
+        let env: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> =
+            serde_json::from_str(json).unwrap();
+        assert_eq!(env.data.total, 0);
+        assert!(env.data.items.is_empty());
+    }
+
+    #[test]
+    fn parse_payment_required_handles_envelope_and_bare_shapes() {
+        // 包在 envelope 里
+        let (msg, url) = parse_payment_required(
+            r#"{"code":402,"message":"outer","data":{"message":"欠费","redirectUrl":"https://pay/x"}}"#,
+        );
+        assert_eq!(msg, "欠费");
+        assert_eq!(url.as_deref(), Some("https://pay/x"));
+
+        // envelope 但 data 没有 message → fallback 到 outer message
+        let (msg, url) = parse_payment_required(
+            r#"{"code":402,"message":"outer","data":{"redirectUrl":"https://pay/y"}}"#,
+        );
+        assert_eq!(msg, "outer");
+        assert_eq!(url.as_deref(), Some("https://pay/y"));
+
+        // 裸对象
+        let (msg, url) = parse_payment_required(r#"{"message":"欠费","redirectUrl":"https://x"}"#);
+        assert_eq!(msg, "欠费");
+        assert_eq!(url.as_deref(), Some("https://x"));
+
+        // 完全空
+        let (msg, url) = parse_payment_required("");
+        assert_eq!(msg, "Payment required");
+        assert!(url.is_none());
     }
 
     #[test]

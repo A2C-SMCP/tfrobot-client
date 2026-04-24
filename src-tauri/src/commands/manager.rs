@@ -31,17 +31,17 @@ pub async fn manager_login(
     state: State<'_, AppState>,
     app: AppHandle,
     base_url: Option<String>,
-    username: String,
+    phone: String,
     password: String,
 ) -> Result<LoginResult, ManagerError> {
     log::info!(
-        "manager_login: base_url_provided={} username={}",
+        "manager_login: base_url_provided={} phone={}",
         base_url.is_some(),
-        username
+        phone
     );
     state
         .manager_client
-        .login(base_url, &username, &password)
+        .login(base_url, &phone, &password)
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))
 }
@@ -50,12 +50,12 @@ pub async fn manager_login(
 pub async fn manager_select_account(
     state: State<'_, AppState>,
     app: AppHandle,
-    account_id: String,
+    account_id: u64,
 ) -> Result<UserInfo, ManagerError> {
     log::info!("manager_select_account: account_id={}", account_id);
     state
         .manager_client
-        .select_account(&account_id)
+        .select_account(account_id)
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))
 }
@@ -76,12 +76,12 @@ pub async fn manager_list_digital_employees(
 pub async fn manager_get_connection_info(
     state: State<'_, AppState>,
     app: AppHandle,
-    id: String,
+    id: u64,
 ) -> Result<ConnectionInfoResponse, ManagerError> {
     log::info!("manager_get_connection_info: id={}", id);
     state
         .manager_client
-        .get_connection_info(&id)
+        .get_connection_info(id)
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))
 }

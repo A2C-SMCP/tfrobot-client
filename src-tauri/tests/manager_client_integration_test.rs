@@ -5,6 +5,12 @@
 //! - 按脚本回固定状态码 + body；
 //! - 关闭连接让客户端推进。
 //!
+//! 响应 fixture 统一遵循 TFRSManager 实测契约：
+//! - envelope `{code, message, data}`；错误响应同结构
+//! - 分页扁平 `{total, page, pageSize, items}`
+//! - 登录 data 扁平 `{token, userId, accountId, accountName}`（无嵌套 user）
+//! - 多账户 data `{message, tempToken, expiresIn, accounts}`
+//!
 //! 不依赖 `hyper`/`warp` 等重量级 server，和已有的 `smcp_handshake_config_test.rs` 风格一致。
 
 use std::collections::HashMap;
@@ -170,6 +176,21 @@ fn raw_script(
     }
 }
 
+/// 标准成功 envelope：`{code:200, message:"success", data}`。
+fn envelope(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"code": 200, "message": "success", "data": data})
+}
+
+/// 标准单账户登录 data（与 UAT guide §5.1 实测字面量对齐）。
+fn single_account_login_data(token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "token": token,
+        "userId": 9,
+        "accountId": 16,
+        "accountName": "client_uat",
+    })
+}
+
 // ───────────────────── 用例 ─────────────────────
 
 #[tokio::test]
@@ -177,23 +198,21 @@ async fn login_success_writes_session_and_returns_authenticated() {
     let script = vec![json_script(
         "/auth/login-by-password",
         "HTTP/1.1 200 OK",
-        serde_json::json!({
-            "token": "jwt-happy-path",
-            "user": {"id": "u1", "username": "alice", "displayName": "Alice"}
-        }),
+        envelope(single_account_login_data("jwt-happy-path")),
     )];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
     let result = client
-        .login(Some(base.clone()), "alice", "hunter2")
+        .login(Some(base.clone()), "13800138008", "Test@123456")
         .await
         .expect("login should succeed");
 
     match result {
         LoginResult::Authenticated { user } => {
-            assert_eq!(user.username, "alice");
-            assert_eq!(user.display_name.as_deref(), Some("Alice"));
+            assert_eq!(user.user_id, 9);
+            assert_eq!(user.account_id, 16);
+            assert_eq!(user.account_name, "client_uat");
         }
         _ => panic!("expected Authenticated variant"),
     }
@@ -213,10 +232,12 @@ async fn login_success_writes_session_and_returns_authenticated() {
         "User-Agent should be prefixed with tfrobot-client/ but was: {ua}"
     );
     assert!(ua.contains("(Tauri;"));
+    // 请求体用 `phone` 字段，不是 `username`
     let parsed: serde_json::Value =
         serde_json::from_str(&reqs[0].body).expect("login body should be JSON");
-    assert_eq!(parsed["username"], "alice");
-    assert_eq!(parsed["password"], "hunter2");
+    assert_eq!(parsed["phone"], "13800138008");
+    assert_eq!(parsed["password"], "Test@123456");
+    assert!(parsed.get("username").is_none());
 
     // 清理
     let _ = client.logout().await;
@@ -227,27 +248,33 @@ async fn login_multi_account_returns_account_selection_required() {
     let script = vec![json_script(
         "/auth/login-by-password",
         "HTTP/1.1 200 OK",
-        serde_json::json!({
-            "sessionToken": "pending-xyz",
+        envelope(serde_json::json!({
+            "message": "请选择要登录的账户",
+            "tempToken": "temp-xyz",
+            "expiresIn": 300,
             "accounts": [
-                {"id": "a1", "name": "Primary"},
-                {"id": "a2", "name": "Tenant-B", "role": "admin"}
+                {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "测试用户2",
+                 "organizationId": 2, "organizationName": "测试企业", "organizationType": "enterprise"},
+                {"accountId": 3, "accountName": "testuser2_personal", "nickname": "测试用户2",
+                 "organizationId": 1, "organizationName": "one-person-org-1", "organizationType": "personal"}
             ]
-        }),
+        })),
     )];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
     let result = client
-        .login(Some(base), "bob", "pw")
+        .login(Some(base), "13900139000", "Test@123456")
         .await
         .expect("multi-account login should return selection-required");
 
     match result {
         LoginResult::AccountSelectionRequired { accounts } => {
             assert_eq!(accounts.len(), 2);
-            assert_eq!(accounts[0].id, "a1");
-            assert_eq!(accounts[1].role.as_deref(), Some("admin"));
+            assert_eq!(accounts[0].account_id, 2);
+            assert_eq!(accounts[0].account_name, "testuser2_enterprise");
+            assert_eq!(accounts[0].organization_type, "enterprise");
+            assert_eq!(accounts[1].organization_type, "personal");
         }
         _ => panic!("expected AccountSelectionRequired"),
     }
@@ -259,70 +286,84 @@ async fn select_account_completes_session() {
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "sessionToken": "pending-xyz",
-                "accounts": [{"id": "a1", "name": "Primary"}]
-            }),
+            envelope(serde_json::json!({
+                "message": "请选择要登录的账户",
+                "tempToken": "temp-xyz",
+                "expiresIn": 300,
+                "accounts": [
+                    {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "n",
+                     "organizationId": 2, "organizationName": "ent", "organizationType": "enterprise"}
+                ]
+            })),
         ),
         json_script(
             "/auth/select-account",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
+            envelope(serde_json::json!({
                 "token": "final-jwt",
-                "user": {"id": "u1", "username": "bob"}
-            }),
+                "userId": 2,
+                "accountId": 2,
+                "accountName": "testuser2_enterprise"
+            })),
         ),
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "bob", "pw").await.unwrap();
-    let user = client.select_account("a1").await.expect("select-account");
-    assert_eq!(user.username, "bob");
+    client.login(Some(base), "13900139000", "Test@123456").await.unwrap();
+    let user = client.select_account(2).await.expect("select-account");
+    assert_eq!(user.account_id, 2);
+    assert_eq!(user.account_name, "testuser2_enterprise");
 
-    // 第二个请求 body 应当是 sessionToken + accountId
+    // 第二个请求 body 应当是 tempToken + accountId (number)
     let reqs = captured.lock().await;
     assert_eq!(reqs.len(), 2);
     let select_body: serde_json::Value = serde_json::from_str(&reqs[1].body).unwrap();
-    assert_eq!(select_body["sessionToken"], "pending-xyz");
-    assert_eq!(select_body["accountId"], "a1");
+    assert_eq!(select_body["tempToken"], "temp-xyz");
+    assert_eq!(select_body["accountId"], 2);
+    // sessionToken 不应再出现
+    assert!(select_body.get("sessionToken").is_none());
 }
 
 #[tokio::test]
 async fn select_account_without_pending_session_errors() {
     let client = ManagerClient::new();
-    let err = client.select_account("a1").await.unwrap_err();
+    let err = client.select_account(1).await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 
 #[tokio::test]
-async fn list_digital_employees_sends_bearer_and_parses_response() {
+async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     let script = vec![
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-xyz",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-xyz")),
         ),
         json_script(
             "/api/v1/digital-employees",
             "HTTP/1.1 200 OK",
-            serde_json::json!([
-                {"id": "r1", "name": "Robot-1", "robotId": "r1", "templateType": "tfrobot", "status": "running"},
-                {"id": "r2", "name": "Robot-2"}
-            ]),
+            envelope(serde_json::json!({
+                "total": 2, "page": 1, "pageSize": 20,
+                "items": [
+                    {"id": 11, "name": "本地联调员工", "robotId": "r-1",
+                     "status": "running", "templateType": "tfrserver", "templateDisplayName": "智能客服",
+                     "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver"},
+                    {"id": 12, "name": "robot-2"}
+                ]
+            })),
         ),
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
     let list = client.list_digital_employees().await.expect("list");
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0].template_type.as_deref(), Some("tfrobot"));
+    assert_eq!(list[0].id, 11);
+    assert_eq!(list[0].template_type.as_deref(), Some("tfrserver"));
     assert_eq!(list[0].status.as_deref(), Some("running"));
+    assert_eq!(list[0].cluster_name.as_deref(), Some("local-tfrobotserver"));
 
     // Bearer token 应当在第二个请求（list）里
     let reqs = captured.lock().await;
@@ -339,50 +380,71 @@ async fn list_digital_employees_sends_bearer_and_parses_response() {
 }
 
 #[tokio::test]
-async fn connection_info_returns_full_dto() {
+async fn list_digital_employees_tolerates_empty_items() {
     let script = vec![
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-ok",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-empty")),
         ),
         json_script(
-            "/connection-info",
+            "/api/v1/digital-employees",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "socketBaseURL": "https://tfr.example.com",
-                "sioPath": "/socket.io/",
-                "namespace": "tenant-a",
-                "rid": "robot-42",
-                "robotType": "tfrobot",
-                "smcpNamespace": "/smcp",
-                "accessToken": "admin-secret",
-                "computerName": "computer-x",
-                "routingHeaders": {
-                    "X-TF-Namespace": "tenant-a",
-                    "X-TF-RobotId": "robot-42",
-                    "X-TF-RobotType": "tfrobot",
-                    "access_token": "admin-secret"
-                },
-                "expiresAt": "2026-04-23T12:00:00Z"
-            }),
+            envelope(serde_json::json!({
+                "total": 0, "page": 1, "pageSize": 20, "items": []
+            })),
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
-    let info = client.get_connection_info("robot-42").await.expect("info");
-    assert_eq!(info.socket_base_url, "https://tfr.example.com");
-    assert_eq!(info.rid.as_deref(), Some("robot-42"));
-    assert_eq!(info.access_token, "admin-secret");
+    client.login(Some(base), "13800138009", "Test@123456").await.unwrap();
+    let list = client.list_digital_employees().await.expect("list");
+    assert!(list.is_empty());
+}
+
+#[tokio::test]
+async fn connection_info_returns_full_dto() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-ok")),
+        ),
+        json_script(
+            "/connection-info",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "socketBaseURL": "https://127.0.0.1:8443",
+                "sioPath": "/socket.io/",
+                "namespace": "tfrobotserver",
+                "rid": "5f4b3b3b-3b3b-3b3b-3b3",
+                "robotType": "tfrobot",
+                "smcpNamespace": "/smcp",
+                "accessToken": "ac4a30ae",
+                "computerName": "本地联调员工",
+                "routingHeaders": {
+                    "X-TF-Namespace": "tfrobotserver",
+                    "X-TF-RobotId": "5f4b3b3b-3b3b-3b3b-3b3",
+                    "X-TF-RobotType": "tfrobot",
+                    "access_token": "ac4a30ae"
+                }
+            })),
+        ),
+    ];
+    let (base, _cap, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    let info = client.get_connection_info(11).await.expect("info");
+    assert_eq!(info.socket_base_url, "https://127.0.0.1:8443");
+    assert_eq!(info.rid.as_deref(), Some("5f4b3b3b-3b3b-3b3b-3b3"));
+    assert_eq!(info.access_token, "ac4a30ae");
+    assert_eq!(info.computer_name.as_deref(), Some("本地联调员工"));
     assert_eq!(info.routing_headers.len(), 4);
     assert_eq!(
         info.routing_headers.get("access_token").map(String::as_str),
-        Some("admin-secret")
+        Some("ac4a30ae")
     );
     let _ = client.logout().await;
 }
@@ -393,22 +455,19 @@ async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized(
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-will-expire",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-will-expire")),
         ),
         raw_script(
             "/api/v1/digital-employees",
             "HTTP/1.1 401 Unauthorized",
-            r#"{"message":"token expired"}"#,
+            r#"{"code":401,"message":"token expired","data":null}"#,
             "application/json",
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
     assert!(client.has_session().await);
 
     let err = client.list_digital_employees().await.unwrap_err();
@@ -418,28 +477,25 @@ async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized(
 }
 
 #[tokio::test]
-async fn payment_required_parses_redirect_url() {
+async fn payment_required_parses_redirect_url_from_envelope() {
     let script = vec![
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-ok",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-ok")),
         ),
         raw_script(
             "/connection-info",
             "HTTP/1.1 402 Payment Required",
-            r#"{"code":"ARREARS","message":"账号已欠费","redirectUrl":"https://pay.example.com/renew"}"#,
+            r#"{"code":402,"message":"账号已欠费","data":{"redirectUrl":"https://pay.example.com/renew"}}"#,
             "application/json",
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
-    let err = client.get_connection_info("r1").await.unwrap_err();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    let err = client.get_connection_info(11).await.unwrap_err();
     match err {
         ManagerError::PaymentRequired { message, redirect_url } => {
             assert_eq!(message, "账号已欠费");
@@ -457,25 +513,25 @@ async fn payment_required_without_redirect_url_field_still_parses() {
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-ok",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-ok")),
         ),
         raw_script(
             "/connection-info",
             "HTTP/1.1 402 Payment Required",
-            r#"{"message":"欠费"}"#,
+            r#"{"code":402,"message":"欠费","data":null}"#,
             "application/json",
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
-    let err = client.get_connection_info("r1").await.unwrap_err();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    let err = client.get_connection_info(11).await.unwrap_err();
     match err {
-        ManagerError::PaymentRequired { redirect_url, .. } => assert!(redirect_url.is_none()),
+        ManagerError::PaymentRequired { message, redirect_url } => {
+            assert_eq!(message, "欠费");
+            assert!(redirect_url.is_none());
+        }
         other => panic!("expected PaymentRequired, got {other:?}"),
     }
 }
@@ -486,23 +542,20 @@ async fn not_found_returned_for_missing_robot() {
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-ok",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-ok")),
         ),
         raw_script(
             "/connection-info",
             "HTTP/1.1 404 Not Found",
-            "",
+            r#"{"code":404,"message":"not found","data":null}"#,
             "application/json",
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
-    let err = client.get_connection_info("nope").await.unwrap_err();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    let err = client.get_connection_info(99999).await.unwrap_err();
     assert!(matches!(err, ManagerError::NotFound));
 }
 
@@ -512,22 +565,19 @@ async fn forbidden_mapped_from_403() {
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "token": "jwt-ok",
-                "user": {"id": "u1", "username": "alice"}
-            }),
+            envelope(single_account_login_data("jwt-ok")),
         ),
         raw_script(
             "/api/v1/digital-employees",
             "HTTP/1.1 403 Forbidden",
-            r#"{"message":"no"}"#,
+            r#"{"code":403,"message":"no","data":null}"#,
             "application/json",
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "alice", "pw").await.unwrap();
+    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
     let err = client.list_digital_employees().await.unwrap_err();
     assert!(matches!(err, ManagerError::Forbidden));
     // 403 不清 session
@@ -573,7 +623,7 @@ async fn list_without_login_errors_no_session() {
 #[tokio::test]
 async fn connection_info_without_login_errors_no_session() {
     let client = ManagerClient::new();
-    let err = client.get_connection_info("r1").await.unwrap_err();
+    let err = client.get_connection_info(1).await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 
