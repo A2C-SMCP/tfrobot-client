@@ -11,6 +11,9 @@ permissions:
 jobs:
   build:
     strategy:
+      # 任一平台失败时，已成功的产物仍然完整发布；不要让一个平台的瞬时
+      # 故障（公证服务器抖动、staple 失败等）牵连整个 release 的完整性。
+      fail-fast: false
       matrix:
         include:
           - platform: macos-latest
