@@ -78,3 +78,24 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      # tauri-action 会 staple .app 但漏 staple .dmg 容器；这里补上并覆盖 release 资产。
+      # spctl -a -t open 在 quarantine .dmg 上之前会判 Unnotarized Developer ID，订上票后即 Notarized。
+      - name: Staple DMG and re-upload (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          DMGS=$(find src-tauri/target -name "*.dmg" -type f)
+          if [ -z "$DMGS" ]; then
+            echo "::warning::No DMG found, skipping staple"
+            exit 0
+          fi
+          for dmg in $DMGS; do
+            echo "Stapling: $dmg"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
+          # shellcheck disable=SC2086
+          gh release upload "${{ github.ref_name }}" $DMGS --clobber
