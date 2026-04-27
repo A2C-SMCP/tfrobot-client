@@ -57,3 +57,6 @@ e2e/playwright-report/
 src-tauri/resources/node/
 src-tauri/resources/python/
 src-tauri/resources/uv/
+
+# 密钥管理
+cert/

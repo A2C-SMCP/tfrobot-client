@@ -55,24 +55,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
+          # Apple code-signing + notarization (macOS only; ignored on other platforms).
+          # tauri-action 自动检测这组变量，创建临时 keychain → 签名 → 公证 → staple。
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: 'TFRobot Client v__VERSION__'
           releaseBody: |
             See CHANGELOG.md for details.
 
-            ## macOS 安装说明
+            ## 安装
 
-            macOS 用户首次安装时可能被 Gatekeeper 拦截，请按以下步骤操作：
-
-            1. 双击 `.dmg` 文件挂载，将应用拖入 Applications
-            2. **右键点击** Applications 中的 TFRobot Client → 选择「打开」
-            3. 弹出安全提示后点击「打开」即可（仅首次需要）
-
-            或使用终端命令：
-            ```bash
-            xattr -cr /Applications/TFRobot\ Client.app
-            ```
+            - **macOS**：下载 `.dmg`，双击挂载后将应用拖入 Applications 即可。已通过 Apple 公证，无需任何额外命令。
+            - **Windows**：下载 `.msi` 或 `.exe` 安装包并运行。
+            - **Linux**：下载 `.AppImage` 或 `.deb`。
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
