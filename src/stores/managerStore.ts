@@ -224,6 +224,10 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   },
 
   fetchEmployees: async () => {
+    // Guard against concurrent invocations. React StrictMode deliberately
+    // double-fires effects in development, which otherwise produces two
+    // identical IPC calls and duplicated "fetched N digital employees" logs.
+    if (get().loading) return;
     set({ loading: true, error: null, paymentRequired: null });
     try {
       const employees = await invoke<DigitalEmployeeBrief[]>('manager_list_digital_employees');

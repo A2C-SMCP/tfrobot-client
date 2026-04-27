@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Typography, Table, Empty, Alert, Spin, Image, message } from 'antd';
+import { App, Button, Space, Typography, Table, Empty, Alert, Spin, Image } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useDesktopStore, WindowContent } from '@/stores/desktopStore';
@@ -11,6 +11,7 @@ const MAX_TEXT_PREVIEW_LENGTH = 500;
 
 export function DesktopResources() {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
     windows,
     loading,
@@ -34,7 +35,7 @@ export function DesktopResources() {
         message.error(`${t('desktop.failedToLoadDetail')}: ${err}`);
       }
     });
-  }, [detailErrors, t]);
+  }, [detailErrors, t, message]);
 
   const handleRowExpand = async (expanded: boolean, record: { uri: string; server: string }) => {
     const newExpanded = new Set(expandedUris);

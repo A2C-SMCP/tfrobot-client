@@ -1,4 +1,4 @@
-import { Table, Button, Space, Popconfirm, message } from 'antd';
+import { App, Table, Button, Space, Popconfirm } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
@@ -27,6 +27,7 @@ export function McpServerList({
   onRemove,
 }: McpServerListProps) {
   const { t } = useTranslation();
+  const { message } = App.useApp();
 
   const handleStart = async (name: string) => {
     try {

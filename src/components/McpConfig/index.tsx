@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Modal, Typography, message, Alert } from 'antd';
+import { App, Button, Space, Modal, Typography, Alert } from 'antd';
 import {
   PlusOutlined,
   PlayCircleOutlined,
@@ -17,6 +17,7 @@ const { Title } = Typography;
 
 export function McpConfig() {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
     servers,
     loading,

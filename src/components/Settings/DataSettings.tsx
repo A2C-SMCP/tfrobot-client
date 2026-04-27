@@ -1,4 +1,4 @@
-import { Form, InputNumber, Button, Space, Popconfirm, message } from 'antd';
+import { App, Form, InputNumber, Button, Space, Popconfirm } from 'antd';
 import { ExportOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -8,6 +8,7 @@ import { useMcpStore } from '@/stores/mcpStore';
 
 export function DataSettings() {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const { settings, updateSettings } = useSettingsStore();
   const { clearLogs } = useLogStore();
   const { exportConfig } = useMcpStore();

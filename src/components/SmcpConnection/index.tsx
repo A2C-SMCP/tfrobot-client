@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Typography, message, Alert, Card, Table, Tag, Popconfirm, Modal, Descriptions } from 'antd';
+import { App, Button, Space, Typography, Alert, Card, Table, Tag, Popconfirm, Modal, Descriptions } from 'antd';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -18,6 +18,7 @@ const { Title, Text } = Typography;
 
 export function SmcpConnection() {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
     profiles,
     status,

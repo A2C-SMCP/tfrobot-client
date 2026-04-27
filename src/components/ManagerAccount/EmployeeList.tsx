@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import {
+  App,
   Card,
   List,
   Button,
@@ -8,8 +9,6 @@ import {
   Alert,
   Tag,
   Empty,
-  Modal,
-  message,
   Descriptions,
 } from 'antd';
 import {
@@ -58,6 +57,7 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
 
 export function EmployeeList() {
   const { t } = useTranslation();
+  const { modal, message } = App.useApp();
   const {
     session,
     employees,
@@ -91,7 +91,7 @@ export function EmployeeList() {
 
   const resolveNameConflict = (existingName: string): Promise<'overwrite' | 'copy' | 'cancel'> =>
     new Promise((resolve) => {
-      Modal.confirm({
+      modal.confirm({
         title: t('managerAccount.employees.conflictTitle'),
         icon: <ExclamationCircleOutlined />,
         content: t('managerAccount.employees.conflictDescription', { name: existingName }),

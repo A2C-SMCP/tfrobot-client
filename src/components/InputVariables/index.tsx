@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Modal, Typography, message, Alert, Table, Tag, Popconfirm } from 'antd';
+import { App, Button, Space, Modal, Typography, Alert, Table, Tag, Popconfirm } from 'antd';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -16,6 +16,7 @@ const { Title } = Typography;
 
 export function InputVariables() {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
     inputs,
     values,
