@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "0.1.3-rc.1"
+current_version = "0.1.3"
 # SemVer with optional pre-release: MAJOR.MINOR.PATCH[-rc.N]
 # Compatible with Cargo (Rust), npm, and Tauri conventions.
 #
