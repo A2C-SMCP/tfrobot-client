@@ -79,23 +79,38 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }}
 
-      # tauri-action 会 staple .app 但漏 staple .dmg 容器；这里补上并覆盖 release 资产。
-      # spctl -a -t open 在 quarantine .dmg 上之前会判 Unnotarized Developer ID，订上票后即 Notarized。
-      - name: Staple DMG and re-upload (macOS)
+      # tauri-action 只把 .app 提交给 notarytool 公证，.dmg 容器从未公证 → stapler
+      # 拿 .dmg 的 hash 在 Apple CloudKit 上查不到 ticket。这里单独把 .dmg 公证 + staple。
+      # NOTE: Tauri 产出的 dmg 文件名带空格（"TFRobot Client_x.y.z_*.dmg"），
+      #       全程用 -print0 / xargs -0 处理，避免 shell word-splitting。
+      - name: Notarize DMG, staple and re-upload (macOS)
         if: startsWith(matrix.platform, 'macos')
         env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          set -e
-          DMGS=$(find src-tauri/target -name "*.dmg" -type f)
-          if [ -z "$DMGS" ]; then
-            echo "::warning::No DMG found, skipping staple"
+          set -euo pipefail
+          DMG_COUNT=$(find src-tauri/target -name "*.dmg" -type f | wc -l | tr -d ' ')
+          if [ "$DMG_COUNT" -eq 0 ]; then
+            echo "::warning::No DMG found, skipping notarize"
             exit 0
           fi
-          for dmg in $DMGS; do
-            echo "Stapling: $dmg"
-            xcrun stapler staple "$dmg"
-            xcrun stapler validate "$dmg"
-          done
-          # shellcheck disable=SC2086
-          gh release upload "${{ github.ref_name }}" $DMGS --clobber
+          echo "Found $DMG_COUNT DMG(s) to notarize."
+          find src-tauri/target -name "*.dmg" -type f -print0 \
+            | xargs -0 -I{} sh -c '
+                set -e
+                echo "::group::Notarize $1"
+                xcrun notarytool submit "$1" \
+                  --apple-id "$APPLE_ID" \
+                  --password "$APPLE_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" \
+                  --wait --timeout 600
+                xcrun stapler staple "$1"
+                xcrun stapler validate "$1"
+                echo "::endgroup::"
+              ' _ {}
+          find src-tauri/target -name "*.dmg" -type f -print0 \
+            | xargs -0 gh release upload "$TAG" --clobber
