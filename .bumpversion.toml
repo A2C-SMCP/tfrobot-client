@@ -57,6 +57,15 @@ filename = "src-tauri/Cargo.toml"
 search = "version = \"{current_version}\""
 replace = "version = \"{new_version}\""
 
+# Cargo.lock 的 [[package]] 段会被 cargo 自动同步成 Cargo.toml 里的 version。
+# 用 name 行锚定避免误伤其它同版本号的依赖。
+[[tool.bumpversion.files]]
+filename = "src-tauri/Cargo.lock"
+search = '''name = "tfrobot-client"
+version = "{current_version}"'''
+replace = '''name = "tfrobot-client"
+version = "{new_version}"'''
+
 [[tool.bumpversion.files]]
 filename = "src-tauri/tauri.conf.json"
 search = "\"version\": \"{current_version}\""
