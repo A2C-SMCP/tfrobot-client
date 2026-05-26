@@ -1,4 +1,5 @@
-import { Form, Input, Button, Space, Switch, Card } from 'antd';
+import { Form, Button, Space, Switch, Card } from 'antd';
+import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { ConnectionProfile } from '@/stores/connectionStore';

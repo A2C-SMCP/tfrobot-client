@@ -1,4 +1,5 @@
-import { Form, Input, Select, Button, Space, Card, Collapse, Switch } from 'antd';
+import { Form, Select, Button, Space, Card, Collapse, Switch } from 'antd';
+import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';

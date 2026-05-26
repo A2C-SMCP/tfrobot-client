@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Button, Input, Select, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
+import { Button, Select, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
+import { Input } from '@/components/common/Input';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useDebugStore, type ToolInfo } from '@/stores/debugStore';

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { Table, Tag, Button, Collapse, Form, Input, Typography, Space } from 'antd';
+import { Table, Tag, Button, Collapse, Form, Typography, Space } from 'antd';
+import { Input } from '@/components/common/Input';
 import { ReloadOutlined, UndoOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';

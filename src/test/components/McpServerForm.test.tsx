@@ -1,4 +1,5 @@
-import { parseToolMetaJson } from '@/components/McpConfig/McpServerForm';
+import { render, screen } from '../helpers/render';
+import { McpServerForm, parseToolMetaJson } from '@/components/McpConfig/McpServerForm';
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -58,5 +59,19 @@ describe('parseToolMetaJson', () => {
   it('rejects mixed valid/invalid — fails on first invalid value', () => {
     const input = '{"good": {"auto_apply": true}, "bad": true}';
     expect(parseToolMetaJson(input)).toEqual({ ok: false, error: 'invalid_format' });
+  });
+});
+
+describe('McpServerForm input attributes (issue #26)', () => {
+  // macOS WKWebView auto-capitalizes / auto-corrects technical input
+  // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
+  it('disables auto-capitalization/correction/autofill on the command field', () => {
+    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+
+    const command = screen.getByPlaceholderText('npx, python, node...');
+    expect(command).toHaveAttribute('autocapitalize', 'off');
+    expect(command).toHaveAttribute('autocorrect', 'off');
+    expect(command).toHaveAttribute('spellcheck', 'false');
+    expect(command).toHaveAttribute('autocomplete', 'off');
   });
 });

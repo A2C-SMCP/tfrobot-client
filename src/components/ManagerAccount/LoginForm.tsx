@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { Form, Input, Button, Card, Alert, Typography, Space } from 'antd';
+import { Form, Button, Card, Alert, Typography, Space } from 'antd';
+import { Input } from '@/components/common/Input';
 import { LoginOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useManagerStore, type ManagerError } from '@/stores/managerStore';
