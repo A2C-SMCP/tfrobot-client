@@ -11,6 +11,48 @@ env:
 
 jobs:
   # ══════════════════════════════════════════
+  # Lint & Format (tsc + eslint + rustfmt + clippy)
+  # ══════════════════════════════════════════
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # clippy 需要编译 tauri lib，Linux 下依赖系统库
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - run: pnpm install --frozen-lockfile
+
+      # Rust 格式（只检查不改文件）
+      - run: pnpm fmt:check
+
+      # 与本地一致：tsc --noEmit + eslint + clippy -D warnings
+      - run: pnpm lint
+
+  # ══════════════════════════════════════════
   # Frontend Tests (Ubuntu, fastest)
   # ══════════════════════════════════════════
   frontend-test:
@@ -147,13 +189,14 @@ jobs:
   # ══════════════════════════════════════════
   quality-gate:
     name: Quality Gate
-    needs: [frontend-test, rust-test, e2e-test]
+    needs: [lint, frontend-test, rust-test, e2e-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.frontend-test.result }}" != "success" ]] || \
+          if [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-test.result }}" != "success" ]] || \
              [[ "${{ needs.rust-test.result }}" != "success" ]] || \
              [[ "${{ needs.e2e-test.result }}" != "success" ]]; then
             echo "Some test jobs failed"
