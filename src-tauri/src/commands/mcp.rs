@@ -15,7 +15,9 @@ pub struct McpServerStatus {
 #[tauri::command]
 pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServerStatus>, String> {
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     let statuses = mgr.get_server_status().await;
 
     Ok(statuses
@@ -55,13 +57,17 @@ pub async fn add_mcp_server(
         .map_err(|e| e.to_string())?;
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     mgr.add_or_update_server(config)
         .await
         .map_err(|e| e.to_string())?;
 
     log::info!("MCP server added: {}", name);
-    let _ = state.log_service.write("info", "mcp", &format!("Server added: {}", name), None);
+    let _ = state
+        .log_service
+        .write("info", "mcp", &format!("Server added: {}", name), None);
     Ok(())
 }
 
@@ -70,10 +76,10 @@ pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Resu
     log::info!("Removing MCP server: {}", name);
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
-    mgr.remove_server(&name)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
+    mgr.remove_server(&name).await.map_err(|e| e.to_string())?;
 
     state
         .config
@@ -81,7 +87,9 @@ pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Resu
         .map_err(|e| e.to_string())?;
 
     log::info!("MCP server removed: {}", name);
-    let _ = state.log_service.write("info", "mcp", &format!("Server removed: {}", name), None);
+    let _ = state
+        .log_service
+        .write("info", "mcp", &format!("Server removed: {}", name), None);
     Ok(())
 }
 
@@ -99,13 +107,17 @@ pub async fn update_mcp_server(
         .map_err(|e| e.to_string())?;
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     mgr.add_or_update_server(config)
         .await
         .map_err(|e| e.to_string())?;
 
     log::info!("MCP server updated: {}", name);
-    let _ = state.log_service.write("info", "mcp", &format!("Server updated: {}", name), None);
+    let _ = state
+        .log_service
+        .write("info", "mcp", &format!("Server updated: {}", name), None);
     Ok(())
 }
 
@@ -114,13 +126,15 @@ pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Resul
     log::info!("Starting MCP server: {}", name);
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
-    mgr.start_client(&name)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
+    mgr.start_client(&name).await.map_err(|e| e.to_string())?;
 
     log::info!("MCP server started: {}", name);
-    let _ = state.log_service.write("info", "mcp", &format!("Server started: {}", name), None);
+    let _ = state
+        .log_service
+        .write("info", "mcp", &format!("Server started: {}", name), None);
     Ok(())
 }
 
@@ -129,13 +143,15 @@ pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result
     log::info!("Stopping MCP server: {}", name);
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_client(&name)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
+    mgr.stop_client(&name).await.map_err(|e| e.to_string())?;
 
     log::info!("MCP server stopped: {}", name);
-    let _ = state.log_service.write("info", "mcp", &format!("Server stopped: {}", name), None);
+    let _ = state
+        .log_service
+        .write("info", "mcp", &format!("Server stopped: {}", name), None);
     Ok(())
 }
 
@@ -144,7 +160,9 @@ pub async fn start_all_servers(state: State<'_, AppState>) -> Result<(), String>
     log::info!("Starting all MCP servers");
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     mgr.start_all().await.map_err(|e| e.to_string())?;
 
     log::info!("All MCP servers started");
@@ -156,7 +174,9 @@ pub async fn stop_all_servers(state: State<'_, AppState>) -> Result<(), String> 
     log::info!("Stopping all MCP servers");
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     mgr.stop_all().await.map_err(|e| e.to_string())?;
 
     log::info!("All MCP servers stopped");
@@ -185,12 +205,16 @@ mod tests {
             }
         });
 
-        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Stdio config from frontend JSON");
+        let config: MCPServerConfig = serde_json::from_value(json)
+            .expect("should deserialize Stdio config from frontend JSON");
         assert_eq!(config.name(), "test-server");
         match &config {
             MCPServerConfig::Stdio(c) => {
                 assert_eq!(c.server_parameters.command, "npx");
-                assert_eq!(c.server_parameters.args, vec!["-y", "@modelcontextprotocol/server-filesystem"]);
+                assert_eq!(
+                    c.server_parameters.args,
+                    vec!["-y", "@modelcontextprotocol/server-filesystem"]
+                );
                 assert_eq!(c.server_parameters.env.get("HOME").unwrap(), "/tmp");
                 assert_eq!(c.server_parameters.cwd.as_deref(), Some("/workspace"));
                 assert!(!c.disabled);
@@ -215,12 +239,16 @@ mod tests {
             }
         });
 
-        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Http config from frontend JSON");
+        let config: MCPServerConfig = serde_json::from_value(json)
+            .expect("should deserialize Http config from frontend JSON");
         assert_eq!(config.name(), "http-server");
         match &config {
             MCPServerConfig::Http(c) => {
                 assert_eq!(c.server_parameters.url, "https://api.example.com/mcp");
-                assert_eq!(c.server_parameters.headers.get("Authorization").unwrap(), "Bearer token123");
+                assert_eq!(
+                    c.server_parameters.headers.get("Authorization").unwrap(),
+                    "Bearer token123"
+                );
             }
             _ => panic!("expected Http variant"),
         }
@@ -242,7 +270,8 @@ mod tests {
             }
         });
 
-        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize Sse config from frontend JSON");
+        let config: MCPServerConfig =
+            serde_json::from_value(json).expect("should deserialize Sse config from frontend JSON");
         assert_eq!(config.name(), "sse-server");
         match &config {
             MCPServerConfig::Sse(c) => {
@@ -264,7 +293,8 @@ mod tests {
             }
         });
 
-        let config: MCPServerConfig = serde_json::from_value(json).expect("should deserialize lowercase 'stdio' type alias");
+        let config: MCPServerConfig =
+            serde_json::from_value(json).expect("should deserialize lowercase 'stdio' type alias");
         assert_eq!(config.name(), "lowercase-test");
         assert!(matches!(config, MCPServerConfig::Stdio(_)));
     }
@@ -289,7 +319,8 @@ mod tests {
 
         let config: MCPServerConfig = serde_json::from_value(json).expect("deserialize");
         let serialized = serde_json::to_value(&config).expect("serialize");
-        let roundtrip: MCPServerConfig = serde_json::from_value(serialized.clone()).expect("deserialize again");
+        let roundtrip: MCPServerConfig =
+            serde_json::from_value(serialized.clone()).expect("deserialize again");
 
         assert_eq!(config, roundtrip);
         // Verify the serialized JSON has the expected structure

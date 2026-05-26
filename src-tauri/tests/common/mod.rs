@@ -7,10 +7,9 @@ use tfrobot_client_lib::AppState;
 /// Create an isolated test AppState with temp directories.
 /// Each test gets its own tempdir for full isolation.
 pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
-    let config = ConfigService::new(tmp_path.to_path_buf())
-        .expect("Failed to create ConfigService");
-    let log_service = LogService::new(tmp_path)
-        .expect("Failed to create LogService");
+    let config =
+        ConfigService::new(tmp_path.to_path_buf()).expect("Failed to create ConfigService");
+    let log_service = LogService::new(tmp_path).expect("Failed to create LogService");
     let settings_service = SettingsService::new(tmp_path.to_path_buf());
 
     AppState::new(config, log_service, settings_service)
@@ -18,8 +17,7 @@ pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
 
 /// Path to the echo MCP server index.js
 pub fn echo_server_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/echo-mcp-server/index.js")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index.js")
 }
 
 /// Build an MCPServerConfig for the echo server
@@ -39,8 +37,7 @@ pub fn echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerCo
 
 /// Path to the stderr-flood echo MCP server (Issue #19 regression)
 pub fn stderr_flood_server_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/echo-mcp-server/index-stderr-flood.js")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-stderr-flood.js")
 }
 
 /// Build an MCPServerConfig for the stderr-flood echo server.

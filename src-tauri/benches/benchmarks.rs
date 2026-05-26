@@ -104,7 +104,9 @@ fn bench_config_load_save(c: &mut Criterion) {
     let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
 
     // Pre-fill 50 server configs
-    let configs: Vec<MCPServerConfig> = (0..50).map(|i| make_test_config(&format!("server-{i}"))).collect();
+    let configs: Vec<MCPServerConfig> = (0..50)
+        .map(|i| make_test_config(&format!("server-{i}")))
+        .collect();
     svc.save_configs(&configs).unwrap();
 
     let mut group = c.benchmark_group("config");

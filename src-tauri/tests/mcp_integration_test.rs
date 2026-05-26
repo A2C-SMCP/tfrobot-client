@@ -114,7 +114,10 @@ async fn test_manager_list_tools_after_start() {
         Ok(Ok(())) => {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let tools = mgr.list_available_tools().await;
-            assert!(!tools.is_empty(), "Expected at least one tool from echo server");
+            assert!(
+                !tools.is_empty(),
+                "Expected at least one tool from echo server"
+            );
             let echo_tool = tools.iter().find(|t| t.name == "echo");
             assert!(echo_tool.is_some(), "Expected 'echo' tool");
             let _ = mgr.stop_client("tool-list-test").await;
@@ -142,7 +145,10 @@ async fn test_manager_execute_echo_tool() {
             let params = serde_json::json!({"message": "hello from test"});
             match mgr.execute_tool("echo", params, None).await {
                 Ok(call_result) => {
-                    assert!(!call_result.is_error.unwrap_or(false), "Tool call should succeed");
+                    assert!(
+                        !call_result.is_error.unwrap_or(false),
+                        "Tool call should succeed"
+                    );
                     assert!(!call_result.content.is_empty(), "Should have content");
                 }
                 Err(e) => panic!("Tool call failed: {e}"),
@@ -178,7 +184,10 @@ async fn test_manager_start_all_stop_all() {
             let _ = mgr.stop_all().await;
             // Verify all stopped
             let after = mgr.get_server_status().await;
-            assert!(after.iter().all(|(_, running, _)| !*running), "All servers should be stopped");
+            assert!(
+                after.iter().all(|(_, running, _)| !*running),
+                "All servers should be stopped"
+            );
         }
         Ok(Err(e)) => panic!("start_all failed: {e}"),
         Err(_) => panic!("start_all timed out after {MANAGER_TIMEOUT:?}"),
@@ -222,7 +231,10 @@ async fn test_manager_invalid_command_fails() {
 
     let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("bad-server")).await;
     match result {
-        Ok(r) => assert!(r.is_err(), "Starting server with invalid command should fail"),
+        Ok(r) => assert!(
+            r.is_err(),
+            "Starting server with invalid command should fail"
+        ),
         Err(_) => { /* Timeout is acceptable — the server doesn't exist / command is invalid */ }
     }
 }
@@ -245,7 +257,11 @@ fn test_export_and_reimport_config() {
         "servers": configs,
         "inputs": []
     });
-    std::fs::write(&export_path, serde_json::to_string_pretty(&export_data).unwrap()).unwrap();
+    std::fs::write(
+        &export_path,
+        serde_json::to_string_pretty(&export_data).unwrap(),
+    )
+    .unwrap();
 
     // Verify exported file is valid JSON
     let content = std::fs::read_to_string(&export_path).unwrap();
@@ -295,8 +311,14 @@ fn test_log_write_query_export_clear() {
     let state = create_test_app_state(tmp.path());
 
     // Write
-    state.log_service.write("info", "system", "App started", None).unwrap();
-    state.log_service.write("error", "mcp", "Server crashed", Some("stack trace")).unwrap();
+    state
+        .log_service
+        .write("info", "system", "App started", None)
+        .unwrap();
+    state
+        .log_service
+        .write("error", "mcp", "Server crashed", Some("stack trace"))
+        .unwrap();
 
     // Query
     let logs = state.log_service.query(&Default::default()).unwrap();
@@ -363,7 +385,10 @@ fn test_input_definitions_crud() {
     assert_eq!(loaded[0].id(), "test-input");
 
     // Remove
-    let filtered: Vec<_> = loaded.into_iter().filter(|i| i.id() != "test-input").collect();
+    let filtered: Vec<_> = loaded
+        .into_iter()
+        .filter(|i| i.id() != "test-input")
+        .collect();
     state.config.save_inputs(&filtered).unwrap();
 
     let after = state.config.load_inputs().unwrap();
@@ -426,7 +451,10 @@ fn test_profiles_crud() {
     assert_eq!(loaded[0].name, "test-profile");
 
     // Delete
-    let filtered: Vec<_> = loaded.into_iter().filter(|p| p.name != "test-profile").collect();
+    let filtered: Vec<_> = loaded
+        .into_iter()
+        .filter(|p| p.name != "test-profile")
+        .collect();
     state.config.save_profiles(&filtered).unwrap();
 
     let after = state.config.load_profiles().unwrap();
@@ -463,11 +491,8 @@ async fn test_manager_stderr_flood_does_not_block() {
             // during this call, so if the pipe is not being drained this will
             // time out.
             let params = serde_json::json!({"message": "hello through stderr storm"});
-            match tokio::time::timeout(
-                STDERR_FLOOD_TIMEOUT,
-                mgr.execute_tool("echo", params, None),
-            )
-            .await
+            match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.execute_tool("echo", params, None))
+                .await
             {
                 Ok(Ok(call_result)) => {
                     assert!(

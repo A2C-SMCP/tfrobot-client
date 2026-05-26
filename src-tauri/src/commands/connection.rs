@@ -96,10 +96,7 @@ pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<
 
 /// Connect to SMCP server using a saved profile
 #[tauri::command]
-pub async fn connect_smcp(
-    state: State<'_, AppState>,
-    profile_name: String,
-) -> Result<(), String> {
+pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> Result<(), String> {
     log::info!("Connecting with profile: {}", profile_name);
 
     let profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
@@ -111,8 +108,8 @@ pub async fn connect_smcp(
 
     // Retrieve API key from keychain
     let keychain_id = format!("profile:{}", profile.name);
-    let api_key = crate::services::keychain::get_credential(&keychain_id)
-        .map_err(|e| e.to_string())?;
+    let api_key =
+        crate::services::keychain::get_credential(&keychain_id).map_err(|e| e.to_string())?;
 
     // Share the same manager Arc with SmcpComputerClient
     let manager = state.manager.clone();
@@ -145,7 +142,12 @@ pub async fn connect_smcp(
     });
 
     log::info!("Connected to SMCP server: {}", profile.url);
-    let _ = state.log_service.write("info", "connection", &format!("Connected to {}", profile.url), None);
+    let _ = state.log_service.write(
+        "info",
+        "connection",
+        &format!("Connected to {}", profile.url),
+        None,
+    );
     Ok(())
 }
 
@@ -161,7 +163,9 @@ pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
 
-    let _ = state.log_service.write("info", "connection", "Disconnected from SMCP server", None);
+    let _ = state
+        .log_service
+        .write("info", "connection", "Disconnected from SMCP server", None);
     Ok(())
 }
 

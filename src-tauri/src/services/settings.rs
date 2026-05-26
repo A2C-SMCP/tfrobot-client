@@ -63,8 +63,7 @@ impl SettingsService {
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
-        let content = serde_json::to_string_pretty(settings)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = serde_json::to_string_pretty(settings).map_err(std::io::Error::other)?;
         fs::write(&self.settings_file, content)
     }
 }

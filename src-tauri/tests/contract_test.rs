@@ -31,7 +31,10 @@ async fn contract_manager_api_surface() {
 fn contract_version_exists() {
     let version = smcp_computer::VERSION;
     assert!(!version.is_empty());
-    assert!(version.contains('.'), "VERSION should be semver format: {version}");
+    assert!(
+        version.contains('.'),
+        "VERSION should be semver format: {version}"
+    );
 }
 
 // ── Serialization Format Contracts ──

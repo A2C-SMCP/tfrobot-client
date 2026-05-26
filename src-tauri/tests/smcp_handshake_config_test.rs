@@ -150,7 +150,10 @@ async fn test_default_auth_header_is_access_token() {
         .connect()
         .await;
 
-    assert!(result.is_err(), "capture server returned 503; connect() 应当失败");
+    assert!(
+        result.is_err(),
+        "capture server returned 503; connect() 应当失败"
+    );
 
     let captured = wait_capture(&capture).await;
     assert_eq!(
@@ -291,7 +294,10 @@ async fn test_routing_headers_propagate_with_auth() {
     // 4 条 header 一条都不能少
     for (k, v) in &routing_headers {
         assert_eq!(
-            captured.headers.get(&k.to_ascii_lowercase()).map(String::as_str),
+            captured
+                .headers
+                .get(&k.to_ascii_lowercase())
+                .map(String::as_str),
             Some(v.as_str()),
             "routing header `{}` 必须出现在 WS upgrade 上，否则 TF Envoy 路由会失败。\
              实际 headers: {:?}",

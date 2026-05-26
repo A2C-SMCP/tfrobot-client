@@ -71,10 +71,7 @@ async fn spawn_mock_manager(
                         Ok(Ok(0)) => break,
                         Ok(Ok(n)) => {
                             buf.extend_from_slice(&tmp[..n]);
-                            if let Some(pos) = buf
-                                .windows(4)
-                                .position(|w| w == b"\r\n\r\n")
-                            {
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                                 header_end = Some(pos + 4);
                                 break;
                             }
@@ -110,11 +107,8 @@ async fn spawn_mock_manager(
                 while body.len() < content_length {
                     let need = content_length - body.len();
                     let mut chunk = vec![0u8; need.min(2048)];
-                    match tokio::time::timeout(
-                        Duration::from_secs(2),
-                        socket.read(&mut chunk),
-                    )
-                    .await
+                    match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk))
+                        .await
                     {
                         Ok(Ok(0)) => break,
                         Ok(Ok(n)) => body.extend_from_slice(&chunk[..n]),
@@ -153,7 +147,11 @@ async fn spawn_mock_manager(
     (base_url, captured, handle)
 }
 
-fn json_script(path: &'static str, status: &'static str, body: serde_json::Value) -> ScriptedResponse {
+fn json_script(
+    path: &'static str,
+    status: &'static str,
+    body: serde_json::Value,
+) -> ScriptedResponse {
     ScriptedResponse {
         path_contains: path,
         status_line: status,
@@ -221,7 +219,9 @@ async fn login_success_writes_session_and_returns_authenticated() {
     // 验证请求特征
     let reqs = captured.lock().await;
     assert_eq!(reqs.len(), 1);
-    assert!(reqs[0].request_line.starts_with("POST /auth/login-by-password"));
+    assert!(reqs[0]
+        .request_line
+        .starts_with("POST /auth/login-by-password"));
     let ua = reqs[0]
         .headers
         .get("user-agent")
@@ -310,7 +310,10 @@ async fn select_account_completes_session() {
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13900139000", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13900139000", "Test@123456")
+        .await
+        .unwrap();
     let user = client.select_account(2).await.expect("select-account");
     assert_eq!(user.account_id, 2);
     assert_eq!(user.account_name, "testuser2_enterprise");
@@ -357,7 +360,10 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let list = client.list_digital_employees().await.expect("list");
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].id, 11);
@@ -398,7 +404,10 @@ async fn list_digital_employees_tolerates_empty_items() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138009", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138009", "Test@123456")
+        .await
+        .unwrap();
     let list = client.list_digital_employees().await.expect("list");
     assert!(list.is_empty());
 }
@@ -435,7 +444,10 @@ async fn connection_info_returns_full_dto() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let info = client.get_connection_info(11).await.expect("info");
     assert_eq!(info.socket_base_url, "https://127.0.0.1:8443");
     assert_eq!(info.rid.as_deref(), Some("5f4b3b3b-3b3b-3b3b-3b3"));
@@ -467,7 +479,10 @@ async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized(
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     assert!(client.has_session().await);
 
     let err = client.list_digital_employees().await.unwrap_err();
@@ -494,12 +509,21 @@ async fn payment_required_parses_redirect_url_from_envelope() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let err = client.get_connection_info(11).await.unwrap_err();
     match err {
-        ManagerError::PaymentRequired { message, redirect_url } => {
+        ManagerError::PaymentRequired {
+            message,
+            redirect_url,
+        } => {
             assert_eq!(message, "账号已欠费");
-            assert_eq!(redirect_url.as_deref(), Some("https://pay.example.com/renew"));
+            assert_eq!(
+                redirect_url.as_deref(),
+                Some("https://pay.example.com/renew")
+            );
         }
         other => panic!("expected PaymentRequired, got {other:?}"),
     }
@@ -525,10 +549,16 @@ async fn payment_required_without_redirect_url_field_still_parses() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let err = client.get_connection_info(11).await.unwrap_err();
     match err {
-        ManagerError::PaymentRequired { message, redirect_url } => {
+        ManagerError::PaymentRequired {
+            message,
+            redirect_url,
+        } => {
             assert_eq!(message, "欠费");
             assert!(redirect_url.is_none());
         }
@@ -554,7 +584,10 @@ async fn not_found_returned_for_missing_robot() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let err = client.get_connection_info(99999).await.unwrap_err();
     assert!(matches!(err, ManagerError::NotFound));
 }
@@ -577,7 +610,10 @@ async fn forbidden_mapped_from_403() {
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = ManagerClient::new();
-    client.login(Some(base), "13800138008", "Test@123456").await.unwrap();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
     let err = client.list_digital_employees().await.unwrap_err();
     assert!(matches!(err, ManagerError::Forbidden));
     // 403 不清 session

@@ -97,7 +97,9 @@ async fn import_cli_native(state: &AppState, content: &str) -> Result<ImportResu
 
     // Import servers
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     for server in &config.servers {
         state
             .config
@@ -135,7 +137,9 @@ async fn import_claude_desktop(state: &AppState, content: &str) -> Result<Import
     let mut servers_imported = 0;
     let servers_skipped = Vec::new();
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
 
     for (name, server) in config.mcp_servers {
         let mcp_config = build_stdio_config(&name, &server);

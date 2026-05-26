@@ -75,7 +75,9 @@ impl LogService {
 
     pub fn query(&self, filter: &LogFilter) -> Result<Vec<LogEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut sql = String::from("SELECT id, timestamp, level, category, message, details FROM logs WHERE 1=1");
+        let mut sql = String::from(
+            "SELECT id, timestamp, level, category, message, details FROM logs WHERE 1=1",
+        );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(ref start) = filter.start_time {
@@ -88,7 +90,8 @@ impl LogService {
         }
         if let Some(ref levels) = filter.levels {
             if !levels.is_empty() {
-                let placeholders: Vec<String> = levels.iter().enumerate().map(|_| "?".to_string()).collect();
+                let placeholders: Vec<String> =
+                    levels.iter().enumerate().map(|_| "?".to_string()).collect();
                 sql.push_str(&format!(" AND level IN ({})", placeholders.join(",")));
                 for l in levels {
                     param_values.push(Box::new(l.clone()));
@@ -97,7 +100,11 @@ impl LogService {
         }
         if let Some(ref categories) = filter.categories {
             if !categories.is_empty() {
-                let placeholders: Vec<String> = categories.iter().enumerate().map(|_| "?".to_string()).collect();
+                let placeholders: Vec<String> = categories
+                    .iter()
+                    .enumerate()
+                    .map(|_| "?".to_string())
+                    .collect();
                 sql.push_str(&format!(" AND category IN ({})", placeholders.join(",")));
                 for c in categories {
                     param_values.push(Box::new(c.clone()));
@@ -119,7 +126,8 @@ impl LogService {
         param_values.push(Box::new(limit));
         param_values.push(Box::new(offset));
 
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
@@ -158,7 +166,8 @@ impl LogService {
 
     pub fn clear_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM logs", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM logs", [])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 }

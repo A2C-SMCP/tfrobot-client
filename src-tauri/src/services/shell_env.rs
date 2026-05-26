@@ -85,10 +85,7 @@ fn fallback_path() -> String {
     let mut extra: Vec<String> = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        let candidates = [
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-        ];
+        let candidates = [home.join(".local/bin"), home.join(".cargo/bin")];
         for p in &candidates {
             if p.exists() {
                 extra.push(p.to_string_lossy().to_string());

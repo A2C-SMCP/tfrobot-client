@@ -44,11 +44,11 @@ pub struct ToolCallHistoryRecord {
 
 /// Get all available tools from running MCP servers
 #[tauri::command]
-pub async fn get_available_tools(
-    state: State<'_, AppState>,
-) -> Result<Vec<ToolInfo>, String> {
+pub async fn get_available_tools(state: State<'_, AppState>) -> Result<Vec<ToolInfo>, String> {
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
     let tools: Vec<Tool> = mgr.list_available_tools().await;
 
     let result = tools
@@ -63,10 +63,7 @@ pub async fn get_available_tools(
                 .unwrap_or("unknown")
                 .to_string();
 
-            let a2c_meta = t
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("a2c_tool_meta"));
+            let a2c_meta = t.meta.as_ref().and_then(|m| m.get("a2c_tool_meta"));
 
             let tags = a2c_meta
                 .and_then(|m| m.get("tags"))
@@ -101,10 +98,12 @@ pub async fn execute_tool(
     log::info!("Executing tool: {}", tool_name);
 
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
 
     let start = std::time::Instant::now();
-    let duration_timeout = timeout.map(|s| std::time::Duration::from_secs_f64(s));
+    let duration_timeout = timeout.map(std::time::Duration::from_secs_f64);
 
     let result = mgr.execute_tool(&tool_name, params, duration_timeout).await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -112,7 +111,11 @@ pub async fn execute_tool(
     match result {
         Ok(call_result) => {
             let _ = state.log_service.write(
-                if call_result.is_error.unwrap_or(false) { "error" } else { "info" },
+                if call_result.is_error.unwrap_or(false) {
+                    "error"
+                } else {
+                    "info"
+                },
                 "tool",
                 &format!("Tool {} executed ({}ms)", tool_name, duration_ms),
                 None,

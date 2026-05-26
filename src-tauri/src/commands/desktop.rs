@@ -40,8 +40,7 @@ pub struct WindowDetail {
 }
 
 /// Get desktop resources (window:// URIs)
-
-
+///
 /// Lists all window resources from connected MCP servers.
 #[tauri::command]
 pub async fn get_desktop(
@@ -49,7 +48,9 @@ pub async fn get_desktop(
     uri: Option<String>,
 ) -> Result<Vec<DesktopWindow>, String> {
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
 
     log::info!("get_desktop called with uri filter: {:?}", uri);
 
@@ -78,7 +79,9 @@ pub async fn get_window_detail(
     uri: String,
 ) -> Result<WindowDetail, String> {
     let lock = state.manager.read().await;
-    let mgr = lock.as_ref().ok_or("MCP manager not initialized".to_string())?;
+    let mgr = lock
+        .as_ref()
+        .ok_or("MCP manager not initialized".to_string())?;
 
     log::info!(
         "get_window_detail called: server={}, uri={}",
@@ -87,12 +90,7 @@ pub async fn get_window_detail(
     );
 
     // Create a Resource object for the request
-    let resource = make_resource(
-        uri.clone(),
-        uri.clone(),
-        None,
-        None,
-    );
+    let resource = make_resource(uri.clone(), uri.clone(), None, None);
 
     let result = mgr
         .get_window_detail(&server_name, resource)
@@ -105,7 +103,10 @@ pub async fn get_window_detail(
         .into_iter()
         .map(|rc| match rc {
             ResourceContents::TextResourceContents {
-                uri, mime_type, text, ..
+                uri,
+                mime_type,
+                text,
+                ..
             } => WindowContent {
                 content_type: "text".to_string(),
                 uri,
@@ -114,7 +115,10 @@ pub async fn get_window_detail(
                 blob: None,
             },
             ResourceContents::BlobResourceContents {
-                uri, mime_type, blob, ..
+                uri,
+                mime_type,
+                blob,
+                ..
             } => WindowContent {
                 content_type: "blob".to_string(),
                 uri,
@@ -295,7 +299,10 @@ mod tests {
         assert_eq!(detail.uri, "window://app");
         assert_eq!(detail.contents.len(), 1);
         assert_eq!(detail.contents[0].content_type, "text");
-        assert_eq!(detail.contents[0].text, Some("Window text content".to_string()));
+        assert_eq!(
+            detail.contents[0].text,
+            Some("Window text content".to_string())
+        );
     }
 
     #[test]

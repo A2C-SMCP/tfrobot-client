@@ -108,7 +108,10 @@ fn load_json_file<T: serde::de::DeserializeOwned + Default>(
     Ok(data)
 }
 
-fn save_json_file<T: serde::Serialize + ?Sized>(path: &PathBuf, data: &T) -> Result<(), ConfigError> {
+fn save_json_file<T: serde::Serialize + ?Sized>(
+    path: &PathBuf,
+    data: &T,
+) -> Result<(), ConfigError> {
     let content = serde_json::to_string_pretty(data)?;
     fs::write(path, content)?;
     Ok(())
@@ -160,7 +163,7 @@ mod tests {
         }))
         .unwrap();
 
-        svc.save_configs(&[config.clone()]).unwrap();
+        svc.save_configs(std::slice::from_ref(&config)).unwrap();
         let loaded = svc.load_configs().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name(), "test-server");
@@ -211,7 +214,10 @@ mod tests {
         // Verify content was actually replaced (command: "node" → "python")
         match &loaded[0] {
             MCPServerConfig::Stdio(c) => {
-                assert_eq!(c.server_parameters.command, "python", "Config should be replaced, not appended");
+                assert_eq!(
+                    c.server_parameters.command, "python",
+                    "Config should be replaced, not appended"
+                );
                 assert_eq!(c.server_parameters.args, vec!["v2"]);
             }
             other => panic!("Expected Stdio variant, got: {:?}", other),

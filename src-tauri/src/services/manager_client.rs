@@ -385,7 +385,10 @@ impl ManagerClient {
             StatusCode::PAYMENT_REQUIRED => {
                 let body = resp.text().await.unwrap_or_default();
                 let (message, redirect_url) = parse_payment_required(&body);
-                ManagerError::PaymentRequired { message, redirect_url }
+                ManagerError::PaymentRequired {
+                    message,
+                    redirect_url,
+                }
             }
             s => {
                 let body = resp.text().await.unwrap_or_default();
@@ -608,6 +611,7 @@ fn strip_trailing_slash(url: String) -> String {
 /// 解析 402 响应体。兼容两种形态：
 /// - envelope：`{code, message, data: {message?, redirectUrl?}}`
 /// - 裸对象：`{message?, redirectUrl?}`
+///
 /// 缺省返回 `("Payment required", None)`。
 fn parse_payment_required(body: &str) -> (String, Option<String>) {
     if let Ok(any) = serde_json::from_str::<PaymentRequiredAny>(body) {
@@ -820,7 +824,10 @@ mod tests {
         assert_eq!(parsed.access_token, "admin-secret-plain");
         assert_eq!(parsed.routing_headers.len(), 4);
         assert_eq!(
-            parsed.routing_headers.get("access_token").map(String::as_str),
+            parsed
+                .routing_headers
+                .get("access_token")
+                .map(String::as_str),
             Some("admin-secret-plain")
         );
     }
@@ -847,7 +854,10 @@ mod tests {
             redirect_url: Some("https://pay.example.com".into()),
         };
         let v = serde_json::to_value(&e).unwrap();
-        assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("payment_required"));
+        assert_eq!(
+            v.get("kind").and_then(|x| x.as_str()),
+            Some("payment_required")
+        );
         assert_eq!(
             v.pointer("/detail/message").and_then(|x| x.as_str()),
             Some("arrears")
@@ -889,8 +899,14 @@ mod tests {
 
     #[test]
     fn strip_trailing_slash_normalizes() {
-        assert_eq!(strip_trailing_slash("https://x.com/".to_string()), "https://x.com");
-        assert_eq!(strip_trailing_slash("https://x.com".to_string()), "https://x.com");
+        assert_eq!(
+            strip_trailing_slash("https://x.com/".to_string()),
+            "https://x.com"
+        );
+        assert_eq!(
+            strip_trailing_slash("https://x.com".to_string()),
+            "https://x.com"
+        );
         assert_eq!(
             strip_trailing_slash("https://x.com/path/".to_string()),
             "https://x.com/path"

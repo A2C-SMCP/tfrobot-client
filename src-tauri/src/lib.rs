@@ -35,7 +35,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: ConfigService, log_service: LogService, settings_service: SettingsService) -> Self {
+    pub fn new(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+    ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
             config: Arc::new(config),
@@ -51,8 +55,8 @@ impl AppState {
 /// Remove log files older than `retention_days` from the given directory.
 fn cleanup_old_log_files(log_dir: &Path, retention_days: u64) {
     if let Ok(entries) = std::fs::read_dir(log_dir) {
-        let cutoff = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(retention_days * 86400);
+        let cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(retention_days * 86400);
         for entry in entries.flatten() {
             if let Ok(metadata) = entry.metadata() {
                 if let Ok(modified) = metadata.modified() {
@@ -107,8 +111,8 @@ pub fn run() {
             let config_service = ConfigService::new(app_data_dir.clone())
                 .expect("Failed to initialize config service");
 
-            let log_service = LogService::new(&app_data_dir)
-                .expect("Failed to initialize log service");
+            let log_service =
+                LogService::new(&app_data_dir).expect("Failed to initialize log service");
 
             let settings_service = SettingsService::new(app_data_dir.clone());
 
@@ -134,8 +138,12 @@ pub fn run() {
             let state = AppState::new(config_service, log_service, settings_service);
 
             // Write startup log and cleanup old entries
-            let _ = state.log_service.write("info", "system", "Application started", None);
-            let _ = state.log_service.cleanup(settings.log_retention_days as i64);
+            let _ = state
+                .log_service
+                .write("info", "system", "Application started", None);
+            let _ = state
+                .log_service
+                .cleanup(settings.log_retention_days as i64);
 
             // Initialize manager with saved configs in background
             let manager = state.manager.clone();
@@ -250,7 +258,10 @@ pub fn run() {
                         let _ = mgr.stop_all().await;
                     }
                 });
-                let _ = state.log_service.write("info", "system", "Application shutting down", None);
+                let _ =
+                    state
+                        .log_service
+                        .write("info", "system", "Application shutting down", None);
             }
         });
 }

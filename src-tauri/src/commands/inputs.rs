@@ -58,7 +58,10 @@ pub async fn list_inputs(state: State<'_, AppState>) -> Result<Vec<InputDefiniti
 
 /// Get a single input definition by ID
 #[tauri::command]
-pub async fn get_input(state: State<'_, AppState>, id: String) -> Result<Option<InputDefinition>, String> {
+pub async fn get_input(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<InputDefinition>, String> {
     let inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
     Ok(inputs.into_iter().find(|i| i.id() == id))
 }
@@ -75,7 +78,10 @@ pub async fn add_or_update_input(
     let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
-    state.config.save_inputs(&inputs).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_inputs(&inputs)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -93,12 +99,21 @@ pub async fn remove_input(state: State<'_, AppState>, id: String) -> Result<(), 
         return Err(format!("Input not found: {}", id));
     }
 
-    state.config.save_inputs(&inputs).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_inputs(&inputs)
+        .map_err(|e| e.to_string())?;
 
     // Also remove cached value
-    let mut values = state.config.load_input_values().map_err(|e| e.to_string())?;
+    let mut values = state
+        .config
+        .load_input_values()
+        .map_err(|e| e.to_string())?;
     values.remove(&id);
-    state.config.save_input_values(&values).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_input_values(&values)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -117,7 +132,10 @@ pub async fn get_input_value(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    let values = state.config.load_input_values().map_err(|e| e.to_string())?;
+    let values = state
+        .config
+        .load_input_values()
+        .map_err(|e| e.to_string())?;
     Ok(values.get(&id).cloned())
 }
 
@@ -130,9 +148,15 @@ pub async fn set_input_value(
 ) -> Result<(), String> {
     log::info!("Setting input value: {}", id);
 
-    let mut values = state.config.load_input_values().map_err(|e| e.to_string())?;
+    let mut values = state
+        .config
+        .load_input_values()
+        .map_err(|e| e.to_string())?;
     values.insert(id, value);
-    state.config.save_input_values(&values).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_input_values(&values)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -140,9 +164,15 @@ pub async fn set_input_value(
 /// Remove a cached input value
 #[tauri::command]
 pub async fn remove_input_value(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut values = state.config.load_input_values().map_err(|e| e.to_string())?;
+    let mut values = state
+        .config
+        .load_input_values()
+        .map_err(|e| e.to_string())?;
     values.remove(&id);
-    state.config.save_input_values(&values).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_input_values(&values)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -160,7 +190,8 @@ pub async fn clear_input_values(state: State<'_, AppState>) -> Result<(), String
 #[tauri::command]
 pub async fn import_inputs(state: State<'_, AppState>, path: String) -> Result<usize, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let imported: Vec<InputDefinition> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let imported: Vec<InputDefinition> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let count = imported.len();
 
     let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
@@ -169,7 +200,10 @@ pub async fn import_inputs(state: State<'_, AppState>, path: String) -> Result<u
         inputs.retain(|i| i.id() != id);
         inputs.push(input);
     }
-    state.config.save_inputs(&inputs).map_err(|e| e.to_string())?;
+    state
+        .config
+        .save_inputs(&inputs)
+        .map_err(|e| e.to_string())?;
 
     Ok(count)
 }
