@@ -194,9 +194,17 @@ manager-login-and-connect   ← 无依赖（基础）
 | 场景文件                                | 用例数 | 覆盖 | 状态   |
 |----------------------------------------|-------|------|-------|
 | scenarios/manager-login-and-connect.md | 12    | A/B/C/D/E (UAT guide §4) | 🟢 就绪 |
+| scenarios/department-visibility.md     | 8     | TFRM-56 部门面包屑 / staleness / 离线 / 可见性失效 | 🟡 seed 待实施（DV-04~07 可先跑；DV-01/02/03/08 待 seed/flag） |
 
 F/G/H（402/403/401）场景在 TFRSManager 提供对应 Mock 能力后再新增（用 `/uat-scenario
-create` 起流程）。
+create` 起流程）。department-visibility 的 DV-01/02/03/08 待
+`seed-requests/seed-request-department-visibility.md` 落地后转 active。
+
+依赖图更新：
+```
+manager-login-and-connect   ← 无依赖（基础）
+department-visibility       ← 复用登录态；DV-08 额外需 flag-on
+```
 
 ---
 
