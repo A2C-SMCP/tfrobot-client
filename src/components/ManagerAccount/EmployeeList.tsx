@@ -24,6 +24,7 @@ import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import {
   useManagerStore,
+  type DepartmentRef,
   type DigitalEmployeeBrief,
   type ManagerError,
 } from '@/stores/managerStore';
@@ -33,6 +34,12 @@ const { Title, Text } = Typography;
 
 function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
+}
+
+/** 把单个部门的祖先链拼成面包屑（根→叶有序）。无祖先链时回退到部门名。 */
+function formatDeptBreadcrumb(dept: DepartmentRef): string {
+  const chain = dept.ancestors?.length ? dept.ancestors.map((a) => a.name) : [dept.name];
+  return chain.join(' / ');
 }
 
 function employeeStatusTagColor(status?: string): string {
@@ -65,7 +72,10 @@ export function EmployeeList() {
     loading,
     error,
     paymentRequired,
+    online,
     fetchEmployees,
+    fetchEmployeesIfStale,
+    setOnline,
     selectEmployeeAndConnect,
     logout,
     clearError,
@@ -81,13 +91,27 @@ export function EmployeeList() {
     });
   }, [fetchConnectionStatus]);
 
+  // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
     if (session) {
-      fetchEmployees().catch(() => {
+      fetchEmployeesIfStale().catch(() => {
         /* error stored in store */
       });
     }
-  }, [session, fetchEmployees]);
+  }, [session, fetchEmployeesIfStale]);
+
+  // 在线/离线探测：离线 → 在线跳变时 store 会自动校准 refetch。
+  useEffect(() => {
+    setOnline(navigator.onLine);
+    const handleOnline = () => setOnline(true);
+    const handleOffline = () => setOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [setOnline]);
 
   const resolveNameConflict = (existingName: string): Promise<'overwrite' | 'copy' | 'cancel'> =>
     new Promise((resolve) => {
@@ -118,8 +142,13 @@ export function EmployeeList() {
         // 刷新连接状态，让 UI 上"已连接"标识立即生效
         await fetchConnectionStatus();
       }
-    } catch {
-      /* error & paymentRequired already stored */
+    } catch (e) {
+      const err = e as ManagerError;
+      if (err?.kind === 'not_found_or_no_permission') {
+        // store 已剔除该项并触发校准 refetch；这里只提示用户。
+        message.warning(t('managerAccount.employees.visibilityRevoked', { name: employee.name }));
+      }
+      /* 其余错误 & paymentRequired 已存入 store，由顶部 Alert 呈现 */
     }
   };
 
@@ -182,6 +211,14 @@ export function EmployeeList() {
             </Button>
           </Space>
         </div>
+
+        {!online && (
+          <Alert
+            type="warning"
+            showIcon
+            message={t('managerAccount.employees.offlineBanner')}
+          />
+        )}
 
         {paymentRequired && (
           <Alert
@@ -278,6 +315,19 @@ export function EmployeeList() {
                     }
                     description={
                       <Descriptions size="small" column={1} colon={false}>
+                        <Descriptions.Item label={t('managerAccount.employees.department')}>
+                          {emp.departments && emp.departments.length > 0 ? (
+                            <Space direction="vertical" size={0}>
+                              {emp.departments.map((d) => (
+                                <Text key={d.id}>{formatDeptBreadcrumb(d)}</Text>
+                              ))}
+                            </Space>
+                          ) : (
+                            <Text type="secondary">
+                              {t('managerAccount.employees.noDepartment')}
+                            </Text>
+                          )}
+                        </Descriptions.Item>
                         {emp.robotId && (
                           <Descriptions.Item
                             label={t('managerAccount.employees.robotId')}

@@ -23,6 +23,23 @@ export interface AccountOption {
   organizationType: string;
 }
 
+/** 部门祖先链元素（`departments[].ancestors[]`）。根→叶有序，末元素即本部门。 */
+export interface DepartmentAncestor {
+  id: number;
+  name: string;
+}
+
+/**
+ * 部门归属（`departments[]` 元素，与 Rust `DepartmentRef` 对齐）。
+ * `ancestors` 含自身、根→叶有序；按序 join `name` 即面包屑。不受可见性 flag 控制。
+ */
+export interface DepartmentRef {
+  id: number;
+  name: string;
+  path?: string;
+  ancestors?: DepartmentAncestor[];
+}
+
 /** 数字员工列表项（`DigitalEmployeeBrief`，与 Rust DTO 对齐）。id 是数字主键。 */
 export interface DigitalEmployeeBrief {
   id: number;
@@ -34,6 +51,8 @@ export interface DigitalEmployeeBrief {
   templateType?: string;
   namespace?: string;
   clusterName?: string;
+  /** 部门归属（TFRM-56）。后端保证为数组（可能为空 []）。 */
+  departments?: DepartmentRef[];
 }
 
 export interface ConnectionInfo {
@@ -59,6 +78,7 @@ export type ManagerError =
   | { kind: 'forbidden' }
   | { kind: 'payment_required'; detail: { message: string; redirect_url?: string } }
   | { kind: 'not_found' }
+  | { kind: 'not_found_or_no_permission' }
   | { kind: 'other'; detail: { status: number; body: string } }
   | { kind: 'no_session' }
   | { kind: 'missing_base_url' }
@@ -79,11 +99,24 @@ interface ManagerState {
   loading: boolean;
   error: ManagerError | null;
   paymentRequired: PaymentRequiredInfo | null;
+  /** 上次成功拉取员工列表的时间戳（ms）。null = 尚未成功拉过。用于 60s staleness 兜底。 */
+  lastFetchAt: number | null;
+  /** 在线状态。false 时 UI 展示离线横幅并保留最近一次成功列表（TFRM-56 离线模式）。 */
+  online: boolean;
 
   setBaseUrl: (url: string) => void;
   login: (phone: string, password: string, baseUrl?: string) => Promise<LoginResult>;
   selectAccount: (accountId: number) => Promise<void>;
   fetchEmployees: () => Promise<void>;
+  /**
+   * 进入列表页时的兜底拉取：仅当无数据、或距上次成功拉取已超过 `maxAgeMs`（默认 60s，
+   * 与后端可见集合缓存 TTL 对齐）时才真正请求；否则复用当前列表（TFRM-56）。
+   */
+  fetchEmployeesIfStale: (maxAgeMs?: number) => Promise<void>;
+  /**
+   * 同步在线状态。离线 → 在线的跳变会立即触发一次校准 refetch（不受 staleness 窗口限制）。
+   */
+  setOnline: (online: boolean) => void;
   /**
    * 选中数字员工 → 拉取 connection-info → 生成/复用 ConnectionProfile → 立即发起连接。
    * 同名 profile 的解决策略由 UI 通过 `onConflict` 传入：返回 'overwrite' / 'copy' / 'cancel'。
@@ -99,6 +132,9 @@ interface ManagerState {
   reset: () => void;
 }
 
+/** 列表 staleness 窗口，与后端可见集合缓存 TTL 对齐（TFRM-167 评论：60s）。 */
+const EMPLOYEE_LIST_STALE_MS = 60_000;
+
 const initialState = {
   baseUrl: '',
   session: null as UserInfo | null,
@@ -108,6 +144,8 @@ const initialState = {
   loading: false,
   error: null as ManagerError | null,
   paymentRequired: null as PaymentRequiredInfo | null,
+  lastFetchAt: null as number | null,
+  online: true,
 };
 
 const TOKEN_LIKE_HEADER = /token|authorization|cookie/i;
@@ -232,7 +270,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     try {
       const employees = await invoke<DigitalEmployeeBrief[]>('manager_list_digital_employees');
       info(`manager: fetched ${employees.length} digital employees`);
-      set({ employees, loading: false });
+      set({ employees, loading: false, lastFetchAt: Date.now(), online: true });
     } catch (e) {
       const err = toManagerError(e);
       warn(`manager: list_employees failed, kind=${err.kind}`);
@@ -241,8 +279,36 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
           paymentRequired: { message: err.detail.message, redirectUrl: err.detail.redirect_url },
         });
       }
-      set({ error: err, loading: false });
+      // 网络失败：保留最近一次成功列表（不清空 employees），标记离线供 UI 横幅展示。
+      set({
+        error: err,
+        loading: false,
+        online: err.kind === 'network_error' ? false : get().online,
+      });
       throw err;
+    }
+  },
+
+  fetchEmployeesIfStale: async (maxAgeMs = EMPLOYEE_LIST_STALE_MS) => {
+    const { lastFetchAt, employees, loading } = get();
+    if (loading) return;
+    const fresh =
+      lastFetchAt !== null && employees.length > 0 && Date.now() - lastFetchAt < maxAgeMs;
+    if (fresh) return;
+    await get().fetchEmployees();
+  },
+
+  setOnline: (online: boolean) => {
+    const wasOffline = !get().online;
+    set({ online });
+    // 离线 → 在线跳变：立即校准（绕过 staleness 窗口），让被剔除/新增的项即时对齐。
+    if (online && wasOffline && get().session) {
+      info('manager: back online, recalibrating employee list');
+      get()
+        .fetchEmployees()
+        .catch(() => {
+          /* error stored in store */
+        });
     }
   },
 
@@ -305,7 +371,20 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
           paymentRequired: { message: err.detail.message, redirectUrl: err.detail.redirect_url },
         });
       }
+      if (err.kind === 'not_found_or_no_permission') {
+        // 该机器人对当前 viewer 已不可见（部门可见性回收）：本地剔除该项。
+        warn(`manager: employee ${employeeId} no longer visible, removing from local list`);
+        set({ employees: get().employees.filter((e2) => e2.id !== employeeId) });
+      }
       set({ error: err, loading: false });
+      // loading 已置 false，可安全触发校准 refetch（绕过并发 guard）。
+      if (err.kind === 'not_found_or_no_permission') {
+        get()
+          .fetchEmployees()
+          .catch(() => {
+            /* error stored in store */
+          });
+      }
       throw err;
     }
   },
@@ -328,6 +407,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         employees: [],
         selectedEmployeeId: null,
         loading: false,
+        lastFetchAt: null,
       });
     } catch (e) {
       const err = toManagerError(e);
@@ -343,6 +423,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       pendingAccountSelection: null,
       employees: [],
       selectedEmployeeId: null,
+      lastFetchAt: null,
       error: { kind: 'unauthorized' },
     });
   },

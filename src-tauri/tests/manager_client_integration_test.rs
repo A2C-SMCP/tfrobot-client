@@ -593,6 +593,35 @@ async fn not_found_returned_for_missing_robot() {
 }
 
 #[tokio::test]
+async fn visibility_revoked_404_maps_to_not_found_or_no_permission() {
+    // TFRM-167：不可见/权限回收的资源返回 404 + 顶层 errorCode；数字 code/message 不变。
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-ok")),
+        ),
+        raw_script(
+            "/connection-info",
+            "HTTP/1.1 404 Not Found",
+            r#"{"code":404,"message":"not found","errorCode":"ERR_NOT_FOUND_OR_NO_PERMISSION","data":null}"#,
+            "application/json",
+        ),
+    ];
+    let (base, _cap, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
+    let err = client.get_connection_info(11).await.unwrap_err();
+    assert!(matches!(err, ManagerError::NotFoundOrNoPermission));
+    // 不是鉴权问题 — session 应保留（前端只剔除该项 + refetch）
+    assert!(client.has_session().await);
+}
+
+#[tokio::test]
 async fn forbidden_mapped_from_403() {
     let script = vec![
         json_script(

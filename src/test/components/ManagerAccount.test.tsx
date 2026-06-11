@@ -17,10 +17,13 @@ type ManagerStoreMock = {
   loading: boolean;
   error: ManagerError | null;
   paymentRequired: { message: string; redirectUrl?: string } | null;
+  online: boolean;
   setBaseUrl: ReturnType<typeof vi.fn>;
   login: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
   fetchEmployees: ReturnType<typeof vi.fn>;
+  fetchEmployeesIfStale: ReturnType<typeof vi.fn>;
+  setOnline: ReturnType<typeof vi.fn>;
   selectEmployeeAndConnect: ReturnType<typeof vi.fn>;
   logout: ReturnType<typeof vi.fn>;
   handleAuthExpired: ReturnType<typeof vi.fn>;
@@ -38,10 +41,13 @@ const mockStore: ManagerStoreMock = {
   loading: false,
   error: null,
   paymentRequired: null,
+  online: true,
   setBaseUrl: vi.fn(),
   login: vi.fn().mockResolvedValue({ kind: 'authenticated' }),
   selectAccount: vi.fn().mockResolvedValue(undefined),
   fetchEmployees: vi.fn().mockResolvedValue(undefined),
+  fetchEmployeesIfStale: vi.fn().mockResolvedValue(undefined),
+  setOnline: vi.fn(),
   selectEmployeeAndConnect: vi.fn().mockResolvedValue(null),
   logout: vi.fn().mockResolvedValue(undefined),
   handleAuthExpired: vi.fn(),
@@ -186,12 +192,12 @@ describe('ManagerAccount', () => {
       status: 'running',
     };
 
-    it('fetches employees on mount and renders them', async () => {
-      const fetchEmployees = vi.fn().mockResolvedValue(undefined);
-      applyMock({ session: user, employees: [employee], fetchEmployees });
+    it('fetches employees on mount (staleness-gated) and renders them', async () => {
+      const fetchEmployeesIfStale = vi.fn().mockResolvedValue(undefined);
+      applyMock({ session: user, employees: [employee], fetchEmployeesIfStale });
 
       render(<EmployeeList />);
-      expect(fetchEmployees).toHaveBeenCalled();
+      expect(fetchEmployeesIfStale).toHaveBeenCalled();
       expect(screen.getByText('bot-one')).toBeInTheDocument();
       expect(screen.getByText('robot-a')).toBeInTheDocument();
     });

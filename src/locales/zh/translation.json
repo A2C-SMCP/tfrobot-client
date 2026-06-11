@@ -298,6 +298,7 @@
       "forbidden": "当前账号没有访问该资源的权限。",
       "payment_required": "账号已欠费或被暂停，请前往续费页面。",
       "not_found": "未找到对应的资源。",
+      "not_found_or_no_permission": "该资源已不可见或你的访问权限已变更。",
       "other": "Manager 返回了意料之外的响应。",
       "no_session": "尚未登录 Manager，请先登录。",
       "missing_base_url": "未配置 Manager 地址，请设置环境变量 TFRS_MANAGER_BASE_URL 或在登录表单中填写。",
@@ -343,7 +344,11 @@
       "conflictDescription": "\"{{name}}\" 已存在，是覆盖还是另存副本？",
       "overwrite": "覆盖",
       "createCopy": "另存副本",
-      "renew": "去续费"
+      "renew": "去续费",
+      "department": "所属部门",
+      "noDepartment": "未分配部门",
+      "offlineBanner": "离线模式——正在展示最近一次加载的列表，恢复网络后将自动刷新。",
+      "visibilityRevoked": "「{{name}}」已不可访问，已从列表中移除。"
     }
   }
 }

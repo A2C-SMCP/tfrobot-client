@@ -298,6 +298,7 @@
       "forbidden": "You do not have permission to access this resource.",
       "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
       "not_found": "The requested resource was not found.",
+      "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
       "missing_base_url": "The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.",
@@ -343,7 +344,11 @@
       "conflictDescription": "\"{{name}}\" already exists. Overwrite it, or save a copy?",
       "overwrite": "Overwrite",
       "createCopy": "Save a copy",
-      "renew": "Renew subscription"
+      "renew": "Renew subscription",
+      "department": "Department",
+      "noDepartment": "Unassigned",
+      "offlineBanner": "Offline — showing the last loaded list. It will refresh automatically when the connection is restored.",
+      "visibilityRevoked": "\"{{name}}\" is no longer available and was removed from the list."
     }
   }
 }
