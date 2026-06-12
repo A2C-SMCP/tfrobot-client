@@ -194,16 +194,16 @@ manager-login-and-connect   ← 无依赖（基础）
 | 场景文件                                | 用例数 | 覆盖 | 状态   |
 |----------------------------------------|-------|------|-------|
 | scenarios/manager-login-and-connect.md | 12    | A/B/C/D/E (UAT guide §4) | 🟢 就绪 |
-| scenarios/department-visibility.md     | 8     | TFRM-56 部门面包屑 / staleness / 离线 / 可见性失效 | 🟡 seed 待实施（DV-04~07 可先跑；DV-01/02/03/08 待 seed/flag） |
+| scenarios/department-visibility.md     | 8     | TFRM-56 部门面包屑 / staleness / 离线 / 可见性失效 | 🟢 seed 已实施（`137de75`）。active：DV-01/02/04/05/06/07；DV-03 降级代码级；DV-08 待调岗能力 |
 
 F/G/H（402/403/401）场景在 TFRSManager 提供对应 Mock 能力后再新增（用 `/uat-scenario
-create` 起流程）。department-visibility 的 DV-01/02/03/08 待
-`seed-requests/seed-request-department-visibility.md` 落地后转 active。
+create` 起流程）。department-visibility 的 DV-03（TFRM-53 后无未分配账户）已降级为前端单测；
+DV-08（TFRM-174 删 flag、可见性恒生效）需「起始可见机器人 + AdminPortal/Manager 调岗路径」就位后转 active。
 
 依赖图更新：
 ```
 manager-login-and-connect   ← 无依赖（基础）
-department-visibility       ← 复用登录态；DV-08 额外需 flag-on
+department-visibility       ← 复用登录态；DV-08 额外需调岗能力（可见性恒生效，无 flag）
 ```
 
 ---

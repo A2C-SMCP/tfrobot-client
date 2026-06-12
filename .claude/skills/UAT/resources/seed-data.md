@@ -90,7 +90,7 @@ DevTools Console 的 `manager: connection-info ok for ...` 日志里必须**不�
 > 状态：🟢 **已实施** —— 后端 commit `137de75` @ develop，`make seed-local` + SQL 核对全部通过（部门树/多部门/未分配/兄弟不可见/client_uat 全员）。
 > `scenarios/department-visibility.md` 的 DV-01/02/03/08 可转 active（账号映射见下表 + 注）。
 
-为 TFRM-56「部门展示 + staleness/离线兜底 + 可见性失效」准备，**加性**（flag-off 时场景 A–E 不变）。
+为 TFRM-56「部门展示 + staleness/离线兜底 + 可见性失效」准备，**加性**（不影响场景 A–E）。
 **TFRM-170 方案2**：个人组织账户自动入根部门「全员」，富部门场景只能落企业组织——故 seed 分两块：
 
 | 类别 | 账号（组织类型） | 内容 | flag 依赖 |
@@ -100,13 +100,13 @@ DevTools Console 的 `manager: connection-info ok for ...` 日志里必须**不�
 
 - **类别 A + B 均已 seed 验证**（commit `137de75`）。企业富树 viewer = `testuser2_enterprise`（**accountId 2**，登录 13900139000→多账户选企业账户）@ **平台组**。3 机器人实例（list-only，无需端到端连通）：
   - `DV多部门机器人`（CRName `seed-dv-multi`）→ 平台组 **+** 华东区 → **DV-02** 两行面包屑
-  - `DV未分配机器人`（CRName `seed-dv-unassigned`）→ 无部门 → **DV-03** `departments[]=[]`（flag-off 可见）
-  - `销售部机器人`（CRName `seed-dv-sales`）→ 华东区 → **DV-08** 对平台组 viewer flag-on 不可见，connection-info 回 404+`ERR_NOT_FOUND_OR_NO_PERMISSION`
+  - `DV未分配机器人`（CRName `seed-dv-unassigned`）→ 无部门 → **DV-03** `departments[]=[]`（⚠️ 恒生效下对非 admin viewer 不可见；DV-03 已降级代码级，见 scenario）
+  - `销售部机器人`（CRName `seed-dv-sales`）→ 华东区 → **DV-08** ⚠️ 恒生效下对平台组 viewer 永不可见（不进列表），需改用「起始平台组机器人 + 调岗」触发，见 scenario
 - **DV-01** 用 client_uat（13800138008）验 `本地联调员工` 面包屑 = `全员`（个人组织 1 级）。
 
 - `departments[]` 元素形态：`{id, name, path, ancestors:[{id,name}...]}`，`ancestors` 含自身、根→叶有序，空=`[]` 非 null（契约见 TFRM-167/168 评论）。
 - 面包屑 = `ancestors.map(name).join(' / ')`。客户端不依赖部门 id，只读 `ancestors[].name`。
-- `DEPT_VISIBILITY_FILTER_ENABLED` 三环境默认 **off**；DV-08 需目标环境临时置 on（建议 staging 先开），验收后复位。
+- ⚠️ **`DEPT_VISIBILITY_FILTER_ENABLED` 已被 TFRM-174 删除**——可见性恒生效，行为由账号 `data_scope` 决定。无「翻 flag」手法：DV-08 改靠真实**调岗**构造不可见（管理员把机器人移出 viewer 子树）；DV-03「未分配」在 TFRM-53 NOT NULL 后无法用 seed 构造，降级为前端单测兜底。详见 `scenarios/department-visibility.md`。
 
 ## 未覆盖场景（blocked）
 
