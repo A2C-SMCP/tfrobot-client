@@ -171,7 +171,7 @@ pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
     disconnect_smcp_core(&state).await
 }
 
-pub async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
+async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
     log::info!("Disconnecting from SMCP server");
 
     let existing_connection = {

@@ -167,6 +167,18 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
         || stats.active() == 0 && stats.disconnected() == 1,
     )
     .await;
+
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        stats.active(),
+        0,
+        "SMCP socket should remain disconnected after cleanup"
+    );
+    assert_eq!(
+        stats.disconnected(),
+        1,
+        "SMCP cleanup should not trigger a reconnect cycle"
+    );
 }
 
 #[tokio::test]

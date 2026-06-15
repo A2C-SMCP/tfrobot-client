@@ -1,17 +1,17 @@
-//! 验收测试：smcp-computer 0.1.15 握手配置化（TFRM-16 子项）
+//! 验收测试：smcp-computer 0.2.2 握手配置化（TFRM-16 子项）
 //!
 //! 本文件验证 rust-sdk PR 的实现是否符合 `docs/proposals/tfrm-16-rust-sdk-handshake-config.md` 建议。
 //!
 //! # 运行前提
 //!
-//! 1. rust-sdk 已发布 `smcp-computer` v0.1.15（含 `SmcpComputerClientBuilder` 与默认 `access_token` header）。
-//! 2. `src-tauri/Cargo.toml` 已将 `smcp-computer` 版本升级至 `0.1.15`。
+//! 1. rust-sdk 已发布 `smcp-computer` v0.2.2（含 `SmcpComputerClientBuilder` 与默认 `access_token` header）。
+//! 2. `src-tauri/Cargo.toml` 已将 `smcp-computer` 版本升级至 `0.2.2`。
 //! 3. 通过 feature flag 显式启用本文件：
 //!    ```bash
-//!    cargo test --test smcp_handshake_config_test --features verify-smcp-0-1-15
+//!    cargo test --test smcp_handshake_config_test --features verify-smcp-0-2-2
 //!    ```
 //!
-//! 在版本升级前，整个文件被 `#![cfg(feature = "verify-smcp-0-1-15")]` 门控，
+//! 在版本升级前，整个文件被 `#![cfg(feature = "verify-smcp-0-2-2")]` 门控，
 //! 不参与编译，不会影响现有 CI。
 //!
 //! # 验收策略
@@ -25,7 +25,7 @@
 //! 客户端的 `connect()` 会返回 `Err`（预期）；我们断言**捕获到的 headers** 是否符合预期。
 //! 这样无需引入 `socketioxide` 等重量依赖，也足以验证"上游 WS upgrade 携带什么 header / 连接到什么 namespace"。
 
-#![cfg(feature = "verify-smcp-0-1-15")]
+#![cfg(feature = "verify-smcp-0-2-2")]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -159,7 +159,7 @@ async fn test_default_auth_header_is_access_token() {
     assert_eq!(
         captured.headers.get("access_token").map(String::as_str),
         Some("test-secret-123"),
-        "默认鉴权 header 应为 access_token（0.1.15 新默认）。实际 headers: {:?}",
+        "默认鉴权 header 应为 access_token（0.2.2 默认）。实际 headers: {:?}",
         captured.headers
     );
     assert!(
@@ -363,7 +363,7 @@ async fn test_backward_compat_new_uses_access_token_default() {
     let (manager, inputs) = empty_manager_and_inputs();
 
     // 走老的 `SmcpComputerClient::new()` 入口（tfrobot-client 当前的调用形态）。
-    // 升级到 0.1.15 后，此入口应内部委托给 Builder，默认 header 为 access_token。
+    // 升级到 0.2.2 后，此入口应内部委托给 Builder，默认 header 为 access_token。
     let result = SmcpComputerClient::new(
         &url,
         manager,
@@ -380,11 +380,11 @@ async fn test_backward_compat_new_uses_access_token_default() {
     assert_eq!(
         captured.headers.get("access_token").map(String::as_str),
         Some("compat-secret"),
-        "老的 new() 入口在 0.1.15 后也应走新默认 access_token。实际 headers: {:?}",
+        "老的 new() 入口在 0.2.2 后也应走新默认 access_token。实际 headers: {:?}",
         captured.headers
     );
     assert!(
         !captured.headers.contains_key("x-api-key"),
-        "0.1.15 后不应再有 x-api-key fallback"
+        "0.2.2 后不应再有 x-api-key fallback"
     );
 }
