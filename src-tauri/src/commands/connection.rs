@@ -1,6 +1,9 @@
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tokio::time::{timeout, Duration};
+
+const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connection Profile stored to disk (API Key stored separately in Keychain)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +100,10 @@ pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<
 /// Connect to SMCP server using a saved profile
 #[tauri::command]
 pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> Result<(), String> {
+    connect_smcp_core(&state, profile_name).await
+}
+
+pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result<(), String> {
     log::info!("Connecting with profile: {}", profile_name);
 
     let profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
@@ -126,20 +133,27 @@ pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> R
     .await
     .map_err(|e| e.to_string())?;
 
-    client
-        .join_office(&profile.office_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = client.join_office(&profile.office_id).await {
+        disconnect_smcp_client(client, "after join_office failure").await;
+        return Err(e.to_string());
+    }
 
-    let mut conn = state.connection.write().await;
-    *conn = Some(ConnectionState {
-        client: std::sync::Arc::new(client),
+    let new_connection = ConnectionState {
+        client,
         profile_name: profile.name.clone(),
         url: profile.url.clone(),
         office_id: profile.office_id.clone(),
         computer_name: profile.computer_name.clone(),
         connected_at: chrono::Utc::now(),
-    });
+    };
+
+    let previous_connection = {
+        let mut conn = state.connection.write().await;
+        conn.replace(new_connection)
+    };
+    if let Some(connection) = previous_connection {
+        close_smcp_connection(connection).await;
+    }
 
     log::info!("Connected to SMCP server: {}", profile.url);
     let _ = state.log_service.write(
@@ -154,19 +168,61 @@ pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> R
 /// Disconnect from SMCP server
 #[tauri::command]
 pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
+    disconnect_smcp_core(&state).await
+}
+
+pub async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
     log::info!("Disconnecting from SMCP server");
 
-    let mut conn = state.connection.write().await;
-    if let Some(connection) = conn.take() {
-        if let Err(e) = connection.client.leave_office(&connection.office_id).await {
-            log::warn!("Error leaving office: {}", e);
-        }
+    let existing_connection = {
+        let mut conn = state.connection.write().await;
+        conn.take()
+    };
+    if let Some(connection) = existing_connection {
+        close_smcp_connection(connection).await;
     }
 
     let _ = state
         .log_service
         .write("info", "connection", "Disconnected from SMCP server", None);
     Ok(())
+}
+
+pub async fn close_smcp_connection(connection: ConnectionState) {
+    let ConnectionState {
+        client, office_id, ..
+    } = connection;
+
+    match timeout(
+        SMCP_CONNECTION_CLOSE_TIMEOUT,
+        client.leave_office(&office_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("Error leaving office: {}", e),
+        Err(_) => log::warn!(
+            "Timed out leaving SMCP office after {:?}",
+            SMCP_CONNECTION_CLOSE_TIMEOUT
+        ),
+    }
+
+    disconnect_smcp_client(client, "from SMCP server").await;
+}
+
+async fn disconnect_smcp_client(
+    client: smcp_computer::socketio_client::SmcpComputerClient,
+    context: &str,
+) {
+    match timeout(SMCP_CONNECTION_CLOSE_TIMEOUT, client.disconnect()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("Error disconnecting {}: {}", context, e),
+        Err(_) => log::warn!(
+            "Timed out disconnecting {} after {:?}",
+            context,
+            SMCP_CONNECTION_CLOSE_TIMEOUT,
+        ),
+    }
 }
 
 /// Get current connection status
@@ -197,7 +253,7 @@ pub async fn get_connection_status(
 
 /// Active connection state held in AppState
 pub struct ConnectionState {
-    pub client: std::sync::Arc<smcp_computer::socketio_client::SmcpComputerClient>,
+    pub client: smcp_computer::socketio_client::SmcpComputerClient,
     pub profile_name: String,
     pub url: String,
     pub office_id: String,

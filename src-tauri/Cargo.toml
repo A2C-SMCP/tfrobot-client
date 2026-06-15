@@ -20,7 +20,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 
 # A2C-SMCP Computer implementation
-smcp-computer = "0.1.15"
+smcp-computer = "0.2.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -63,6 +63,11 @@ hex = "0.4"
 tempfile = "3"
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1", "full"] }
+hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
+socketioxide = { version = "0.16.3", features = ["state"] }
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "benchmarks"
