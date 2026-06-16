@@ -233,6 +233,12 @@ pub fn run() {
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
             commands::settings::get_detected_path,
+            // Skills
+            commands::skills::list_skills,
+            commands::skills::read_skill_markdown,
+            commands::skills::open_skills_root,
+            commands::skills::open_skill_folder,
+            commands::skills::open_skill_markdown_file,
             // TFRSManager HTTP client (issue #23)
             commands::manager::manager_login,
             commands::manager::manager_select_account,

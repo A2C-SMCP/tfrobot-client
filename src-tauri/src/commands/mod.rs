@@ -8,3 +8,4 @@ pub mod logs;
 pub mod manager;
 pub mod mcp;
 pub mod settings;
+pub mod skills;

@@ -9,6 +9,7 @@
     "delete": "删除",
     "edit": "编辑",
     "refresh": "刷新",
+    "close": "关闭",
     "yes": "是",
     "no": "否",
     "error": "错误",
@@ -198,6 +199,38 @@
     "description": "浏览桌面资源。",
     "refresh": "刷新"
   },
+  "skills": {
+    "title": "Skills",
+    "openRoot": "打开 Skills 文件夹",
+    "openRootShort": "打开根目录",
+    "openRootFailed": "打开 Skills 文件夹失败",
+    "openFolderFailed": "打开 Skill 文件夹失败",
+    "openFileFailed": "打开 SKILL.md 失败",
+    "empty": "未找到 Skills",
+    "subtitle": "管理本地 Skills，预览说明并打开对应内容",
+    "previewTitle": "SKILL.md 预览",
+    "previewSelect": "请选择一个 Skill 预览其 SKILL.md",
+    "previewMissing": "该 Skill 缺少 SKILL.md 文件",
+    "previewFailed": "加载 SKILL.md 失败",
+    "previewEmpty": "SKILL.md 内容为空",
+    "skillMdPresent": "已找到",
+    "skillMdMissing": "缺失",
+    "noDescription": "暂无描述",
+    "previewAction": "预览",
+    "folderAction": "文件夹",
+    "openFile": "打开文件",
+    "columns": {
+      "name": "名称",
+      "path": "路径",
+      "skillMd": "SKILL.md",
+      "description": "Description",
+      "source": "来源",
+      "actions": "操作"
+    },
+    "sources": {
+      "local": "本地"
+    }
+  },
   "desktop": {
     "title": "桌面资源",
     "windowUri": "URI",
@@ -276,6 +309,8 @@
     "pathDescription": "用于查找 node、uvx、npx 等命令的目录列表。留空则使用从 Shell 自动检测的 PATH。",
     "pathPlaceholder": "留空使用自动检测的 PATH",
     "resetPath": "重置为自动检测",
+    "skillsRootDir": "Skills 根目录",
+    "skillsRootDirDescription": "用于加载本地 skills 的目录，默认使用 ~/.a2c/skills。",
     "customPaths": "自定义路径",
     "logRetention": "日志保留天数",
     "days": "天",

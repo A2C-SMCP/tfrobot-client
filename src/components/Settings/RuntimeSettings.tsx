@@ -68,6 +68,11 @@ export function RuntimeSettings() {
     updateSettings({ ...settings, custom_path: null });
   };
 
+  const handleSkillsRootDirChange = (value: string) => {
+    if (!settings) return;
+    updateSettings({ ...settings, skills_root_dir: value });
+  };
+
   const handlePathChange = (key: string, value: string) => {
     if (!settings) return;
     const paths = { ...settings.custom_runtime_paths, [key]: value || undefined };
@@ -99,6 +104,17 @@ export function RuntimeSettings() {
               </Button>
             )}
           </Space>
+        </Form.Item>
+
+        <Form.Item
+          label={t('settings.skillsRootDir')}
+          help={t('settings.skillsRootDirDescription')}
+        >
+          <Input
+            value={settings?.skills_root_dir || '~/.a2c/skills'}
+            onChange={(e) => handleSkillsRootDirChange(e.target.value)}
+            placeholder="~/.a2c/skills"
+          />
         </Form.Item>
       </Form>
 

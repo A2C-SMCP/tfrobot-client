@@ -9,6 +9,7 @@
     "delete": "Delete",
     "edit": "Edit",
     "refresh": "Refresh",
+    "close": "Close",
     "yes": "Yes",
     "no": "No",
     "error": "Error",
@@ -198,6 +199,38 @@
     "description": "Browse desktop resources.",
     "refresh": "Refresh"
   },
+  "skills": {
+    "title": "Skills",
+    "openRoot": "Open Skills Folder",
+    "openRootShort": "Open Root Folder",
+    "openRootFailed": "Failed to open skills folder",
+    "openFolderFailed": "Failed to open skill folder",
+    "openFileFailed": "Failed to open SKILL.md",
+    "empty": "No skills found",
+    "subtitle": "Manage local skills and preview their SKILL.md content.",
+    "previewTitle": "SKILL.md Preview",
+    "previewSelect": "Select a skill to preview its SKILL.md",
+    "previewMissing": "This skill does not have a SKILL.md file",
+    "previewFailed": "Failed to load SKILL.md",
+    "previewEmpty": "SKILL.md is empty",
+    "skillMdPresent": "Found",
+    "skillMdMissing": "Missing",
+    "noDescription": "No description",
+    "previewAction": "Preview",
+    "folderAction": "Folder",
+    "openFile": "Open File",
+    "columns": {
+      "name": "Name",
+      "path": "Path",
+      "skillMd": "SKILL.md",
+      "description": "Description",
+      "source": "Source",
+      "actions": "Actions"
+    },
+    "sources": {
+      "local": "Local"
+    }
+  },
   "desktop": {
     "title": "Desktop Resources",
     "windowUri": "URI",
@@ -276,6 +309,8 @@
     "pathDescription": "Directories for finding commands like node, uvx, npx. Leave empty to use the auto-detected PATH from your shell.",
     "pathPlaceholder": "Leave empty to use auto-detected PATH",
     "resetPath": "Reset to Auto-detected",
+    "skillsRootDir": "Skills Root Directory",
+    "skillsRootDirDescription": "Local directory used to load skills. Defaults to ~/.a2c/skills.",
     "customPaths": "Custom Paths",
     "logRetention": "Log Retention",
     "days": "days",

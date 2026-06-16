@@ -18,6 +18,7 @@ const mockSettings: AppSettings = {
   language: 'en',
   log_retention_days: 30,
   custom_runtime_paths: {},
+  skills_root_dir: '~/.a2c/skills',
 };
 
 const mockRuntimes: RuntimeInfo[] = [

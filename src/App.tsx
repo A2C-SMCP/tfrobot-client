@@ -11,6 +11,7 @@ import {
   SunOutlined,
   MoonOutlined,
   UserOutlined,
+  ReadOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -24,6 +25,7 @@ import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
 import { ManagerAccount } from './components/ManagerAccount';
+import { Skills } from './components/Skills';
 import { useThemeStore } from './stores/themeStore';
 
 const { Header, Sider, Content } = Layout;
@@ -79,6 +81,11 @@ function App() {
           key: 'inputs',
           icon: <FormOutlined />,
           label: t('inputs.title'),
+        },
+        {
+          key: 'skills',
+          icon: <ReadOutlined />,
+          label: t('skills.title'),
         },
       ],
     },
@@ -149,6 +156,8 @@ function App() {
         return <SmcpConnection />;
       case 'resources':
         return <DesktopResources />;
+      case 'skills':
+        return <Skills />;
       case 'debug':
         return <DebugPanel />;
       case 'logs':
