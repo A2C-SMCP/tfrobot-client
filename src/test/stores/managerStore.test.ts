@@ -21,6 +21,24 @@ const employeeA: DigitalEmployeeBrief = {
   namespace: 'ns-a',
   templateType: 'tfrserver',
   status: 'running',
+  departments: [
+    {
+      id: 7,
+      name: '平台组',
+      path: '/1/3/7/',
+      ancestors: [
+        { id: 1, name: '总公司' },
+        { id: 3, name: '研发中心' },
+        { id: 7, name: '平台组' },
+      ],
+    },
+  ],
+};
+
+const employeeB: DigitalEmployeeBrief = {
+  id: 12,
+  name: 'bot-two',
+  robotId: 'robot-b',
 };
 
 const connInfo: ConnectionInfo = {
@@ -257,6 +275,106 @@ describe('managerStore', () => {
         message: 'Quota exceeded',
         redirectUrl: 'https://pay.example.com',
       });
+    });
+  });
+
+  describe('department visibility & staleness (TFRM-56)', () => {
+    it('fetchEmployees stores departments, lastFetchAt and marks online', async () => {
+      useManagerStore.setState({ session: user });
+      mockedInvoke.mockResolvedValueOnce([employeeA]);
+
+      await useManagerStore.getState().fetchEmployees();
+
+      const s = useManagerStore.getState();
+      expect(s.employees[0].departments?.[0].ancestors?.[2].name).toBe('平台组');
+      expect(typeof s.lastFetchAt).toBe('number');
+      expect(s.online).toBe(true);
+    });
+
+    it('fetchEmployees keeps the last list and marks offline on network_error', async () => {
+      useManagerStore.setState({ session: user, employees: [employeeA], online: true });
+      const err: ManagerError = { kind: 'network_error', detail: 'connect refused' };
+      mockedInvoke.mockRejectedValueOnce(err);
+
+      await expect(useManagerStore.getState().fetchEmployees()).rejects.toEqual(err);
+
+      const s = useManagerStore.getState();
+      expect(s.employees).toEqual([employeeA]); // 离线保留最近一次成功列表
+      expect(s.online).toBe(false);
+    });
+
+    it('fetchEmployeesIfStale skips refetch when within the freshness window', async () => {
+      useManagerStore.setState({
+        session: user,
+        employees: [employeeA],
+        lastFetchAt: Date.now(),
+      });
+
+      await useManagerStore.getState().fetchEmployeesIfStale();
+
+      expect(mockedInvoke).not.toHaveBeenCalled();
+    });
+
+    it('fetchEmployeesIfStale refetches when older than 60s', async () => {
+      useManagerStore.setState({
+        session: user,
+        employees: [employeeA],
+        lastFetchAt: Date.now() - 61_000,
+      });
+      mockedInvoke.mockResolvedValueOnce([employeeA, employeeB]);
+
+      await useManagerStore.getState().fetchEmployeesIfStale();
+
+      expect(mockedInvoke).toHaveBeenCalledWith('manager_list_digital_employees');
+      expect(useManagerStore.getState().employees).toHaveLength(2);
+    });
+
+    it('fetchEmployeesIfStale refetches when there is no data yet', async () => {
+      useManagerStore.setState({ session: user, employees: [], lastFetchAt: null });
+      mockedInvoke.mockResolvedValueOnce([employeeA]);
+
+      await useManagerStore.getState().fetchEmployeesIfStale();
+
+      expect(mockedInvoke).toHaveBeenCalledWith('manager_list_digital_employees');
+    });
+
+    it('setOnline recalibrates the list on offline -> online transition', async () => {
+      useManagerStore.setState({ session: user, online: false, employees: [employeeA] });
+      mockedInvoke.mockResolvedValueOnce([employeeA, employeeB]);
+
+      useManagerStore.getState().setOnline(true);
+
+      await vi.waitFor(() =>
+        expect(mockedInvoke).toHaveBeenCalledWith('manager_list_digital_employees'),
+      );
+      expect(useManagerStore.getState().online).toBe(true);
+    });
+
+    it('setOnline does not refetch without a session', () => {
+      useManagerStore.setState({ session: null, online: false });
+
+      useManagerStore.getState().setOnline(true);
+
+      expect(mockedInvoke).not.toHaveBeenCalled();
+    });
+
+    it('selectEmployeeAndConnect drops the item and recalibrates on visibility-revoked 404', async () => {
+      useManagerStore.setState({ session: user, employees: [employeeA, employeeB] });
+      const err: ManagerError = { kind: 'not_found_or_no_permission' };
+      // manager_get_connection_info rejects with the revoked error
+      mockedInvoke.mockRejectedValueOnce(err);
+      // the calibration refetch returns the now-filtered server list
+      mockedInvoke.mockResolvedValueOnce([employeeB]);
+
+      await expect(
+        useManagerStore.getState().selectEmployeeAndConnect(employeeA.id),
+      ).rejects.toEqual(err);
+
+      // 列表已剔除不可见项 + refetch 校准
+      await vi.waitFor(() =>
+        expect(useManagerStore.getState().employees).toEqual([employeeB]),
+      );
+      expect(mockedInvoke).toHaveBeenCalledWith('manager_list_digital_employees');
     });
   });
 

@@ -22,6 +22,11 @@ pub const BASE_URL_ENV: &str = "TFRS_MANAGER_BASE_URL";
 /// keychain 中 Manager JWT 条目的用户名前缀；实际 key 为 `manager_jwt:{sha256(base_url)[..16]}`。
 const KEYCHAIN_KEY_PREFIX: &str = "manager_jwt:";
 
+/// TFRM-167 落地的权限失效错误码：业务接口对「不可见 / 已变更」资源返回 HTTP 404，
+/// 同时在响应体顶层带 `errorCode = ERR_NOT_FOUND_OR_NO_PERMISSION`。
+/// 数字 `code=404` 与 `message` 不变，仅新增此 `errorCode` 字段。
+pub const ERR_NOT_FOUND_OR_NO_PERMISSION: &str = "ERR_NOT_FOUND_OR_NO_PERMISSION";
+
 // ───────────────────────── 错误 ─────────────────────────
 
 /// 面向前端的错误分类。`serde` 采用 `tag + content` 让 UI 可按 `kind` 分支。
@@ -50,6 +55,12 @@ pub enum ManagerError {
     /// 404：资源不存在（机器人已删除 / id 错误）。
     #[error("Not found")]
     NotFound,
+
+    /// 404 + 顶层 `errorCode = ERR_NOT_FOUND_OR_NO_PERMISSION`：资源不可见或权限被回收
+    /// （典型场景：部门调岗后该机器人对当前 viewer 不再可见）。
+    /// 前端据此清本地缓存 + refetch + 从列表剔除该项（TFRM-56）。
+    #[error("Not found or no permission (visibility revoked)")]
+    NotFoundOrNoPermission,
 
     /// 其他 HTTP 非成功状态。
     #[error("HTTP {status}: {body}")]
@@ -195,6 +206,30 @@ pub enum LoginResult {
     AccountSelectionRequired { accounts: Vec<AccountOption> },
 }
 
+/// 部门祖先链元素（`departments[].ancestors[]` 元素）。
+/// 根→叶有序，末元素即本部门；按序 join `name` 即面包屑。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DepartmentAncestor {
+    pub id: u64,
+    pub name: String,
+}
+
+/// 部门归属（`departments[]` 元素）。契约见 TFRM-167/168：
+/// - `ancestors` **含自身**、根→叶有序（如 总公司 / 研发中心 / 平台组）
+/// - `path` 与后端 `Department.Path` 同源（形如 `/1/3/7/`）
+/// - **不受可见性 flag 控制**，始终返回真实归属
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DepartmentRef {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub ancestors: Vec<DepartmentAncestor>,
+}
+
 /// 数字员工列表项（`GET /api/v1/digital-employees`，data.items 元素）。
 /// 按真实响应补全业务字段，UI 可展示；未列出的字段由 serde 自动忽略。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +253,10 @@ pub struct DigitalEmployeeBrief {
     pub namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_name: Option<String>,
+    /// 部门归属（TFRM-56：含祖先链，用于客户端面包屑展示）。
+    /// 后端保证为 `[]` 非 null；旧响应缺字段时 serde 默认空 vec（向后兼容）。
+    #[serde(default)]
+    pub departments: Vec<DepartmentRef>,
 }
 
 /// connection-info 响应 data 体（`GET /api/v1/digital-employees/{id}/connection-info`）。
@@ -381,7 +420,15 @@ impl ManagerClient {
                 ManagerError::Unauthorized
             }
             StatusCode::FORBIDDEN => ManagerError::Forbidden,
-            StatusCode::NOT_FOUND => ManagerError::NotFound,
+            StatusCode::NOT_FOUND => {
+                // 普通 404 与「不可见/权限回收」404 同状态码，靠响应体顶层 `errorCode` 区分。
+                let body = resp.text().await.unwrap_or_default();
+                if extract_error_code(&body).as_deref() == Some(ERR_NOT_FOUND_OR_NO_PERMISSION) {
+                    ManagerError::NotFoundOrNoPermission
+                } else {
+                    ManagerError::NotFound
+                }
+            }
             StatusCode::PAYMENT_REQUIRED => {
                 let body = resp.text().await.unwrap_or_default();
                 let (message, redirect_url) = parse_payment_required(&body);
@@ -600,6 +647,21 @@ impl Default for ManagerClient {
     }
 }
 
+/// 从响应体提取顶层 `errorCode`（TFRM-167：用于区分权限失效 404 与普通 404）。
+/// body 非 JSON 或无该字段时返回 None（回退为普通 404 语义，向后兼容）。
+fn extract_error_code(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ErrorCodeProbe {
+        #[serde(default)]
+        error_code: Option<String>,
+    }
+    serde_json::from_str::<ErrorCodeProbe>(body)
+        .ok()
+        .and_then(|p| p.error_code)
+        .filter(|s| !s.is_empty())
+}
+
 fn strip_trailing_slash(url: String) -> String {
     if url.ends_with('/') {
         url.trim_end_matches('/').to_string()
@@ -769,6 +831,72 @@ mod tests {
             serde_json::from_str(json).unwrap();
         assert_eq!(env.data.total, 0);
         assert!(env.data.items.is_empty());
+    }
+
+    #[test]
+    fn digital_employee_brief_deserializes_departments_with_ancestors() {
+        // TFRM-167/168 契约：departments[].ancestors 含自身、根→叶有序。
+        let json = r#"{
+            "id": 11, "name": "客服机器人", "robotId": "r-1",
+            "departments": [{
+                "id": 7, "name": "平台组", "path": "/1/3/7/",
+                "ancestors": [
+                    {"id": 1, "name": "总公司"},
+                    {"id": 3, "name": "研发中心"},
+                    {"id": 7, "name": "平台组"}
+                ]
+            }]
+        }"#;
+        let emp: DigitalEmployeeBrief = serde_json::from_str(json).unwrap();
+        assert_eq!(emp.departments.len(), 1);
+        let dept = &emp.departments[0];
+        assert_eq!(dept.id, 7);
+        assert_eq!(dept.path, "/1/3/7/");
+        assert_eq!(dept.ancestors.len(), 3);
+        assert_eq!(dept.ancestors[0].name, "总公司");
+        assert_eq!(dept.ancestors[2].name, "平台组");
+        // 面包屑 = ancestors.name join " / "
+        let crumb: Vec<&str> = dept.ancestors.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(crumb.join(" / "), "总公司 / 研发中心 / 平台组");
+    }
+
+    #[test]
+    fn digital_employee_brief_defaults_empty_departments_when_field_absent() {
+        // 旧响应 / flag-off 且未回填：缺 departments 字段 → 空 vec，不应反序列化失败。
+        let json = r#"{"id": 12, "name": "robot-2"}"#;
+        let emp: DigitalEmployeeBrief = serde_json::from_str(json).unwrap();
+        assert!(emp.departments.is_empty());
+    }
+
+    #[test]
+    fn extract_error_code_picks_up_visibility_revoked_marker() {
+        // 顶层 errorCode（camelCase），数字 code 与 message 不影响提取。
+        let body =
+            r#"{"code":404,"message":"not found","errorCode":"ERR_NOT_FOUND_OR_NO_PERMISSION"}"#;
+        assert_eq!(
+            extract_error_code(body).as_deref(),
+            Some(ERR_NOT_FOUND_OR_NO_PERMISSION)
+        );
+    }
+
+    #[test]
+    fn extract_error_code_returns_none_for_plain_404_and_non_json() {
+        // 普通 404（无 errorCode）→ None → 上层落普通 NotFound
+        assert!(extract_error_code(r#"{"code":404,"message":"not found","data":null}"#).is_none());
+        // 空 errorCode 视为无标记
+        assert!(extract_error_code(r#"{"errorCode":""}"#).is_none());
+        // 非 JSON body 不应 panic
+        assert!(extract_error_code("plain text 404").is_none());
+        assert!(extract_error_code("").is_none());
+    }
+
+    #[test]
+    fn not_found_or_no_permission_serializes_with_kind_tag() {
+        let v = serde_json::to_value(ManagerError::NotFoundOrNoPermission).unwrap();
+        assert_eq!(
+            v.get("kind").and_then(|x| x.as_str()),
+            Some("not_found_or_no_permission")
+        );
     }
 
     #[test]
