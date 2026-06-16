@@ -168,6 +168,7 @@ fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConf
         tool_meta: HashMap::new(),
         default_tool_meta: None,
         vrl: None,
+        env_file: None,
         server_parameters: StdioServerParameters {
             command: server.command.clone(),
             args: server.args.clone(),

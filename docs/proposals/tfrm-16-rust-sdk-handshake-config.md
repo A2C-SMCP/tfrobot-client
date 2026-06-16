@@ -12,7 +12,7 @@
 
 > **状态：已实现 + 已验收**（更新于 2026-04-25）
 > - rust-sdk @ workspace 0.1.15，`SmcpComputerClientBuilder` + 默认 `access_token` + Agent 对称修改全部到位
-> - tfrobot-client 侧验收：7/7 acceptance tests pass（`cargo test --test smcp_handshake_config_test --features verify-smcp-0-1-15`）
+> - tfrobot-client 侧验收：7/7 acceptance tests pass（当前 feature：`cargo test --test smcp_handshake_config_test --features verify-smcp-0-2-2`）
 > - TFRM-16 Jira 不关闭：仍待 UI 改造、Manager 集成、指数退避、跨 SDK 协议版本对齐 4 项子任务（见 §5 非目标）
 
 ---
@@ -262,16 +262,16 @@ version = "0.1.15"  # was 0.1.14
 
 ## 6. 验收方式
 
-tfrobot-client 侧已提交验收测试用例 `src-tauri/tests/smcp_handshake_config_test.rs`，由 Cargo feature `verify-smcp-0-1-15` 门控（默认关闭，不影响现有 CI）。
+tfrobot-client 侧已提交验收测试用例 `src-tauri/tests/smcp_handshake_config_test.rs`，由 Cargo feature `verify-smcp-0-2-2` 门控（默认关闭，不影响现有 CI）。
 
 **验收流程**（rust-sdk 工程师完成实现后）：
 
-1. rust-sdk 发布 `smcp-computer` v0.1.15 到 crates.io。
-2. tfrobot-client 维护者在 `src-tauri/Cargo.toml` 将 `smcp-computer` 升级到 `0.1.15`。
+1. rust-sdk 发布 `smcp-computer` v0.2.2 到 crates.io。
+2. tfrobot-client 维护者在 `src-tauri/Cargo.toml` 将 `smcp-computer` 升级到 `0.2.2`。
 3. 运行：
    ```bash
    cd /Users/jqq/RustroverProjects/tfrobot-client/src-tauri
-   cargo test --test smcp_handshake_config_test --features verify-smcp-0-1-15
+   cargo test --test smcp_handshake_config_test --features verify-smcp-0-2-2
    ```
 4. 7 个用例全绿 → 在 TFRM-16 评论区确认验收通过。
 5. TFRM-16 **不关闭**（还有 UI、Manager 集成等未完成子项）。

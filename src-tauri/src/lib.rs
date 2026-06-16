@@ -2,7 +2,7 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
-use commands::connection::ConnectionState;
+use commands::connection::{close_smcp_connection, ConnectionState};
 use services::config::ConfigService;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
@@ -248,9 +248,12 @@ pub fn run() {
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
                     // Disconnect SMCP if connected
-                    let mut conn = state.connection.write().await;
-                    if let Some(connection) = conn.take() {
-                        let _ = connection.client.leave_office(&connection.office_id).await;
+                    let existing_connection = {
+                        let mut conn = state.connection.write().await;
+                        conn.take()
+                    };
+                    if let Some(connection) = existing_connection {
+                        close_smcp_connection(connection).await;
                     }
                     // Stop all MCP servers
                     let lock = state.manager.read().await;
