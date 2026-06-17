@@ -206,6 +206,8 @@
     "openRootFailed": "Failed to open skills folder",
     "openFolderFailed": "Failed to open skill folder",
     "openFileFailed": "Failed to open SKILL.md",
+    "sync": "Sync",
+    "syncFailed": "Failed to sync skills",
     "empty": "No skills found",
     "subtitle": "Manage local skills and preview their SKILL.md content.",
     "previewTitle": "SKILL.md Preview",
@@ -219,6 +221,23 @@
     "previewAction": "Preview",
     "folderAction": "Folder",
     "openFile": "Open File",
+    "summary": {
+      "title": "Skill sync summary",
+      "localSynced": "Local synced: {{count}}",
+      "mcpSynced": "MCP synced: {{count}}",
+      "skipped": "Skipped: {{count}}",
+      "conflicts": "Conflicts: {{count}}"
+    },
+    "conflicts": {
+      "title": "Skill sync conflicts",
+      "description": "Some skills were not exposed to robot because their full protocol name was already loaded.",
+      "item": "{{skill}}: kept {{kept}}, ignored {{ignored}} ({{reason}})"
+    },
+    "skipped": {
+      "title": "Skipped skills",
+      "description": "These skills were found locally but were not exposed to robot.",
+      "item": "{{skill}} ({{source}}): {{reason}}"
+    },
     "columns": {
       "name": "Name",
       "path": "Path",
@@ -305,12 +324,19 @@
     "notInstalled": "Not Installed",
     "notDetected": "Not detected",
     "installGuide": "Install Guide",
-    "pathConfig": "PATH Configuration",
+    "pathConfig": "Path Configuration",
     "pathDescription": "Directories for finding commands like node, uvx, npx. Leave empty to use the auto-detected PATH from your shell.",
     "pathPlaceholder": "Leave empty to use auto-detected PATH",
     "resetPath": "Reset to Auto-detected",
+    "computerConfig": "Computer Configuration",
+    "computerName": "Computer Name",
+    "computerNameDescription": "Stable name exposed to SMCP for this local Computer runtime. Defaults to tfrobot-client.",
     "skillsRootDir": "Skills Root Directory",
     "skillsRootDirDescription": "Local directory used to load skills. Defaults to ~/.a2c/skills.",
+    "skillsRootChangeConfirmTitle": "Changing the skills root rebuilds the runtime",
+    "skillsRootChangeConfirmDescription": "If SMCP is connected, a successful change will disconnect the current session. Reconnect after the runtime is rebuilt.",
+    "runtimeRebuildConfirmTitle": "Changing this setting rebuilds the runtime",
+    "runtimeRebuildConfirmDescription": "If SMCP is connected, a successful change will disconnect the current session. Reconnect after the runtime is rebuilt.",
     "customPaths": "Custom Paths",
     "logRetention": "Log Retention",
     "days": "days",

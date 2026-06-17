@@ -1,9 +1,7 @@
+use crate::services::settings::default_computer_name;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use tokio::time::{timeout, Duration};
-
-const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connection Profile stored to disk (API Key stored separately in Keychain)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +44,13 @@ pub struct ConnectionStatusInfo {
 /// List all saved connection profiles
 #[tauri::command]
 pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ConnectionProfile>, String> {
-    state.config.load_profiles().map_err(|e| e.to_string())
+    Ok(state
+        .config
+        .load_profiles()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(normalize_profile)
+        .collect())
 }
 
 /// Save (create or update) a connection profile
@@ -56,10 +60,10 @@ pub async fn save_profile(
     profile: ConnectionProfile,
     api_key: Option<String>,
 ) -> Result<(), String> {
+    let profile = normalize_profile(profile);
     let name = profile.name.clone();
     log::info!("Saving connection profile: {}", name);
 
-    // Store API key in keychain if provided
     if let Some(key) = &api_key {
         if !key.is_empty() {
             let keychain_id = format!("profile:{}", name);
@@ -77,6 +81,11 @@ pub async fn save_profile(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+fn normalize_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
+    profile.computer_name = default_computer_name();
+    profile
 }
 
 /// Delete a connection profile
@@ -97,7 +106,7 @@ pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<
     Ok(())
 }
 
-/// Connect to SMCP server using a saved profile
+/// Connect the shared app Computer to SMCP using a saved profile.
 #[tauri::command]
 pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> Result<(), String> {
     connect_smcp_core(&state, profile_name).await
@@ -113,47 +122,16 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
         .ok_or_else(|| format!("Profile not found: {}", profile_name))?
         .clone();
 
-    // Retrieve API key from keychain
     let keychain_id = format!("profile:{}", profile.name);
     let api_key =
         crate::services::keychain::get_credential(&keychain_id).map_err(|e| e.to_string())?;
 
-    // Share the same manager Arc with SmcpComputerClient
-    let manager = state.manager.clone();
-    let inputs = state.inputs.clone();
-
-    let client = smcp_computer::socketio_client::SmcpComputerClient::new(
-        &profile.url,
-        manager,
-        profile.computer_name.clone(),
-        api_key,
-        inputs,
-        Some(profile.headers.clone()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if let Err(e) = client.join_office(&profile.office_id).await {
-        disconnect_smcp_client(client, "after join_office failure").await;
-        return Err(e.to_string());
-    }
-
-    let new_connection = ConnectionState {
-        client,
-        profile_name: profile.name.clone(),
-        url: profile.url.clone(),
-        office_id: profile.office_id.clone(),
-        computer_name: profile.computer_name.clone(),
-        connected_at: chrono::Utc::now(),
-    };
-
-    let previous_connection = {
-        let mut conn = state.connection.write().await;
-        conn.replace(new_connection)
-    };
-    if let Some(connection) = previous_connection {
-        close_smcp_connection(connection).await;
-    }
+    let settings = state.settings_service.load();
+    let configs = state.config.load_configs().map_err(|e| e.to_string())?;
+    state
+        .runtime
+        .connect(&profile, &api_key, &settings, configs)
+        .await?;
 
     log::info!("Connected to SMCP server: {}", profile.url);
     let _ = state.log_service.write(
@@ -165,7 +143,7 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
     Ok(())
 }
 
-/// Disconnect from SMCP server
+/// Disconnect from SMCP and rebuild a clean local Computer runtime from saved MCP configs.
 #[tauri::command]
 pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
     disconnect_smcp_core(&state).await
@@ -174,13 +152,7 @@ pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
 async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
     log::info!("Disconnecting from SMCP server");
 
-    let existing_connection = {
-        let mut conn = state.connection.write().await;
-        conn.take()
-    };
-    if let Some(connection) = existing_connection {
-        close_smcp_connection(connection).await;
-    }
+    state.runtime.disconnect().await;
 
     let _ = state
         .log_service
@@ -188,75 +160,54 @@ async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn close_smcp_connection(connection: ConnectionState) {
-    let ConnectionState {
-        client, office_id, ..
-    } = connection;
-
-    match timeout(
-        SMCP_CONNECTION_CLOSE_TIMEOUT,
-        client.leave_office(&office_id),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log::warn!("Error leaving office: {}", e),
-        Err(_) => log::warn!(
-            "Timed out leaving SMCP office after {:?}",
-            SMCP_CONNECTION_CLOSE_TIMEOUT
-        ),
-    }
-
-    disconnect_smcp_client(client, "from SMCP server").await;
-}
-
-async fn disconnect_smcp_client(
-    client: smcp_computer::socketio_client::SmcpComputerClient,
-    context: &str,
-) {
-    match timeout(SMCP_CONNECTION_CLOSE_TIMEOUT, client.disconnect()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log::warn!("Error disconnecting {}: {}", context, e),
-        Err(_) => log::warn!(
-            "Timed out disconnecting {} after {:?}",
-            context,
-            SMCP_CONNECTION_CLOSE_TIMEOUT,
-        ),
-    }
-}
-
 /// Get current connection status
 #[tauri::command]
 pub async fn get_connection_status(
     state: State<'_, AppState>,
 ) -> Result<ConnectionStatusInfo, String> {
-    let conn = state.connection.read().await;
-    match conn.as_ref() {
-        Some(c) => Ok(ConnectionStatusInfo {
-            connected: true,
-            url: Some(c.url.clone()),
-            office_id: Some(c.office_id.clone()),
-            computer_name: Some(c.computer_name.clone()),
-            connected_at: Some(c.connected_at.to_rfc3339()),
-            profile_name: Some(c.profile_name.clone()),
-        }),
-        None => Ok(ConnectionStatusInfo {
-            connected: false,
-            url: None,
-            office_id: None,
-            computer_name: None,
-            connected_at: None,
-            profile_name: None,
-        }),
-    }
+    Ok(state.runtime.connection_status().await)
 }
 
-/// Active connection state held in AppState
-pub struct ConnectionState {
-    pub client: smcp_computer::socketio_client::SmcpComputerClient,
-    pub profile_name: String,
-    pub url: String,
-    pub office_id: String,
-    pub computer_name: String,
-    pub connected_at: chrono::DateTime<chrono::Utc>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_profile_defaults_are_explicit_in_fixture() {
+        let profile = ConnectionProfile {
+            name: "test-profile".to_string(),
+            url: "http://127.0.0.1:9".to_string(),
+            namespace: default_namespace(),
+            office_id: "test-office".to_string(),
+            computer_name: "test-computer".to_string(),
+            api_key_ref: None,
+            headers: std::collections::HashMap::new(),
+            auto_connect: default_true(),
+            auto_reconnect: default_true(),
+        };
+
+        assert_eq!(profile.namespace, "/smcp");
+        assert!(profile.auto_connect);
+        assert!(profile.auto_reconnect);
+    }
+
+    #[test]
+    fn normalize_profile_forces_default_computer_name() {
+        let profile = ConnectionProfile {
+            name: "test-profile".to_string(),
+            url: "http://127.0.0.1:9".to_string(),
+            namespace: default_namespace(),
+            office_id: "test-office".to_string(),
+            computer_name: "custom-computer".to_string(),
+            api_key_ref: None,
+            headers: std::collections::HashMap::new(),
+            auto_connect: default_true(),
+            auto_reconnect: default_true(),
+        };
+
+        assert_eq!(
+            normalize_profile(profile).computer_name,
+            crate::services::settings::default_computer_name()
+        );
+    }
 }

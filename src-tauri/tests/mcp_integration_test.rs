@@ -1,9 +1,12 @@
 //! Integration tests for MCP server management through AppState.
-//! These tests exercise the full flow: config persistence + MCPServerManager.
+//! These tests exercise the full flow: config persistence + Computer runtime.
 
 mod common;
 
-use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
+use common::{
+    create_test_app_state, echo_server_config, fastmcp_skill_server_config,
+    stderr_flood_server_config,
+};
 use smcp_computer::mcp_clients::MCPServerConfig;
 
 /// Panics if Node.js is not available — CI must have Node.js installed.
@@ -60,7 +63,7 @@ fn test_update_server_config_replaces() {
     assert_eq!(loaded.len(), 1);
 }
 
-// ── MCPServerManager lifecycle (requires Node.js) ──
+// ── Computer runtime lifecycle (requires Node.js) ──
 // Echo server uses newline-delimited JSON framing (MCP spec 2025-03-26).
 
 const MANAGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -73,21 +76,20 @@ async fn test_manager_add_and_start_server() {
     let state = create_test_app_state(tmp.path());
     let config = echo_server_config("lifecycle-test");
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config.clone()).await.unwrap();
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config.clone()).await.unwrap();
 
     // Start with timeout - may fail if echo server protocol doesn't match rmcp
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("lifecycle-test")).await {
+    match tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("lifecycle-test")).await {
         Ok(Ok(())) => {
             // Verify running
-            let statuses = mgr.get_server_status().await;
+            let statuses = computer.get_server_status().await;
             let found = statuses.iter().find(|(n, _, _)| n == "lifecycle-test");
             assert!(found.is_some());
             assert!(found.unwrap().1, "Server should be running");
 
             // Stop
-            let _ = mgr.stop_client("lifecycle-test").await;
+            let _ = computer.stop_mcp_client("lifecycle-test").await;
         }
         Ok(Err(e)) => {
             panic!("start_client failed: {e}");
@@ -106,21 +108,20 @@ async fn test_manager_list_tools_after_start() {
     let state = create_test_app_state(tmp.path());
     let config = echo_server_config("tool-list-test");
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config).await.unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("tool-list-test")).await {
+    match tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("tool-list-test")).await {
         Ok(Ok(())) => {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let tools = mgr.list_available_tools().await;
+            let tools = computer.get_available_tools().await.unwrap();
             assert!(
                 !tools.is_empty(),
                 "Expected at least one tool from echo server"
             );
             let echo_tool = tools.iter().find(|t| t.name == "echo");
             assert!(echo_tool.is_some(), "Expected 'echo' tool");
-            let _ = mgr.stop_client("tool-list-test").await;
+            let _ = computer.stop_mcp_client("tool-list-test").await;
         }
         Ok(Err(e)) => panic!("start_client failed: {e}"),
         Err(_) => panic!("start_client timed out after {MANAGER_TIMEOUT:?}"),
@@ -135,15 +136,17 @@ async fn test_manager_execute_echo_tool() {
     let state = create_test_app_state(tmp.path());
     let config = echo_server_config("echo-call-test");
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config).await.unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("echo-call-test")).await {
+    match tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("echo-call-test")).await {
         Ok(Ok(())) => {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let params = serde_json::json!({"message": "hello from test"});
-            match mgr.execute_tool("echo", params, None).await {
+            match computer
+                .execute_tool_cancellable("test-tool-call", "echo", params, None)
+                .await
+            {
                 Ok(call_result) => {
                     assert!(
                         !call_result.is_error.unwrap_or(false),
@@ -153,7 +156,62 @@ async fn test_manager_execute_echo_tool() {
                 }
                 Err(e) => panic!("Tool call failed: {e}"),
             }
-            let _ = mgr.stop_client("echo-call-test").await;
+            let _ = computer.stop_mcp_client("echo-call-test").await;
+        }
+        Ok(Err(e)) => panic!("start_client failed: {e}"),
+        Err(_) => panic!("start_client timed out after {MANAGER_TIMEOUT:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_sdk_restage_mcp_skills_does_not_collect_fastmcp_resource_layout() {
+    require_node();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    let server_name = "fastmcp-skill-test";
+    let config = fastmcp_skill_server_config(server_name);
+
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config).await.unwrap();
+
+    match tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client(server_name)).await {
+        Ok(Ok(())) => {
+            let (resources, next_cursor) = computer
+                .get_resources(server_name, None)
+                .await
+                .expect("FastMCP-style server should expose resources");
+            assert!(next_cursor.is_none());
+            assert!(
+                resources
+                    .iter()
+                    .any(|resource| resource.uri == "skill://fastmcp-demo/SKILL.md"),
+                "test server must expose the FastMCP SKILL.md resource"
+            );
+            assert!(
+                resources
+                    .iter()
+                    .any(|resource| resource.uri == "skill://fastmcp-demo/_manifest"),
+                "test server must expose the FastMCP manifest resource"
+            );
+            let registered = computer.restage_mcp_skills(Some(server_name)).await;
+            assert!(
+                registered.is_empty(),
+                "smcp-computer 0.2.2 only treats skill:// resources with _meta.source \
+                 mounted/archive/resources as skill roots; FastMCP's direct \
+                 skill://<name>/SKILL.md layout should not be registered by current SDK"
+            );
+
+            let skills = computer.get_skills().await;
+            assert!(
+                skills.iter().all(|skill| {
+                    skill.uri.as_deref() != Some("skill://fastmcp-demo/SKILL.md")
+                        && !skill.path.contains("fastmcp-demo")
+                }),
+                "FastMCP-style skill unexpectedly appeared in SDK skill registry: {skills:?}"
+            );
+
+            let _ = computer.stop_mcp_client(server_name).await;
         }
         Ok(Err(e)) => panic!("start_client failed: {e}"),
         Err(_) => panic!("start_client timed out after {MANAGER_TIMEOUT:?}"),
@@ -167,23 +225,22 @@ async fn test_manager_start_all_stop_all() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_test_app_state(tmp.path());
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
+    let computer = state.runtime.computer();
 
     // Use a single server to avoid tool name conflicts (all echo servers
     // expose the same "echo" tool, triggering ToolNameDuplicated).
     let config = echo_server_config("batch-single");
-    mgr.add_or_update_server(config).await.unwrap();
+    computer.add_or_update_server(config).await.unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_all()).await {
+    match tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("all")).await {
         Ok(Ok(())) => {
-            let statuses = mgr.get_server_status().await;
+            let statuses = computer.get_server_status().await;
             let found = statuses.iter().find(|(n, _, _)| n == "batch-single");
             assert!(found.is_some());
             assert!(found.unwrap().1, "Server should be running after start_all");
-            let _ = mgr.stop_all().await;
+            let _ = computer.stop_mcp_client("all").await;
             // Verify all stopped
-            let after = mgr.get_server_status().await;
+            let after = computer.get_server_status().await;
             assert!(
                 after.iter().all(|(_, running, _)| !*running),
                 "All servers should be stopped"
@@ -199,10 +256,10 @@ async fn test_manager_start_nonexistent_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_test_app_state(tmp.path());
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
+    let computer = state.runtime.computer();
 
-    let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("ghost-server")).await;
+    let result =
+        tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("ghost-server")).await;
     match result {
         Ok(r) => assert!(r.is_err()),
         Err(_) => { /* Timeout is acceptable — the server doesn't exist / command is invalid */ }
@@ -225,11 +282,11 @@ async fn test_manager_invalid_command_fails() {
     }))
     .unwrap();
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config).await.unwrap();
 
-    let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("bad-server")).await;
+    let result =
+        tokio::time::timeout(MANAGER_TIMEOUT, computer.start_mcp_client("bad-server")).await;
     match result {
         Ok(r) => assert!(
             r.is_err(),
@@ -478,12 +535,16 @@ async fn test_manager_stderr_flood_does_not_block() {
     let state = create_test_app_state(tmp.path());
     let config = stderr_flood_server_config("stderr-flood-test");
 
-    let lock = state.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    let computer = state.runtime.computer();
+    computer.add_or_update_server(config).await.unwrap();
 
     // Start the server — this itself may hang if stderr blocks during init.
-    match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.start_client("stderr-flood-test")).await {
+    match tokio::time::timeout(
+        STDERR_FLOOD_TIMEOUT,
+        computer.start_mcp_client("stderr-flood-test"),
+    )
+    .await
+    {
         Ok(Ok(())) => {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -491,8 +552,11 @@ async fn test_manager_stderr_flood_does_not_block() {
             // during this call, so if the pipe is not being drained this will
             // time out.
             let params = serde_json::json!({"message": "hello through stderr storm"});
-            match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.execute_tool("echo", params, None))
-                .await
+            match tokio::time::timeout(
+                STDERR_FLOOD_TIMEOUT,
+                computer.execute_tool_cancellable("test-tool-call", "echo", params, None),
+            )
+            .await
             {
                 Ok(Ok(call_result)) => {
                     assert!(
@@ -508,7 +572,7 @@ async fn test_manager_stderr_flood_does_not_block() {
                 ),
             }
 
-            let _ = mgr.stop_client("stderr-flood-test").await;
+            let _ = computer.stop_mcp_client("stderr-flood-test").await;
         }
         Ok(Err(e)) => panic!("start_client failed: {e}"),
         Err(_) => panic!(

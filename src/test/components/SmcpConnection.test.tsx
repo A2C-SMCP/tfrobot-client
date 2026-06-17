@@ -1,4 +1,4 @@
-import { render, screen } from '../helpers/render';
+import { render, screen, fireEvent } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { SmcpConnection } from '@/components/SmcpConnection';
 
@@ -75,5 +75,13 @@ describe('SmcpConnection', () => {
   it('renders add profile button', () => {
     render(<SmcpConnection />);
     expect(screen.getByText('Add Profile')).toBeInTheDocument();
+  });
+
+  it('does not expose a computer name field in the profile form', () => {
+    render(<SmcpConnection />);
+
+    fireEvent.click(screen.getByText('Add Profile'));
+
+    expect(screen.queryByText('Computer Name')).not.toBeInTheDocument();
   });
 });

@@ -20,6 +20,7 @@ export interface AppSettings {
   language: string;
   log_retention_days: number;
   custom_runtime_paths: CustomRuntimePaths;
+  computer_name: string;
   skills_root_dir: string;
   custom_path?: string | null;
 }

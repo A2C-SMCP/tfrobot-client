@@ -1,0 +1,6 @@
+{
+  "name": "fastmcp-skill-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FastMCP-style skill resource server for integration testing"
+}

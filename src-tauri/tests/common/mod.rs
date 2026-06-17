@@ -56,3 +56,23 @@ pub fn stderr_flood_server_config(name: &str) -> smcp_computer::mcp_clients::MCP
     }))
     .expect("Failed to build stderr-flood server config")
 }
+
+/// Path to the FastMCP-style skill MCP server.
+pub fn fastmcp_skill_server_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fastmcp-skill-server/index.js")
+}
+
+/// Build an MCPServerConfig for a server exposing skills as FastMCP resources.
+pub fn fastmcp_skill_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
+    let server_path = fastmcp_skill_server_path();
+    serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": name,
+        "server_parameters": {
+            "command": "node",
+            "args": [server_path.to_str().unwrap()],
+            "env": {}
+        }
+    }))
+    .expect("Failed to build FastMCP skill server config")
+}

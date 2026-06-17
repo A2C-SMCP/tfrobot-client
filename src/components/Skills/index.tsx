@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Alert, App, Button, Empty, Modal, Space, Spin, Table, Typography } from 'antd';
-import { CloseOutlined, FileTextOutlined, FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CloseOutlined, FileTextOutlined, FolderOpenOutlined, SyncOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useSkillsStore, type SkillInfo } from '@/stores/skillsStore';
 
 const { Paragraph, Text, Title } = Typography;
+
+function isLocalSkill(skill: SkillInfo | null): skill is SkillInfo {
+  return skill?.source === 'local';
+}
 
 function renderInlineCode(text: string) {
   const parts = text.split(/(`[^`]+`)/g);
@@ -99,7 +103,9 @@ export function Skills() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const {
     skills,
+    syncSummary,
     loading,
+    syncing,
     opening,
     error,
     selectedSkillPath,
@@ -107,6 +113,7 @@ export function Skills() {
     previewLoading,
     previewError,
     fetchSkills,
+    syncSkills,
     openSkillsRoot,
     openSkillFolder,
     openSkillMarkdownFile,
@@ -119,12 +126,22 @@ export function Skills() {
 
   const selectedSkill = skills.find((skill) => skill.path === selectedSkillPath) ?? null;
   const selectedMarkdown = selectedSkill ? markdownByPath[selectedSkill.path] : undefined;
+  const conflicts = syncSummary?.ignored_conflicts ?? [];
+  const skipped = syncSummary?.skipped ?? [];
 
   const handleOpenRoot = async () => {
     try {
       await openSkillsRoot();
     } catch {
       message.error(t('skills.openRootFailed'));
+    }
+  };
+
+  const handleSyncSkills = async () => {
+    try {
+      await syncSkills();
+    } catch {
+      message.error(t('skills.syncFailed'));
     }
   };
 
@@ -214,9 +231,7 @@ export function Skills() {
       dataIndex: 'source',
       key: 'source',
       width: 140,
-      render: (source: string) => (
-        <Text type="secondary">{source === 'local' ? t('skills.sources.local') : source}</Text>
-      ),
+      render: (source: string) => <Text type="secondary">{source}</Text>,
     },
     {
       title: t('skills.columns.actions'),
@@ -232,13 +247,15 @@ export function Skills() {
           >
             {t('skills.previewAction')}
           </Button>
-          <Button
-            size="small"
-            icon={<FolderOpenOutlined />}
-            onClick={() => void handleOpenSkillFolder(skill)}
-          >
-            {t('skills.folderAction')}
-          </Button>
+          {isLocalSkill(skill) && (
+            <Button
+              size="small"
+              icon={<FolderOpenOutlined />}
+              onClick={() => void handleOpenSkillFolder(skill)}
+            >
+              {t('skills.folderAction')}
+            </Button>
+          )}
         </Space>
       ),
     },
@@ -263,11 +280,11 @@ export function Skills() {
         </div>
         <Space>
           <Button
-            icon={<ReloadOutlined />}
-            onClick={() => fetchSkills()}
-            loading={loading}
+            icon={<SyncOutlined />}
+            onClick={() => void handleSyncSkills()}
+            loading={syncing}
           >
-            {t('common.refresh')}
+            {t('skills.sync')}
           </Button>
           <Button
             icon={<FolderOpenOutlined />}
@@ -286,6 +303,70 @@ export function Skills() {
           type="error"
           showIcon
           closable
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {syncSummary && (
+        <Alert
+          message={t('skills.summary.title')}
+          description={
+            <Space size={16} wrap>
+              <Text>{t('skills.summary.localSynced', { count: syncSummary.local_synced })}</Text>
+              <Text>{t('skills.summary.mcpSynced', { count: syncSummary.mcp_synced })}</Text>
+              <Text>{t('skills.summary.skipped', { count: skipped.length })}</Text>
+              <Text>{t('skills.summary.conflicts', { count: conflicts.length })}</Text>
+            </Space>
+          }
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {conflicts.length > 0 && (
+        <Alert
+          message={t('skills.conflicts.title')}
+          description={
+            <Space direction="vertical" size={4}>
+              <Text>{t('skills.conflicts.description')}</Text>
+              {conflicts.map((conflict) => (
+                <Text key={`${conflict.ignored_name}:${conflict.reason}`}>
+                  {t('skills.conflicts.item', {
+                    skill: conflict.skill_name,
+                    kept: conflict.kept_name,
+                    ignored: conflict.ignored_name,
+                    reason: conflict.reason,
+                  })}
+                </Text>
+              ))}
+            </Space>
+          }
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {skipped.length > 0 && (
+        <Alert
+          message={t('skills.skipped.title')}
+          description={
+            <Space direction="vertical" size={4}>
+              <Text>{t('skills.skipped.description')}</Text>
+              {skipped.map((entry) => (
+                <Text key={`${entry.source}:${entry.skill_name}:${entry.reason}`}>
+                  {t('skills.skipped.item', {
+                    skill: entry.skill_name,
+                    source: entry.source,
+                    reason: entry.reason,
+                  })}
+                </Text>
+              ))}
+            </Space>
+          }
+          type="warning"
+          showIcon
           style={{ marginBottom: 16 }}
         />
       )}
@@ -309,14 +390,18 @@ export function Skills() {
           <Button key="close" onClick={() => setPreviewOpen(false)}>
             {t('common.close')}
           </Button>,
-          <Button
-            key="open"
-            type="primary"
-            disabled={!selectedSkill?.has_skill_md}
-            onClick={() => void handleOpenMarkdownFile()}
-          >
-            {t('skills.openFile')}
-          </Button>,
+          ...(isLocalSkill(selectedSkill)
+            ? [
+                <Button
+                  key="open"
+                  type="primary"
+                  disabled={!selectedSkill.has_skill_md}
+                  onClick={() => void handleOpenMarkdownFile()}
+                >
+                  {t('skills.openFile')}
+                </Button>,
+              ]
+            : []),
         ]}
       >
         <div style={{ maxHeight: '62vh', overflow: 'auto', padding: '8px 0' }}>

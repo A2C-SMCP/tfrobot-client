@@ -1,17 +1,20 @@
 import { render, screen, fireEvent } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Skills } from '@/components/Skills';
-import type { SkillInfo } from '@/stores/skillsStore';
+import type { SkillInfo, SkillSyncSummary } from '@/stores/skillsStore';
 
 const mocks = vi.hoisted(() => ({
   fetchSkills: vi.fn(),
+  syncSkills: vi.fn(),
   openSkillsRoot: vi.fn(),
   openSkillFolder: vi.fn(),
   openSkillMarkdownFile: vi.fn(),
   selectSkill: vi.fn(),
   store: {
     skills: [] as SkillInfo[],
+    syncSummary: null as SkillSyncSummary | null,
     loading: false,
+    syncing: false,
     opening: false,
     error: null as string | null,
     rootPath: null as string | null,
@@ -26,6 +29,7 @@ vi.mock('@/stores/skillsStore', () => ({
   useSkillsStore: vi.fn(() => ({
     ...mocks.store,
     fetchSkills: mocks.fetchSkills,
+    syncSkills: mocks.syncSkills,
     openSkillsRoot: mocks.openSkillsRoot,
     openSkillFolder: mocks.openSkillFolder,
     openSkillMarkdownFile: mocks.openSkillMarkdownFile,
@@ -39,16 +43,19 @@ const mockSkills: SkillInfo[] = [
     path: '/tmp/skills/alpha',
     skill_md_path: '/tmp/skills/alpha/SKILL.md',
     has_skill_md: true,
+    is_skill: true,
     description: 'Alpha skill description',
     source: 'local',
   },
   {
-    name: 'beta',
-    path: '/tmp/skills/beta',
-    skill_md_path: '/tmp/skills/beta/SKILL.md',
-    has_skill_md: false,
-    description: null,
-    source: 'local',
+    name: 'mcp:tfrobot-tools:image-gen',
+    path: '/tmp/runtime-skill-home/mcp/tfrobot-tools/image-gen',
+    skill_md_path: '/tmp/runtime-skill-home/mcp/tfrobot-tools/image-gen/SKILL.md',
+    has_skill_md: true,
+    is_skill: true,
+    description: 'Image generation',
+    source: 'mcp:tfrobot-tools',
+    uri: 'skill://tfrobot-tools/image-gen',
   },
 ];
 
@@ -56,7 +63,9 @@ describe('Skills', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.store.skills = [];
+    mocks.store.syncSummary = null;
     mocks.store.loading = false;
+    mocks.store.syncing = false;
     mocks.store.opening = false;
     mocks.store.error = null;
     mocks.store.rootPath = null;
@@ -65,6 +74,7 @@ describe('Skills', () => {
     mocks.store.previewLoading = false;
     mocks.store.previewError = null;
     mocks.fetchSkills.mockResolvedValue(undefined);
+    mocks.syncSkills.mockResolvedValue(undefined);
     mocks.openSkillsRoot.mockResolvedValue(undefined);
     mocks.openSkillFolder.mockResolvedValue(undefined);
     mocks.openSkillMarkdownFile.mockResolvedValue(undefined);
@@ -75,6 +85,14 @@ describe('Skills', () => {
     render(<Skills />);
 
     expect(mocks.fetchSkills).toHaveBeenCalled();
+  });
+
+  it('syncs skills on explicit sync action', () => {
+    render(<Skills />);
+
+    fireEvent.click(screen.getByRole('button', { name: /sync/i }));
+
+    expect(mocks.syncSkills).toHaveBeenCalled();
   });
 
   it('renders empty state', () => {
@@ -90,9 +108,10 @@ describe('Skills', () => {
 
     expect(screen.getByText('alpha')).toBeInTheDocument();
     expect(screen.getByText('Alpha skill description')).toBeInTheDocument();
-    expect(screen.getAllByText('Local').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('beta')).toBeInTheDocument();
-    expect(screen.getByText('No description')).toBeInTheDocument();
+    expect(screen.getByText('local')).toBeInTheDocument();
+    expect(screen.getByText('mcp:tfrobot-tools:image-gen')).toBeInTheDocument();
+    expect(screen.getByText('Image generation')).toBeInTheDocument();
+    expect(screen.getByText('mcp:tfrobot-tools')).toBeInTheDocument();
   });
 
   it('does not render status management UI', () => {
@@ -104,12 +123,10 @@ describe('Skills', () => {
     expect(screen.queryByText('Disable')).not.toBeInTheDocument();
   });
 
-  it('refreshes skills', () => {
+  it('does not render a separate refresh action', () => {
     render(<Skills />);
 
-    fireEvent.click(screen.getByText('Refresh'));
-
-    expect(mocks.fetchSkills).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Refresh')).not.toBeInTheDocument();
   });
 
   it('opens skills root', () => {
@@ -128,6 +145,14 @@ describe('Skills', () => {
     fireEvent.click(screen.getAllByText('Folder')[0]);
 
     expect(mocks.openSkillFolder).toHaveBeenCalledWith(mockSkills[0]);
+  });
+
+  it('does not expose folder action for MCP skills', () => {
+    mocks.store.skills = mockSkills;
+
+    render(<Skills />);
+
+    expect(screen.getAllByText('Folder')).toHaveLength(1);
   });
 
   it('selects a skill when preview action is clicked', () => {
@@ -159,12 +184,12 @@ describe('Skills', () => {
 
   it('renders missing SKILL.md preview state', () => {
     mocks.store.skills = mockSkills;
-    mocks.store.selectedSkillPath = '/tmp/skills/beta';
+    mocks.store.selectedSkillPath = '/tmp/skills/alpha';
     mocks.store.previewError = 'missing_skill_md';
 
     render(<Skills />);
 
-    fireEvent.click(screen.getAllByText('Preview')[1]);
+    fireEvent.click(screen.getAllByText('Preview')[0]);
 
     expect(screen.getByText('This skill does not have a SKILL.md file')).toBeInTheDocument();
   });
@@ -200,6 +225,84 @@ describe('Skills', () => {
     render(<Skills />);
 
     expect(screen.getByText('Skills root directory does not exist')).toBeInTheDocument();
+  });
+
+  it('renders skill sync conflicts', () => {
+    mocks.store.syncSummary = {
+      local_synced: 1,
+      mcp_synced: 0,
+      ignored_conflicts: [
+        {
+          skill_name: 'code-review',
+          kept_source: 'user',
+          kept_name: 'code-review',
+          ignored_source: 'user',
+          ignored_name: 'code-review',
+          reason: 'same full protocol skill name; keeping first loaded',
+        },
+      ],
+      skipped: [],
+    };
+
+    render(<Skills />);
+
+    expect(screen.getByText('Skill sync conflicts')).toBeInTheDocument();
+    expect(screen.getByText(/kept code-review/)).toBeInTheDocument();
+  });
+
+  it('renders skill sync skipped entries and summary counts', () => {
+    mocks.store.syncSummary = {
+      local_synced: 2,
+      mcp_synced: 1,
+      ignored_conflicts: [],
+      skipped: [
+        {
+          skill_name: 'body-only',
+          source: 'user',
+          reason: 'missing frontmatter description',
+        },
+      ],
+    };
+
+    render(<Skills />);
+
+    expect(screen.getByText('Skill sync summary')).toBeInTheDocument();
+    expect(screen.getByText('Local synced: 2')).toBeInTheDocument();
+    expect(screen.getByText('MCP synced: 1')).toBeInTheDocument();
+    expect(screen.getByText('Skipped: 1')).toBeInTheDocument();
+    expect(screen.getByText('Conflicts: 0')).toBeInTheDocument();
+    expect(screen.getByText('Skipped skills')).toBeInTheDocument();
+    expect(screen.getByText(/body-only/)).toBeInTheDocument();
+    expect(screen.getByText(/missing frontmatter description/)).toBeInTheDocument();
+  });
+
+  it('renders skill sync conflicts and skipped entries together', () => {
+    mocks.store.syncSummary = {
+      local_synced: 0,
+      mcp_synced: 0,
+      ignored_conflicts: [
+        {
+          skill_name: 'code-review',
+          kept_source: 'marketplace',
+          kept_name: 'code-review',
+          ignored_source: 'user',
+          ignored_name: 'code-review',
+          reason: 'same full protocol skill name; keeping first loaded',
+        },
+      ],
+      skipped: [
+        {
+          skill_name: 'body-only',
+          source: 'user',
+          reason: 'missing frontmatter description',
+        },
+      ],
+    };
+
+    render(<Skills />);
+
+    expect(screen.getByText('Skill sync conflicts')).toBeInTheDocument();
+    expect(screen.getByText('Skipped skills')).toBeInTheDocument();
   });
 
   it('shows loading state', () => {

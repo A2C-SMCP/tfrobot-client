@@ -12,6 +12,7 @@ const mockSkills: SkillInfo[] = [
     path: '/tmp/skills/demo-skill',
     skill_md_path: '/tmp/skills/demo-skill/SKILL.md',
     has_skill_md: true,
+    is_skill: true,
     description: 'Demo skill description',
     source: 'local',
   },
@@ -24,6 +25,14 @@ describe('Skills workflow integration', () => {
     mockedInvoke.mockImplementation((command, args) => {
       if (command === 'list_skills') {
         return Promise.resolve(mockSkills);
+      }
+      if (command === 'refresh_skill_sync_summary') {
+        return Promise.resolve({
+          local_synced: 0,
+          mcp_synced: 0,
+          ignored_conflicts: [],
+          skipped: [],
+        });
       }
       if (command === 'read_skill_markdown') {
         expect(args).toEqual({ skillPath: '/tmp/skills/demo-skill' });
@@ -45,12 +54,19 @@ describe('Skills workflow integration', () => {
 
     await screen.findByText('demo-skill');
     expect(mockedInvoke).toHaveBeenCalledWith('list_skills');
+    expect(
+      mockedInvoke.mock.calls.some(([command]) => command === 'refresh_skill_sync_summary')
+    ).toBe(false);
     expect(screen.getByText('Demo skill description')).toBeInTheDocument();
-    expect(screen.getByText('Local')).toBeInTheDocument();
+    expect(screen.getByText('local')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Refresh'));
+    fireEvent.click(screen.getByRole('button', { name: /sync/i }));
     await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledTimes(2);
+      expect(mockedInvoke).toHaveBeenCalledWith('refresh_skill_sync_summary');
+      expect(
+        mockedInvoke.mock.calls.filter(([command]) => command === 'list_skills')
+      ).toHaveLength(2);
     });
 
     fireEvent.click(screen.getByText('Open Root Folder'));

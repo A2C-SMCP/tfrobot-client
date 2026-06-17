@@ -1,5 +1,6 @@
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use smcp_computer::computer::ToolCallRecord;
 use smcp_computer::mcp_clients::model::{CallToolResult, Tool};
 use tauri::State;
 
@@ -45,11 +46,12 @@ pub struct ToolCallHistoryRecord {
 /// Get all available tools from running MCP servers
 #[tauri::command]
 pub async fn get_available_tools(state: State<'_, AppState>) -> Result<Vec<ToolInfo>, String> {
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    let tools: Vec<Tool> = mgr.list_available_tools().await;
+    let tools: Vec<Tool> = state
+        .runtime
+        .computer()
+        .get_available_tools()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let result = tools
         .into_iter()
@@ -97,15 +99,13 @@ pub async fn execute_tool(
 ) -> Result<ToolCallResponse, String> {
     log::info!("Executing tool: {}", tool_name);
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-
     let start = std::time::Instant::now();
-    let duration_timeout = timeout.map(std::time::Duration::from_secs_f64);
 
-    let result = mgr.execute_tool(&tool_name, params, duration_timeout).await;
+    let result = state
+        .runtime
+        .computer()
+        .execute_tool_cancellable("debug-tool-call", &tool_name, params, timeout)
+        .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match result {
@@ -149,9 +149,55 @@ pub async fn execute_tool(
 pub async fn get_tool_history(
     state: State<'_, AppState>,
 ) -> Result<Vec<ToolCallHistoryRecord>, String> {
-    // Tool history is tracked in Computer struct, but we're using MCPServerManager directly.
-    // For now, return empty - will be populated when we track calls locally.
-    // TODO: Integrate with Computer's tool history tracking
-    let _ = state;
-    Ok(vec![])
+    let history = state
+        .runtime
+        .computer()
+        .get_tool_history()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(history.into_iter().map(tool_call_history_record).collect())
+}
+
+fn tool_call_history_record(record: ToolCallRecord) -> ToolCallHistoryRecord {
+    ToolCallHistoryRecord {
+        timestamp: record.timestamp.to_rfc3339(),
+        req_id: record.req_id,
+        server: record.server,
+        tool: record.tool,
+        parameters: record.parameters,
+        timeout: record.timeout,
+        success: record.success,
+        error: record.error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn tool_history_record_maps_computer_history_contract() {
+        let record = ToolCallRecord {
+            timestamp: chrono::Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap(),
+            req_id: "req-1".to_string(),
+            server: "server-a".to_string(),
+            tool: "echo".to_string(),
+            parameters: serde_json::json!({"message": "hello"}),
+            timeout: Some(1.5),
+            success: true,
+            error: None,
+        };
+
+        let mapped = tool_call_history_record(record);
+
+        assert_eq!(mapped.timestamp, "2026-06-16T12:00:00+00:00");
+        assert_eq!(mapped.req_id, "req-1");
+        assert_eq!(mapped.server, "server-a");
+        assert_eq!(mapped.tool, "echo");
+        assert_eq!(mapped.parameters, serde_json::json!({"message": "hello"}));
+        assert_eq!(mapped.timeout, Some(1.5));
+        assert!(mapped.success);
+        assert!(mapped.error.is_none());
+    }
 }

@@ -206,6 +206,8 @@
     "openRootFailed": "打开 Skills 文件夹失败",
     "openFolderFailed": "打开 Skill 文件夹失败",
     "openFileFailed": "打开 SKILL.md 失败",
+    "sync": "同步",
+    "syncFailed": "同步 Skills 失败",
     "empty": "未找到 Skills",
     "subtitle": "管理本地 Skills，预览说明并打开对应内容",
     "previewTitle": "SKILL.md 预览",
@@ -219,11 +221,28 @@
     "previewAction": "预览",
     "folderAction": "文件夹",
     "openFile": "打开文件",
+    "summary": {
+      "title": "Skill 同步摘要",
+      "localSynced": "本地已同步：{{count}}",
+      "mcpSynced": "MCP 已同步：{{count}}",
+      "skipped": "已跳过：{{count}}",
+      "conflicts": "冲突：{{count}}"
+    },
+    "conflicts": {
+      "title": "Skill 同步冲突",
+      "description": "部分 Skill 因完整协议名已被先加载项占用，未暴露给 robot。",
+      "item": "{{skill}}：保留 {{kept}}，忽略 {{ignored}}（{{reason}}）"
+    },
+    "skipped": {
+      "title": "已跳过的 Skills",
+      "description": "这些 Skill 已在本地发现，但未暴露给 robot。",
+      "item": "{{skill}}（{{source}}）：{{reason}}"
+    },
     "columns": {
       "name": "名称",
       "path": "路径",
       "skillMd": "SKILL.md",
-      "description": "Description",
+      "description": "描述",
       "source": "来源",
       "actions": "操作"
     },
@@ -309,8 +328,15 @@
     "pathDescription": "用于查找 node、uvx、npx 等命令的目录列表。留空则使用从 Shell 自动检测的 PATH。",
     "pathPlaceholder": "留空使用自动检测的 PATH",
     "resetPath": "重置为自动检测",
+    "computerConfig": "Computer 配置",
+    "computerName": "Computer 名称",
+    "computerNameDescription": "此本地 Computer runtime 暴露给 SMCP 的稳定名称，默认使用 tfrobot-client。",
     "skillsRootDir": "Skills 根目录",
     "skillsRootDirDescription": "用于加载本地 skills 的目录，默认使用 ~/.a2c/skills。",
+    "skillsRootChangeConfirmTitle": "修改 Skills 根目录会重建运行时",
+    "skillsRootChangeConfirmDescription": "如果当前已连接 SMCP，修改成功后会断开当前会话。运行时重建完成后需要重新连接。",
+    "runtimeRebuildConfirmTitle": "修改此设置会重建运行时",
+    "runtimeRebuildConfirmDescription": "如果当前已连接 SMCP，修改成功后会断开当前会话。运行时重建完成后需要重新连接。",
     "customPaths": "自定义路径",
     "logRetention": "日志保留天数",
     "days": "天",

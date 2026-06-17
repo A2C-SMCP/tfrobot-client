@@ -1,20 +1,16 @@
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
-use smcp_computer::mcp_clients::manager::MCPServerManager;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::socketio_client::SmcpComputerClient;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
-use tfrobot_client_lib::commands::connection::{
-    close_smcp_connection, connect_smcp_core, ConnectionProfile, ConnectionState,
-};
+use tfrobot_client_lib::commands::connection::{connect_smcp_core, ConnectionProfile};
+use tfrobot_client_lib::commands::settings::update_settings_core;
+use tfrobot_client_lib::services::settings::{AppSettings, SettingsService};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use tower::service_fn;
 use tower::Layer;
@@ -22,8 +18,12 @@ use tower::Layer;
 #[allow(dead_code)]
 mod common;
 
+const CLIENT_GET_TOOLS: &str = "client:get_tools";
 const SERVER_JOIN_OFFICE: &str = "server:join_office";
 const SERVER_LEAVE_OFFICE: &str = "server:leave_office";
+const SERVER_UPDATE_SKILLS: &str = "server:update_skills";
+const CLIENT_GET_SKILLS: &str = "client:get_skills";
+const CLIENT_GET_SKILL: &str = "client:get_skill";
 
 #[derive(Default)]
 struct SocketStats {
@@ -31,6 +31,7 @@ struct SocketStats {
     connected: AtomicUsize,
     disconnected: AtomicUsize,
     leave_events: AtomicUsize,
+    skill_update_events: AtomicUsize,
 }
 
 impl SocketStats {
@@ -48,6 +49,10 @@ impl SocketStats {
 
     fn leave_events(&self) -> usize {
         self.leave_events.load(Ordering::SeqCst)
+    }
+
+    fn skill_update_events(&self) -> usize {
+        self.skill_update_events.load(Ordering::SeqCst)
     }
 }
 
@@ -67,6 +72,13 @@ async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
         let leave_stats = connect_stats.clone();
         socket.on(SERVER_LEAVE_OFFICE, move || {
             leave_stats.leave_events.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let update_stats = connect_stats.clone();
+        socket.on(SERVER_UPDATE_SKILLS, move || {
+            update_stats
+                .skill_update_events
+                .fetch_add(1, Ordering::SeqCst);
         });
 
         let disconnect_stats = connect_stats.clone();
@@ -109,6 +121,211 @@ async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
     (url, stats)
 }
 
+async fn start_rejecting_join_smcp_socket_server() -> (String, Arc<SocketStats>) {
+    let stats = Arc::new(SocketStats::default());
+    let (socket_layer, io) = SocketIo::new_layer();
+
+    let connect_stats = stats.clone();
+    io.ns("/smcp", move |socket: SocketRef| {
+        connect_stats.active.fetch_add(1, Ordering::SeqCst);
+        connect_stats.connected.fetch_add(1, Ordering::SeqCst);
+
+        socket.on(SERVER_JOIN_OFFICE, |ack: AckSender| {
+            let _ = ack.send(&(false, Some("join rejected")));
+        });
+
+        let disconnect_stats = connect_stats.clone();
+        socket.on_disconnect(move || {
+            disconnect_stats.active.fetch_sub(1, Ordering::SeqCst);
+            disconnect_stats.disconnected.fetch_add(1, Ordering::SeqCst);
+        });
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+
+    tokio::spawn(async move {
+        let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(
+                hyper::Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("not found"))
+                    .unwrap(),
+            )
+        });
+        let service = socket_layer.layer(fallback);
+
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let service = service.clone();
+            tokio::spawn(async move {
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    (url, stats)
+}
+
+async fn start_skill_query_smcp_socket_server(
+    result_tx: oneshot::Sender<(serde_json::Value, serde_json::Value)>,
+) -> String {
+    let (socket_layer, io) = SocketIo::new_layer();
+    let result_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+
+    io.ns("/smcp", move |socket: SocketRef| {
+        let tx = result_tx.clone();
+        socket.on(
+            SERVER_JOIN_OFFICE,
+            move |socket: SocketRef, ack: AckSender| {
+                let _ = ack.send(&(true, Option::<String>::None));
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let get_skills_req = serde_json::json!({
+                        "agent": "robot",
+                        "req_id": "skills-req",
+                        "computer": "tfrobot-client"
+                    });
+                    let skills: serde_json::Value = socket
+                        .emit_with_ack(CLIENT_GET_SKILLS, &get_skills_req)
+                        .expect("emit get skills")
+                        .await
+                        .expect("get skills ack");
+
+                    let skill_name = skills["skills"][0]["name"]
+                        .as_str()
+                        .expect("skill name")
+                        .to_string();
+                    let get_skill_req = serde_json::json!({
+                        "agent": "robot",
+                        "req_id": "skill-req",
+                        "computer": "tfrobot-client",
+                        "name": skill_name
+                    });
+                    let detail: serde_json::Value = socket
+                        .emit_with_ack(CLIENT_GET_SKILL, &get_skill_req)
+                        .expect("emit get skill")
+                        .await
+                        .expect("get skill ack");
+
+                    if let Some(tx) = tx.lock().expect("tx lock").take() {
+                        let _ = tx.send((skills, detail));
+                    }
+                });
+            },
+        );
+
+        socket.on(SERVER_LEAVE_OFFICE, || {});
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+
+    tokio::spawn(async move {
+        let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(
+                hyper::Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("not found"))
+                    .unwrap(),
+            )
+        });
+        let service = socket_layer.layer(fallback);
+
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let service = service.clone();
+            tokio::spawn(async move {
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    url
+}
+
+async fn start_tool_query_smcp_socket_server(
+    result_tx: oneshot::Sender<serde_json::Value>,
+) -> String {
+    let (socket_layer, io) = SocketIo::new_layer();
+    let result_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+
+    io.ns("/smcp", move |socket: SocketRef| {
+        let tx = result_tx.clone();
+        socket.on(
+            SERVER_JOIN_OFFICE,
+            move |socket: SocketRef, ack: AckSender| {
+                let _ = ack.send(&(true, Option::<String>::None));
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let get_tools_req = serde_json::json!({
+                        "agent": "robot",
+                        "req_id": "tools-req",
+                        "computer": "tfrobot-client"
+                    });
+                    let tools: serde_json::Value = socket
+                        .emit_with_ack(CLIENT_GET_TOOLS, &get_tools_req)
+                        .expect("emit get tools")
+                        .await
+                        .expect("get tools ack");
+
+                    if let Some(tx) = tx.lock().expect("tx lock").take() {
+                        let _ = tx.send(tools);
+                    }
+                });
+            },
+        );
+
+        socket.on(SERVER_LEAVE_OFFICE, || {});
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+
+    tokio::spawn(async move {
+        let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(
+                hyper::Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("not found"))
+                    .unwrap(),
+            )
+        });
+        let service = socket_layer.layer(fallback);
+
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let service = service.clone();
+            tokio::spawn(async move {
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    url
+}
+
 async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
     for _ in 0..40 {
         if predicate() {
@@ -119,212 +336,547 @@ async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
     panic!("{timeout_message}");
 }
 
+fn profile(name: &str, url: String) -> ConnectionProfile {
+    ConnectionProfile {
+        name: name.to_string(),
+        url,
+        namespace: "/smcp".to_string(),
+        office_id: format!("{name}-office"),
+        computer_name: format!("{name}-computer"),
+        api_key_ref: None,
+        headers: Default::default(),
+        auto_connect: true,
+        auto_reconnect: true,
+    }
+}
+
 #[tokio::test]
-async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
-    let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
-    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let client = SmcpComputerClient::new(
-        &server_url,
-        manager,
-        "lifecycle-test-computer".to_string(),
-        None,
-        inputs,
-        None,
+async fn disconnect_smcp_closes_socket_without_rebuilding_runtime() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_home = tmp.path().join("skills-home");
+    let demo_skill = skill_home.join("demo-skill");
+    std::fs::create_dir_all(&demo_skill).expect("create skill dir");
+    std::fs::write(
+        demo_skill.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: Demo skill\n---\n# Demo Skill\n",
     )
-    .await
-    .expect("connect smcp client");
+    .expect("write skill");
+    let settings_service = SettingsService::new(tmp.path().to_path_buf());
+    settings_service
+        .save(&AppSettings {
+            skills_root_dir: skill_home.to_string_lossy().to_string(),
+            ..AppSettings::default()
+        })
+        .expect("save settings");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_smcp_socket_server().await;
 
-    client
-        .join_office("lifecycle-office")
+    state
+        .config
+        .save_profiles(&[profile("lifecycle", server_url)])
+        .expect("save profile");
+
+    connect_smcp_core(&state, "lifecycle".to_string())
         .await
-        .expect("join office");
+        .expect("connect profile");
+    let before = state.runtime.computer();
+    assert!(before
+        .get_skills()
+        .await
+        .iter()
+        .any(|skill| skill.name == "demo-skill"));
 
     wait_for("server never observed the SMCP socket connection", || {
         stats.active() == 1 && stats.connected() == 1
     })
     .await;
 
-    close_smcp_connection(ConnectionState {
-        client,
-        profile_name: "lifecycle-profile".to_string(),
-        url: server_url,
-        office_id: "lifecycle-office".to_string(),
-        computer_name: "lifecycle-test-computer".to_string(),
-        connected_at: chrono::Utc::now(),
-    })
-    .await;
+    state.runtime.disconnect().await;
 
     wait_for("server never observed the leave_office event", || {
         stats.leave_events() == 1
     })
     .await;
-
-    wait_for(
-        "SMCP cleanup did not close the underlying Socket.IO connection",
-        || stats.active() == 0 && stats.disconnected() == 1,
-    )
-    .await;
-
-    sleep(Duration::from_millis(250)).await;
-    assert_eq!(
-        stats.active(),
-        0,
-        "SMCP socket should remain disconnected after cleanup"
-    );
-    assert_eq!(
-        stats.disconnected(),
-        1,
-        "SMCP cleanup should not trigger a reconnect cycle"
-    );
-}
-
-#[tokio::test]
-async fn failed_profile_switch_keeps_existing_smcp_connection() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = state.manager.clone();
-    let inputs = state.inputs.clone();
-
-    let client = SmcpComputerClient::new(
-        &server_url,
-        manager,
-        "existing-computer".to_string(),
-        None,
-        inputs,
-        None,
-    )
-    .await
-    .expect("connect existing smcp client");
-
-    client
-        .join_office("existing-office")
-        .await
-        .expect("join existing office");
-
-    wait_for("server never observed the existing SMCP socket", || {
-        stats.active() == 1 && stats.connected() == 1
+    wait_for("SMCP cleanup did not close the socket", || {
+        stats.active() == 0 && stats.disconnected() == 1
     })
     .await;
 
-    {
-        let mut conn = state.connection.write().await;
-        *conn = Some(ConnectionState {
-            client,
-            profile_name: "existing-profile".to_string(),
-            url: server_url,
-            office_id: "existing-office".to_string(),
-            computer_name: "existing-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-        });
-    }
+    assert!(state.runtime.computer().is_mcp_manager_initialized().await);
+    assert!(Arc::ptr_eq(&before, &state.runtime.computer()));
+    assert!(state
+        .runtime
+        .computer()
+        .get_skills()
+        .await
+        .iter()
+        .any(|skill| skill.name == "demo-skill"));
+}
+
+#[tokio::test]
+async fn failed_skill_root_reconfigure_keeps_existing_smcp_connection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    state
+        .config
+        .save_profiles(&[profile("existing", server_url)])
+        .expect("save profile");
+    connect_smcp_core(&state, "existing".to_string())
+        .await
+        .expect("connect profile");
+    wait_for("server never observed active connection", || {
+        stats.active() == 1
+    })
+    .await;
+
+    let invalid_skill_home = tmp.path().join("not-a-dir");
+    std::fs::write(&invalid_skill_home, "file blocks skill home directory")
+        .expect("write blocking file");
+    let err = update_settings_core(
+        &state,
+        AppSettings {
+            skills_root_dir: invalid_skill_home.to_string_lossy().to_string(),
+            ..AppSettings::default()
+        },
+    )
+    .await
+    .expect_err("invalid skill root should fail reconfigure");
+
+    assert!(err.contains("Not a directory") || err.contains("not a directory"));
+    let status = state.runtime.connection_status().await;
+    assert!(status.connected);
+    assert_eq!(status.profile_name.as_deref(), Some("existing"));
+    assert_eq!(stats.active(), 1);
+    assert_eq!(stats.disconnected(), 0);
+
+    state.runtime.disconnect().await;
+}
+
+#[tokio::test]
+async fn successful_skill_root_sync_keeps_existing_smcp_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_smcp_socket_server().await;
+    let new_skill_home = tmp.path().join("new-skills");
+    let new_user_skill = new_skill_home.join("new-skill");
+    std::fs::create_dir_all(&new_user_skill).expect("create new skill");
+    std::fs::write(
+        new_user_skill.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: New skill\n---\n# New Skill\n",
+    )
+    .expect("write new skill");
+
+    state
+        .config
+        .save_profiles(&[profile("existing", server_url)])
+        .expect("save profile");
+    connect_smcp_core(&state, "existing".to_string())
+        .await
+        .expect("connect profile");
+    wait_for("server never observed active connection", || {
+        stats.active() == 1
+    })
+    .await;
+
+    update_settings_core(
+        &state,
+        AppSettings {
+            skills_root_dir: new_skill_home.to_string_lossy().to_string(),
+            ..AppSettings::default()
+        },
+    )
+    .await
+    .expect("valid skill root should sync runtime skills");
+
+    let status = state.runtime.connection_status().await;
+    assert!(status.connected);
+    assert_eq!(status.profile_name.as_deref(), Some("existing"));
+    assert_eq!(stats.active(), 1);
+    assert_eq!(stats.disconnected(), 0);
+    assert_eq!(stats.leave_events(), 0);
+    assert_eq!(state.runtime.local_skill_root(), new_skill_home);
+    assert!(state
+        .runtime
+        .computer()
+        .get_skills()
+        .await
+        .iter()
+        .any(|skill| skill.name == "new-skill"));
+
+    state.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn connecting_new_profile_closes_previous_smcp_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (first_url, first_stats) = start_smcp_socket_server().await;
+    let (second_url, second_stats) = start_smcp_socket_server().await;
+
+    state
+        .config
+        .save_profiles(&[profile("first", first_url), profile("second", second_url)])
+        .expect("save profiles");
+
+    connect_smcp_core(&state, "first".to_string())
+        .await
+        .expect("connect first profile");
+    wait_for("first server never observed active connection", || {
+        first_stats.active() == 1
+    })
+    .await;
+
+    connect_smcp_core(&state, "second".to_string())
+        .await
+        .expect("connect second profile");
+
+    wait_for("first server never observed leave_office", || {
+        first_stats.leave_events() == 1
+    })
+    .await;
+    wait_for("first SMCP socket was not closed on profile switch", || {
+        first_stats.active() == 0 && first_stats.disconnected() == 1
+    })
+    .await;
+    wait_for("second server never observed active connection", || {
+        second_stats.active() == 1
+    })
+    .await;
+
+    let status = state.runtime.connection_status().await;
+    assert!(status.connected);
+    assert_eq!(status.profile_name.as_deref(), Some("second"));
+    assert_eq!(status.computer_name.as_deref(), Some("tfrobot-client"));
+
+    state.runtime.disconnect().await;
+}
+
+#[tokio::test]
+async fn rejected_join_closes_established_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_rejecting_join_smcp_socket_server().await;
+
+    state
+        .config
+        .save_profiles(&[profile("reject", server_url)])
+        .expect("save profile");
+
+    let err = connect_smcp_core(&state, "reject".to_string())
+        .await
+        .expect_err("join rejection should fail connect");
+    assert!(err.contains("Failed to join office"));
+
+    wait_for("rejected join socket was not disconnected", || {
+        stats.active() == 0 && stats.disconnected() == 1
+    })
+    .await;
+    assert!(!state.runtime.connection_status().await.connected);
+}
+
+#[tokio::test]
+async fn rejected_profile_switch_keeps_existing_smcp_connection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (existing_url, existing_stats) = start_smcp_socket_server().await;
+    let (reject_url, reject_stats) = start_rejecting_join_smcp_socket_server().await;
+
+    state
+        .config
+        .save_profiles(&[
+            profile("existing", existing_url),
+            profile("reject", reject_url),
+        ])
+        .expect("save profiles");
+
+    connect_smcp_core(&state, "existing".to_string())
+        .await
+        .expect("connect existing profile");
+    wait_for("existing server never observed active connection", || {
+        existing_stats.active() == 1
+    })
+    .await;
+
+    let err = connect_smcp_core(&state, "reject".to_string())
+        .await
+        .expect_err("rejected profile should fail switch");
+    assert!(err.contains("Failed to join office"));
+
+    wait_for("rejected profile socket was not disconnected", || {
+        reject_stats.active() == 0 && reject_stats.disconnected() == 1
+    })
+    .await;
+
+    let status = state.runtime.connection_status().await;
+    assert!(status.connected);
+    assert_eq!(status.profile_name.as_deref(), Some("existing"));
+    assert_eq!(existing_stats.active(), 1);
+    assert_eq!(existing_stats.disconnected(), 0);
+
+    state.runtime.disconnect().await;
+}
+
+#[tokio::test]
+async fn failed_profile_lookup_keeps_existing_smcp_connection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    state
+        .config
+        .save_profiles(&[profile("existing", server_url)])
+        .expect("save profile");
+
+    connect_smcp_core(&state, "existing".to_string())
+        .await
+        .expect("connect existing profile");
 
     let err = connect_smcp_core(&state, "missing-profile".to_string())
         .await
         .expect_err("missing profile should fail");
     assert_eq!(err, "Profile not found: missing-profile");
 
-    let conn = state.connection.read().await;
-    let connection = conn
-        .as_ref()
-        .expect("existing connection should be preserved");
-    assert_eq!(connection.profile_name, "existing-profile");
-    drop(conn);
-
+    let status = state.runtime.connection_status().await;
+    assert!(status.connected);
+    assert_eq!(status.profile_name.as_deref(), Some("existing"));
     assert_eq!(stats.active(), 1);
     assert_eq!(stats.disconnected(), 0);
 
-    let existing_connection = {
-        let mut conn = state.connection.write().await;
-        conn.take()
-    };
-    if let Some(connection) = existing_connection {
-        close_smcp_connection(connection).await;
-    }
+    state.runtime.disconnect().await;
 }
 
 #[tokio::test]
-async fn successful_profile_switch_closes_previous_smcp_connection() {
+async fn robot_can_fetch_local_skill_list_and_detail_over_shared_runtime() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_home = tmp.path().join("skills-home");
+    let demo_skill = skill_home.join("demo-skill");
+    std::fs::create_dir_all(&demo_skill).expect("create skill dir");
+    std::fs::write(
+        demo_skill.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: Demo skill for robot\n---\n# Demo Skill\n\nUse this skill.",
+    )
+    .expect("write skill");
+
+    let settings_service = SettingsService::new(tmp.path().to_path_buf());
+    settings_service
+        .save(&AppSettings {
+            skills_root_dir: skill_home.to_string_lossy().to_string(),
+            ..AppSettings::default()
+        })
+        .expect("save settings");
+    let state = common::create_test_app_state(tmp.path());
+
+    let (tx, rx) = oneshot::channel();
+    let server_url = start_skill_query_smcp_socket_server(tx).await;
+    state
+        .config
+        .save_profiles(&[profile("skill", server_url)])
+        .expect("save profile");
+
+    connect_smcp_core(&state, "skill".to_string())
+        .await
+        .expect("connect profile");
+
+    let (skills, detail) = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("robot skill query timed out")
+        .expect("robot skill query result");
+
+    assert_eq!(skills["req_id"], "skills-req");
+    assert_eq!(skills["skills"][0]["name"], "demo-skill");
+    assert_eq!(skills["skills"][0]["source"], "user");
+    assert_eq!(skills["skills"][0]["description"], "Demo skill for robot");
+
+    assert_eq!(detail["req_id"], "skill-req");
+    assert_eq!(detail["name"], "demo-skill");
+    assert_eq!(detail["rel_path"], "SKILL.md");
+    assert_eq!(detail["mime_type"], "text/markdown");
+    assert!(detail["body"]
+        .as_str()
+        .expect("skill body")
+        .contains("# Demo Skill"));
+
+    state.runtime.disconnect().await;
+}
+
+#[tokio::test]
+async fn robot_can_fetch_mcp_tools_over_shared_runtime() {
+    let node_available = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    assert!(
+        node_available,
+        "Node.js is required for the echo MCP server integration test"
+    );
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
-    let (old_server_url, old_stats) = start_smcp_socket_server().await;
-    let (new_server_url, new_stats) = start_smcp_socket_server().await;
+    let config = common::echo_server_config("robot-tool-test");
+    state
+        .config
+        .add_config(config.clone())
+        .expect("persist MCP config");
 
-    let old_client = SmcpComputerClient::new(
-        &old_server_url,
-        state.manager.clone(),
-        "old-computer".to_string(),
-        None,
-        state.inputs.clone(),
-        None,
-    )
-    .await
-    .expect("connect old smcp client");
-
-    old_client
-        .join_office("old-office")
+    state.runtime.boot().await.expect("boot runtime");
+    let computer = state.runtime.computer();
+    computer
+        .add_or_update_server(config)
         .await
-        .expect("join old office");
+        .expect("add echo MCP server");
+    computer
+        .start_mcp_client("robot-tool-test")
+        .await
+        .expect("start echo MCP server");
 
-    wait_for("server never observed the old SMCP socket", || {
-        old_stats.active() == 1 && old_stats.connected() == 1
-    })
-    .await;
-
-    {
-        let mut conn = state.connection.write().await;
-        *conn = Some(ConnectionState {
-            client: old_client,
-            profile_name: "old-profile".to_string(),
-            url: old_server_url,
-            office_id: "old-office".to_string(),
-            computer_name: "old-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-        });
+    let mut echo_tool_ready = false;
+    for _ in 0..40 {
+        if computer
+            .get_available_tools()
+            .await
+            .map(|tools| tools.iter().any(|tool| tool.name == "echo"))
+            .unwrap_or(false)
+        {
+            echo_tool_ready = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
     }
+    assert!(echo_tool_ready, "echo MCP server did not expose tools");
+
+    let (tx, rx) = oneshot::channel();
+    let server_url = start_tool_query_smcp_socket_server(tx).await;
+    state
+        .config
+        .save_profiles(&[profile("tools", server_url)])
+        .expect("save profile");
+
+    connect_smcp_core(&state, "tools".to_string())
+        .await
+        .expect("connect profile");
+
+    let tools = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("robot tool query timed out")
+        .expect("robot tool query result");
+
+    assert_eq!(tools["req_id"], "tools-req");
+    let tool_names: Vec<_> = tools["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        tool_names.contains(&"echo"),
+        "robot-visible tool list should include echo, got {tool_names:?}"
+    );
+
+    state.runtime.disconnect().await;
+}
+
+#[tokio::test]
+async fn skill_sync_summary_refreshes_after_local_skill_changes_without_reconnect() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_home = tmp.path().join("skills-home");
+    let initial_skill = skill_home.join("initial-skill");
+    std::fs::create_dir_all(&initial_skill).expect("create initial skill dir");
+    std::fs::write(
+        initial_skill.join("SKILL.md"),
+        "---\nname: initial-skill\ndescription: Initial skill\n---\n# Initial Skill\n",
+    )
+    .expect("write initial skill");
+
+    let settings_service = SettingsService::new(tmp.path().to_path_buf());
+    let settings = AppSettings {
+        skills_root_dir: skill_home.to_string_lossy().to_string(),
+        ..AppSettings::default()
+    };
+    settings_service.save(&settings).expect("save settings");
+    let state = common::create_test_app_state(tmp.path());
+
+    state.runtime.boot().await.expect("boot runtime");
+    let first = state
+        .runtime
+        .refresh_skill_sync_summary(&settings)
+        .await
+        .expect("first summary");
+    assert_eq!(first.local_synced, 1);
+
+    let added_skill = skill_home.join("added-skill");
+    std::fs::create_dir_all(&added_skill).expect("create added skill dir");
+    std::fs::write(
+        added_skill.join("SKILL.md"),
+        "---\nname: added-skill\ndescription: Added skill\n---\n# Added Skill\n",
+    )
+    .expect("write added skill");
+
+    let refreshed = state
+        .runtime
+        .refresh_skill_sync_summary(&settings)
+        .await
+        .expect("refreshed summary");
+    assert_eq!(refreshed.local_synced, 2);
+    assert!(refreshed.skipped.is_empty());
+
+    state.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn skill_sync_notifies_connected_smcp_server_after_local_skill_changes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_home = tmp.path().join("skills-home");
+    let initial_skill = skill_home.join("initial-skill");
+    std::fs::create_dir_all(&initial_skill).expect("create initial skill dir");
+    std::fs::write(
+        initial_skill.join("SKILL.md"),
+        "---\nname: initial-skill\ndescription: Initial skill\n---\n# Initial Skill\n",
+    )
+    .expect("write initial skill");
+
+    let settings_service = SettingsService::new(tmp.path().to_path_buf());
+    let settings = AppSettings {
+        skills_root_dir: skill_home.to_string_lossy().to_string(),
+        ..AppSettings::default()
+    };
+    settings_service.save(&settings).expect("save settings");
+    let state = common::create_test_app_state(tmp.path());
+    let (server_url, stats) = start_smcp_socket_server().await;
 
     state
         .config
-        .save_profiles(&[ConnectionProfile {
-            name: "new-profile".to_string(),
-            url: new_server_url.clone(),
-            namespace: "/smcp".to_string(),
-            office_id: "new-office".to_string(),
-            computer_name: "new-computer".to_string(),
-            api_key_ref: None,
-            headers: HashMap::new(),
-            auto_connect: true,
-            auto_reconnect: true,
-        }])
-        .expect("save profiles");
-
-    connect_smcp_core(&state, "new-profile".to_string())
+        .save_profiles(&[profile("skill-sync", server_url)])
+        .expect("save profile");
+    connect_smcp_core(&state, "skill-sync".to_string())
         .await
-        .expect("connect new profile");
-
-    wait_for("server never observed the new SMCP socket", || {
-        new_stats.active() == 1 && new_stats.connected() == 1
+        .expect("connect profile");
+    wait_for("server never observed active connection", || {
+        stats.active() == 1
     })
     .await;
-    wait_for("old SMCP connection was not closed after switch", || {
-        old_stats.leave_events() == 1 && old_stats.active() == 0 && old_stats.disconnected() == 1
+    let update_events_before_sync = stats.skill_update_events();
+
+    let added_skill = skill_home.join("added-skill");
+    std::fs::create_dir_all(&added_skill).expect("create added skill dir");
+    std::fs::write(
+        added_skill.join("SKILL.md"),
+        "---\nname: added-skill\ndescription: Added skill\n---\n# Added Skill\n",
+    )
+    .expect("write added skill");
+
+    let refreshed = state
+        .runtime
+        .refresh_skill_sync_summary(&settings)
+        .await
+        .expect("refresh summary");
+    assert_eq!(refreshed.local_synced, 2);
+    wait_for("server never observed skill update notification", || {
+        stats.skill_update_events() > update_events_before_sync
     })
     .await;
 
-    let conn = state.connection.read().await;
-    let connection = conn.as_ref().expect("new connection should be retained");
-    assert_eq!(connection.profile_name, "new-profile");
-    assert_eq!(connection.office_id, "new-office");
-    drop(conn);
-
-    let new_connection = {
-        let mut conn = state.connection.write().await;
-        conn.take()
-    };
-    if let Some(connection) = new_connection {
-        close_smcp_connection(connection).await;
-    }
+    state.runtime.disconnect().await;
 }

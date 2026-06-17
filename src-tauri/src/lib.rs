@@ -2,30 +2,23 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
-use commands::connection::{close_smcp_connection, ConnectionState};
 use services::config::ConfigService;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
+use services::runtime::ComputerRuntime;
 use services::settings::SettingsService;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::mcp_clients::MCPServerManager;
-use std::collections::HashMap;
+use services::skills;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
-use tokio::sync::RwLock;
 
 /// Application state shared across all Tauri commands
 pub struct AppState {
-    /// MCP Server manager from smcp-computer (wrapped in Option for SmcpComputerClient compatibility)
-    pub manager: Arc<RwLock<Option<MCPServerManager>>>,
     /// Configuration persistence service
     pub config: Arc<ConfigService>,
-    /// Input definitions for SMCP (shared with SmcpComputerClient)
-    pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
-    /// Active SMCP connection
-    pub connection: Arc<RwLock<Option<ConnectionState>>>,
+    /// Single application runtime backed by smcp-computer's Computer.
+    pub runtime: Arc<ComputerRuntime>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
     /// Settings persistence service
@@ -40,11 +33,17 @@ impl AppState {
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
+        let settings = settings_service.load();
+        let configs = config.load_configs().unwrap_or_default();
+        let runtime_skill_home = skills::runtime_skill_home(config.config_dir());
         Self {
-            manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
+            runtime: Arc::new(ComputerRuntime::new(
+                "tfrobot-client",
+                &settings,
+                configs,
+                runtime_skill_home,
+            )),
             config: Arc::new(config),
-            inputs: Arc::new(RwLock::new(HashMap::new())),
-            connection: Arc::new(RwLock::new(None)),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
             manager_client: Arc::new(ManagerClient::new()),
@@ -132,8 +131,8 @@ pub fn run() {
                 );
             }
 
-            let saved_configs = config_service.load_configs().unwrap_or_default();
-            log::info!("Loaded {} MCP server configurations", saved_configs.len());
+            let saved_configs_count = config_service.load_configs().unwrap_or_default().len();
+            log::info!("Loaded {} MCP server configurations", saved_configs_count);
 
             let state = AppState::new(config_service, log_service, settings_service);
 
@@ -145,16 +144,13 @@ pub fn run() {
                 .log_service
                 .cleanup(settings.log_retention_days as i64);
 
-            // Initialize manager with saved configs in background
-            let manager = state.manager.clone();
-            let configs = saved_configs.clone();
+            // Boot the single application Computer runtime in background.
+            let runtime = state.runtime.clone();
             tauri::async_runtime::spawn(async move {
-                let lock = manager.read().await;
-                if let Some(mgr) = lock.as_ref() {
-                    if let Err(e) = mgr.initialize(configs).await {
-                        log::error!("Failed to initialize MCP servers: {}", e);
-                    }
-                    log::info!("MCP servers initialized");
+                if let Err(e) = runtime.boot().await {
+                    log::error!("Failed to boot app Computer runtime: {}", e);
+                } else {
+                    log::info!("App Computer runtime booted");
                 }
             });
 
@@ -239,6 +235,8 @@ pub fn run() {
             commands::skills::open_skills_root,
             commands::skills::open_skill_folder,
             commands::skills::open_skill_markdown_file,
+            commands::skills::get_skill_sync_summary,
+            commands::skills::refresh_skill_sync_summary,
             // TFRSManager HTTP client (issue #23)
             commands::manager::manager_login,
             commands::manager::manager_select_account,
@@ -253,19 +251,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    // Disconnect SMCP if connected
-                    let existing_connection = {
-                        let mut conn = state.connection.write().await;
-                        conn.take()
-                    };
-                    if let Some(connection) = existing_connection {
-                        close_smcp_connection(connection).await;
-                    }
-                    // Stop all MCP servers
-                    let lock = state.manager.read().await;
-                    if let Some(mgr) = lock.as_ref() {
-                        let _ = mgr.stop_all().await;
-                    }
+                    state.runtime.shutdown().await;
                 });
                 let _ =
                     state

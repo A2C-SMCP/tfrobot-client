@@ -8,6 +8,9 @@ pub struct AppSettings {
     pub language: String,
     pub log_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
+    /// Stable name exposed to SMCP for this local Computer runtime.
+    #[serde(default = "default_computer_name")]
+    pub computer_name: String,
     /// Local root directory where user skills are stored.
     #[serde(default = "default_skills_root_dir")]
     pub skills_root_dir: String,
@@ -36,6 +39,10 @@ fn default_skills_root_dir() -> String {
     "~/.a2c/skills".to_string()
 }
 
+pub fn default_computer_name() -> String {
+    "tfrobot-client".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -43,6 +50,7 @@ impl Default for AppSettings {
             language: "en".to_string(),
             log_retention_days: 30,
             custom_runtime_paths: CustomRuntimePaths::default(),
+            computer_name: default_computer_name(),
             skills_root_dir: default_skills_root_dir(),
             custom_path: None,
         }
@@ -54,6 +62,7 @@ impl AppSettings {
         if self.skills_root_dir.trim().is_empty() {
             self.skills_root_dir = default_skills_root_dir();
         }
+        self.computer_name = default_computer_name();
         self
     }
 }
@@ -105,6 +114,7 @@ mod tests {
         assert_eq!(settings.language, "en");
         assert_eq!(settings.log_retention_days, 30);
         assert!(matches!(settings.theme, ThemeMode::System));
+        assert_eq!(settings.computer_name, "tfrobot-client");
         assert_eq!(settings.skills_root_dir, "~/.a2c/skills");
     }
 
@@ -115,6 +125,7 @@ mod tests {
         settings.language = "zh".to_string();
         settings.log_retention_days = 7;
         settings.theme = ThemeMode::Dark;
+        settings.computer_name = "local-dev".to_string();
         settings.skills_root_dir = "/Users/test/.codex/skills".to_string();
         svc.save(&settings).unwrap();
 
@@ -122,6 +133,7 @@ mod tests {
         assert_eq!(loaded.language, "zh");
         assert_eq!(loaded.log_retention_days, 7);
         assert!(matches!(loaded.theme, ThemeMode::Dark));
+        assert_eq!(loaded.computer_name, "tfrobot-client");
         assert_eq!(loaded.skills_root_dir, "/Users/test/.codex/skills");
     }
 
@@ -173,6 +185,7 @@ mod tests {
         assert_eq!(settings.language, "zh");
         assert_eq!(settings.log_retention_days, 14);
         assert!(matches!(settings.theme, ThemeMode::Light));
+        assert_eq!(settings.computer_name, "tfrobot-client");
         assert_eq!(settings.skills_root_dir, "~/.a2c/skills");
     }
 
@@ -193,5 +206,24 @@ mod tests {
 
         let settings = svc.load();
         assert_eq!(settings.skills_root_dir, "~/.a2c/skills");
+    }
+
+    #[test]
+    fn test_load_custom_computer_name_uses_default() {
+        let (svc, tmp) = setup();
+        fs::write(
+            tmp.path().join("settings.json"),
+            r#"{
+                "theme": "system",
+                "language": "en",
+                "log_retention_days": 30,
+                "custom_runtime_paths": {},
+                "computer_name": "custom-computer"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = svc.load();
+        assert_eq!(settings.computer_name, "tfrobot-client");
     }
 }

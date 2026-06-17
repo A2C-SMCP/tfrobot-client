@@ -105,11 +105,6 @@ export function SmcpConnection() {
       key: 'office_id',
     },
     {
-      title: t('connection.table.computer'),
-      dataIndex: 'computer_name',
-      key: 'computer_name',
-    },
-    {
       title: t('connection.table.actions'),
       key: 'actions',
       width: 200,

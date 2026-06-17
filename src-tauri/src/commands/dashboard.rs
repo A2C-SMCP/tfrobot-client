@@ -41,25 +41,22 @@ fn detect_runtime(name: &str, cmd: &str) -> RuntimeInfo {
 #[tauri::command]
 pub async fn get_dashboard_data(state: State<'_, AppState>) -> Result<DashboardData, String> {
     // Connection status
-    let conn = state.connection.read().await;
-    let connected = conn.is_some();
-    let connection_url = conn.as_ref().map(|c| c.url.clone());
-    let connection_profile = conn.as_ref().map(|c| c.profile_name.clone());
-    drop(conn);
+    let connection = state.runtime.connection_status().await;
+    let connected = connection.connected;
+    let connection_url = connection.url;
+    let connection_profile = connection.profile_name;
 
     // MCP server stats
-    let lock = state.manager.read().await;
-    let (mcp_total, mcp_running, mcp_stopped, tools_count) = if let Some(mgr) = lock.as_ref() {
-        let statuses = mgr.get_server_status().await;
-        let total = statuses.len();
-        let running = statuses.iter().filter(|(_, r, _)| *r).count();
-        let stopped = total - running;
-        let tools = mgr.list_available_tools().await.len();
-        (total, running, stopped, tools)
-    } else {
-        (0, 0, 0, 0)
-    };
-    drop(lock);
+    let computer = state.runtime.computer();
+    let statuses = computer.get_server_status().await;
+    let mcp_total = statuses.len();
+    let mcp_running = statuses.iter().filter(|(_, running, _)| *running).count();
+    let mcp_stopped = mcp_total - mcp_running;
+    let tools_count = computer
+        .get_available_tools()
+        .await
+        .map(|tools| tools.len())
+        .unwrap_or_default();
 
     // Recent logs
     let recent_logs = state

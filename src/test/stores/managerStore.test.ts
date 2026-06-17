@@ -176,7 +176,7 @@ describe('managerStore', () => {
           url: connInfo.socketBaseURL,
           namespace: '/smcp',
           office_id: 'robot-a',
-          computer_name: 'alice-laptop',
+          computer_name: 'tfrobot-client',
           headers: connInfo.routingHeaders,
           auto_connect: false,
           auto_reconnect: false,

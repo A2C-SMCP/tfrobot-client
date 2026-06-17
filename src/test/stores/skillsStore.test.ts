@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useSkillsStore, type SkillInfo } from '@/stores/skillsStore';
+import { useSkillsStore, type SkillInfo, type SkillSyncSummary } from '@/stores/skillsStore';
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -9,16 +9,26 @@ const mockSkills: SkillInfo[] = [
     path: '/tmp/skills/demo-skill',
     skill_md_path: '/tmp/skills/demo-skill/SKILL.md',
     has_skill_md: true,
+    is_skill: true,
     description: 'Demo skill description',
     source: 'local',
   },
 ];
+
+const emptySummary: SkillSyncSummary = {
+  local_synced: 0,
+  mcp_synced: 0,
+  ignored_conflicts: [],
+  skipped: [],
+};
 
 const missingSkillMd: SkillInfo = {
   name: 'missing-md',
   path: '/tmp/skills/missing-md',
   skill_md_path: '/tmp/skills/missing-md/SKILL.md',
   has_skill_md: false,
+  is_skill: false,
+  invalid_reason: 'missing SKILL.md',
   description: null,
   source: 'local',
 };
@@ -28,6 +38,7 @@ const otherSkill: SkillInfo = {
   path: '/tmp/skills/other-skill',
   skill_md_path: '/tmp/skills/other-skill/SKILL.md',
   has_skill_md: true,
+  is_skill: true,
   description: 'Other skill description',
   source: 'local',
 };
@@ -40,12 +51,18 @@ describe('skillsStore', () => {
 
   describe('fetchSkills', () => {
     it('populates skills', async () => {
-      mockedInvoke.mockResolvedValueOnce(mockSkills);
+      mockedInvoke.mockImplementation((command) => {
+        if (command === 'list_skills') {
+          return Promise.resolve(mockSkills);
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      });
 
       await useSkillsStore.getState().fetchSkills();
 
       expect(mockedInvoke).toHaveBeenCalledWith('list_skills');
       expect(useSkillsStore.getState().skills).toEqual(mockSkills);
+      expect(useSkillsStore.getState().syncSummary).toBeNull();
       expect(useSkillsStore.getState().loading).toBe(false);
     });
 
@@ -56,6 +73,39 @@ describe('skillsStore', () => {
 
       expect(useSkillsStore.getState().error).toBe('read error');
       expect(useSkillsStore.getState().loading).toBe(false);
+    });
+  });
+
+  describe('syncSkills', () => {
+    it('refreshes skills and runtime sync summary explicitly', async () => {
+      mockedInvoke.mockImplementation((command) => {
+        if (command === 'list_skills') {
+          return Promise.resolve(mockSkills);
+        }
+        if (command === 'refresh_skill_sync_summary') {
+          return Promise.resolve(emptySummary);
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      });
+
+      await useSkillsStore.getState().syncSkills();
+
+      expect(mockedInvoke).toHaveBeenCalledWith('list_skills');
+      expect(mockedInvoke).toHaveBeenCalledWith('refresh_skill_sync_summary');
+      expect(mockedInvoke.mock.calls[0][0]).toBe('refresh_skill_sync_summary');
+      expect(mockedInvoke.mock.calls[1][0]).toBe('list_skills');
+      expect(useSkillsStore.getState().skills).toEqual(mockSkills);
+      expect(useSkillsStore.getState().syncSummary).toEqual(emptySummary);
+      expect(useSkillsStore.getState().syncing).toBe(false);
+    });
+
+    it('sets error on explicit sync failure', async () => {
+      mockedInvoke.mockRejectedValueOnce('sync error');
+
+      await useSkillsStore.getState().syncSkills();
+
+      expect(useSkillsStore.getState().error).toBe('sync error');
+      expect(useSkillsStore.getState().syncing).toBe(false);
     });
   });
 
@@ -184,7 +234,9 @@ describe('skillsStore', () => {
   it('resets state', () => {
     useSkillsStore.setState({
       skills: mockSkills,
+      syncSummary: emptySummary,
       loading: true,
+      syncing: true,
       opening: true,
       error: 'error',
       rootPath: '/tmp/skills',
@@ -197,7 +249,9 @@ describe('skillsStore', () => {
     useSkillsStore.getState().reset();
 
     expect(useSkillsStore.getState().skills).toEqual([]);
+    expect(useSkillsStore.getState().syncSummary).toBeNull();
     expect(useSkillsStore.getState().loading).toBe(false);
+    expect(useSkillsStore.getState().syncing).toBe(false);
     expect(useSkillsStore.getState().opening).toBe(false);
     expect(useSkillsStore.getState().error).toBeNull();
     expect(useSkillsStore.getState().rootPath).toBeNull();
