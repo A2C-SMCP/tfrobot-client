@@ -4,8 +4,6 @@ import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { ConnectionProfile } from '@/stores/connectionStore';
 
-const DEFAULT_COMPUTER_NAME = 'tfrobot-client';
-
 interface ProfileFormProps {
   initialValues?: ConnectionProfile;
   onSubmit: (profile: ConnectionProfile, apiKey?: string) => Promise<void>;
@@ -44,7 +42,7 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       url: values.url as string,
       namespace: (values.namespace as string) || '/smcp',
       office_id: values.office_id as string,
-      computer_name: DEFAULT_COMPUTER_NAME,
+      computer_name: values.computer_name as string,
       headers,
       auto_connect: values.auto_connect as boolean ?? true,
       auto_reconnect: values.auto_reconnect as boolean ?? true,
@@ -68,6 +66,10 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       </Form.Item>
 
       <Form.Item name="office_id" label={t('connection.form.officeId')} rules={[{ required: true, message: t('connection.form.officeIdRequired') }]}>
+        <Input />
+      </Form.Item>
+
+      <Form.Item name="computer_name" label={t('connection.form.computerName')} rules={[{ required: true, message: t('connection.form.computerNameRequired') }]}>
         <Input />
       </Form.Item>
 

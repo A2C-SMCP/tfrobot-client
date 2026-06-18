@@ -1,4 +1,3 @@
-use crate::services::settings::default_computer_name;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -44,13 +43,7 @@ pub struct ConnectionStatusInfo {
 /// List all saved connection profiles
 #[tauri::command]
 pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ConnectionProfile>, String> {
-    Ok(state
-        .config
-        .load_profiles()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(normalize_profile)
-        .collect())
+    state.config.load_profiles().map_err(|e| e.to_string())
 }
 
 /// Save (create or update) a connection profile
@@ -60,7 +53,6 @@ pub async fn save_profile(
     profile: ConnectionProfile,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let profile = normalize_profile(profile);
     let name = profile.name.clone();
     log::info!("Saving connection profile: {}", name);
 
@@ -81,11 +73,6 @@ pub async fn save_profile(
         .map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-fn normalize_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
-    profile.computer_name = default_computer_name();
-    profile
 }
 
 /// Delete a connection profile
@@ -189,25 +176,5 @@ mod tests {
         assert_eq!(profile.namespace, "/smcp");
         assert!(profile.auto_connect);
         assert!(profile.auto_reconnect);
-    }
-
-    #[test]
-    fn normalize_profile_forces_default_computer_name() {
-        let profile = ConnectionProfile {
-            name: "test-profile".to_string(),
-            url: "http://127.0.0.1:9".to_string(),
-            namespace: default_namespace(),
-            office_id: "test-office".to_string(),
-            computer_name: "custom-computer".to_string(),
-            api_key_ref: None,
-            headers: std::collections::HashMap::new(),
-            auto_connect: default_true(),
-            auto_reconnect: default_true(),
-        };
-
-        assert_eq!(
-            normalize_profile(profile).computer_name,
-            crate::services::settings::default_computer_name()
-        );
     }
 }

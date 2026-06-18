@@ -219,7 +219,9 @@ impl ComputerRuntime {
             return Ok(());
         }
         let computer = self.computer();
-        computer.boot_up().await.map_err(|e| e.to_string())?;
+        if !computer.is_mcp_manager_initialized().await {
+            computer.boot_up().await.map_err(|e| e.to_string())?;
+        }
         let (settings, _) = self.stored_runtime_config();
         self.stage_and_summarize_current_skills(&settings, &computer)
             .await?;
@@ -255,7 +257,7 @@ impl ComputerRuntime {
         }
 
         if let Err(e) = computer
-            .join_office(&profile.office_id, &settings.computer_name)
+            .join_office(&profile.office_id, &profile.computer_name)
             .await
         {
             Self::disconnect_socket(&computer).await;
@@ -291,7 +293,7 @@ impl ComputerRuntime {
                 profile_name: profile.name.clone(),
                 url: profile.url.clone(),
                 office_id: profile.office_id.clone(),
-                computer_name: settings.computer_name.clone(),
+                computer_name: profile.computer_name.clone(),
                 connected_at: chrono::Utc::now(),
             });
         }
@@ -394,6 +396,24 @@ impl ComputerRuntime {
         Self::close_smcp_client(client, "from SMCP server").await;
     }
 
+    async fn current_socket_client(computer: &Arc<AppComputer>) -> Option<Arc<SmcpComputerClient>> {
+        let socketio_client = computer.get_socketio_client();
+        let guard = socketio_client.read().await;
+        guard.clone()
+    }
+
+    async fn leave_and_close_smcp_client(client: Arc<SmcpComputerClient>, context: &str) {
+        match client.get_current_office_id().await {
+            Ok(office_id) => {
+                if let Err(e) = client.leave_office(&office_id).await {
+                    log::warn!("Error leaving SMCP office for {}: {}", context, e);
+                }
+            }
+            Err(e) => log::warn!("Error reading SMCP office for {}: {}", context, e),
+        }
+        Self::close_smcp_client(client, context).await;
+    }
+
     async fn close_smcp_client(client: Arc<SmcpComputerClient>, context: &str) {
         match Arc::try_unwrap(client) {
             Ok(client) => match timeout(SMCP_CONNECTION_CLOSE_TIMEOUT, client.disconnect()).await {
@@ -414,30 +434,6 @@ impl ComputerRuntime {
                 );
             }
         }
-    }
-
-    async fn leave_and_close_smcp_client(client: Arc<SmcpComputerClient>, context: &str) {
-        if let Ok(office_id) = client.get_current_office_id().await {
-            match timeout(
-                SMCP_CONNECTION_CLOSE_TIMEOUT,
-                client.leave_office(&office_id),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::warn!("Error leaving {}: {}", context, e),
-                Err(_) => log::warn!(
-                    "Timed out leaving {} after {:?}",
-                    context,
-                    SMCP_CONNECTION_CLOSE_TIMEOUT
-                ),
-            }
-        }
-        Self::close_smcp_client(client, context).await;
-    }
-
-    async fn current_socket_client(computer: &Arc<AppComputer>) -> Option<Arc<SmcpComputerClient>> {
-        computer.get_socketio_client().read().await.clone()
     }
 
     async fn shutdown_computer(computer: &Arc<AppComputer>) {

@@ -77,11 +77,11 @@ describe('SmcpConnection', () => {
     expect(screen.getByText('Add Profile')).toBeInTheDocument();
   });
 
-  it('does not expose a computer name field in the profile form', () => {
+  it('exposes a computer name field in the profile form', () => {
     render(<SmcpConnection />);
 
     fireEvent.click(screen.getByText('Add Profile'));
 
-    expect(screen.queryByText('Computer Name')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Computer Name').length).toBeGreaterThanOrEqual(2);
   });
 });

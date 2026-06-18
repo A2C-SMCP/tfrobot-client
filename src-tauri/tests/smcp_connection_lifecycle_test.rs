@@ -7,6 +7,7 @@ use hyper::body::Bytes;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
 use tfrobot_client_lib::commands::connection::{connect_smcp_core, ConnectionProfile};
+use tfrobot_client_lib::commands::mcp::add_mcp_server_core;
 use tfrobot_client_lib::commands::settings::update_settings_core;
 use tfrobot_client_lib::services::settings::{AppSettings, SettingsService};
 use tokio::net::TcpListener;
@@ -260,18 +261,26 @@ async fn start_skill_query_smcp_socket_server(
 
 async fn start_tool_query_smcp_socket_server(
     result_tx: oneshot::Sender<serde_json::Value>,
-) -> String {
+) -> (String, oneshot::Sender<()>) {
     let (socket_layer, io) = SocketIo::new_layer();
     let result_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+    let (trigger_tx, trigger_rx) = oneshot::channel();
+    let trigger_rx = Arc::new(std::sync::Mutex::new(Some(trigger_rx)));
 
     io.ns("/smcp", move |socket: SocketRef| {
         let tx = result_tx.clone();
+        let trigger = trigger_rx.clone();
         socket.on(
             SERVER_JOIN_OFFICE,
             move |socket: SocketRef, ack: AckSender| {
                 let _ = ack.send(&(true, Option::<String>::None));
                 let tx = tx.clone();
+                let trigger = trigger.clone();
                 tokio::spawn(async move {
+                    let trigger_rx = trigger.lock().expect("trigger lock").take();
+                    if let Some(trigger_rx) = trigger_rx {
+                        let _ = trigger_rx.await;
+                    }
                     let get_tools_req = serde_json::json!({
                         "agent": "robot",
                         "req_id": "tools-req",
@@ -323,7 +332,7 @@ async fn start_tool_query_smcp_socket_server(
         }
     });
 
-    url
+    (url, trigger_tx)
 }
 
 async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
@@ -523,6 +532,7 @@ async fn connecting_new_profile_closes_previous_smcp_socket() {
     connect_smcp_core(&state, "first".to_string())
         .await
         .expect("connect first profile");
+    let first_computer = state.runtime.computer();
     wait_for("first server never observed active connection", || {
         first_stats.active() == 1
     })
@@ -531,6 +541,10 @@ async fn connecting_new_profile_closes_previous_smcp_socket() {
     connect_smcp_core(&state, "second".to_string())
         .await
         .expect("connect second profile");
+    assert!(
+        Arc::ptr_eq(&first_computer, &state.runtime.computer()),
+        "Switching SMCP profiles should not rebuild the Computer runtime"
+    );
 
     wait_for("first server never observed leave_office", || {
         first_stats.leave_events() == 1
@@ -548,7 +562,7 @@ async fn connecting_new_profile_closes_previous_smcp_socket() {
     let status = state.runtime.connection_status().await;
     assert!(status.connected);
     assert_eq!(status.profile_name.as_deref(), Some("second"));
-    assert_eq!(status.computer_name.as_deref(), Some("tfrobot-client"));
+    assert_eq!(status.computer_name.as_deref(), Some("second-computer"));
 
     state.runtime.disconnect().await;
 }
@@ -716,17 +730,17 @@ async fn robot_can_fetch_mcp_tools_over_shared_runtime() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let config = common::echo_server_config("robot-tool-test");
+    add_mcp_server_core(&state, config.clone())
+        .await
+        .expect("add MCP config");
+    let (tx, rx) = oneshot::channel();
+    let (server_url, trigger_tool_query) = start_tool_query_smcp_socket_server(tx).await;
     state
         .config
-        .add_config(config.clone())
-        .expect("persist MCP config");
+        .save_profiles(&[profile("tools", server_url)])
+        .expect("save profile");
 
-    state.runtime.boot().await.expect("boot runtime");
     let computer = state.runtime.computer();
-    computer
-        .add_or_update_server(config)
-        .await
-        .expect("add echo MCP server");
     computer
         .start_mcp_client("robot-tool-test")
         .await
@@ -747,16 +761,15 @@ async fn robot_can_fetch_mcp_tools_over_shared_runtime() {
     }
     assert!(echo_tool_ready, "echo MCP server did not expose tools");
 
-    let (tx, rx) = oneshot::channel();
-    let server_url = start_tool_query_smcp_socket_server(tx).await;
-    state
-        .config
-        .save_profiles(&[profile("tools", server_url)])
-        .expect("save profile");
-
     connect_smcp_core(&state, "tools".to_string())
         .await
         .expect("connect profile");
+    assert!(
+        Arc::ptr_eq(&computer, &state.runtime.computer()),
+        "SMCP connect should reuse the current Computer runtime"
+    );
+
+    let _ = trigger_tool_query.send(());
 
     let tools = tokio::time::timeout(Duration::from_secs(5), rx)
         .await

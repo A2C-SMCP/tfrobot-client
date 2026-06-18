@@ -149,7 +149,6 @@ const initialState = {
 };
 
 const TOKEN_LIKE_HEADER = /token|authorization|cookie/i;
-const DEFAULT_COMPUTER_NAME = 'tfrobot-client';
 
 /** Shallow-redact sensitive fields for logging. Never log access_token / Authorization. */
 function redactForLog(info: ConnectionInfo) {
@@ -196,7 +195,7 @@ function buildProfileFromConnectionInfo(
     url: info.socketBaseURL,
     namespace: info.smcpNamespace ?? '/smcp',
     office_id: info.rid ?? '',
-    computer_name: DEFAULT_COMPUTER_NAME,
+    computer_name: info.computerName ?? 'tfrobot-client',
     headers: { ...info.routingHeaders },
     auto_connect: false,
     auto_reconnect: false,
