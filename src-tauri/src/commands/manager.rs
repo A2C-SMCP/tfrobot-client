@@ -9,9 +9,7 @@
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::services::manager_client::{
-    DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo,
-};
+use crate::services::manager_client::{DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo};
 use crate::AppState;
 
 /// 401 事件名。导出为 pub const 便于前端在单一来源引用（通过 get_app_info 之类的常量桥，后续 UI 可接）。

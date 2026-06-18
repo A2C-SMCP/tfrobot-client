@@ -343,7 +343,10 @@ pub async fn manager_connect_smcp(
     );
 
     // 1) 握手参数
-    let info = state.manager_client.get_connection_info(employee_id).await?;
+    let info = state
+        .manager_client
+        .get_connection_info(employee_id)
+        .await?;
     let url = info.socket_base_url.clone();
     if url.trim().is_empty() {
         return Err(ManagerError::InvalidResponse(
@@ -492,8 +495,15 @@ fn spawn_refresh_task(
             let wait = refresh_wait_secs(expires_in);
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
-            match refresh_cycle(&manager_client, &connection, &manager, &inputs, &params, generation)
-                .await
+            match refresh_cycle(
+                &manager_client,
+                &connection,
+                &manager,
+                &inputs,
+                &params,
+                generation,
+            )
+            .await
             {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
@@ -561,7 +571,8 @@ async fn refresh_cycle(
     {
         Ok(t) => t,
         Err(ManagerError::Unauthorized) => return RefreshOutcome::Unauthorized,
-        Err(e @ ManagerError::SigningUnavailable { .. }) | Err(e @ ManagerError::NetworkError(_)) => {
+        Err(e @ ManagerError::SigningUnavailable { .. })
+        | Err(e @ ManagerError::NetworkError(_)) => {
             log::warn!("Token pre-refresh retryable error: {e}");
             return RefreshOutcome::Retry;
         }
@@ -725,6 +736,9 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert_eq!(out.get("X-TF-Namespace").map(String::as_str), Some("ns"));
         assert_eq!(out.get("X-TF-RobotId").map(String::as_str), Some("rid"));
-        assert_eq!(out.get("X-TF-RobotType").map(String::as_str), Some("tfrobot"));
+        assert_eq!(
+            out.get("X-TF-RobotType").map(String::as_str),
+            Some("tfrobot")
+        );
     }
 }

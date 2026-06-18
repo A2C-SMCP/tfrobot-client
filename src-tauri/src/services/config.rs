@@ -1,17 +1,15 @@
 use crate::commands::connection::ConnectionProfile;
 use crate::commands::inputs::InputDefinition;
+use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
 use smcp_computer::mcp_clients::MCPServerConfig;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Service for persisting all configuration data to disk
 pub struct ConfigService {
     config_dir: PathBuf,
-    servers_file: PathBuf,
-    inputs_file: PathBuf,
-    input_values_file: PathBuf,
-    profiles_file: PathBuf,
+    computer_instances_file: PathBuf,
 }
 
 impl ConfigService {
@@ -20,10 +18,7 @@ impl ConfigService {
         fs::create_dir_all(&app_data_dir)?;
 
         Ok(Self {
-            servers_file: app_data_dir.join("mcp_servers.json"),
-            inputs_file: app_data_dir.join("inputs.json"),
-            input_values_file: app_data_dir.join("input_values.json"),
-            profiles_file: app_data_dir.join("connection_profiles.json"),
+            computer_instances_file: app_data_dir.join("computer_instances.json"),
             config_dir: app_data_dir,
         })
     }
@@ -31,11 +26,17 @@ impl ConfigService {
     // --- MCP Server Configs ---
 
     pub fn load_configs(&self) -> Result<Vec<MCPServerConfig>, ConfigError> {
-        load_json_file(&self.servers_file)
+        let instances = self.load_computer_instances()?;
+        Ok(instances
+            .default_instance()
+            .map(|instance| instance.mcp_servers.clone())
+            .unwrap_or_default())
     }
 
     pub fn save_configs(&self, configs: &[MCPServerConfig]) -> Result<(), ConfigError> {
-        save_json_file(&self.servers_file, configs)
+        self.update_default_instance(|instance| {
+            instance.mcp_servers = configs.to_vec();
+        })
     }
 
     pub fn add_config(&self, config: MCPServerConfig) -> Result<(), ConfigError> {
@@ -59,44 +60,90 @@ impl ConfigService {
     // --- Input Definitions ---
 
     pub fn load_inputs(&self) -> Result<Vec<InputDefinition>, ConfigError> {
-        load_json_file(&self.inputs_file)
+        let instances = self.load_computer_instances()?;
+        Ok(instances
+            .default_instance()
+            .map(|instance| instance.inputs.clone())
+            .unwrap_or_default())
     }
 
     pub fn save_inputs(&self, inputs: &[InputDefinition]) -> Result<(), ConfigError> {
-        save_json_file(&self.inputs_file, inputs)
+        self.update_default_instance(|instance| {
+            instance.inputs = inputs.to_vec();
+        })
     }
 
     // --- Input Values ---
 
     pub fn load_input_values(&self) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
-        load_json_file(&self.input_values_file)
+        let instances = self.load_computer_instances()?;
+        Ok(instances
+            .default_instance()
+            .map(|instance| instance.input_values.clone())
+            .unwrap_or_default())
     }
 
     pub fn save_input_values(
         &self,
         values: &HashMap<String, serde_json::Value>,
     ) -> Result<(), ConfigError> {
-        save_json_file(&self.input_values_file, values)
+        self.update_default_instance(|instance| {
+            instance.input_values = values.clone();
+        })
     }
 
     // --- Connection Profiles ---
 
     pub fn load_profiles(&self) -> Result<Vec<ConnectionProfile>, ConfigError> {
-        load_json_file(&self.profiles_file)
+        let instances = self.load_computer_instances()?;
+        Ok(instances
+            .default_instance()
+            .map(|instance| instance.connection_profiles.clone())
+            .unwrap_or_default())
     }
 
     pub fn save_profiles(&self, profiles: &[ConnectionProfile]) -> Result<(), ConfigError> {
-        save_json_file(&self.profiles_file, profiles)
+        self.update_default_instance(|instance| {
+            instance.connection_profiles = profiles.to_vec();
+        })
+    }
+
+    // --- Computer Instances ---
+
+    pub fn load_computer_instances(&self) -> Result<ComputerInstancesConfig, ConfigError> {
+        let mut config: ComputerInstancesConfig = load_json_file(&self.computer_instances_file)?;
+        config.ensure_default_instance();
+        Ok(config)
+    }
+
+    pub fn save_computer_instances(
+        &self,
+        instances: &ComputerInstancesConfig,
+    ) -> Result<(), ConfigError> {
+        let mut instances = instances.clone();
+        instances.ensure_default_instance();
+        save_json_file(&self.computer_instances_file, &instances)
     }
 
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
+
+    fn update_default_instance<F>(&self, update: F) -> Result<(), ConfigError>
+    where
+        F: FnOnce(&mut ComputerInstance),
+    {
+        let mut instances = self.load_computer_instances()?;
+        instances.ensure_default_instance();
+        let default_instance = instances
+            .default_instance_mut()
+            .expect("default instance should exist after ensure_default_instance");
+        update(default_instance);
+        self.save_computer_instances(&instances)
+    }
 }
 
-fn load_json_file<T: serde::de::DeserializeOwned + Default>(
-    path: &PathBuf,
-) -> Result<T, ConfigError> {
+fn load_json_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, ConfigError> {
     if !path.exists() {
         return Ok(T::default());
     }
@@ -108,10 +155,7 @@ fn load_json_file<T: serde::de::DeserializeOwned + Default>(
     Ok(data)
 }
 
-fn save_json_file<T: serde::Serialize + ?Sized>(
-    path: &PathBuf,
-    data: &T,
-) -> Result<(), ConfigError> {
+fn save_json_file<T: serde::Serialize + ?Sized>(path: &Path, data: &T) -> Result<(), ConfigError> {
     let content = serde_json::to_string_pretty(data)?;
     fs::write(path, content)?;
     Ok(())
@@ -132,6 +176,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::computer::DEFAULT_COMPUTER_INSTANCE_ID;
     use tempfile::tempdir;
 
     fn setup() -> (ConfigService, tempfile::TempDir) {
@@ -147,6 +192,21 @@ mod tests {
         let (svc, _tmp) = setup();
         let configs = svc.load_configs().unwrap();
         assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn test_empty_computer_instances_creates_default_instance() {
+        let (svc, _tmp) = setup();
+        let instances = svc.load_computer_instances().unwrap();
+
+        assert_eq!(instances.instances.len(), 1);
+        assert_eq!(instances.default_instance_id, DEFAULT_COMPUTER_INSTANCE_ID);
+        let default_instance = instances.default_instance().unwrap();
+        assert_eq!(default_instance.id, DEFAULT_COMPUTER_INSTANCE_ID);
+        assert!(default_instance.mcp_servers.is_empty());
+        assert!(default_instance.inputs.is_empty());
+        assert!(default_instance.input_values.is_empty());
+        assert!(default_instance.connection_profiles.is_empty());
     }
 
     #[test]
@@ -167,6 +227,105 @@ mod tests {
         let loaded = svc.load_configs().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name(), "test-server");
+    }
+
+    #[test]
+    fn test_legacy_config_files_are_ignored() {
+        let (svc, tmp) = setup();
+        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "legacy-server",
+            "server_parameters": {
+                "command": "node",
+                "args": ["server.js"],
+                "env": {}
+            }
+        }))
+        .unwrap();
+
+        save_json_file(&tmp.path().join("mcp_servers.json"), &[config]).unwrap();
+
+        let instances = svc.load_computer_instances().unwrap();
+        let default_instance = instances.default_instance().unwrap();
+
+        assert!(default_instance.mcp_servers.is_empty());
+        assert!(svc.load_configs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_corrupted_legacy_files_are_ignored() {
+        let (svc, tmp) = setup();
+        std::fs::write(tmp.path().join("mcp_servers.json"), "not json").unwrap();
+        std::fs::write(tmp.path().join("inputs.json"), "not json").unwrap();
+
+        let instances = svc.load_computer_instances().unwrap();
+        let default_instance = instances.default_instance().unwrap();
+
+        assert!(default_instance.mcp_servers.is_empty());
+        assert!(default_instance.inputs.is_empty());
+    }
+
+    #[test]
+    fn test_empty_new_instances_file_uses_default_config() {
+        let (svc, tmp) = setup();
+        std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
+
+        let loaded = svc.load_computer_instances().unwrap();
+        let default_instance = loaded.default_instance().unwrap();
+
+        assert_eq!(loaded.default_instance_id, DEFAULT_COMPUTER_INSTANCE_ID);
+        assert_eq!(default_instance.id, DEFAULT_COMPUTER_INSTANCE_ID);
+        assert!(default_instance.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn test_save_and_load_multiple_computer_instances_roundtrip() {
+        let (svc, _tmp) = setup();
+        let first_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "first-server",
+            "server_parameters": { "command": "node", "args": [], "env": {} }
+        }))
+        .unwrap();
+        let second_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "second-server",
+            "server_parameters": { "command": "python", "args": [], "env": {} }
+        }))
+        .unwrap();
+        let instances = ComputerInstancesConfig {
+            schema_version: 1,
+            default_instance_id: "first".to_string(),
+            instances: vec![
+                ComputerInstance {
+                    id: "first".to_string(),
+                    name: "First".to_string(),
+                    mcp_servers: vec![first_config],
+                    ..ComputerInstance::default_instance()
+                },
+                ComputerInstance {
+                    id: "second".to_string(),
+                    name: "Second".to_string(),
+                    mcp_servers: vec![second_config],
+                    ..ComputerInstance::default_instance()
+                },
+            ],
+        };
+
+        svc.save_computer_instances(&instances).unwrap();
+        let loaded = svc.load_computer_instances().unwrap();
+
+        assert_eq!(loaded.instances.len(), 2);
+        assert_eq!(
+            loaded.default_instance().unwrap().mcp_servers[0].name(),
+            "first-server"
+        );
+        let second = loaded
+            .instances
+            .iter()
+            .find(|instance| instance.id == "second")
+            .unwrap();
+        assert_eq!(second.mcp_servers[0].name(), "second-server");
     }
 
     #[test]
@@ -252,7 +411,7 @@ mod tests {
     #[test]
     fn test_load_corrupted_json_file() {
         let (svc, tmp) = setup();
-        std::fs::write(tmp.path().join("mcp_servers.json"), "not json").unwrap();
+        std::fs::write(tmp.path().join("computer_instances.json"), "not json").unwrap();
         let result = svc.load_configs();
         assert!(result.is_err());
     }
@@ -260,7 +419,7 @@ mod tests {
     #[test]
     fn test_load_empty_json_file_returns_default() {
         let (svc, tmp) = setup();
-        std::fs::write(tmp.path().join("mcp_servers.json"), "").unwrap();
+        std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
         let configs = svc.load_configs().unwrap();
         assert!(configs.is_empty());
     }
@@ -351,8 +510,8 @@ mod tests {
     fn test_config_file_permissions_error() {
         use std::os::unix::fs::PermissionsExt;
         let (svc, tmp) = setup();
-        let path = tmp.path().join("mcp_servers.json");
-        std::fs::write(&path, "[]").unwrap();
+        let path = tmp.path().join("computer_instances.json");
+        std::fs::write(&path, "{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
             "type": "Stdio",

@@ -2,7 +2,8 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
-use commands::connection::{close_smcp_connection, ConnectionState};
+use commands::connection::ConnectionState;
+use services::computer::ComputerRegistry;
 use services::config::ConfigService;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     /// Active SMCP connection
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
+    /// Runtime registry for all configured Computer instances
+    pub computer_registry: Arc<ComputerRegistry>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
     /// Settings persistence service
@@ -40,11 +43,22 @@ impl AppState {
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
+        let instances = config.load_computer_instances().unwrap_or_else(|error| {
+            log::error!(
+                "Failed to load ComputerInstance configuration; starting with default instance: {}",
+                error
+            );
+            Default::default()
+        });
+        let (computer_registry, default_runtime) =
+            ComputerRegistry::from_config_with_default_runtime(instances);
+
         Self {
-            manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
+            manager: default_runtime.manager,
             config: Arc::new(config),
-            inputs: Arc::new(RwLock::new(HashMap::new())),
-            connection: Arc::new(RwLock::new(None)),
+            inputs: default_runtime.inputs,
+            connection: default_runtime.connection,
+            computer_registry: Arc::new(computer_registry),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
             manager_client: Arc::new(ManagerClient::new()),
@@ -132,7 +146,13 @@ pub fn run() {
                 );
             }
 
-            let saved_configs = config_service.load_configs().unwrap_or_default();
+            let saved_configs = config_service.load_configs().unwrap_or_else(|error| {
+                log::error!(
+                    "Failed to load MCP server configurations during startup: {}",
+                    error
+                );
+                Vec::new()
+            });
             log::info!("Loaded {} MCP server configurations", saved_configs.len());
 
             let state = AppState::new(config_service, log_service, settings_service);
@@ -247,19 +267,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    // Disconnect SMCP if connected
-                    let existing_connection = {
-                        let mut conn = state.connection.write().await;
-                        conn.take()
-                    };
-                    if let Some(connection) = existing_connection {
-                        close_smcp_connection(connection).await;
-                    }
-                    // Stop all MCP servers
-                    let lock = state.manager.read().await;
-                    if let Some(mgr) = lock.as_ref() {
-                        let _ = mgr.stop_all().await;
-                    }
+                    state.computer_registry.shutdown_all().await;
                 });
                 let _ =
                     state
@@ -332,5 +340,20 @@ mod tests {
         let path = std::path::Path::new("/tmp/nonexistent_log_dir_test_12345");
         // Should not panic
         cleanup_old_log_files(path, 3);
+    }
+
+    #[tokio::test]
+    async fn app_state_uses_registry_default_runtime_handles() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+
+        let state = AppState::new(config, log_service, settings_service);
+        let default_runtime = state.computer_registry.default_runtime().await.unwrap();
+
+        assert!(Arc::ptr_eq(&state.manager, &default_runtime.manager));
+        assert!(Arc::ptr_eq(&state.inputs, &default_runtime.inputs));
+        assert!(Arc::ptr_eq(&state.connection, &default_runtime.connection));
     }
 }

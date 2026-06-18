@@ -1,3 +1,4 @@
+pub mod computer;
 pub mod config;
 pub mod keychain;
 pub mod logger;

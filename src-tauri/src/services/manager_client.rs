@@ -1032,7 +1032,8 @@ mod tests {
         assert_eq!(emp.robot_id.as_deref(), Some("rid-1"));
 
         // 缺字段（历史实例）→ None
-        let absent: DigitalEmployeeBrief = serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
+        let absent: DigitalEmployeeBrief =
+            serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
         assert!(absent.robot_account_id.is_none());
         // 显式 null → None
         let null_val: DigitalEmployeeBrief =

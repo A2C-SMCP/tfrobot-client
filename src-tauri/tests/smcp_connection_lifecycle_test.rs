@@ -432,7 +432,8 @@ async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
         Arc::new(RwLock::new(HashMap::new()));
 
     // 旧连接连到「好」server（initial join → join_events = 1）。
-    let old_client = connect_client(&server_url, &manager, &inputs, "rollback-test", "office").await;
+    let old_client =
+        connect_client(&server_url, &manager, &inputs, "rollback-test", "office").await;
     let connection = Arc::new(RwLock::new(Some(ConnectionState {
         client: old_client,
         profile_name: "p".to_string(),
@@ -482,7 +483,11 @@ async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
     .await;
     assert_eq!(stats.leave_events(), 1, "exactly one leave before rollback");
     // 旧连接从未断开（leave_office 不断 socket），回滚后仍在 room。
-    assert_eq!(stats.active(), 1, "old connection must stay connected (rolled back)");
+    assert_eq!(
+        stats.active(),
+        1,
+        "old connection must stay connected (rolled back)"
+    );
 
     // 现连接仍是同一代际、未变僵尸 None。
     {
