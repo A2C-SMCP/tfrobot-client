@@ -27,6 +27,11 @@ const KEYCHAIN_KEY_PREFIX: &str = "manager_jwt:";
 /// 数字 `code=404` 与 `message` 不变，仅新增此 `errorCode` 字段。
 pub const ERR_NOT_FOUND_OR_NO_PERMISSION: &str = "ERR_NOT_FOUND_OR_NO_PERMISSION";
 
+/// RFC 8693 token-exchange 的 grant type（TFRC-11 / C1）。
+const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+/// subject_token 类型：User JWT（区别于 PAT 的 `...:token-type:access_token`）。
+const SUBJECT_TOKEN_TYPE_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+
 // ───────────────────────── 错误 ─────────────────────────
 
 /// 面向前端的错误分类。`serde` 采用 `tag + content` 让 UI 可按 `kind` 分支。
@@ -65,6 +70,19 @@ pub enum ManagerError {
     /// 其他 HTTP 非成功状态。
     #[error("HTTP {status}: {body}")]
     Other { status: u16, body: String },
+
+    /// RFC 8693 token-exchange 失败：RFC 6749 §5.2 错误体 `{error, error_description}`。
+    /// `error` 形如 `invalid_grant` / `invalid_target` / `invalid_scope` / `unsupported_grant_type`。
+    #[error("Token exchange failed: {error}")]
+    TokenExchange {
+        error: String,
+        description: Option<String>,
+    },
+
+    /// 503 `temporarily_unavailable`：签名子系统未就位（ACCESS_TOKEN_SIGNING_* 未配置 / flag 未开）。
+    /// 短期重试可恢复——上层应带 jitter/退避重试，而非当作硬错误弹登录。
+    #[error("Token signing temporarily unavailable")]
+    SigningUnavailable { message: Option<String> },
 
     /// 未登录即调用了需要 session 的命令（list / connection-info / select-account）。
     #[error("No active Manager session; call manager_login first")]
@@ -241,6 +259,12 @@ pub struct DigitalEmployeeBrief {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
+    /// 机器人自身账号 ID（`AccountType=robot` 的 Account.ID）；token-exchange 的
+    /// audience = `robot:<robotAccountId>`（TFRM-183 暴露，**nullable**：历史/未回填实例为 null —
+    /// 这类机器人不能做 token-exchange 连接，前端应禁用其连接按钮）。
+    /// 注意与 `account_id`（创建人 ID）和 `robot_id`/rid（SMCP 路由串）区分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robot_account_id: Option<u64>,
     /// `running` / `stopped` / `init_failed` / … 完整状态集见 UAT guide。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -286,6 +310,47 @@ pub struct ConnectionInfoResponse {
     pub routing_headers: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+// ───────── RFC 8693 token-exchange（TFRC-11 / C1，前置 TFRM-158/M4） ─────────
+
+/// `POST /api/v1/oauth/token` 请求体（`application/x-www-form-urlencoded`）。
+/// 公开端点：subject_token 在表单里，无需 Authorization header。**不引 oauth2 crate**，手写表单。
+#[derive(Debug, Serialize)]
+struct TokenExchangeRequest<'a> {
+    grant_type: &'a str,
+    subject_token: &'a str,
+    subject_token_type: &'a str,
+    audience: String,
+    /// 空格分隔的可选 scope；None 时整字段不发送（server 缺省授予全部可用能力）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+}
+
+/// token-exchange 成功响应（OAuth 标准 JSON）。
+#[derive(Debug, Deserialize)]
+struct TokenExchangeResponse {
+    access_token: String,
+    #[serde(default)]
+    token_type: String,
+    #[serde(default)]
+    expires_in: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    issued_token_type: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// 换取到的短 JWT 及元数据。`access_token` 是注入 Socket.IO `auth` dict（字段名 `token`）的
+/// 连接面凭据。**故意不实现 `Serialize`**——短 JWT 不应原样透传给前端。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExchangedToken {
+    pub access_token: String,
+    pub token_type: String,
+    /// 有效期秒数（server 默认 300）。上层据此计算 `expires_at - 60s` 预刷新重连。
+    pub expires_in: i64,
+    pub scope: Option<String>,
 }
 
 /// 402 欠费响应。兼容两种形态用同一个结构：
@@ -621,6 +686,78 @@ impl ManagerClient {
         Ok(envelope.data)
     }
 
+    /// `POST {base}/api/v1/oauth/token` — RFC 8693 token-exchange（C1 / TFRM-153）。
+    ///
+    /// 用当前 session 的 User JWT 作 subject，换取目标机器人的短 JWT（server 默认 5min）。
+    /// 公开端点：subject_token 在 `application/x-www-form-urlencoded` 表单里，无需 Authorization
+    /// header（但本方法要求已登录以取 User JWT）。**不引 oauth2 crate**，手写表单。
+    ///
+    /// - `robot_account_id`：目标机器人账号 ID（audience = `robot:<id>`）。
+    /// - `scope`：可选、空格分隔；None 时不发该字段（server 缺省授予全部可用能力）。
+    ///
+    /// 错误归类：400 → [`ManagerError::TokenExchange`]（RFC 6749 §5.2）；503 →
+    /// [`ManagerError::SigningUnavailable`]（签名未就位，可重试）；401/402/404 等沿用通用归一化
+    /// （401 会清 session）。
+    pub async fn exchange_token(
+        &self,
+        robot_account_id: &str,
+        scope: Option<String>,
+    ) -> Result<ExchangedToken, ManagerError> {
+        let session = self.require_session().await?;
+        if session.jwt.is_empty() {
+            return Err(ManagerError::NoSession);
+        }
+        let url = format!("{}/api/v1/oauth/token", session.base_url);
+
+        let form = TokenExchangeRequest {
+            grant_type: GRANT_TYPE_TOKEN_EXCHANGE,
+            subject_token: &session.jwt,
+            subject_token_type: SUBJECT_TOKEN_TYPE_JWT,
+            audience: format!("robot:{robot_account_id}"),
+            scope,
+        };
+
+        let resp = self
+            .http
+            .post(&url)
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let body: TokenExchangeResponse = resp
+                .json()
+                .await
+                .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+            return Ok(ExchangedToken {
+                access_token: body.access_token,
+                token_type: body.token_type,
+                expires_in: body.expires_in,
+                scope: body.scope,
+            });
+        }
+
+        // 错误分流：400 = RFC 6749 §5.2 OAuth 错误体；503 = 签名子系统未就位；其余沿用通用归一化
+        // （401 清 session、402 欠费、404 等）。
+        match status {
+            StatusCode::BAD_REQUEST => {
+                let body = resp.text().await.unwrap_or_default();
+                let (error, description) = parse_oauth_error(&body);
+                Err(ManagerError::TokenExchange { error, description })
+            }
+            StatusCode::SERVICE_UNAVAILABLE => {
+                let body = resp.text().await.unwrap_or_default();
+                let (_error, description) = parse_oauth_error(&body);
+                Err(ManagerError::SigningUnavailable {
+                    message: description,
+                })
+            }
+            _ => Err(self.classify_error(resp).await),
+        }
+    }
+
     /// 本地登出：清 keychain + 内存 session。无服务端 logout API。
     pub async fn logout(&self) -> Result<(), ManagerError> {
         let base_url = {
@@ -660,6 +797,23 @@ fn extract_error_code(body: &str) -> Option<String> {
         .ok()
         .and_then(|p| p.error_code)
         .filter(|s| !s.is_empty())
+}
+
+/// 解析 OAuth / RFC 6749 §5.2 错误体 `{error, error_description}`（token-exchange 用）。
+/// 非 JSON 或缺 `error` 字段时回退 `("invalid_request", None)`。
+fn parse_oauth_error(body: &str) -> (String, Option<String>) {
+    #[derive(Deserialize)]
+    struct OAuthError {
+        #[serde(default)]
+        error: String,
+        #[serde(default)]
+        error_description: Option<String>,
+    }
+    serde_json::from_str::<OAuthError>(body)
+        .ok()
+        .filter(|e| !e.error.is_empty())
+        .map(|e| (e.error, e.error_description))
+        .unwrap_or_else(|| ("invalid_request".to_string(), None))
 }
 
 fn strip_trailing_slash(url: String) -> String {
@@ -869,6 +1023,24 @@ mod tests {
     }
 
     #[test]
+    fn digital_employee_brief_deserializes_robot_account_id() {
+        // TFRM-183：robotAccountId（camelCase, nullable）= 机器人账号 ID，token-exchange audience 用。
+        let json = r#"{"id": 11, "name": "robot", "robotId": "rid-1", "robotAccountId": 4242}"#;
+        let emp: DigitalEmployeeBrief = serde_json::from_str(json).unwrap();
+        assert_eq!(emp.robot_account_id, Some(4242));
+        // 与 rid/robot_id 区分：robotId 是路由串，robotAccountId 是数字账号 ID。
+        assert_eq!(emp.robot_id.as_deref(), Some("rid-1"));
+
+        // 缺字段（历史实例）→ None
+        let absent: DigitalEmployeeBrief = serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
+        assert!(absent.robot_account_id.is_none());
+        // 显式 null → None
+        let null_val: DigitalEmployeeBrief =
+            serde_json::from_str(r#"{"id": 13, "name": "n", "robotAccountId": null}"#).unwrap();
+        assert!(null_val.robot_account_id.is_none());
+    }
+
+    #[test]
     fn extract_error_code_picks_up_visibility_revoked_marker() {
         // 顶层 errorCode（camelCase），数字 code 与 message 不影响提取。
         let body =
@@ -1001,6 +1173,70 @@ mod tests {
         let e = ManagerError::Unauthorized;
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("unauthorized"));
+    }
+
+    #[test]
+    fn token_exchange_response_deserializes_oauth_json() {
+        let json = r#"{
+            "access_token": "short-robot-jwt",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "token_type": "Bearer",
+            "expires_in": 300,
+            "scope": "smcp:connect tools:call"
+        }"#;
+        let r: TokenExchangeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.access_token, "short-robot-jwt");
+        assert_eq!(r.token_type, "Bearer");
+        assert_eq!(r.expires_in, 300);
+        assert_eq!(r.scope.as_deref(), Some("smcp:connect tools:call"));
+    }
+
+    #[test]
+    fn parse_oauth_error_extracts_error_and_description_with_fallback() {
+        let (e, d) =
+            parse_oauth_error(r#"{"error":"invalid_scope","error_description":"unknown scope x"}"#);
+        assert_eq!(e, "invalid_scope");
+        assert_eq!(d.as_deref(), Some("unknown scope x"));
+
+        // 缺 description → None
+        let (e2, d2) = parse_oauth_error(r#"{"error":"invalid_grant"}"#);
+        assert_eq!(e2, "invalid_grant");
+        assert!(d2.is_none());
+
+        // 非 JSON / 空 error → 回退 invalid_request
+        let (e3, d3) = parse_oauth_error("not json at all");
+        assert_eq!(e3, "invalid_request");
+        assert!(d3.is_none());
+        let (e4, _) = parse_oauth_error(r#"{"error":""}"#);
+        assert_eq!(e4, "invalid_request");
+    }
+
+    #[test]
+    fn token_exchange_and_signing_errors_serialize_with_kind_tag() {
+        let e = ManagerError::TokenExchange {
+            error: "invalid_target".into(),
+            description: Some("no such robot".into()),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(
+            v.get("kind").and_then(|x| x.as_str()),
+            Some("token_exchange")
+        );
+        assert_eq!(
+            v.pointer("/detail/error").and_then(|x| x.as_str()),
+            Some("invalid_target")
+        );
+        assert_eq!(
+            v.pointer("/detail/description").and_then(|x| x.as_str()),
+            Some("no such robot")
+        );
+
+        let e2 = ManagerError::SigningUnavailable { message: None };
+        let v2 = serde_json::to_value(&e2).unwrap();
+        assert_eq!(
+            v2.get("kind").and_then(|x| x.as_str()),
+            Some("signing_unavailable")
+        );
     }
 
     #[tokio::test]

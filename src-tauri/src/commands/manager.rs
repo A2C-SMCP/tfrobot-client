@@ -10,7 +10,7 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::services::manager_client::{
-    ConnectionInfoResponse, DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo,
+    DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo,
 };
 use crate::AppState;
 
@@ -72,19 +72,9 @@ pub async fn manager_list_digital_employees(
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))
 }
 
-#[tauri::command]
-pub async fn manager_get_connection_info(
-    state: State<'_, AppState>,
-    app: AppHandle,
-    id: u64,
-) -> Result<ConnectionInfoResponse, ManagerError> {
-    log::info!("manager_get_connection_info: id={}", id);
-    state
-        .manager_client
-        .get_connection_info(id)
-        .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))
-}
+// 注：原 `manager_get_connection_info` Tauri 命令已移除——切到后端编排（`manager_connect_smcp`）后
+// 前端不再直接拉 connection-info（避免短 JWT/密钥流入 JS 层）。`ManagerClient::get_connection_info`
+// 方法仍由 `manager_connect_smcp` 内部使用。
 
 #[tauri::command]
 pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerError> {

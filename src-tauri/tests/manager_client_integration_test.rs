@@ -717,3 +717,184 @@ async fn network_error_when_server_unreachable() {
         other => panic!("unexpected error variant: {other:?}"),
     }
 }
+
+// ───────────────────── token-exchange (TFRC-11 / C1) ─────────────────────
+
+#[tokio::test]
+async fn exchange_token_posts_form_and_parses_oauth_response() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("user-jwt-xyz")),
+        ),
+        json_script(
+            "/api/v1/oauth/token",
+            "HTTP/1.1 200 OK",
+            serde_json::json!({
+                "access_token": "short-robot-jwt",
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "token_type": "Bearer",
+                "expires_in": 300,
+                "scope": "smcp:connect"
+            }),
+        ),
+    ];
+    let (base, captured, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
+
+    let tok = client.exchange_token("robot-acct-1", None).await.unwrap();
+    assert_eq!(tok.access_token, "short-robot-jwt");
+    assert_eq!(tok.token_type, "Bearer");
+    assert_eq!(tok.expires_in, 300);
+    assert_eq!(tok.scope.as_deref(), Some("smcp:connect"));
+
+    // 校验 wire 请求：POST /api/v1/oauth/token + form-urlencoded 字段（RFC 8693）。
+    let reqs = captured.lock().await.clone();
+    let xchg = reqs
+        .iter()
+        .find(|r| r.request_line.contains("/api/v1/oauth/token"))
+        .expect("token-exchange request should be captured");
+    assert!(
+        xchg.request_line.starts_with("POST "),
+        "should be POST: {}",
+        xchg.request_line
+    );
+    assert_eq!(
+        xchg.headers.get("content-type").map(String::as_str),
+        Some("application/x-www-form-urlencoded")
+    );
+    assert!(
+        xchg.body
+            .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"),
+        "body: {}",
+        xchg.body
+    );
+    assert!(
+        xchg.body.contains("subject_token=user-jwt-xyz"),
+        "subject_token must be the session User JWT. body: {}",
+        xchg.body
+    );
+    assert!(
+        xchg.body
+            .contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt"),
+        "body: {}",
+        xchg.body
+    );
+    assert!(
+        xchg.body.contains("audience=robot%3Arobot-acct-1"),
+        "audience must be robot:<id>. body: {}",
+        xchg.body
+    );
+    assert!(
+        !xchg.body.contains("scope="),
+        "scope must be omitted when None. body: {}",
+        xchg.body
+    );
+}
+
+#[tokio::test]
+async fn exchange_token_sends_scope_when_present() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("user-jwt")),
+        ),
+        json_script(
+            "/api/v1/oauth/token",
+            "HTTP/1.1 200 OK",
+            serde_json::json!({"access_token": "t", "token_type": "Bearer", "expires_in": 300}),
+        ),
+    ];
+    let (base, captured, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client.login(Some(base), "p", "w").await.unwrap();
+    let _ = client
+        .exchange_token("r1", Some("smcp:connect tools:call".to_string()))
+        .await
+        .unwrap();
+
+    let reqs = captured.lock().await.clone();
+    let xchg = reqs
+        .iter()
+        .find(|r| r.request_line.contains("/api/v1/oauth/token"))
+        .unwrap();
+    // 空格分隔的 scope 在 form-urlencoded 里编码为 `+`。
+    assert!(
+        xchg.body.contains("scope=smcp%3Aconnect+tools%3Acall"),
+        "body: {}",
+        xchg.body
+    );
+}
+
+#[tokio::test]
+async fn exchange_token_maps_400_to_token_exchange_error() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("user-jwt")),
+        ),
+        json_script(
+            "/api/v1/oauth/token",
+            "HTTP/1.1 400 Bad Request",
+            serde_json::json!({"error": "invalid_grant", "error_description": "subject token revoked"}),
+        ),
+    ];
+    let (base, _cap, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client.login(Some(base), "p", "w").await.unwrap();
+    let err = client.exchange_token("r1", None).await.unwrap_err();
+    match err {
+        ManagerError::TokenExchange { error, description } => {
+            assert_eq!(error, "invalid_grant");
+            assert_eq!(description.as_deref(), Some("subject token revoked"));
+        }
+        other => panic!("expected TokenExchange, got {other:?}"),
+    }
+    // token-exchange 的 400 不是 session 鉴权失败 — session 应保留。
+    assert!(client.has_session().await);
+}
+
+#[tokio::test]
+async fn exchange_token_maps_503_to_signing_unavailable() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("user-jwt")),
+        ),
+        json_script(
+            "/api/v1/oauth/token",
+            "HTTP/1.1 503 Service Unavailable",
+            serde_json::json!({"error": "temporarily_unavailable", "error_description": "signing keys not provisioned"}),
+        ),
+    ];
+    let (base, _cap, _h) = spawn_mock_manager(script).await;
+
+    let client = ManagerClient::new();
+    client.login(Some(base), "p", "w").await.unwrap();
+    let err = client.exchange_token("r1", None).await.unwrap_err();
+    match err {
+        ManagerError::SigningUnavailable { message } => {
+            assert_eq!(message.as_deref(), Some("signing keys not provisioned"));
+        }
+        other => panic!("expected SigningUnavailable, got {other:?}"),
+    }
+    assert!(client.has_session().await);
+}
+
+#[tokio::test]
+async fn exchange_token_without_login_errors_no_session() {
+    let client = ManagerClient::new();
+    let err = client.exchange_token("r1", None).await.unwrap_err();
+    assert!(matches!(err, ManagerError::NoSession));
+}

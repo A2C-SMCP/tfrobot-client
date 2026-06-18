@@ -208,6 +208,7 @@ pub fn run() {
             commands::connection::save_profile,
             commands::connection::delete_profile,
             commands::connection::connect_smcp,
+            commands::connection::manager_connect_smcp,
             commands::connection::disconnect_smcp,
             commands::connection::get_connection_status,
             // Config import/export
@@ -237,7 +238,6 @@ pub fn run() {
             commands::manager::manager_login,
             commands::manager::manager_select_account,
             commands::manager::manager_list_digital_employees,
-            commands::manager::manager_get_connection_info,
             commands::manager::manager_logout,
         ])
         .build(tauri::generate_context!())

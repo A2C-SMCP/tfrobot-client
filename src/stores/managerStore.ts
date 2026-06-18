@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info, warn, error as logError } from '@/utils/logger';
-import { useConnectionStore, type ConnectionProfile } from './connectionStore';
+import { useConnectionStore } from './connectionStore';
 
 /**
  * 登录成功后 Manager 下发的扁平 4 字段。
@@ -46,6 +46,12 @@ export interface DigitalEmployeeBrief {
   name: string;
   description?: string;
   robotId?: string;
+  /**
+   * 机器人自身账号 ID（TFRM-183，nullable）。token-exchange 的 audience = `robot:<robotAccountId>`。
+   * 为空表示历史/未回填实例——无法走安全连接，UI 应禁用其连接按钮。
+   * 注意与 `robotId`（SMCP 路由串）区分。
+   */
+  robotAccountId?: number;
   status?: string;
   templateDisplayName?: string;
   templateType?: string;
@@ -53,19 +59,6 @@ export interface DigitalEmployeeBrief {
   clusterName?: string;
   /** 部门归属（TFRM-56）。后端保证为数组（可能为空 []）。 */
   departments?: DepartmentRef[];
-}
-
-export interface ConnectionInfo {
-  socketBaseURL: string;
-  sioPath?: string;
-  namespace?: string;
-  rid?: string;
-  robotType?: string;
-  smcpNamespace?: string;
-  accessToken: string;
-  computerName?: string;
-  routingHeaders: Record<string, string>;
-  expiresAt?: string;
 }
 
 export type LoginResult =
@@ -83,7 +76,10 @@ export type ManagerError =
   | { kind: 'no_session' }
   | { kind: 'missing_base_url' }
   | { kind: 'invalid_response'; detail: string }
-  | { kind: 'keychain_error'; detail: string };
+  | { kind: 'keychain_error'; detail: string }
+  // TFRC-11 token-exchange：RFC 6749 §5.2 失败 / 签名子系统未就位。
+  | { kind: 'token_exchange'; detail: { error: string; description?: string } }
+  | { kind: 'signing_unavailable'; detail: { message?: string } };
 
 export interface PaymentRequiredInfo {
   message: string;
@@ -118,13 +114,12 @@ interface ManagerState {
    */
   setOnline: (online: boolean) => void;
   /**
-   * 选中数字员工 → 拉取 connection-info → 生成/复用 ConnectionProfile → 立即发起连接。
-   * 同名 profile 的解决策略由 UI 通过 `onConflict` 传入：返回 'overwrite' / 'copy' / 'cancel'。
+   * 选中数字员工 → 后端编排 token-exchange 全路径并连接（TFRC-11 / C1）：
+   * `connection-info → exchange_token(robotAccountId) → 短 JWT 注入 Socket.IO auth dict → 连接`，
+   * 并起后台预刷新重连。鉴权不再走静态 token / profile。
+   * 返回 `{ name }`（已连接的机器人名）或 `null`（前置校验未过）。
    */
-  selectEmployeeAndConnect: (
-    employeeId: number,
-    onConflict?: (existingName: string) => Promise<'overwrite' | 'copy' | 'cancel'>,
-  ) => Promise<{ profileName: string } | null>;
+  selectEmployeeAndConnect: (employeeId: number) => Promise<{ name: string } | null>;
   logout: () => Promise<void>;
   handleAuthExpired: () => void;
   dismissPaymentRequired: () => void;
@@ -148,27 +143,6 @@ const initialState = {
   online: true,
 };
 
-const TOKEN_LIKE_HEADER = /token|authorization|cookie/i;
-
-/** Shallow-redact sensitive fields for logging. Never log access_token / Authorization. */
-function redactForLog(info: ConnectionInfo) {
-  const redactedHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(info.routingHeaders || {})) {
-    redactedHeaders[k] = TOKEN_LIKE_HEADER.test(k) || k === 'access_token' ? '***' : v;
-  }
-  return {
-    socketBaseURL: info.socketBaseURL,
-    sioPath: info.sioPath,
-    namespace: info.namespace,
-    rid: info.rid,
-    robotType: info.robotType,
-    smcpNamespace: info.smcpNamespace,
-    computerName: info.computerName,
-    routingHeaders: redactedHeaders,
-    expiresAt: info.expiresAt,
-  };
-}
-
 function isManagerError(e: unknown): e is ManagerError {
   return typeof e === 'object' && e !== null && typeof (e as { kind?: unknown }).kind === 'string';
 }
@@ -176,30 +150,6 @@ function isManagerError(e: unknown): e is ManagerError {
 function toManagerError(e: unknown): ManagerError {
   if (isManagerError(e)) return e;
   return { kind: 'other', detail: { status: 0, body: String(e) } };
-}
-
-function findUniqueCopyName(base: string, existing: Set<string>): string {
-  for (let i = 2; i < 1000; i++) {
-    const candidate = `${base} (${i})`;
-    if (!existing.has(candidate)) return candidate;
-  }
-  return `${base} (${Date.now()})`;
-}
-
-function buildProfileFromConnectionInfo(
-  employeeName: string,
-  info: ConnectionInfo,
-): ConnectionProfile {
-  return {
-    name: employeeName,
-    url: info.socketBaseURL,
-    namespace: info.smcpNamespace ?? '/smcp',
-    office_id: info.rid ?? '',
-    computer_name: info.computerName ?? '',
-    headers: { ...info.routingHeaders },
-    auto_connect: false,
-    auto_reconnect: false,
-  };
 }
 
 export const useManagerStore = create<ManagerState>((set, get) => ({
@@ -312,7 +262,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     }
   },
 
-  selectEmployeeAndConnect: async (employeeId, onConflict) => {
+  selectEmployeeAndConnect: async (employeeId) => {
     set({ loading: true, error: null, selectedEmployeeId: employeeId, paymentRequired: null });
     const employee = get().employees.find((e) => e.id === employeeId);
     if (!employee) {
@@ -320,49 +270,27 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       set({ error: err, loading: false });
       throw err;
     }
+    // 安全连接需要 robotAccountId 作 token-exchange audience（TFRM-183，nullable）。
+    // 历史/未回填实例无此 ID，无法换取连接凭据。
+    if (employee.robotAccountId == null) {
+      const err: ManagerError = {
+        kind: 'invalid_response',
+        detail: 'robotAccountId missing for this robot',
+      };
+      set({ error: err, loading: false });
+      throw err;
+    }
     try {
-      const infoResp = await invoke<ConnectionInfo>('manager_get_connection_info', {
-        id: employeeId,
+      // 后端编排 token-exchange 全路径：connection-info → exchange_token → 短 JWT 注入 Socket.IO
+      // auth dict → 连接，并起后台预刷新重连。鉴权不再走静态 token / profile。
+      await invoke('manager_connect_smcp', {
+        employeeId,
+        robotAccountId: employee.robotAccountId,
+        scope: null,
       });
-      info(`manager: connection-info ok for ${employee.name}: ${JSON.stringify(redactForLog(infoResp))}`);
-
-      await useConnectionStore.getState().fetchProfiles();
-      const existingNames = new Set(
-        useConnectionStore.getState().profiles.map((p) => p.name),
-      );
-
-      let profile = buildProfileFromConnectionInfo(employee.name, infoResp);
-      if (existingNames.has(profile.name)) {
-        const choice = onConflict ? await onConflict(profile.name) : 'overwrite';
-        if (choice === 'cancel') {
-          set({ loading: false });
-          return null;
-        }
-        if (choice === 'copy') {
-          profile = { ...profile, name: findUniqueCopyName(profile.name, existingNames) };
-        }
-      }
-
-      await useConnectionStore.getState().saveProfile(profile);
-      info(`manager: profile saved name=${profile.name}`);
-
-      // 若当前已有 SMCP 连接，先断开再重连。
-      // 原因：TFRobotServer 按 (office_id, computer_name) 识别实例，如果同 office + 同
-      // computer_name 还在 room 里，server 会拒绝新连接（"Computer with name X already
-      // exists in room Y"）。典型触发：用户连过一次后点"覆盖"/"另存副本"重新点连接。
-      if (useConnectionStore.getState().status.connected) {
-        try {
-          await useConnectionStore.getState().disconnect();
-          info('manager: disconnected prior session before reconnect');
-        } catch (e) {
-          warn(`manager: pre-connect disconnect failed, continuing anyway: ${String(e)}`);
-        }
-      }
-
-      await useConnectionStore.getState().connect(profile.name);
-      info(`manager: connect initiated profile=${profile.name}`);
+      info(`manager: connected via token-exchange employee=${employee.name}`);
       set({ loading: false });
-      return { profileName: profile.name };
+      return { name: employee.name };
     } catch (e) {
       const err = toManagerError(e);
       logError(`manager: select_employee_and_connect failed, kind=${err.kind}`);

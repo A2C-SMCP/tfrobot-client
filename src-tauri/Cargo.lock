@@ -6319,9 +6319,9 @@ dependencies = [
 
 [[package]]
 name = "smcp"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5d83f198c63c2f9e4d1471127294f80f9a8a998ad259a5f7a6f04d56f7c2a91"
+checksum = "4387868b9cab0cb5762945aab525e90aaf84760c642761c1dbc7e5f2666d7817"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6335,9 +6335,9 @@ dependencies = [
 
 [[package]]
 name = "smcp-client-transport"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1ffb0f26a4ce16bd60a9f0b7e8a6e70f9013cbf8eb785da7cc70f8f4f94653b"
+checksum = "887b84ceff4eb69f69e6c61349fa451165643ecd3f73af1c57a359fbc53969b1"
 dependencies = [
  "serde_json",
  "smcp",
@@ -6348,9 +6348,9 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b44f3e3f6cb996e9e1c6d21eb8756bd4a8e3149fa8030e42f83dea1e1e314be5"
+checksum = "e56c9f6810133a7f4658838402068a37f9b19f6a94e71d170405333156692e96"
 dependencies = [
  "async-recursion",
  "async-trait",

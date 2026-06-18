@@ -10,6 +10,7 @@ import {
   Tag,
   Empty,
   Descriptions,
+  Tooltip,
 } from 'antd';
 import {
   RobotOutlined,
@@ -18,9 +19,9 @@ import {
   LinkOutlined,
   DisconnectOutlined,
   CheckCircleOutlined,
-  ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
+import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import {
   useManagerStore,
@@ -64,7 +65,7 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
 
 export function EmployeeList() {
   const { t } = useTranslation();
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
   const {
     session,
     employees,
@@ -91,6 +92,18 @@ export function EmployeeList() {
     });
   }, [fetchConnectionStatus]);
 
+  // 后端在连接 / 断开 / 后台预刷新重连时 emit 'connection'，据此刷新连接状态徽标（TFRC-11）。
+  useEffect(() => {
+    const unlisten = listen('connection', () => {
+      fetchConnectionStatus().catch(() => {
+        /* noop */
+      });
+    });
+    return () => {
+      unlisten.then((off) => off()).catch(() => {});
+    };
+  }, [fetchConnectionStatus]);
+
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
     if (session) {
@@ -113,32 +126,12 @@ export function EmployeeList() {
     };
   }, [setOnline]);
 
-  const resolveNameConflict = (existingName: string): Promise<'overwrite' | 'copy' | 'cancel'> =>
-    new Promise((resolve) => {
-      modal.confirm({
-        title: t('managerAccount.employees.conflictTitle'),
-        icon: <ExclamationCircleOutlined />,
-        content: t('managerAccount.employees.conflictDescription', { name: existingName }),
-        okText: t('managerAccount.employees.overwrite'),
-        cancelText: t('managerAccount.employees.createCopy'),
-        closable: true,
-        onOk: () => resolve('overwrite'),
-        onCancel: (close) => {
-          if (typeof close === 'function') {
-            resolve('copy');
-          } else {
-            resolve('cancel');
-          }
-        },
-      });
-    });
-
   const handleConnect = async (employee: DigitalEmployeeBrief) => {
     clearError();
     try {
-      const res = await selectEmployeeAndConnect(employee.id, resolveNameConflict);
+      const res = await selectEmployeeAndConnect(employee.id);
       if (res) {
-        message.success(t('managerAccount.employees.connectSuccess', { name: res.profileName }));
+        message.success(t('managerAccount.employees.connectSuccess', { name: res.name }));
         // 刷新连接状态，让 UI 上"已连接"标识立即生效
         await fetchConnectionStatus();
       }
@@ -269,6 +262,20 @@ export function EmployeeList() {
               const connectable = isConnectable(emp);
               const isSelecting = selectedEmployeeId === emp.id && loading;
               const isConnected = isConnectedEmployee(emp);
+              // 无 robotAccountId（历史/未回填实例）无法做 token-exchange → 禁用连接（TFRC-11 / TFRM-183）。
+              const noRobotAccount = emp.robotAccountId == null;
+              const connectButton = (
+                <Button
+                  key="connect"
+                  type="primary"
+                  icon={<LinkOutlined />}
+                  disabled={!connectable || noRobotAccount}
+                  loading={isSelecting}
+                  onClick={() => handleConnect(emp)}
+                >
+                  {t('managerAccount.employees.connect')}
+                </Button>
+              );
               return (
                 <List.Item
                   actions={[
@@ -282,17 +289,15 @@ export function EmployeeList() {
                       >
                         {t('managerAccount.employees.disconnect')}
                       </Button>
-                    ) : (
-                      <Button
+                    ) : noRobotAccount ? (
+                      <Tooltip
                         key="connect"
-                        type="primary"
-                        icon={<LinkOutlined />}
-                        disabled={!connectable}
-                        loading={isSelecting}
-                        onClick={() => handleConnect(emp)}
+                        title={t('managerAccount.employees.noRobotAccount')}
                       >
-                        {t('managerAccount.employees.connect')}
-                      </Button>
+                        <span>{connectButton}</span>
+                      </Tooltip>
+                    ) : (
+                      connectButton
                     ),
                   ]}
                 >

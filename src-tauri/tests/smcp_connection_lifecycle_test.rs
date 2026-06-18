@@ -11,8 +11,10 @@ use smcp_computer::socketio_client::SmcpComputerClient;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
 use tfrobot_client_lib::commands::connection::{
-    close_smcp_connection, connect_smcp_core, ConnectionProfile, ConnectionState,
+    close_smcp_connection, connect_smcp_core, reconnect_with_token, try_install_refreshed_client,
+    ConnectionProfile, ConnectionState, ManagerConnectionParams, RefreshOutcome, SwapResult,
 };
+use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -31,6 +33,7 @@ struct SocketStats {
     connected: AtomicUsize,
     disconnected: AtomicUsize,
     leave_events: AtomicUsize,
+    join_events: AtomicUsize,
 }
 
 impl SocketStats {
@@ -49,6 +52,10 @@ impl SocketStats {
     fn leave_events(&self) -> usize {
         self.leave_events.load(Ordering::SeqCst)
     }
+
+    fn join_events(&self) -> usize {
+        self.join_events.load(Ordering::SeqCst)
+    }
 }
 
 async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
@@ -60,7 +67,9 @@ async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
         connect_stats.active.fetch_add(1, Ordering::SeqCst);
         connect_stats.connected.fetch_add(1, Ordering::SeqCst);
 
-        socket.on(SERVER_JOIN_OFFICE, |ack: AckSender| {
+        let join_stats = connect_stats.clone();
+        socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| {
+            join_stats.join_events.fetch_add(1, Ordering::SeqCst);
             let _ = ack.send(&(true, Option::<String>::None));
         });
 
@@ -154,6 +163,8 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
         office_id: "lifecycle-office".to_string(),
         computer_name: "lifecycle-test-computer".to_string(),
         connected_at: chrono::Utc::now(),
+        generation: 0,
+        refresh_task: None,
     })
     .await;
 
@@ -219,6 +230,8 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
             office_id: "existing-office".to_string(),
             computer_name: "existing-computer".to_string(),
             connected_at: chrono::Utc::now(),
+            generation: 0,
+            refresh_task: None,
         });
     }
 
@@ -283,6 +296,8 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
             office_id: "old-office".to_string(),
             computer_name: "old-computer".to_string(),
             connected_at: chrono::Utc::now(),
+            generation: 0,
+            refresh_task: None,
         });
     }
 
@@ -327,4 +342,204 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
     if let Some(connection) = new_connection {
         close_smcp_connection(connection).await;
     }
+}
+
+// ───────────────────── 预刷新重连：generation 守卫 + abort（TFRC-11 / C1） ─────────────────────
+
+async fn connect_client(
+    url: &str,
+    manager: &Arc<RwLock<Option<MCPServerManager>>>,
+    inputs: &Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    name: &str,
+    office: &str,
+) -> SmcpComputerClient {
+    let c = SmcpComputerClient::new(
+        url,
+        manager.clone(),
+        name.to_string(),
+        None,
+        inputs.clone(),
+        None,
+    )
+    .await
+    .expect("client connect");
+    c.join_office(office).await.expect("join office");
+    c
+}
+
+/// generation 守卫：换连接仅在代际匹配时生效；用户期间断开/改连（代际不符）时旧刷新任务
+/// 走 Stale 分支、不覆盖新连接。
+#[tokio::test]
+async fn try_install_refreshed_client_respects_generation_guard() {
+    let (server_url, _stats) = start_smcp_socket_server().await;
+    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
+    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let client_a = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
+    let connection = Arc::new(RwLock::new(Some(ConnectionState {
+        client: client_a,
+        profile_name: "p".to_string(),
+        url: server_url.clone(),
+        office_id: "office".to_string(),
+        computer_name: "gen-test".to_string(),
+        connected_at: chrono::Utc::now(),
+        generation: 7,
+        refresh_task: None,
+    })));
+
+    // 代际匹配 → Replaced（拿回旧 client A 关闭）。
+    let client_b = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
+    match try_install_refreshed_client(&connection, 7, client_b).await {
+        SwapResult::Replaced(old) => {
+            old.leave_office("office").await.ok();
+            old.disconnect().await.ok();
+        }
+        SwapResult::Stale(_) => panic!("expected Replaced on matching generation"),
+    }
+
+    // 代际不符（模拟用户已改连别的机器人）→ Stale（新 client C 被交还、不覆盖现连接）。
+    let client_c = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
+    match try_install_refreshed_client(&connection, 999, client_c).await {
+        SwapResult::Stale(new) => {
+            new.leave_office("office").await.ok();
+            new.disconnect().await.ok();
+        }
+        SwapResult::Replaced(_) => panic!("expected Stale on non-matching generation"),
+    }
+
+    // 现连接仍是代际 7（client B）。
+    {
+        let guard = connection.read().await;
+        assert_eq!(guard.as_ref().map(|c| c.generation), Some(7));
+    }
+    let final_conn = {
+        let mut conn = connection.write().await;
+        conn.take()
+    };
+    if let Some(cs) = final_conn {
+        close_smcp_connection(cs).await;
+    }
+}
+
+/// build_and_join 失败时，预刷新必须**回滚**（把旧连接重新 join_office）、返回 `Retry`，
+/// 不留「已 leave 却仍标记 connected」的僵尸——旧连接仍在、仍属同一代际。
+#[tokio::test]
+async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
+    let (server_url, stats) = start_smcp_socket_server().await;
+    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
+    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    // 旧连接连到「好」server（initial join → join_events = 1）。
+    let old_client = connect_client(&server_url, &manager, &inputs, "rollback-test", "office").await;
+    let connection = Arc::new(RwLock::new(Some(ConnectionState {
+        client: old_client,
+        profile_name: "p".to_string(),
+        url: server_url.clone(),
+        office_id: "office".to_string(),
+        computer_name: "rollback-test".to_string(),
+        connected_at: chrono::Utc::now(),
+        generation: 5,
+        refresh_task: None,
+    })));
+
+    // 预刷新参数指向一个「死」地址 → build_and_join 必失败。
+    let dead_url = {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        format!("http://{}", addr)
+    };
+    let params = ManagerConnectionParams {
+        url: dead_url,
+        computer_name: "rollback-test".to_string(),
+        office_id: "office".to_string(),
+        routing_headers: HashMap::new(),
+        employee_id: 1,
+        robot_account_id: 42,
+        scope: None,
+    };
+    let token = ExchangedToken {
+        access_token: "new-jwt".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 300,
+        scope: None,
+    };
+
+    let outcome = reconnect_with_token(&connection, &manager, &inputs, &params, 5, &token).await;
+
+    // build 失败 → Retry（不替换连接）。
+    assert!(
+        matches!(outcome, RefreshOutcome::Retry),
+        "expected Retry on build failure"
+    );
+
+    // 发生过一次 leave（step 2 腾 room）+ 一次回滚 re-join；连同 initial join 共 2 次 join。
+    wait_for("expected rollback re-join (join_events == 2)", || {
+        stats.join_events() == 2
+    })
+    .await;
+    assert_eq!(stats.leave_events(), 1, "exactly one leave before rollback");
+    // 旧连接从未断开（leave_office 不断 socket），回滚后仍在 room。
+    assert_eq!(stats.active(), 1, "old connection must stay connected (rolled back)");
+
+    // 现连接仍是同一代际、未变僵尸 None。
+    {
+        let guard = connection.read().await;
+        assert_eq!(
+            guard.as_ref().map(|c| c.generation),
+            Some(5),
+            "old connection must remain at its generation after rollback"
+        );
+    }
+
+    let final_conn = {
+        let mut conn = connection.write().await;
+        conn.take()
+    };
+    if let Some(cs) = final_conn {
+        close_smcp_connection(cs).await;
+    }
+}
+
+/// `close_smcp_connection` 必须 abort 预刷新任务——断开后不得有后台任务继续 revive 连接。
+#[tokio::test]
+async fn close_smcp_connection_aborts_refresh_task() {
+    let (server_url, _stats) = start_smcp_socket_server().await;
+    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
+    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let client = connect_client(&server_url, &manager, &inputs, "abort-test", "office").await;
+
+    // 代表预刷新任务的长驻后台循环；abort 后计数应停止增长。
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_in_task = counter.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            counter_in_task.fetch_add(1, Ordering::SeqCst);
+            sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let cs = ConnectionState {
+        client,
+        profile_name: "p".to_string(),
+        url: server_url,
+        office_id: "office".to_string(),
+        computer_name: "abort-test".to_string(),
+        connected_at: chrono::Utc::now(),
+        generation: 1,
+        refresh_task: Some(task),
+    };
+
+    close_smcp_connection(cs).await;
+
+    let snapshot = counter.load(Ordering::SeqCst);
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        snapshot,
+        "refresh task must be aborted by close_smcp_connection (no revive)"
+    );
 }

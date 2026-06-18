@@ -187,6 +187,7 @@ describe('ManagerAccount', () => {
       id: 11,
       name: 'bot-one',
       robotId: 'robot-a',
+      robotAccountId: 4242,
       templateType: 'tfrserver',
       templateDisplayName: '智能客服',
       status: 'running',
@@ -211,9 +212,7 @@ describe('ManagerAccount', () => {
     });
 
     it('invokes selectEmployeeAndConnect on connect click', async () => {
-      const selectEmployeeAndConnect = vi
-        .fn()
-        .mockResolvedValue({ profileName: 'bot-one' });
+      const selectEmployeeAndConnect = vi.fn().mockResolvedValue({ name: 'bot-one' });
       applyMock({ session: user, employees: [employee], selectEmployeeAndConnect });
 
       render(<EmployeeList />);
@@ -229,6 +228,13 @@ describe('ManagerAccount', () => {
         session: user,
         employees: [{ ...employee, status: 'suspended' }],
       });
+      render(<EmployeeList />);
+      expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
+    });
+
+    it('disables connect when robotAccountId is missing (cannot token-exchange)', () => {
+      const noAccount = { ...employee, robotAccountId: undefined };
+      applyMock({ session: user, employees: [noAccount] });
       render(<EmployeeList />);
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     });

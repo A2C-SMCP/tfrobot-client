@@ -1,13 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   useManagerStore,
-  type ConnectionInfo,
   type DigitalEmployeeBrief,
   type LoginResult,
   type ManagerError,
   type UserInfo,
 } from '@/stores/managerStore';
-import { useConnectionStore, type ConnectionProfile } from '@/stores/connectionStore';
+import { useConnectionStore } from '@/stores/connectionStore';
 import { resetAllStores } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
@@ -18,6 +17,7 @@ const employeeA: DigitalEmployeeBrief = {
   id: 11,
   name: 'bot-one',
   robotId: 'robot-a',
+  robotAccountId: 4242,
   namespace: 'ns-a',
   templateType: 'tfrserver',
   status: 'running',
@@ -39,24 +39,6 @@ const employeeB: DigitalEmployeeBrief = {
   id: 12,
   name: 'bot-two',
   robotId: 'robot-b',
-};
-
-const connInfo: ConnectionInfo = {
-  socketBaseURL: 'wss://tfrserver.example.com',
-  sioPath: '/socket.io/',
-  namespace: 'ns-a',
-  rid: 'robot-a',
-  robotType: 'tfrobot',
-  smcpNamespace: '/smcp',
-  accessToken: 'super-secret-token',
-  computerName: 'alice-laptop',
-  routingHeaders: {
-    'X-TF-Namespace': 'ns-a',
-    'X-TF-RobotId': 'robot-a',
-    'X-TF-RobotType': 'tfrobot',
-    access_token: 'super-secret-token',
-  },
-  expiresAt: '2099-01-01T00:00:00Z',
 };
 
 describe('managerStore', () => {
@@ -162,103 +144,31 @@ describe('managerStore', () => {
       });
     });
 
-    it('builds a profile from connection-info and triggers connect', async () => {
-      // manager_get_connection_info
-      mockedInvoke.mockResolvedValueOnce(connInfo);
-      // list_profiles (inside fetchProfiles, no existing)
-      mockedInvoke.mockResolvedValueOnce([]);
-      // save_profile
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      // list_profiles after save
-      mockedInvoke.mockResolvedValueOnce([
-        {
-          name: 'bot-one',
-          url: connInfo.socketBaseURL,
-          namespace: '/smcp',
-          office_id: 'robot-a',
-          computer_name: 'alice-laptop',
-          headers: connInfo.routingHeaders,
-          auto_connect: false,
-          auto_reconnect: false,
-        } as ConnectionProfile,
-      ]);
-      // connect_smcp
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      // get_connection_status after connect
-      mockedInvoke.mockResolvedValueOnce({ connected: true, profile_name: 'bot-one' });
+    it('invokes manager_connect_smcp with robotAccountId and returns the robot name', async () => {
+      // 后端编排全路径（exchange + connect + 预刷新）为单条命令。
+      mockedInvoke.mockResolvedValueOnce(undefined); // manager_connect_smcp
 
       const ret = await useManagerStore.getState().selectEmployeeAndConnect(11);
 
-      expect(ret).toEqual({ profileName: 'bot-one' });
-      expect(mockedInvoke).toHaveBeenCalledWith('manager_get_connection_info', { id: 11 });
-      expect(mockedInvoke).toHaveBeenCalledWith('save_profile', expect.objectContaining({
-        profile: expect.objectContaining({
-          name: 'bot-one',
-          url: connInfo.socketBaseURL,
-          office_id: 'robot-a',
-          headers: connInfo.routingHeaders,
-          namespace: '/smcp',
-        }),
-        apiKey: null,
-      }));
-      expect(mockedInvoke).toHaveBeenCalledWith('connect_smcp', { profileName: 'bot-one' });
+      expect(ret).toEqual({ name: 'bot-one' });
+      expect(mockedInvoke).toHaveBeenCalledWith('manager_connect_smcp', {
+        employeeId: 11,
+        robotAccountId: 4242,
+        scope: null,
+      });
+      // 不再走 profile 构建/保存/connect_smcp 老路径。
+      expect(mockedInvoke).not.toHaveBeenCalledWith('save_profile', expect.anything());
+      expect(mockedInvoke).not.toHaveBeenCalledWith('connect_smcp', expect.anything());
     });
 
-    it('invokes onConflict when the profile name exists and honors copy decision', async () => {
-      const existing: ConnectionProfile = {
-        name: 'bot-one',
-        url: 'old',
-        namespace: '/smcp',
-        office_id: 'old',
-        computer_name: 'old',
-        headers: {},
-        auto_connect: false,
-        auto_reconnect: false,
-      };
-      // manager_get_connection_info
-      mockedInvoke.mockResolvedValueOnce(connInfo);
-      // list_profiles (existing bot-one)
-      mockedInvoke.mockResolvedValueOnce([existing]);
-      // save_profile
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      // list_profiles after save
-      mockedInvoke.mockResolvedValueOnce([existing]);
-      // connect_smcp
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      // get_connection_status after connect
-      mockedInvoke.mockResolvedValueOnce({ connected: true });
+    it('rejects without calling the backend when robotAccountId is missing', async () => {
+      // employeeB 没有 robotAccountId（历史实例）→ 前置校验直接拒，不发命令。
+      useManagerStore.setState({ employees: [employeeB] });
 
-      const onConflict = vi.fn().mockResolvedValue('copy' as const);
-      const ret = await useManagerStore
-        .getState()
-        .selectEmployeeAndConnect(11, onConflict);
-
-      expect(onConflict).toHaveBeenCalledWith('bot-one');
-      expect(ret?.profileName).toBe('bot-one (2)');
-    });
-
-    it('aborts when onConflict returns cancel', async () => {
-      const existing: ConnectionProfile = {
-        name: 'bot-one',
-        url: '',
-        namespace: '/smcp',
-        office_id: '',
-        computer_name: '',
-        headers: {},
-        auto_connect: false,
-        auto_reconnect: false,
-      };
-      mockedInvoke.mockResolvedValueOnce(connInfo);
-      mockedInvoke.mockResolvedValueOnce([existing]);
-
-      const onConflict = vi.fn().mockResolvedValue('cancel' as const);
-      const ret = await useManagerStore
-        .getState()
-        .selectEmployeeAndConnect(11, onConflict);
-
-      expect(ret).toBeNull();
-      // only get_connection_info + list_profiles — no save, no connect
-      expect(mockedInvoke).toHaveBeenCalledTimes(2);
+      await expect(
+        useManagerStore.getState().selectEmployeeAndConnect(employeeB.id),
+      ).rejects.toMatchObject({ kind: 'invalid_response' });
+      expect(mockedInvoke).not.toHaveBeenCalled();
     });
 
     it('surfaces payment_required detail', async () => {
@@ -266,7 +176,7 @@ describe('managerStore', () => {
         kind: 'payment_required',
         detail: { message: 'Quota exceeded', redirect_url: 'https://pay.example.com' },
       };
-      mockedInvoke.mockRejectedValueOnce(err);
+      mockedInvoke.mockRejectedValueOnce(err); // manager_connect_smcp
 
       await expect(
         useManagerStore.getState().selectEmployeeAndConnect(11),
@@ -275,6 +185,19 @@ describe('managerStore', () => {
         message: 'Quota exceeded',
         redirectUrl: 'https://pay.example.com',
       });
+    });
+
+    it('surfaces signing_unavailable when token signing is not ready', async () => {
+      const err: ManagerError = {
+        kind: 'signing_unavailable',
+        detail: { message: 'keys not provisioned' },
+      };
+      mockedInvoke.mockRejectedValueOnce(err); // manager_connect_smcp
+
+      await expect(
+        useManagerStore.getState().selectEmployeeAndConnect(11),
+      ).rejects.toEqual(err);
+      expect(useManagerStore.getState().error).toEqual(err);
     });
   });
 
@@ -361,7 +284,7 @@ describe('managerStore', () => {
     it('selectEmployeeAndConnect drops the item and recalibrates on visibility-revoked 404', async () => {
       useManagerStore.setState({ session: user, employees: [employeeA, employeeB] });
       const err: ManagerError = { kind: 'not_found_or_no_permission' };
-      // manager_get_connection_info rejects with the revoked error
+      // manager_connect_smcp rejects with the revoked error (来自其内部 get_connection_info)
       mockedInvoke.mockRejectedValueOnce(err);
       // the calibration refetch returns the now-filtered server list
       mockedInvoke.mockResolvedValueOnce([employeeB]);

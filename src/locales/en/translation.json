@@ -303,7 +303,9 @@
       "no_session": "You are not signed in. Please sign in to the Manager first.",
       "missing_base_url": "The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.",
       "invalid_response": "Manager returned a response we could not understand.",
-      "keychain_error": "Failed to read or write the secure credential store."
+      "keychain_error": "Failed to read or write the secure credential store.",
+      "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
+      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly."
     }
   },
   "managerAccount": {
@@ -340,6 +342,7 @@
       "disconnect": "Disconnect",
       "disconnectSuccess": "Disconnected from SMCP server",
       "connectSuccess": "Connecting to {{name}}…",
+      "noRobotAccount": "This robot can't be connected securely yet (no robot account ID).",
       "conflictTitle": "A profile with this name already exists",
       "conflictDescription": "\"{{name}}\" already exists. Overwrite it, or save a copy?",
       "overwrite": "Overwrite",
