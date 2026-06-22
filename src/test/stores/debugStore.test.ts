@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useDebugStore, type ToolInfo } from '@/stores/debugStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 function resetStore() {
   useDebugStore.setState({
@@ -33,9 +34,9 @@ describe('debugStore', () => {
     it('populates tools list', async () => {
       mockedInvoke.mockResolvedValueOnce([mockTool]);
 
-      await useDebugStore.getState().fetchTools();
+      await useDebugStore.getState().fetchTools(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('get_available_tools');
+      expect(mockedInvoke).toHaveBeenCalledWith('get_available_tools', { instanceId });
       expect(useDebugStore.getState().tools).toEqual([mockTool]);
       expect(useDebugStore.getState().toolsLoading).toBe(false);
     });
@@ -43,7 +44,7 @@ describe('debugStore', () => {
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('manager not init');
 
-      await useDebugStore.getState().fetchTools();
+      await useDebugStore.getState().fetchTools(instanceId);
 
       expect(useDebugStore.getState().error).toBe('manager not init');
       expect(useDebugStore.getState().toolsLoading).toBe(false);
@@ -79,9 +80,10 @@ describe('debugStore', () => {
       mockedInvoke.mockResolvedValueOnce(mockResult);  // execute_tool
       mockedInvoke.mockResolvedValueOnce([]);           // fetchHistory (auto-triggered)
 
-      const result = await useDebugStore.getState().executeTool('read_file', { path: '/tmp' });
+      const result = await useDebugStore.getState().executeTool(instanceId, 'read_file', { path: '/tmp' });
 
       expect(mockedInvoke).toHaveBeenCalledWith('execute_tool', {
+        instanceId,
         toolName: 'read_file',
         params: { path: '/tmp' },
         timeout: null,
@@ -95,9 +97,10 @@ describe('debugStore', () => {
       mockedInvoke.mockResolvedValueOnce({ success: true, duration_ms: 0 });
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useDebugStore.getState().executeTool('tool', {}, 30);
+      await useDebugStore.getState().executeTool(instanceId, 'tool', {}, 30);
 
       expect(mockedInvoke).toHaveBeenCalledWith('execute_tool', {
+        instanceId,
         toolName: 'tool',
         params: {},
         timeout: 30,
@@ -107,7 +110,7 @@ describe('debugStore', () => {
     it('returns error result on invoke failure', async () => {
       mockedInvoke.mockRejectedValueOnce('timeout exceeded');
 
-      const result = await useDebugStore.getState().executeTool('slow_tool', {});
+      const result = await useDebugStore.getState().executeTool(instanceId, 'slow_tool', {});
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('timeout exceeded');

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useDesktopStore } from '@/stores/desktopStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 describe('desktopStore', () => {
   beforeEach(() => {
@@ -16,9 +17,10 @@ describe('desktopStore', () => {
       ];
       mockedInvoke.mockResolvedValueOnce(mockWindows);
 
-      await useDesktopStore.getState().fetchDesktop();
+      await useDesktopStore.getState().fetchDesktop(instanceId);
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
+        instanceId,
         uri: null,
       });
       expect(useDesktopStore.getState().windows).toEqual(mockWindows);
@@ -27,9 +29,10 @@ describe('desktopStore', () => {
     it('passes uri parameter', async () => {
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useDesktopStore.getState().fetchDesktop('window://test');
+      await useDesktopStore.getState().fetchDesktop(instanceId, 'window://test');
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
+        instanceId,
         uri: 'window://test',
       });
     });
@@ -37,7 +40,7 @@ describe('desktopStore', () => {
     it('handles error', async () => {
       mockedInvoke.mockRejectedValueOnce('not available');
 
-      await useDesktopStore.getState().fetchDesktop();
+      await useDesktopStore.getState().fetchDesktop(instanceId);
 
       expect(useDesktopStore.getState().error).toBe('not available');
     });
@@ -49,7 +52,7 @@ describe('desktopStore', () => {
       });
       mockedInvoke.mockReturnValueOnce(promise as any);
 
-      const fetchPromise = useDesktopStore.getState().fetchDesktop();
+      const fetchPromise = useDesktopStore.getState().fetchDesktop(instanceId);
 
       // Loading should be true during fetch
       expect(useDesktopStore.getState().loading).toBe(true);
@@ -74,9 +77,10 @@ describe('desktopStore', () => {
       };
       mockedInvoke.mockResolvedValueOnce(mockDetail);
 
-      await useDesktopStore.getState().fetchWindowDetail('desktop-server', 'window://main');
+      await useDesktopStore.getState().fetchWindowDetail(instanceId, 'desktop-server', 'window://main');
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
+        instanceId,
         serverName: 'desktop-server',
         uri: 'window://main',
       });
@@ -86,7 +90,7 @@ describe('desktopStore', () => {
     it('sets detailErrors on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('detail not found');
 
-      await useDesktopStore.getState().fetchWindowDetail('server', 'window://fail');
+      await useDesktopStore.getState().fetchWindowDetail(instanceId, 'server', 'window://fail');
 
       expect(useDesktopStore.getState().detailErrors['window://fail']).toBe('detail not found');
     });
@@ -98,7 +102,7 @@ describe('desktopStore', () => {
       });
       mockedInvoke.mockReturnValueOnce(promise as any);
 
-      const fetchPromise = useDesktopStore.getState().fetchWindowDetail('server', 'window://loading');
+      const fetchPromise = useDesktopStore.getState().fetchWindowDetail(instanceId, 'server', 'window://loading');
 
       expect(useDesktopStore.getState().loadingDetails['window://loading']).toBe(true);
 
@@ -121,7 +125,7 @@ describe('desktopStore', () => {
       };
       mockedInvoke.mockResolvedValueOnce(mockDetail);
 
-      await useDesktopStore.getState().fetchWindowDetail('server', 'window://main');
+      await useDesktopStore.getState().fetchWindowDetail(instanceId, 'server', 'window://main');
 
       expect(useDesktopStore.getState().detailErrors['window://main']).toBeUndefined();
     });

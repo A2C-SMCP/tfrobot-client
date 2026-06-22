@@ -65,8 +65,19 @@ pub async fn detect_config_format(path: String) -> Result<ConfigFormat, String> 
 pub async fn import_config(
     state: State<'_, AppState>,
     path: String,
+    instance_id: String,
     format: Option<ConfigFormat>,
 ) -> Result<ImportResult, String> {
+    import_config_core(&state, path, instance_id, format).await
+}
+
+pub async fn import_config_core(
+    state: &AppState,
+    path: String,
+    instance_id: String,
+    format: Option<ConfigFormat>,
+) -> Result<ImportResult, String> {
+    let instance_id = require_instance_id(&instance_id)?.to_string();
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
 
     // Detect format if not specified
@@ -84,27 +95,35 @@ pub async fn import_config(
     };
 
     match fmt {
-        ConfigFormat::CliNative => import_cli_native(&state, &content).await,
-        ConfigFormat::ClaudeDesktop => import_claude_desktop(&state, &content).await,
+        ConfigFormat::CliNative => import_cli_native(&state, &instance_id, &content).await,
+        ConfigFormat::ClaudeDesktop => import_claude_desktop(&state, &instance_id, &content).await,
     }
 }
 
-async fn import_cli_native(state: &AppState, content: &str) -> Result<ImportResult, String> {
+async fn import_cli_native(
+    state: &AppState,
+    instance_id: &str,
+    content: &str,
+) -> Result<ImportResult, String> {
     let config: CliNativeConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
 
     let mut servers_imported = 0;
     let servers_skipped = Vec::new();
 
     // Import servers
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
     for server in &config.servers {
-        state
+        let updated_instance = state
             .config
-            .add_config(server.clone())
+            .add_config_for_instance(instance_id, server.clone())
             .map_err(|e| e.to_string())?;
+        let runtime = state
+            .computer_registry
+            .update_runtime_instance(updated_instance)
+            .await;
+        let lock = runtime.manager.read().await;
+        let mgr = lock
+            .as_ref()
+            .ok_or("MCP manager not initialized".to_string())?;
         let _ = mgr.add_or_update_server(server.clone()).await;
         servers_imported += 1;
     }
@@ -112,7 +131,10 @@ async fn import_cli_native(state: &AppState, content: &str) -> Result<ImportResu
     // Import inputs
     let inputs_imported = config.inputs.len();
     if !config.inputs.is_empty() {
-        let mut existing = state.config.load_inputs().map_err(|e| e.to_string())?;
+        let mut existing = state
+            .config
+            .load_inputs_for_instance(instance_id)
+            .map_err(|e| e.to_string())?;
         for input in config.inputs {
             let id = input.id().to_string();
             existing.retain(|i| i.id() != id);
@@ -120,7 +142,7 @@ async fn import_cli_native(state: &AppState, content: &str) -> Result<ImportResu
         }
         state
             .config
-            .save_inputs(&existing)
+            .save_inputs_for_instance(instance_id, &existing)
             .map_err(|e| e.to_string())?;
     }
 
@@ -131,22 +153,30 @@ async fn import_cli_native(state: &AppState, content: &str) -> Result<ImportResu
     })
 }
 
-async fn import_claude_desktop(state: &AppState, content: &str) -> Result<ImportResult, String> {
+async fn import_claude_desktop(
+    state: &AppState,
+    instance_id: &str,
+    content: &str,
+) -> Result<ImportResult, String> {
     let config: ClaudeDesktopConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
 
     let mut servers_imported = 0;
     let servers_skipped = Vec::new();
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
 
     for (name, server) in config.mcp_servers {
         let mcp_config = build_stdio_config(&name, &server);
-        state
+        let updated_instance = state
             .config
-            .add_config(mcp_config.clone())
+            .add_config_for_instance(instance_id, mcp_config.clone())
             .map_err(|e| e.to_string())?;
+        let runtime = state
+            .computer_registry
+            .update_runtime_instance(updated_instance)
+            .await;
+        let lock = runtime.manager.read().await;
+        let mgr = lock
+            .as_ref()
+            .ok_or("MCP manager not initialized".to_string())?;
         let _ = mgr.add_or_update_server(mcp_config).await;
         servers_imported += 1;
     }
@@ -183,10 +213,27 @@ fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConf
 pub async fn export_config(
     state: State<'_, AppState>,
     path: String,
+    instance_id: String,
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let servers = state.config.load_configs().map_err(|e| e.to_string())?;
-    let inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
+    export_config_core(&state, path, instance_id, server_names).await
+}
+
+pub async fn export_config_core(
+    state: &AppState,
+    path: String,
+    instance_id: String,
+    server_names: Option<Vec<String>>,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    let servers = state
+        .config
+        .load_configs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
+    let inputs = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let filtered_servers = match server_names {
         Some(names) => servers
@@ -206,4 +253,12 @@ pub async fn export_config(
 
     log::info!("Configuration exported to: {}", path);
     Ok(())
+}
+
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
 }

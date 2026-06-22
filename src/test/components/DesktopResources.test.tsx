@@ -46,18 +46,18 @@ describe('DesktopResources', () => {
   });
 
   it('calls fetchDesktop on mount', () => {
-    render(<DesktopResources />);
-    expect(mockFetchDesktop).toHaveBeenCalled();
+    render(<DesktopResources instanceId="computer-a" />);
+    expect(mockFetchDesktop).toHaveBeenCalledWith('computer-a');
   });
 
   it('renders title and refresh button', () => {
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Refresh')).toBeInTheDocument();
   });
 
   it('renders empty state when no windows', () => {
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     expect(
       screen.getByText('No desktop windows detected'),
     ).toBeInTheDocument();
@@ -65,7 +65,7 @@ describe('DesktopResources', () => {
 
   it('renders windows table', () => {
     mockUseDesktopStore.mockReturnValue({ ...mockStore, windows: mockWindows } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     expect(screen.getByText('Main Window')).toBeInTheDocument();
     expect(screen.getByText('Secondary')).toBeInTheDocument();
   });
@@ -75,12 +75,12 @@ describe('DesktopResources', () => {
       ...mockStore,
       error: 'Failed to fetch',
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     expect(screen.getByText('Failed to fetch')).toBeInTheDocument();
   });
 
   it('refreshes on button click', () => {
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     const refreshButton = screen.getByText('Refresh');
     fireEvent.click(refreshButton);
     expect(mockFetchDesktop).toHaveBeenCalledTimes(2); // Once on mount, once on click
@@ -88,7 +88,7 @@ describe('DesktopResources', () => {
 
   it('shows loading spinner when loading', () => {
     mockUseDesktopStore.mockReturnValue({ ...mockStore, loading: true } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
     // Ant Design Table loading state
     expect(document.querySelector('.ant-spin')).toBeInTheDocument();
   });
@@ -107,7 +107,7 @@ describe('DesktopResources', () => {
       ...mockStore,
       windows: mockWindows,
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     // Find and click expand button (first row)
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
@@ -115,7 +115,7 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('computer-a', 'desktop-server', 'window://main');
     });
   });
 
@@ -134,7 +134,7 @@ describe('DesktopResources', () => {
       windows: mockWindows,
       windowDetails: { 'window://main': mockDetail },
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     // Expand first row
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
@@ -142,7 +142,7 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('computer-a', 'desktop-server', 'window://main');
     });
     expect(screen.getByText('Sample text content')).toBeInTheDocument();
   });
@@ -167,7 +167,7 @@ describe('DesktopResources', () => {
       windows: mockWindows,
       windowDetails: { 'window://main': mockDetail },
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     // Expand first row
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
@@ -175,7 +175,7 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('computer-a', 'desktop-server', 'window://main');
     });
     // Check for image element with base64 src
     const img = document.querySelector('img[src*="base64"]');
@@ -195,7 +195,7 @@ describe('DesktopResources', () => {
       windows: mockWindows,
       windowDetails: { 'window://main': mockDetail },
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     // Expand first row
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
@@ -203,7 +203,7 @@ describe('DesktopResources', () => {
     fireEvent.click(expandButtons[0]);
 
     await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith('desktop-server', 'window://main');
+      expect(mockFetchWindowDetail).toHaveBeenCalledWith('computer-a', 'desktop-server', 'window://main');
     });
     expect(screen.getByText('No content available')).toBeInTheDocument();
   });
@@ -219,7 +219,7 @@ describe('DesktopResources', () => {
       ...mockStore,
       windows: mockWindows,
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
     expect(expandButtons.length).toBeGreaterThan(0);
@@ -244,7 +244,7 @@ describe('DesktopResources', () => {
       windows: mockWindows,
       loadingDetails: { 'window://main': true },
     } as any);
-    render(<DesktopResources />);
+    render(<DesktopResources instanceId="computer-a" />);
 
     // Expand first row
     const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');

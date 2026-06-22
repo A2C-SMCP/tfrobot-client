@@ -65,14 +65,7 @@ pub async fn list_computer_instances_core(
                     .await
             }
         };
-        statuses.push(
-            status_from_instance(
-                &instance,
-                config.default_instance_id == instance.id,
-                &runtime,
-            )
-            .await,
-        );
+        statuses.push(status_from_instance(&instance, false, &runtime).await);
     }
 
     Ok(statuses)
@@ -104,12 +97,7 @@ pub async fn get_computer_instance_status_core(
         .update_runtime_instance(instance.clone())
         .await;
 
-    Ok(status_from_instance(
-        &instance,
-        config.default_instance_id == instance.id,
-        &runtime,
-    )
-    .await)
+    Ok(status_from_instance(&instance, false, &runtime).await)
 }
 
 #[tauri::command]
@@ -160,16 +148,12 @@ pub async fn rename_computer_instance_core(
         .config
         .rename_computer_instance(&request.id, name)
         .map_err(|error| error.to_string())?;
-    let config = state
-        .config
-        .load_computer_instances()
-        .map_err(|error| error.to_string())?;
     let runtime = state
         .computer_registry
         .update_runtime_instance(updated.clone())
         .await;
 
-    Ok(status_from_instance(&updated, config.default_instance_id == updated.id, &runtime).await)
+    Ok(status_from_instance(&updated, false, &runtime).await)
 }
 
 #[tauri::command]
@@ -250,16 +234,7 @@ pub async fn start_computer_instance_core(
         .await;
     runtime.start().await?;
 
-    let config = state
-        .config
-        .load_computer_instances()
-        .map_err(|error| error.to_string())?;
-    Ok(status_from_instance(
-        &instance,
-        config.default_instance_id == instance.id,
-        &runtime,
-    )
-    .await)
+    Ok(status_from_instance(&instance, false, &runtime).await)
 }
 
 #[tauri::command]
@@ -285,16 +260,7 @@ pub async fn stop_computer_instance_core(
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
     runtime.shutdown().await;
 
-    let config = state
-        .config
-        .load_computer_instances()
-        .map_err(|error| error.to_string())?;
-    Ok(status_from_instance(
-        &instance,
-        config.default_instance_id == instance.id,
-        &runtime,
-    )
-    .await)
+    Ok(status_from_instance(&instance, false, &runtime).await)
 }
 
 async fn status_from_instance(

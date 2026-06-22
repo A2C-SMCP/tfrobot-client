@@ -9,7 +9,6 @@ use tfrobot_client_lib::commands::computer::{
     stop_computer_instance_core, CreateComputerInstanceRequest, DuplicateComputerInstanceRequest,
     RenameComputerInstanceRequest,
 };
-use tfrobot_client_lib::services::computer::DEFAULT_COMPUTER_INSTANCE_ID;
 
 #[tokio::test]
 async fn command_core_creates_renames_lists_and_deletes_instance() {
@@ -40,8 +39,8 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     assert_eq!(renamed.name, "Renamed Computer");
 
     let list = list_computer_instances_core(&state).await.unwrap();
-    assert_eq!(list.len(), 2);
-    assert!(list.iter().any(|instance| instance.is_default));
+    assert_eq!(list.len(), 1);
+    assert!(!list.iter().any(|instance| instance.is_default));
     assert!(list
         .iter()
         .any(|instance| instance.id == created.id && instance.name == "Renamed Computer"));
@@ -50,7 +49,7 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         .await
         .unwrap();
     let list = list_computer_instances_core(&state).await.unwrap();
-    assert_eq!(list.len(), 1);
+    assert!(list.is_empty());
     assert!(state.computer_registry.runtime(&created.id).await.is_none());
 }
 
@@ -195,7 +194,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
 }
 
 #[tokio::test]
-async fn blank_names_and_default_delete_are_rejected() {
+async fn blank_names_are_rejected_and_default_named_instance_is_not_special() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
 
@@ -209,10 +208,10 @@ async fn blank_names_and_default_delete_are_rejected() {
     .unwrap_err();
     assert!(error.contains("cannot be empty"));
 
-    let error = delete_computer_instance_core(&state, DEFAULT_COMPUTER_INSTANCE_ID.to_string())
+    let error = delete_computer_instance_core(&state, "default".to_string())
         .await
         .unwrap_err();
-    assert!(error.contains("default computer instance cannot be deleted"));
+    assert!(error.contains("not found"));
 }
 
 fn assert_uuid_instance_id(id: &str) {

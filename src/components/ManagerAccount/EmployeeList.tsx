@@ -30,6 +30,7 @@ import {
   type ManagerError,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { useComputerStore } from '@/stores/computerStore';
 
 const { Title, Text } = Typography;
 
@@ -85,24 +86,30 @@ export function EmployeeList() {
   const connectionStatus = useConnectionStore((s) => s.status);
   const fetchConnectionStatus = useConnectionStore((s) => s.fetchStatus);
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
+  const selectedInstanceId = useComputerStore((s) => s.selectedInstanceId);
+
+  const refreshConnectionStatus = () => {
+    if (!selectedInstanceId) return Promise.resolve();
+    return fetchConnectionStatus(selectedInstanceId);
+  };
 
   useEffect(() => {
-    fetchConnectionStatus().catch(() => {
+    refreshConnectionStatus().catch(() => {
       /* noop */
     });
-  }, [fetchConnectionStatus]);
+  }, [selectedInstanceId, fetchConnectionStatus]);
 
   // 后端在连接 / 断开 / 后台预刷新重连时 emit 'connection'，据此刷新连接状态徽标（TFRC-11）。
   useEffect(() => {
     const unlisten = listen('connection', () => {
-      fetchConnectionStatus().catch(() => {
+      refreshConnectionStatus().catch(() => {
         /* noop */
       });
     });
     return () => {
       unlisten.then((off) => off()).catch(() => {});
     };
-  }, [fetchConnectionStatus]);
+  }, [selectedInstanceId, fetchConnectionStatus]);
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
@@ -133,7 +140,7 @@ export function EmployeeList() {
       if (res) {
         message.success(t('managerAccount.employees.connectSuccess', { name: res.name }));
         // 刷新连接状态，让 UI 上"已连接"标识立即生效
-        await fetchConnectionStatus();
+        await refreshConnectionStatus();
       }
     } catch (e) {
       const err = e as ManagerError;
@@ -147,7 +154,8 @@ export function EmployeeList() {
 
   const handleDisconnectEmployee = async () => {
     try {
-      await disconnectSmcp();
+      if (!selectedInstanceId) return;
+      await disconnectSmcp(selectedInstanceId);
       message.success(t('managerAccount.employees.disconnectSuccess'));
     } catch (e) {
       message.error(String(e));

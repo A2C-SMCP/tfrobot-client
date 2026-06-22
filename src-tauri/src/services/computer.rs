@@ -69,28 +69,31 @@ impl Default for ComputerInstancesConfig {
     fn default() -> Self {
         Self {
             schema_version: default_schema_version(),
-            default_instance_id: default_instance_id(),
-            instances: vec![ComputerInstance::default_instance()],
+            default_instance_id: String::new(),
+            instances: Vec::new(),
         }
     }
 }
 
 impl ComputerInstancesConfig {
-    pub fn ensure_default_instance(&mut self) {
+    pub fn normalize(&mut self) {
         let mut seen = HashSet::new();
         self.instances
             .retain(|instance| !instance.id.trim().is_empty() && seen.insert(instance.id.clone()));
 
-        if self.instances.is_empty() {
-            self.instances.push(ComputerInstance::default_instance());
-        }
-        if !self
+        if !self.default_instance_id.is_empty()
+            && !self
             .instances
             .iter()
             .any(|instance| instance.id == self.default_instance_id)
         {
-            self.default_instance_id = self.instances[0].id.clone();
+            self.default_instance_id.clear();
         }
+    }
+
+    #[cfg(test)]
+    pub fn ensure_default_instance(&mut self) {
+        self.normalize();
     }
 
     pub fn default_instance(&self) -> Option<&ComputerInstance> {
@@ -219,21 +222,19 @@ impl From<&ConnectionState> for ConnectionStateSummary {
 }
 
 pub struct ComputerRegistry {
-    default_instance_id: ComputerInstanceId,
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
 }
 
 impl ComputerRegistry {
     pub fn from_config(config: ComputerInstancesConfig) -> Self {
-        let (registry, _) = Self::from_config_with_default_runtime(config);
+        let (registry, _) = Self::from_config_with_initial_runtime(config);
         registry
     }
 
-    pub fn from_config_with_default_runtime(
+    pub fn from_config_with_initial_runtime(
         mut config: ComputerInstancesConfig,
-    ) -> (Self, ComputerInstanceRuntime) {
-        config.ensure_default_instance();
-        let default_instance_id = config.default_instance_id.clone();
+    ) -> (Self, Option<ComputerInstanceRuntime>) {
+        config.normalize();
         let mut runtimes = HashMap::new();
 
         for instance in config.instances {
@@ -242,20 +243,27 @@ impl ComputerRegistry {
             runtimes.insert(instance_id, runtime);
         }
 
-        let default_runtime = runtimes
-            .get(&default_instance_id)
-            .expect("default runtime should exist")
-            .clone();
+        let initial_runtime = runtimes.values().next().cloned();
         let registry = Self {
-            default_instance_id,
             runtimes: RwLock::new(runtimes),
         };
 
-        (registry, default_runtime)
+        (registry, initial_runtime)
+    }
+
+    pub fn from_config_with_default_runtime(
+        config: ComputerInstancesConfig,
+    ) -> (Self, ComputerInstanceRuntime) {
+        let (registry, runtime) = Self::from_config_with_initial_runtime(config);
+        (
+            registry,
+            runtime.expect("configured runtime should exist for legacy default-runtime tests"),
+        )
     }
 
     pub async fn default_runtime(&self) -> Option<ComputerInstanceRuntime> {
-        self.runtime(&self.default_instance_id).await
+        let runtimes = self.runtimes.read().await;
+        runtimes.values().next().cloned()
     }
 
     pub async fn runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {
@@ -291,9 +299,6 @@ impl ComputerRegistry {
     }
 
     pub async fn remove_runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {
-        if id == self.default_instance_id {
-            return None;
-        }
         let mut runtimes = self.runtimes.write().await;
         runtimes.remove(id)
     }
@@ -332,15 +337,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn computer_instances_config_has_default_instance() {
+    fn computer_instances_config_can_be_empty() {
         let config = ComputerInstancesConfig::default();
 
-        assert_eq!(config.default_instance_id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert_eq!(config.instances.len(), 1);
-        assert_eq!(
-            config.default_instance().unwrap().id,
-            DEFAULT_COMPUTER_INSTANCE_ID
-        );
+        assert!(config.default_instance_id.is_empty());
+        assert!(config.instances.is_empty());
+        assert!(config.default_instance().is_none());
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_runtime_rejects_default_and_returns_non_default_runtime() {
+    async fn remove_runtime_allows_any_configured_instance() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             default_instance_id: "one".to_string(),
@@ -513,11 +515,12 @@ mod tests {
             ],
         });
 
-        assert!(registry.remove_runtime("one").await.is_none());
-        assert!(registry.runtime("one").await.is_some());
+        let removed_one = registry.remove_runtime("one").await.unwrap();
+        assert_eq!(removed_one.instance.id, "one");
+        assert!(registry.runtime("one").await.is_none());
 
-        let removed = registry.remove_runtime("two").await.unwrap();
-        assert_eq!(removed.instance.id, "two");
+        let removed_two = registry.remove_runtime("two").await.unwrap();
+        assert_eq!(removed_two.instance.id, "two");
         assert!(registry.runtime("two").await.is_none());
     }
 

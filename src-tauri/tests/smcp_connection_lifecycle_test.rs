@@ -14,7 +14,9 @@ use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_smcp_core, reconnect_with_token, try_install_refreshed_client,
     ConnectionProfile, ConnectionState, ManagerConnectionParams, RefreshOutcome, SwapResult,
 };
+use tfrobot_client_lib::services::computer::{ComputerInstance, ComputerInstanceRuntime};
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
+use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -26,6 +28,22 @@ mod common;
 
 const SERVER_JOIN_OFFICE: &str = "server:join_office";
 const SERVER_LEAVE_OFFICE: &str = "server:leave_office";
+const TEST_INSTANCE_ID: &str = "test-computer";
+
+async fn create_test_runtime(state: &AppState) -> ComputerInstanceRuntime {
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: TEST_INSTANCE_ID.to_string(),
+            name: "Test Computer".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(state.config.get_computer_instance(TEST_INSTANCE_ID).unwrap())
+        .await
+}
 
 #[derive(Default)]
 struct SocketStats {
@@ -196,9 +214,10 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
 async fn failed_profile_switch_keeps_existing_smcp_connection() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
     let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = state.manager.clone();
-    let inputs = state.inputs.clone();
+    let manager = runtime.manager.clone();
+    let inputs = runtime.inputs.clone();
 
     let client = SmcpComputerClient::new(
         &server_url,
@@ -222,7 +241,7 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
     .await;
 
     {
-        let mut conn = state.connection.write().await;
+        let mut conn = runtime.connection.write().await;
         *conn = Some(ConnectionState {
             client,
             profile_name: "existing-profile".to_string(),
@@ -235,12 +254,12 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
         });
     }
 
-    let err = connect_smcp_core(&state, "missing-profile".to_string())
+    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "missing-profile".to_string())
         .await
         .expect_err("missing profile should fail");
     assert_eq!(err, "Profile not found: missing-profile");
 
-    let conn = state.connection.read().await;
+    let conn = runtime.connection.read().await;
     let connection = conn
         .as_ref()
         .expect("existing connection should be preserved");
@@ -251,7 +270,7 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
     assert_eq!(stats.disconnected(), 0);
 
     let existing_connection = {
-        let mut conn = state.connection.write().await;
+        let mut conn = runtime.connection.write().await;
         conn.take()
     };
     if let Some(connection) = existing_connection {
@@ -263,15 +282,16 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
 async fn successful_profile_switch_closes_previous_smcp_connection() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
     let (old_server_url, old_stats) = start_smcp_socket_server().await;
     let (new_server_url, new_stats) = start_smcp_socket_server().await;
 
     let old_client = SmcpComputerClient::new(
         &old_server_url,
-        state.manager.clone(),
+        runtime.manager.clone(),
         "old-computer".to_string(),
         None,
-        state.inputs.clone(),
+        runtime.inputs.clone(),
         None,
     )
     .await
@@ -288,7 +308,7 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
     .await;
 
     {
-        let mut conn = state.connection.write().await;
+        let mut conn = runtime.connection.write().await;
         *conn = Some(ConnectionState {
             client: old_client,
             profile_name: "old-profile".to_string(),
@@ -303,7 +323,7 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
 
     state
         .config
-        .save_profiles(&[ConnectionProfile {
+        .save_profiles_for_instance(TEST_INSTANCE_ID, &[ConnectionProfile {
             name: "new-profile".to_string(),
             url: new_server_url.clone(),
             namespace: "/smcp".to_string(),
@@ -316,7 +336,7 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
         }])
         .expect("save profiles");
 
-    connect_smcp_core(&state, "new-profile".to_string())
+    connect_smcp_core(&state, TEST_INSTANCE_ID, "new-profile".to_string())
         .await
         .expect("connect new profile");
 
@@ -329,14 +349,14 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
     })
     .await;
 
-    let conn = state.connection.read().await;
+    let conn = runtime.connection.read().await;
     let connection = conn.as_ref().expect("new connection should be retained");
     assert_eq!(connection.profile_name, "new-profile");
     assert_eq!(connection.office_id, "new-office");
     drop(conn);
 
     let new_connection = {
-        let mut conn = state.connection.write().await;
+        let mut conn = runtime.connection.write().await;
         conn.take()
     };
     if let Some(connection) = new_connection {

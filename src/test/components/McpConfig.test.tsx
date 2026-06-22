@@ -32,18 +32,20 @@ const mockServers = [
 ];
 
 describe('McpConfig', () => {
+  const instanceId = 'computer-a';
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseMcpStore.mockReturnValue({ ...mockStore, servers: [] } as any);
   });
 
   it('calls fetchServers on mount', () => {
-    render(<McpConfig />);
-    expect(mockStore.fetchServers).toHaveBeenCalled();
+    render(<McpConfig instanceId={instanceId} />);
+    expect(mockStore.fetchServers).toHaveBeenCalledWith(instanceId);
   });
 
   it('renders title and action buttons', () => {
-    render(<McpConfig />);
+    render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('MCP Servers')).toBeInTheDocument();
     expect(screen.getByText('Add Server')).toBeInTheDocument();
     expect(screen.getByText('Start All')).toBeInTheDocument();
@@ -54,13 +56,13 @@ describe('McpConfig', () => {
 
   it('renders error alert when error exists', () => {
     mockUseMcpStore.mockReturnValue({ ...mockStore, error: 'Something broke' } as any);
-    render(<McpConfig />);
+    render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('Something broke')).toBeInTheDocument();
   });
 
   it('renders server list with servers', () => {
     mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockServers } as any);
-    render(<McpConfig />);
+    render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('test-stdio')).toBeInTheDocument();
     expect(screen.getByText('test-http')).toBeInTheDocument();
   });

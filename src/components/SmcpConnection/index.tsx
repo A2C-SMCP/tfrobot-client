@@ -16,7 +16,11 @@ import { ProfileForm } from './ProfileForm';
 
 const { Title, Text } = Typography;
 
-export function SmcpConnection() {
+interface SmcpConnectionProps {
+  instanceId: string;
+}
+
+export function SmcpConnection({ instanceId }: SmcpConnectionProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -36,9 +40,9 @@ export function SmcpConnection() {
   const [editingProfile, setEditingProfile] = useState<ConnectionProfile | undefined>();
 
   useEffect(() => {
-    fetchProfiles();
-    fetchStatus();
-  }, [fetchProfiles, fetchStatus]);
+    fetchProfiles(instanceId);
+    fetchStatus(instanceId);
+  }, [fetchProfiles, fetchStatus, instanceId]);
 
   const handleAdd = () => {
     setEditingProfile(undefined);
@@ -52,7 +56,7 @@ export function SmcpConnection() {
 
   const handleFormSubmit = async (profile: ConnectionProfile, apiKey?: string) => {
     try {
-      await saveProfile(profile, apiKey);
+      await saveProfile(instanceId, profile, apiKey);
       message.success(t('connection.messages.profileSaved'));
       setFormVisible(false);
     } catch (e) {
@@ -62,7 +66,7 @@ export function SmcpConnection() {
 
   const handleConnect = async (profileName: string) => {
     try {
-      await connect(profileName);
+      await connect(instanceId, profileName);
       message.success(t('connection.messages.connected'));
     } catch (e) {
       message.error(String(e));
@@ -71,7 +75,7 @@ export function SmcpConnection() {
 
   const handleDisconnect = async () => {
     try {
-      await disconnect();
+      await disconnect(instanceId);
       message.success(t('connection.messages.disconnected'));
     } catch (e) {
       message.error(String(e));
@@ -146,7 +150,7 @@ export function SmcpConnection() {
             />
             <Popconfirm
               title={t('connection.confirmDelete')}
-              onConfirm={() => deleteProfile(record.name).catch((e) => message.error(String(e)))}
+              onConfirm={() => deleteProfile(instanceId, record.name).catch((e) => message.error(String(e)))}
             >
               <Button type="text" size="small" danger icon={<DeleteOutlined />} />
             </Popconfirm>
@@ -191,7 +195,7 @@ export function SmcpConnection() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('connection.profiles')}</Title>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchProfiles(); fetchStatus(); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchProfiles(instanceId); fetchStatus(instanceId); }} loading={loading}>
             {t('common.refresh')}
           </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>

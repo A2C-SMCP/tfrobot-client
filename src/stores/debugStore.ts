@@ -51,9 +51,9 @@ interface DebugState {
   historyLoading: boolean;
   error: string | null;
 
-  fetchTools: () => Promise<void>;
+  fetchTools: (instanceId: string) => Promise<void>;
   selectTool: (tool: ToolInfo | null) => void;
-  executeTool: (toolName: string, params: Record<string, unknown>, timeout?: number) => Promise<ToolCallResponse>;
+  executeTool: (instanceId: string, toolName: string, params: Record<string, unknown>, timeout?: number) => Promise<ToolCallResponse>;
   fetchHistory: () => Promise<void>;
   reset: () => void;
 }
@@ -74,10 +74,10 @@ export const useDebugStore = create<DebugState>((set, get) => ({
 
   reset: () => set(initialState),
 
-  fetchTools: async () => {
+  fetchTools: async (instanceId: string) => {
     set({ toolsLoading: true, error: null });
     try {
-      const tools = await invoke<ToolInfo[]>('get_available_tools');
+      const tools = await invoke<ToolInfo[]>('get_available_tools', { instanceId });
       set({ tools, toolsLoading: false });
     } catch (e) {
       set({ error: String(e), toolsLoading: false });
@@ -86,10 +86,11 @@ export const useDebugStore = create<DebugState>((set, get) => ({
 
   selectTool: (tool) => set({ selectedTool: tool, lastCallResult: null }),
 
-  executeTool: async (toolName, params, timeout) => {
+  executeTool: async (instanceId, toolName, params, timeout) => {
     set({ calling: true, error: null });
     try {
       const result = await invoke<ToolCallResponse>('execute_tool', {
+        instanceId,
         toolName,
         params,
         timeout: timeout ?? null,

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info, warn, error as logError } from '@/utils/logger';
 import { useConnectionStore } from './connectionStore';
+import { useComputerStore } from './computerStore';
 
 /**
  * 登录成功后 Manager 下发的扁平 4 字段。
@@ -280,10 +281,20 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       set({ error: err, loading: false });
       throw err;
     }
+    const instanceId = useComputerStore.getState().selectedInstanceId;
+    if (!instanceId) {
+      const err: ManagerError = {
+        kind: 'invalid_response',
+        detail: 'No Computer instance selected',
+      };
+      set({ error: err, loading: false });
+      throw err;
+    }
     try {
       // 后端编排 token-exchange 全路径：connection-info → exchange_token → 短 JWT 注入 Socket.IO
       // auth dict → 连接，并起后台预刷新重连。鉴权不再走静态 token / profile。
       await invoke('manager_connect_smcp', {
+        instanceId,
         employeeId,
         robotAccountId: employee.robotAccountId,
         scope: null,
@@ -322,7 +333,10 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     try {
       if (useConnectionStore.getState().status.connected) {
         try {
-          await useConnectionStore.getState().disconnect();
+          const instanceId = useComputerStore.getState().selectedInstanceId;
+          if (instanceId) {
+            await useConnectionStore.getState().disconnect(instanceId);
+          }
         } catch (e) {
           warn(`manager: logout disconnect failed: ${String(e)}`);
         }

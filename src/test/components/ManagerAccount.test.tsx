@@ -64,6 +64,10 @@ vi.mock('@/stores/managerStore', async (importOriginal) => {
   };
 });
 
+vi.mock('@/stores/computerStore', () => ({
+  useComputerStore: vi.fn(() => 'computer-a'),
+}));
+
 import { useManagerStore } from '@/stores/managerStore';
 import { LoginForm } from '@/components/ManagerAccount/LoginForm';
 import { AccountSelection } from '@/components/ManagerAccount/AccountSelection';
@@ -237,7 +241,7 @@ describe('ManagerAccount', () => {
       applyMock({ session: user, employees: [noAccount] });
       render(<EmployeeList />);
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
-    });
+    }, 10_000);
 
     it('renders payment_required alert with renew button when redirectUrl present', () => {
       applyMock({

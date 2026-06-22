@@ -15,7 +15,11 @@ import { McpServerForm } from './McpServerForm';
 
 const { Title } = Typography;
 
-export function McpConfig() {
+interface McpConfigProps {
+  instanceId: string;
+}
+
+export function McpConfig({ instanceId }: McpConfigProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -39,8 +43,8 @@ export function McpConfig() {
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
 
   useEffect(() => {
-    fetchServers();
-  }, [fetchServers]);
+    fetchServers(instanceId);
+  }, [fetchServers, instanceId]);
 
   const handleAdd = () => {
     setEditingServer(undefined);
@@ -49,7 +53,7 @@ export function McpConfig() {
 
   const handleEdit = async (name: string) => {
     try {
-      const config = await getServerConfig(name);
+      const config = await getServerConfig(instanceId, name);
       setEditingServer(config);
       setFormVisible(true);
     } catch (e) {
@@ -60,10 +64,10 @@ export function McpConfig() {
   const handleFormSubmit = async (config: McpServerConfig) => {
     try {
       if (editingServer) {
-        await updateServer(config);
+        await updateServer(instanceId, config);
         message.success(t('mcp.messages.updated'));
       } else {
-        await addServer(config);
+        await addServer(instanceId, config);
         message.success(t('mcp.messages.added'));
       }
       setFormVisible(false);
@@ -74,7 +78,7 @@ export function McpConfig() {
 
   const handleStartAll = async () => {
     try {
-      await startAll();
+      await startAll(instanceId);
       message.success(t('mcp.messages.allStarted'));
     } catch (e) {
       message.error(String(e));
@@ -83,7 +87,7 @@ export function McpConfig() {
 
   const handleStopAll = async () => {
     try {
-      await stopAll();
+      await stopAll(instanceId);
       message.success(t('mcp.messages.allStopped'));
     } catch (e) {
       message.error(String(e));
@@ -98,7 +102,7 @@ export function McpConfig() {
         multiple: false,
       });
       if (path) {
-        const result = await importConfig(path as string);
+        const result = await importConfig(instanceId, path as string);
         message.success(t('mcp.messages.importSuccess', { servers: result.servers_imported, inputs: result.inputs_imported }));
       }
     } catch (e) {
@@ -114,7 +118,7 @@ export function McpConfig() {
         defaultPath: 'mcp_config.json',
       });
       if (path) {
-        await exportConfig(path);
+        await exportConfig(instanceId, path);
         message.success(t('mcp.messages.exportSuccess'));
       }
     } catch (e) {
@@ -129,7 +133,7 @@ export function McpConfig() {
         <Space>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => fetchServers()}
+            onClick={() => fetchServers(instanceId)}
             loading={loading}
           >
             {t('common.refresh')}
@@ -184,10 +188,10 @@ export function McpConfig() {
       <McpServerList
         servers={servers}
         loading={loading}
-        onStart={startServer}
-        onStop={stopServer}
+        onStop={(name) => stopServer(instanceId, name)}
         onEdit={handleEdit}
-        onRemove={removeServer}
+        onRemove={(name) => removeServer(instanceId, name)}
+        onStart={(name) => startServer(instanceId, name)}
       />
 
       <Modal

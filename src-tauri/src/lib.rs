@@ -3,7 +3,7 @@ pub mod services;
 pub mod tray;
 
 use commands::connection::ConnectionState;
-use services::computer::ComputerRegistry;
+use services::computer::{ComputerInstanceRuntime, ComputerRegistry};
 use services::config::ConfigService;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
@@ -50,14 +50,21 @@ impl AppState {
             );
             Default::default()
         });
-        let (computer_registry, default_runtime) =
-            ComputerRegistry::from_config_with_default_runtime(instances);
+        let (computer_registry, initial_runtime) =
+            ComputerRegistry::from_config_with_initial_runtime(instances);
+        let legacy_runtime = initial_runtime.unwrap_or_else(|| {
+            ComputerInstanceRuntime::new(services::computer::ComputerInstance {
+                id: String::new(),
+                name: String::new(),
+                ..services::computer::ComputerInstance::default_instance()
+            })
+        });
 
         Self {
-            manager: default_runtime.manager,
+            manager: legacy_runtime.manager,
             config: Arc::new(config),
-            inputs: default_runtime.inputs,
-            connection: default_runtime.connection,
+            inputs: legacy_runtime.inputs,
+            connection: legacy_runtime.connection,
             computer_registry: Arc::new(computer_registry),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
@@ -146,15 +153,6 @@ pub fn run() {
                 );
             }
 
-            let saved_configs = config_service.load_configs().unwrap_or_else(|error| {
-                log::error!(
-                    "Failed to load MCP server configurations during startup: {}",
-                    error
-                );
-                Vec::new()
-            });
-            log::info!("Loaded {} MCP server configurations", saved_configs.len());
-
             let state = AppState::new(config_service, log_service, settings_service);
 
             // Write startup log and cleanup old entries
@@ -165,16 +163,19 @@ pub fn run() {
                 .log_service
                 .cleanup(settings.log_retention_days as i64);
 
-            // Initialize the default Computer runtime with saved configs in background.
+            // Initialize every configured Computer runtime with its own persisted MCP config.
             let computer_registry = state.computer_registry.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(runtime) = computer_registry.default_runtime().await {
+                for runtime in computer_registry.list_runtimes().await {
                     if let Err(e) = runtime.start().await {
-                        log::error!("Failed to initialize MCP servers: {}", e);
-                        return;
+                        log::error!(
+                            "Failed to initialize MCP servers for Computer instance {}: {}",
+                            runtime.instance.id,
+                            e
+                        );
                     }
-                    log::info!("Default Computer runtime initialized");
                 }
+                log::info!("Configured Computer runtimes initialized");
             });
 
             app.manage(state);
@@ -351,33 +352,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_state_uses_registry_default_runtime_handles() {
+    async fn app_state_allows_empty_computer_registry() {
         let dir = TempDir::new().unwrap();
         let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
         let log_service = LogService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
 
         let state = AppState::new(config, log_service, settings_service);
-        let default_runtime = state.computer_registry.default_runtime().await.unwrap();
 
-        assert!(Arc::ptr_eq(&state.manager, &default_runtime.manager));
-        assert!(Arc::ptr_eq(&state.inputs, &default_runtime.inputs));
-        assert!(Arc::ptr_eq(&state.connection, &default_runtime.connection));
+        assert!(state.computer_registry.list_runtimes().await.is_empty());
+        assert!(state.manager.read().await.is_some());
+        assert!(state.inputs.read().await.is_empty());
+        assert!(state.connection.read().await.is_none());
     }
 
     #[tokio::test]
-    async fn default_runtime_start_marks_legacy_default_state_running() {
+    async fn app_state_uses_first_configured_runtime_for_legacy_handles() {
         let dir = TempDir::new().unwrap();
         let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(services::computer::ComputerInstance {
+                id: "one".to_string(),
+                name: "One".to_string(),
+                ..services::computer::ComputerInstance::default_instance()
+            })
+            .unwrap();
         let log_service = LogService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
 
         let state = AppState::new(config, log_service, settings_service);
-        let default_runtime = state.computer_registry.default_runtime().await.unwrap();
+        let runtime = state.computer_registry.runtime("one").await.unwrap();
 
-        default_runtime.start().await.unwrap();
+        runtime.start().await.unwrap();
 
-        assert!(default_runtime.is_running().await);
-        assert!(Arc::ptr_eq(&state.manager, &default_runtime.manager));
+        assert!(runtime.is_running().await);
+        assert!(Arc::ptr_eq(&state.manager, &runtime.manager));
     }
 }

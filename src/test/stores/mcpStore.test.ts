@@ -23,6 +23,8 @@ function makeStdioConfig(overrides?: Partial<McpServerConfig & { server_paramete
 }
 
 describe('mcpStore', () => {
+  const instanceId = 'computer-a';
+
   beforeEach(() => {
     resetStore();
     mockedInvoke.mockReset();
@@ -33,9 +35,9 @@ describe('mcpStore', () => {
       const mockServers = [{ name: 'srv', running: false, status_message: '', disabled: false }];
       mockedInvoke.mockResolvedValueOnce(mockServers);
 
-      await useMcpStore.getState().fetchServers();
+      await useMcpStore.getState().fetchServers(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers', { instanceId });
       expect(useMcpStore.getState().servers).toEqual(mockServers);
       expect(useMcpStore.getState().loading).toBe(false);
     });
@@ -43,7 +45,7 @@ describe('mcpStore', () => {
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('connection failed');
 
-      await useMcpStore.getState().fetchServers();
+      await useMcpStore.getState().fetchServers(instanceId);
 
       expect(useMcpStore.getState().error).toBe('connection failed');
     });
@@ -55,16 +57,16 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined); // add_mcp_server
       mockedInvoke.mockResolvedValueOnce([]);         // fetchServers
 
-      await useMcpStore.getState().addServer(config);
+      await useMcpStore.getState().addServer(instanceId, config);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('add_mcp_server', { config });
+      expect(mockedInvoke).toHaveBeenCalledWith('add_mcp_server', { instanceId, config });
     });
 
     it('sets error and re-throws on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('duplicate');
 
       await expect(
-        useMcpStore.getState().addServer(makeStdioConfig({ name: 'x' }))
+        useMcpStore.getState().addServer(instanceId, makeStdioConfig({ name: 'x' }))
       ).rejects.toBe('duplicate');
 
       expect(useMcpStore.getState().error).toBe('duplicate');
@@ -76,9 +78,9 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().removeServer('test');
+      await useMcpStore.getState().removeServer(instanceId, 'test');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('remove_mcp_server', { name: 'test' });
+      expect(mockedInvoke).toHaveBeenCalledWith('remove_mcp_server', { instanceId, name: 'test' });
     });
   });
 
@@ -87,18 +89,18 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().startServer('srv');
+      await useMcpStore.getState().startServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { instanceId, name: 'srv' });
     });
 
     it('stop invokes stop_mcp_server', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().stopServer('srv');
+      await useMcpStore.getState().stopServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { instanceId, name: 'srv' });
     });
   });
 
@@ -107,18 +109,18 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().startAll();
+      await useMcpStore.getState().startAll(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers', { instanceId });
     });
 
     it('stopAll invokes stop_all_servers', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().stopAll();
+      await useMcpStore.getState().stopAll(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('stop_all_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_all_servers', { instanceId });
     });
   });
 
@@ -128,26 +130,26 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(result); // import_config
       mockedInvoke.mockResolvedValueOnce([]);     // fetchServers
 
-      const ret = await useMcpStore.getState().importConfig('/path/to/config.json');
+      const ret = await useMcpStore.getState().importConfig(instanceId, '/path/to/config.json');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('import_config', { path: '/path/to/config.json', format: null });
+      expect(mockedInvoke).toHaveBeenCalledWith('import_config', { path: '/path/to/config.json', instanceId, format: null });
       expect(ret).toEqual(result);
     });
 
     it('exportConfig invokes export_config', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
 
-      await useMcpStore.getState().exportConfig('/out.json', ['srv1']);
+      await useMcpStore.getState().exportConfig(instanceId, '/out.json', ['srv1']);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', serverNames: ['srv1'] });
+      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', instanceId, serverNames: ['srv1'] });
     });
 
     it('exportConfig passes null when no server names', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
 
-      await useMcpStore.getState().exportConfig('/out.json');
+      await useMcpStore.getState().exportConfig(instanceId, '/out.json');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', serverNames: null });
+      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', instanceId, serverNames: null });
     });
   });
 });

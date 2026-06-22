@@ -7,12 +7,12 @@ const mockStore = {
   status: { connected: false },
   loading: false,
   error: null,
-  fetchProfiles: vi.fn(),
-  fetchStatus: vi.fn(),
-  saveProfile: vi.fn(),
-  deleteProfile: vi.fn(),
-  connect: vi.fn(),
-  disconnect: vi.fn(),
+  fetchProfiles: vi.fn().mockResolvedValue(undefined),
+  fetchStatus: vi.fn().mockResolvedValue(undefined),
+  saveProfile: vi.fn().mockResolvedValue(undefined),
+  deleteProfile: vi.fn().mockResolvedValue(undefined),
+  connect: vi.fn().mockResolvedValue(undefined),
+  disconnect: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@/stores/connectionStore', () => ({
@@ -42,38 +42,38 @@ describe('SmcpConnection', () => {
   });
 
   it('calls fetchProfiles and fetchStatus on mount', () => {
-    render(<SmcpConnection />);
-    expect(mockStore.fetchProfiles).toHaveBeenCalled();
-    expect(mockStore.fetchStatus).toHaveBeenCalled();
+    render(<SmcpConnection instanceId="computer-a" />);
+    expect(mockStore.fetchProfiles).toHaveBeenCalledWith('computer-a');
+    expect(mockStore.fetchStatus).toHaveBeenCalledWith('computer-a');
   });
 
   it('renders disconnected status when not connected', () => {
-    render(<SmcpConnection />);
+    render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('Disconnected')).toBeInTheDocument();
     expect(screen.getByText('Not connected to any SMCP server.')).toBeInTheDocument();
   });
 
   it('renders connected status with details', () => {
     mockUseConnectionStore.mockReturnValue({ ...mockStore, status: connectedStatus } as any);
-    render(<SmcpConnection />);
+    render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(screen.getByText('https://smcp.example.com')).toBeInTheDocument();
   });
 
   it('renders profiles table', () => {
     mockUseConnectionStore.mockReturnValue({ ...mockStore, profiles: mockProfiles } as any);
-    render(<SmcpConnection />);
+    render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('prod')).toBeInTheDocument();
   });
 
   it('renders error alert', () => {
     mockUseConnectionStore.mockReturnValue({ ...mockStore, error: 'Network error' } as any);
-    render(<SmcpConnection />);
+    render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('Network error')).toBeInTheDocument();
   });
 
   it('renders add profile button', () => {
-    render(<SmcpConnection />);
+    render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('Add Profile')).toBeInTheDocument();
   });
 });

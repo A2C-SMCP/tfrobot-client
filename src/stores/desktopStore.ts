@@ -34,8 +34,8 @@ interface DesktopState {
   loadingDetails: Record<string, boolean>;
   detailErrors: Record<string, string>;
 
-  fetchDesktop: (uri?: string) => Promise<void>;
-  fetchWindowDetail: (server: string, uri: string) => Promise<void>;
+  fetchDesktop: (instanceId: string, uri?: string) => Promise<void>;
+  fetchWindowDetail: (instanceId: string, server: string, uri: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -53,10 +53,11 @@ export const useDesktopStore = create<DesktopState>((set) => ({
 
   reset: () => set(initialState),
 
-  fetchDesktop: async (uri?: string) => {
+  fetchDesktop: async (instanceId: string, uri?: string) => {
     set({ loading: true, error: null });
     try {
       const windows = await invoke<DesktopWindow[]>('get_desktop', {
+        instanceId,
         uri: uri ?? null,
       });
       set({ windows, loading: false });
@@ -65,7 +66,7 @@ export const useDesktopStore = create<DesktopState>((set) => ({
     }
   },
 
-  fetchWindowDetail: async (server: string, uri: string) => {
+  fetchWindowDetail: async (instanceId: string, server: string, uri: string) => {
     // Add to loading record
     set((state) => ({
       loadingDetails: { ...state.loadingDetails, [uri]: true },
@@ -73,6 +74,7 @@ export const useDesktopStore = create<DesktopState>((set) => ({
 
     try {
       const detail = await invoke<WindowDetail>('get_window_detail', {
+        instanceId,
         serverName: server,
         uri,
       });

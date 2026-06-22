@@ -5,6 +5,36 @@ mod common;
 
 use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
 use smcp_computer::mcp_clients::MCPServerConfig;
+use tfrobot_client_lib::commands::{config_io, mcp};
+use tfrobot_client_lib::services::computer::{ComputerInstance, DEFAULT_COMPUTER_INSTANCE_ID};
+use tfrobot_client_lib::AppState;
+
+async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
+    let state = create_test_app_state(path);
+    if state
+        .config
+        .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .is_err()
+    {
+        state
+            .config
+            .add_computer_instance(ComputerInstance::default_instance())
+            .unwrap();
+    }
+    let mut instances = state.config.load_computer_instances().unwrap();
+    instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
+    state.config.save_computer_instances(&instances).unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await;
+    state
+}
 
 /// Panics if Node.js is not available — CI must have Node.js installed.
 fn require_node() {
@@ -18,10 +48,10 @@ fn require_node() {
 
 // ── Config CRUD via AppState ──
 
-#[test]
-fn test_add_and_load_server_config() {
+#[tokio::test]
+async fn test_add_and_load_server_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config = echo_server_config("test-echo");
     state.config.add_config(config).unwrap();
@@ -31,10 +61,10 @@ fn test_add_and_load_server_config() {
     assert_eq!(loaded[0].name(), "test-echo");
 }
 
-#[test]
-fn test_add_remove_server_config() {
+#[tokio::test]
+async fn test_add_remove_server_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config = echo_server_config("to-remove");
     state.config.add_config(config).unwrap();
@@ -44,10 +74,10 @@ fn test_add_remove_server_config() {
     assert!(loaded.is_empty());
 }
 
-#[test]
-fn test_update_server_config_replaces() {
+#[tokio::test]
+async fn test_update_server_config_replaces() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config1 = echo_server_config("updatable");
     state.config.add_config(config1).unwrap();
@@ -60,6 +90,132 @@ fn test_update_server_config_replaces() {
     assert_eq!(loaded.len(), 1);
 }
 
+#[tokio::test]
+async fn test_mcp_commands_require_instance_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    let result = mcp::get_mcp_servers_core(&state, "").await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("instance_id is required"));
+}
+
+#[tokio::test]
+async fn test_mcp_commands_are_instance_scoped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: "second".to_string(),
+            name: "Second".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(state.config.get_computer_instance("second").unwrap())
+        .await;
+
+    mcp::add_mcp_server_core(&state, "second", echo_server_config("second-only"))
+        .await
+        .unwrap();
+
+    let default_configs = state
+        .config
+        .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .unwrap();
+    let second_configs = state.config.load_configs_for_instance("second").unwrap();
+    let second_statuses = mcp::get_mcp_servers_core(&state, "second").await.unwrap();
+
+    assert!(default_configs.is_empty());
+    assert_eq!(second_configs.len(), 1);
+    assert_eq!(second_configs[0].name(), "second-only");
+    assert_eq!(second_statuses.len(), 1);
+    assert_eq!(second_statuses[0].name, "second-only");
+}
+
+#[tokio::test]
+async fn test_config_io_requires_instance_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let export_path = tmp.path().join("export.json");
+
+    let result = config_io::export_config_core(
+        &state,
+        export_path.to_string_lossy().to_string(),
+        "".into(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("instance_id is required"));
+}
+
+#[tokio::test]
+async fn test_config_io_import_export_are_instance_scoped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: "second".to_string(),
+            name: "Second".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(state.config.get_computer_instance("second").unwrap())
+        .await;
+
+    let import_path = tmp.path().join("import.json");
+    let export_path = tmp.path().join("export.json");
+    let import_data = serde_json::json!({
+        "servers": [echo_server_config("imported-second")],
+        "inputs": []
+    });
+    std::fs::write(
+        &import_path,
+        serde_json::to_string_pretty(&import_data).unwrap(),
+    )
+    .unwrap();
+
+    let import_result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().to_string(),
+        "second".into(),
+        None,
+    )
+    .await
+    .unwrap();
+    config_io::export_config_core(
+        &state,
+        export_path.to_string_lossy().to_string(),
+        "second".into(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let default_configs = state
+        .config
+        .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .unwrap();
+    let second_configs = state.config.load_configs_for_instance("second").unwrap();
+    let exported: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(export_path).unwrap()).unwrap();
+
+    assert_eq!(import_result.servers_imported, 1);
+    assert!(default_configs.is_empty());
+    assert_eq!(second_configs.len(), 1);
+    assert_eq!(second_configs[0].name(), "imported-second");
+    assert_eq!(exported["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(exported["servers"][0]["name"], "imported-second");
+}
+
 // ── MCPServerManager lifecycle (requires Node.js) ──
 // Echo server uses newline-delimited JSON framing (MCP spec 2025-03-26).
 
@@ -70,7 +226,7 @@ async fn test_manager_add_and_start_server() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("lifecycle-test");
 
     let lock = state.manager.read().await;
@@ -103,7 +259,7 @@ async fn test_manager_list_tools_after_start() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("tool-list-test");
 
     let lock = state.manager.read().await;
@@ -132,7 +288,7 @@ async fn test_manager_execute_echo_tool() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("echo-call-test");
 
     let lock = state.manager.read().await;
@@ -165,7 +321,7 @@ async fn test_manager_start_all_stop_all() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().unwrap();
@@ -197,7 +353,7 @@ async fn test_manager_start_all_stop_all() {
 #[tokio::test]
 async fn test_manager_start_nonexistent_fails() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let lock = state.manager.read().await;
     let mgr = lock.as_ref().unwrap();
@@ -212,7 +368,7 @@ async fn test_manager_start_nonexistent_fails() {
 #[tokio::test]
 async fn test_manager_invalid_command_fails() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Stdio",
@@ -241,10 +397,10 @@ async fn test_manager_invalid_command_fails() {
 
 // ── Config IO integration ──
 
-#[test]
-fn test_export_and_reimport_config() {
+#[tokio::test]
+async fn test_export_and_reimport_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     // Add configs
     let config = echo_server_config("export-me");
@@ -270,8 +426,8 @@ fn test_export_and_reimport_config() {
     assert_eq!(parsed["servers"].as_array().unwrap().len(), 1);
 }
 
-#[test]
-fn test_claude_desktop_format_detection() {
+#[tokio::test]
+async fn test_claude_desktop_format_detection() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Claude Desktop format
@@ -305,10 +461,10 @@ fn test_claude_desktop_format_detection() {
 
 // ── Logs integration ──
 
-#[test]
-fn test_log_write_query_export_clear() {
+#[tokio::test]
+async fn test_log_write_query_export_clear() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     // Write
     state
@@ -342,10 +498,10 @@ fn test_log_write_query_export_clear() {
 
 // ── Settings integration ──
 
-#[test]
-fn test_settings_persist_and_reload() {
+#[tokio::test]
+async fn test_settings_persist_and_reload() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let mut settings = state.settings_service.load();
     settings.language = "zh".to_string();
@@ -353,7 +509,7 @@ fn test_settings_persist_and_reload() {
     state.settings_service.save(&settings).unwrap();
 
     // Create new state pointing to same dir (simulates app restart)
-    let state2 = create_test_app_state(tmp.path());
+    let state2 = create_mcp_test_app_state(tmp.path()).await;
     let reloaded = state2.settings_service.load();
     assert_eq!(reloaded.language, "zh");
     assert_eq!(reloaded.log_retention_days, 7);
@@ -361,10 +517,10 @@ fn test_settings_persist_and_reload() {
 
 // ── Input definitions integration ──
 
-#[test]
-fn test_input_definitions_crud() {
+#[tokio::test]
+async fn test_input_definitions_crud() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     // Add
     let input: tfrobot_client_lib::commands::inputs::InputDefinition =
@@ -395,10 +551,10 @@ fn test_input_definitions_crud() {
     assert!(after.is_empty());
 }
 
-#[test]
-fn test_input_values_crud() {
+#[tokio::test]
+async fn test_input_values_crud() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     // Set values
     let mut values = std::collections::HashMap::new();
@@ -422,10 +578,10 @@ fn test_input_values_crud() {
 
 // ── Connection profiles integration ──
 
-#[test]
-fn test_profiles_crud() {
+#[tokio::test]
+async fn test_profiles_crud() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
 
     let profile: tfrobot_client_lib::commands::connection::ConnectionProfile =
         serde_json::from_value(serde_json::json!({
@@ -475,7 +631,7 @@ async fn test_manager_stderr_flood_does_not_block() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
-    let state = create_test_app_state(tmp.path());
+    let state = create_mcp_test_app_state(tmp.path()).await;
     let config = stderr_flood_server_config("stderr-flood-test");
 
     let lock = state.manager.read().await;

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useConnectionStore, type ConnectionProfile } from '@/stores/connectionStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 function resetStore() {
   useConnectionStore.setState({
@@ -33,9 +34,9 @@ describe('connectionStore', () => {
     it('populates profiles list', async () => {
       mockedInvoke.mockResolvedValueOnce([mockProfile]);
 
-      await useConnectionStore.getState().fetchProfiles();
+      await useConnectionStore.getState().fetchProfiles(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('list_profiles');
+      expect(mockedInvoke).toHaveBeenCalledWith('list_profiles', { instanceId });
       expect(useConnectionStore.getState().profiles).toEqual([mockProfile]);
       expect(useConnectionStore.getState().loading).toBe(false);
     });
@@ -43,7 +44,7 @@ describe('connectionStore', () => {
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('network error');
 
-      await useConnectionStore.getState().fetchProfiles();
+      await useConnectionStore.getState().fetchProfiles(instanceId);
 
       expect(useConnectionStore.getState().error).toBe('network error');
     });
@@ -54,9 +55,9 @@ describe('connectionStore', () => {
       const status = { connected: true, url: 'https://smcp.example.com', profile_name: 'dev' };
       mockedInvoke.mockResolvedValueOnce(status);
 
-      await useConnectionStore.getState().fetchStatus();
+      await useConnectionStore.getState().fetchStatus(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status');
+      expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', { instanceId });
       expect(useConnectionStore.getState().status).toEqual(status);
     });
   });
@@ -66,9 +67,10 @@ describe('connectionStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);       // save_profile
       mockedInvoke.mockResolvedValueOnce([mockProfile]);   // fetchProfiles
 
-      await useConnectionStore.getState().saveProfile(mockProfile, 'secret-key');
+      await useConnectionStore.getState().saveProfile(instanceId, mockProfile, 'secret-key');
 
       expect(mockedInvoke).toHaveBeenCalledWith('save_profile', {
+        instanceId,
         profile: mockProfile,
         apiKey: 'secret-key',
       });
@@ -78,9 +80,10 @@ describe('connectionStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useConnectionStore.getState().saveProfile(mockProfile);
+      await useConnectionStore.getState().saveProfile(instanceId, mockProfile);
 
       expect(mockedInvoke).toHaveBeenCalledWith('save_profile', {
+        instanceId,
         profile: mockProfile,
         apiKey: null,
       });
@@ -92,9 +95,9 @@ describe('connectionStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useConnectionStore.getState().deleteProfile('dev');
+      await useConnectionStore.getState().deleteProfile(instanceId, 'dev');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('delete_profile', { name: 'dev' });
+      expect(mockedInvoke).toHaveBeenCalledWith('delete_profile', { instanceId, name: 'dev' });
     });
   });
 
@@ -103,9 +106,9 @@ describe('connectionStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);                          // connect_smcp
       mockedInvoke.mockResolvedValueOnce({ connected: true, url: 'x' });     // fetchStatus
 
-      await useConnectionStore.getState().connect('dev');
+      await useConnectionStore.getState().connect(instanceId, 'dev');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('connect_smcp', { profileName: 'dev' });
+      expect(mockedInvoke).toHaveBeenCalledWith('connect_smcp', { instanceId, profileName: 'dev' });
       expect(useConnectionStore.getState().loading).toBe(false);
     });
 
@@ -113,16 +116,16 @@ describe('connectionStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce({ connected: false });
 
-      await useConnectionStore.getState().disconnect();
+      await useConnectionStore.getState().disconnect(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp');
+      expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp', { instanceId });
     });
 
     it('connect sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('auth failed');
 
       await expect(
-        useConnectionStore.getState().connect('dev')
+        useConnectionStore.getState().connect(instanceId, 'dev')
       ).rejects.toBe('auth failed');
 
       expect(useConnectionStore.getState().error).toBe('auth failed');

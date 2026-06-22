@@ -27,67 +27,193 @@ impl ConfigService {
 
     pub fn load_configs(&self) -> Result<Vec<MCPServerConfig>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        Ok(instances
-            .default_instance()
-            .map(|instance| instance.mcp_servers.clone())
-            .unwrap_or_default())
+        let instance_id = instances
+            .default_instance_id
+            .as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for MCP configs".to_string(),
+            ));
+        }
+        self.load_configs_for_instance(instance_id)
     }
 
-    pub fn save_configs(&self, configs: &[MCPServerConfig]) -> Result<(), ConfigError> {
-        self.update_default_instance(|instance| {
+    pub fn load_configs_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<MCPServerConfig>, ConfigError> {
+        let instances = self.load_computer_instances()?;
+        Ok(instances
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+            .map(|instance| instance.mcp_servers.clone())
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+    }
+
+    pub fn save_configs_for_instance(
+        &self,
+        instance_id: &str,
+        configs: &[MCPServerConfig],
+    ) -> Result<ComputerInstance, ConfigError> {
+        self.update_computer_instance(instance_id, |instance| {
             instance.mcp_servers = configs.to_vec();
         })
     }
 
+    pub fn save_configs(&self, configs: &[MCPServerConfig]) -> Result<(), ConfigError> {
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for MCP configs".to_string(),
+            ));
+        }
+        self.save_configs_for_instance(instance_id, configs).map(|_| ())
+    }
+
     pub fn add_config(&self, config: MCPServerConfig) -> Result<(), ConfigError> {
-        let mut configs = self.load_configs()?;
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for MCP configs".to_string(),
+            ));
+        }
+        self.add_config_for_instance(instance_id, config).map(|_| ())
+    }
+
+    pub fn add_config_for_instance(
+        &self,
+        instance_id: &str,
+        config: MCPServerConfig,
+    ) -> Result<ComputerInstance, ConfigError> {
+        let mut configs = self.load_configs_for_instance(instance_id)?;
         let name = config.name().to_string();
         configs.retain(|c| c.name() != name);
         configs.push(config);
-        self.save_configs(&configs)
+        self.save_configs_for_instance(instance_id, &configs)
     }
 
-    pub fn remove_config(&self, name: &str) -> Result<(), ConfigError> {
-        let mut configs = self.load_configs()?;
+    pub fn remove_config_for_instance(
+        &self,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<ComputerInstance, ConfigError> {
+        let mut configs = self.load_configs_for_instance(instance_id)?;
         let original_len = configs.len();
         configs.retain(|c| c.name() != name);
         if configs.len() == original_len {
             return Err(ConfigError::NotFound(name.to_string()));
         }
-        self.save_configs(&configs)
+        self.save_configs_for_instance(instance_id, &configs)
+    }
+
+    pub fn remove_config(&self, name: &str) -> Result<(), ConfigError> {
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for MCP configs".to_string(),
+            ));
+        }
+        self.remove_config_for_instance(instance_id, name).map(|_| ())
     }
 
     // --- Input Definitions ---
 
     pub fn load_inputs(&self) -> Result<Vec<InputDefinition>, ConfigError> {
         let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for inputs".to_string(),
+            ));
+        }
+        self.load_inputs_for_instance(instance_id)
+    }
+
+    pub fn load_inputs_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<InputDefinition>, ConfigError> {
+        let instances = self.load_computer_instances()?;
         Ok(instances
-            .default_instance()
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
             .map(|instance| instance.inputs.clone())
-            .unwrap_or_default())
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+    }
+
+    pub fn save_inputs_for_instance(
+        &self,
+        instance_id: &str,
+        inputs: &[InputDefinition],
+    ) -> Result<ComputerInstance, ConfigError> {
+        self.update_computer_instance(instance_id, |instance| {
+            instance.inputs = inputs.to_vec();
+        })
     }
 
     pub fn save_inputs(&self, inputs: &[InputDefinition]) -> Result<(), ConfigError> {
-        self.update_default_instance(|instance| {
-            instance.inputs = inputs.to_vec();
-        })
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for inputs".to_string(),
+            ));
+        }
+        self.save_inputs_for_instance(instance_id, inputs).map(|_| ())
     }
 
     // --- Input Values ---
 
     pub fn load_input_values(&self) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
         let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for input values".to_string(),
+            ));
+        }
+        self.load_input_values_for_instance(instance_id)
+    }
+
+    pub fn load_input_values_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
+        let instances = self.load_computer_instances()?;
         Ok(instances
-            .default_instance()
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
             .map(|instance| instance.input_values.clone())
-            .unwrap_or_default())
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
     }
 
     pub fn save_input_values(
         &self,
         values: &HashMap<String, serde_json::Value>,
     ) -> Result<(), ConfigError> {
-        self.update_default_instance(|instance| {
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for input values".to_string(),
+            ));
+        }
+        self.save_input_values_for_instance(instance_id, values)
+            .map(|_| ())
+    }
+
+    pub fn save_input_values_for_instance(
+        &self,
+        instance_id: &str,
+        values: &HashMap<String, serde_json::Value>,
+    ) -> Result<ComputerInstance, ConfigError> {
+        self.update_computer_instance(instance_id, |instance| {
             instance.input_values = values.clone();
         })
     }
@@ -96,23 +222,55 @@ impl ConfigService {
 
     pub fn load_profiles(&self) -> Result<Vec<ConnectionProfile>, ConfigError> {
         let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for connection profiles".to_string(),
+            ));
+        }
+        self.load_profiles_for_instance(instance_id)
+    }
+
+    pub fn load_profiles_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<ConnectionProfile>, ConfigError> {
+        let instances = self.load_computer_instances()?;
         Ok(instances
-            .default_instance()
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
             .map(|instance| instance.connection_profiles.clone())
-            .unwrap_or_default())
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+    }
+
+    pub fn save_profiles_for_instance(
+        &self,
+        instance_id: &str,
+        profiles: &[ConnectionProfile],
+    ) -> Result<ComputerInstance, ConfigError> {
+        self.update_computer_instance(instance_id, |instance| {
+            instance.connection_profiles = profiles.to_vec();
+        })
     }
 
     pub fn save_profiles(&self, profiles: &[ConnectionProfile]) -> Result<(), ConfigError> {
-        self.update_default_instance(|instance| {
-            instance.connection_profiles = profiles.to_vec();
-        })
+        let instances = self.load_computer_instances()?;
+        let instance_id = instances.default_instance_id.as_str();
+        if instance_id.is_empty() {
+            return Err(ConfigError::InvalidOperation(
+                "instance_id is required for connection profiles".to_string(),
+            ));
+        }
+        self.save_profiles_for_instance(instance_id, profiles)
+            .map(|_| ())
     }
 
     // --- Computer Instances ---
 
     pub fn load_computer_instances(&self) -> Result<ComputerInstancesConfig, ConfigError> {
         let mut config: ComputerInstancesConfig = load_json_file(&self.computer_instances_file)?;
-        config.ensure_default_instance();
+        config.normalize();
         Ok(config)
     }
 
@@ -121,7 +279,7 @@ impl ConfigService {
         instances: &ComputerInstancesConfig,
     ) -> Result<(), ConfigError> {
         let mut instances = instances.clone();
-        instances.ensure_default_instance();
+        instances.normalize();
         save_json_file(&self.computer_instances_file, &instances)
     }
 
@@ -179,12 +337,6 @@ impl ConfigService {
 
     pub fn remove_computer_instance(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
         let mut instances = self.load_computer_instances()?;
-        if instances.default_instance_id == id {
-            return Err(ConfigError::InvalidOperation(
-                "default computer instance cannot be deleted".to_string(),
-            ));
-        }
-
         let index = instances
             .instances
             .iter()
@@ -197,19 +349,6 @@ impl ConfigService {
 
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
-    }
-
-    fn update_default_instance<F>(&self, update: F) -> Result<(), ConfigError>
-    where
-        F: FnOnce(&mut ComputerInstance),
-    {
-        let mut instances = self.load_computer_instances()?;
-        instances.ensure_default_instance();
-        let default_instance = instances
-            .default_instance_mut()
-            .expect("default instance should exist after ensure_default_instance");
-        update(default_instance);
-        self.save_computer_instances(&instances)
     }
 }
 
@@ -258,6 +397,17 @@ mod tests {
     fn setup() -> (ConfigService, tempfile::TempDir) {
         let tmp = tempdir().unwrap();
         let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
+        svc.add_computer_instance(ComputerInstance::default_instance())
+            .unwrap();
+        let mut instances = svc.load_computer_instances().unwrap();
+        instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
+        svc.save_computer_instances(&instances).unwrap();
+        (svc, tmp)
+    }
+
+    fn setup_empty() -> (ConfigService, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
         (svc, tmp)
     }
 
@@ -271,18 +421,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_computer_instances_creates_default_instance() {
-        let (svc, _tmp) = setup();
+    fn test_empty_computer_instances_remain_empty() {
+        let (svc, _tmp) = setup_empty();
         let instances = svc.load_computer_instances().unwrap();
 
-        assert_eq!(instances.instances.len(), 1);
-        assert_eq!(instances.default_instance_id, DEFAULT_COMPUTER_INSTANCE_ID);
-        let default_instance = instances.default_instance().unwrap();
-        assert_eq!(default_instance.id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert!(default_instance.mcp_servers.is_empty());
-        assert!(default_instance.inputs.is_empty());
-        assert!(default_instance.input_values.is_empty());
-        assert!(default_instance.connection_profiles.is_empty());
+        assert!(instances.instances.is_empty());
+        assert!(instances.default_instance_id.is_empty());
     }
 
     #[test]
@@ -307,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_legacy_config_files_are_ignored() {
-        let (svc, tmp) = setup();
+        let (svc, tmp) = setup_empty();
         let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
             "type": "Stdio",
             "name": "legacy-server",
@@ -322,36 +466,28 @@ mod tests {
         save_json_file(&tmp.path().join("mcp_servers.json"), &[config]).unwrap();
 
         let instances = svc.load_computer_instances().unwrap();
-        let default_instance = instances.default_instance().unwrap();
-
-        assert!(default_instance.mcp_servers.is_empty());
-        assert!(svc.load_configs().unwrap().is_empty());
+        assert!(instances.instances.is_empty());
     }
 
     #[test]
     fn test_corrupted_legacy_files_are_ignored() {
-        let (svc, tmp) = setup();
+        let (svc, tmp) = setup_empty();
         std::fs::write(tmp.path().join("mcp_servers.json"), "not json").unwrap();
         std::fs::write(tmp.path().join("inputs.json"), "not json").unwrap();
 
         let instances = svc.load_computer_instances().unwrap();
-        let default_instance = instances.default_instance().unwrap();
-
-        assert!(default_instance.mcp_servers.is_empty());
-        assert!(default_instance.inputs.is_empty());
+        assert!(instances.instances.is_empty());
     }
 
     #[test]
-    fn test_empty_new_instances_file_uses_default_config() {
-        let (svc, tmp) = setup();
+    fn test_empty_new_instances_file_uses_empty_config() {
+        let (svc, tmp) = setup_empty();
         std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
 
         let loaded = svc.load_computer_instances().unwrap();
-        let default_instance = loaded.default_instance().unwrap();
 
-        assert_eq!(loaded.default_instance_id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert_eq!(default_instance.id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert!(default_instance.mcp_servers.is_empty());
+        assert!(loaded.default_instance_id.is_empty());
+        assert!(loaded.instances.is_empty());
     }
 
     #[test]
@@ -443,16 +579,15 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_default_computer_instance_returns_error() {
+    fn test_remove_default_named_computer_instance_succeeds() {
         let (svc, _tmp) = setup();
 
-        let error = svc
+        let removed = svc
             .remove_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("default computer instance cannot be deleted"));
+        assert_eq!(removed.id, DEFAULT_COMPUTER_INSTANCE_ID);
+        assert!(svc.get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID).is_err());
     }
 
     #[test]
@@ -511,6 +646,45 @@ mod tests {
     }
 
     #[test]
+    fn test_instance_scoped_configs_are_isolated() {
+        let (svc, _tmp) = setup();
+        svc.add_computer_instance(ComputerInstance {
+            id: "second".to_string(),
+            name: "Second".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+
+        let first_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "first-server",
+            "server_parameters": { "command": "node", "args": [], "env": {} }
+        }))
+        .unwrap();
+        let second_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "second-server",
+            "server_parameters": { "command": "python", "args": [], "env": {} }
+        }))
+        .unwrap();
+
+        svc.add_config_for_instance(DEFAULT_COMPUTER_INSTANCE_ID, first_config)
+            .unwrap();
+        svc.add_config_for_instance("second", second_config)
+            .unwrap();
+
+        let default_configs = svc
+            .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+            .unwrap();
+        let second_configs = svc.load_configs_for_instance("second").unwrap();
+
+        assert_eq!(default_configs.len(), 1);
+        assert_eq!(default_configs[0].name(), "first-server");
+        assert_eq!(second_configs.len(), 1);
+        assert_eq!(second_configs[0].name(), "second-server");
+    }
+
+    #[test]
     fn test_remove_config() {
         let (svc, _tmp) = setup();
         let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
@@ -544,11 +718,12 @@ mod tests {
     }
 
     #[test]
-    fn test_load_empty_json_file_returns_default() {
-        let (svc, tmp) = setup();
+    fn test_load_empty_json_file_returns_empty_config() {
+        let (svc, tmp) = setup_empty();
         std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
-        let configs = svc.load_configs().unwrap();
-        assert!(configs.is_empty());
+        let instances = svc.load_computer_instances().unwrap();
+        assert!(instances.instances.is_empty());
+        assert!(instances.default_instance_id.is_empty());
     }
 
     // --- Input Definitions ---

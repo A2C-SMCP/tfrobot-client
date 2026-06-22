@@ -7,6 +7,7 @@ import {
   type UserInfo,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { useComputerStore } from '@/stores/computerStore';
 import { resetAllStores } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
@@ -44,6 +45,7 @@ const employeeB: DigitalEmployeeBrief = {
 describe('managerStore', () => {
   beforeEach(() => {
     resetAllStores();
+    useComputerStore.setState({ selectedInstanceId: 'computer-a' });
     mockedInvoke.mockReset();
   });
 
@@ -152,6 +154,7 @@ describe('managerStore', () => {
 
       expect(ret).toEqual({ name: 'bot-one' });
       expect(mockedInvoke).toHaveBeenCalledWith('manager_connect_smcp', {
+        instanceId: 'computer-a',
         employeeId: 11,
         robotAccountId: 4242,
         scope: null,
@@ -327,7 +330,7 @@ describe('managerStore', () => {
 
       await useManagerStore.getState().logout();
 
-      expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp');
+      expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp', { instanceId: 'computer-a' });
       expect(mockedInvoke).toHaveBeenCalledWith('manager_logout');
       expect(useManagerStore.getState().session).toBeNull();
       expect(useManagerStore.getState().employees).toEqual([]);

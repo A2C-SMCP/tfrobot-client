@@ -45,9 +45,15 @@ pub struct WindowDetail {
 #[tauri::command]
 pub async fn get_desktop(
     state: State<'_, AppState>,
+    instance_id: String,
     uri: Option<String>,
 ) -> Result<Vec<DesktopWindow>, String> {
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(require_instance_id(&instance_id)?)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
@@ -75,10 +81,16 @@ pub async fn get_desktop(
 #[tauri::command]
 pub async fn get_window_detail(
     state: State<'_, AppState>,
+    instance_id: String,
     server_name: String,
     uri: String,
 ) -> Result<WindowDetail, String> {
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(require_instance_id(&instance_id)?)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
@@ -135,6 +147,14 @@ pub async fn get_window_detail(
         server: server_name,
         contents,
     })
+}
+
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
 }
 
 // =============================================================================

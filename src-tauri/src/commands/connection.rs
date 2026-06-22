@@ -96,19 +96,27 @@ pub struct ConnectionStatusInfo {
 
 /// List all saved connection profiles
 #[tauri::command]
-pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ConnectionProfile>, String> {
-    state.config.load_profiles().map_err(|e| e.to_string())
+pub async fn list_profiles(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<Vec<ConnectionProfile>, String> {
+    state
+        .config
+        .load_profiles_for_instance(require_instance_id(&instance_id)?)
+        .map_err(|e| e.to_string())
 }
 
 /// Save (create or update) a connection profile
 #[tauri::command]
 pub async fn save_profile(
     state: State<'_, AppState>,
+    instance_id: String,
     profile: ConnectionProfile,
     api_key: Option<String>,
 ) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
     let name = profile.name.clone();
-    log::info!("Saving connection profile: {}", name);
+    log::info!("Saving connection profile for instance {}: {}", instance_id, name);
 
     // Store API key in keychain if provided
     if let Some(key) = &api_key {
@@ -119,12 +127,15 @@ pub async fn save_profile(
         }
     }
 
-    let mut profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
+    let mut profiles = state
+        .config
+        .load_profiles_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     profiles.retain(|p| p.name != name);
     profiles.push(profile);
     state
         .config
-        .save_profiles(&profiles)
+        .save_profiles_for_instance(instance_id, &profiles)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -132,17 +143,25 @@ pub async fn save_profile(
 
 /// Delete a connection profile
 #[tauri::command]
-pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Deleting connection profile: {}", name);
+pub async fn delete_profile(
+    state: State<'_, AppState>,
+    instance_id: String,
+    name: String,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    log::info!("Deleting connection profile for instance {}: {}", instance_id, name);
 
     let keychain_id = format!("profile:{}", name);
     let _ = crate::services::keychain::delete_credential(&keychain_id);
 
-    let mut profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
+    let mut profiles = state
+        .config
+        .load_profiles_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     profiles.retain(|p| p.name != name);
     state
         .config
-        .save_profiles(&profiles)
+        .save_profiles_for_instance(instance_id, &profiles)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -150,14 +169,26 @@ pub async fn delete_profile(state: State<'_, AppState>, name: String) -> Result<
 
 /// Connect to SMCP server using a saved profile
 #[tauri::command]
-pub async fn connect_smcp(state: State<'_, AppState>, profile_name: String) -> Result<(), String> {
-    connect_smcp_core(&state, profile_name).await
+pub async fn connect_smcp(
+    state: State<'_, AppState>,
+    instance_id: String,
+    profile_name: String,
+) -> Result<(), String> {
+    connect_smcp_core(&state, &instance_id, profile_name).await
 }
 
-pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result<(), String> {
-    log::info!("Connecting with profile: {}", profile_name);
+pub async fn connect_smcp_core(
+    state: &AppState,
+    instance_id: &str,
+    profile_name: String,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Connecting instance {} with profile: {}", instance_id, profile_name);
 
-    let profiles = state.config.load_profiles().map_err(|e| e.to_string())?;
+    let profiles = state
+        .config
+        .load_profiles_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     let profile = profiles
         .iter()
         .find(|p| p.name == profile_name)
@@ -169,9 +200,11 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
     let api_key =
         crate::services::keychain::get_credential(&keychain_id).map_err(|e| e.to_string())?;
 
-    // Share the same manager Arc with SmcpComputerClient
-    let manager = state.manager.clone();
-    let inputs = state.inputs.clone();
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
     // smcp-computer #86：连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`），HTTP header 退役鉴权、
     // 仅承载路由（profile.headers，如 X-TF-*）。profile 中保存的密钥包成 `{"token": <secret>}` 注入 auth dict。
@@ -182,10 +215,10 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
 
     let client = smcp_computer::socketio_client::SmcpComputerClient::new(
         &profile.url,
-        manager,
+        runtime.manager.clone(),
         profile.computer_name.clone(),
         auth_payload,
-        inputs,
+        runtime.inputs.clone(),
         Some(profile.headers.clone()),
     )
     .await
@@ -209,8 +242,8 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
     };
 
     let previous_connection = {
-        let mut conn = state.connection.write().await;
-        conn.replace(new_connection)
+        let mut runtime_conn = runtime.connection.write().await;
+        runtime_conn.replace(new_connection)
     };
     if let Some(connection) = previous_connection {
         close_smcp_connection(connection).await;
@@ -228,15 +261,24 @@ pub async fn connect_smcp_core(state: &AppState, profile_name: String) -> Result
 
 /// Disconnect from SMCP server
 #[tauri::command]
-pub async fn disconnect_smcp(state: State<'_, AppState>) -> Result<(), String> {
-    disconnect_smcp_core(&state).await
+pub async fn disconnect_smcp(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    disconnect_smcp_core(&state, &instance_id).await
 }
 
-async fn disconnect_smcp_core(state: &AppState) -> Result<(), String> {
-    log::info!("Disconnecting from SMCP server");
+async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Disconnecting instance {} from SMCP server", instance_id);
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
     let existing_connection = {
-        let mut conn = state.connection.write().await;
+        let mut conn = runtime.connection.write().await;
         conn.take()
     };
     if let Some(connection) = existing_connection {
@@ -298,8 +340,15 @@ async fn disconnect_smcp_client(
 #[tauri::command]
 pub async fn get_connection_status(
     state: State<'_, AppState>,
+    instance_id: String,
 ) -> Result<ConnectionStatusInfo, String> {
-    let conn = state.connection.read().await;
+    let instance_id = require_instance_id(&instance_id)?;
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let conn = runtime.connection.read().await;
     match conn.as_ref() {
         Some(c) => Ok(ConnectionStatusInfo {
             connected: true,
@@ -334,10 +383,14 @@ pub async fn get_connection_status(
 pub async fn manager_connect_smcp(
     app: AppHandle,
     state: State<'_, AppState>,
+    instance_id: String,
     employee_id: u64,
     robot_account_id: u64,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
+    let instance_id = require_instance_id(&instance_id)
+        .map_err(ManagerError::InvalidResponse)?
+        .to_string();
     log::info!(
         "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
     );
@@ -383,7 +436,7 @@ pub async fn manager_connect_smcp(
         .await?;
 
     // 3) 连接 + 入库 + 起预刷新任务
-    establish_manager_connection(&app, state.inner(), params, token).await
+    establish_manager_connection(&app, state.inner(), &instance_id, params, token).await
 }
 
 /// 用给定参数 + 短 JWT 构建 [`SmcpComputerClient`] 并 join_office。失败时尽力清理已建客户端。
@@ -418,18 +471,33 @@ async fn build_and_join(
 async fn establish_manager_connection(
     app: &AppHandle,
     state: &AppState,
+    instance_id: &str,
     params: ManagerConnectionParams,
     token: ExchangedToken,
 ) -> Result<(), ManagerError> {
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}")))?;
     // 先把新连接建成功，再替换/关旧——build 失败则保留旧连接（与手动 profile 切换同一不变量）。
     // 用户发起的连接通常切到「不同机器人」（office 不同），不会撞 room；同机器人重连由 UI 阻止
     // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 leave-first 路径。
-    let client = build_and_join(&state.manager, &state.inputs, &params, &token.access_token)
+    let client = build_and_join(&runtime.manager, &runtime.inputs, &params, &token.access_token)
         .await
         .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
 
     let generation = next_generation();
-    let refresh_task = spawn_refresh_task(app, state, params.clone(), generation, token.expires_in);
+    let refresh_task = spawn_refresh_task(
+        app,
+        state,
+        runtime.connection.clone(),
+        runtime.manager.clone(),
+        runtime.inputs.clone(),
+        params.clone(),
+        generation,
+        token.expires_in,
+    );
 
     let new_connection = ConnectionState {
         client,
@@ -443,8 +511,8 @@ async fn establish_manager_connection(
     };
 
     let previous = {
-        let mut conn = state.connection.write().await;
-        conn.replace(new_connection)
+        let mut runtime_conn = runtime.connection.write().await;
+        runtime_conn.replace(new_connection)
     };
     if let Some(previous) = previous {
         close_smcp_connection(previous).await;
@@ -471,14 +539,14 @@ async fn establish_manager_connection(
 fn spawn_refresh_task(
     app: &AppHandle,
     state: &AppState,
+    connection: Arc<RwLock<Option<ConnectionState>>>,
+    manager: Arc<RwLock<Option<MCPServerManager>>>,
+    inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     params: ManagerConnectionParams,
     generation: u64,
     initial_expires_in: i64,
 ) -> tokio::task::JoinHandle<()> {
     let manager_client = state.manager_client.clone();
-    let connection = state.connection.clone();
-    let manager = state.manager.clone();
-    let inputs = state.inputs.clone();
     let log_service = state.log_service.clone();
     let app = app.clone();
 
@@ -686,6 +754,14 @@ fn routing_only_headers(headers: HashMap<String, String>) -> HashMap<String, Str
         .into_iter()
         .filter(|(k, _)| !is_auth_like_header(k))
         .collect()
+}
+
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
 }
 
 /// Active connection state held in AppState

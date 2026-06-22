@@ -9,7 +9,11 @@ const { Title, Text } = Typography;
 // Constants
 const MAX_TEXT_PREVIEW_LENGTH = 500;
 
-export function DesktopResources() {
+interface DesktopResourcesProps {
+  instanceId: string;
+}
+
+export function DesktopResources({ instanceId }: DesktopResourcesProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -25,8 +29,8 @@ export function DesktopResources() {
   const [expandedUris, setExpandedUris] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    fetchDesktop();
-  }, [fetchDesktop]);
+    fetchDesktop(instanceId);
+  }, [fetchDesktop, instanceId]);
 
   // Show error message when detail fetch fails
   useEffect(() => {
@@ -45,7 +49,7 @@ export function DesktopResources() {
     } else {
       newExpanded.add(record.uri);
       setExpandedUris(newExpanded);
-      await fetchWindowDetail(record.server, record.uri);
+      await fetchWindowDetail(instanceId, record.server, record.uri);
     }
   };
 
@@ -155,7 +159,7 @@ export function DesktopResources() {
         <Space>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => fetchDesktop()}
+            onClick={() => fetchDesktop(instanceId)}
             loading={loading}
           >
             {t('common.refresh')}
@@ -221,7 +225,7 @@ export function DesktopResources() {
                     <Button
                       size="small"
                       icon={<ReloadOutlined />}
-                      onClick={() => fetchWindowDetail(record.server, record.uri)}
+                      onClick={() => fetchWindowDetail(instanceId, record.server, record.uri)}
                       loading={isLoading}
                     />
                   </div>

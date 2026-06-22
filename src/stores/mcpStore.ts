@@ -93,17 +93,17 @@ interface McpServerState {
   loading: boolean;
   error: string | null;
 
-  fetchServers: () => Promise<void>;
-  addServer: (config: McpServerConfig) => Promise<void>;
-  updateServer: (config: McpServerConfig) => Promise<void>;
-  removeServer: (name: string) => Promise<void>;
-  startServer: (name: string) => Promise<void>;
-  stopServer: (name: string) => Promise<void>;
-  startAll: () => Promise<void>;
-  stopAll: () => Promise<void>;
-  getServerConfig: (name: string) => Promise<McpServerConfig>;
-  importConfig: (path: string) => Promise<ImportResult>;
-  exportConfig: (path: string, serverNames?: string[]) => Promise<void>;
+  fetchServers: (instanceId: string) => Promise<void>;
+  addServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
+  updateServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
+  removeServer: (instanceId: string, name: string) => Promise<void>;
+  startServer: (instanceId: string, name: string) => Promise<void>;
+  stopServer: (instanceId: string, name: string) => Promise<void>;
+  startAll: (instanceId: string) => Promise<void>;
+  stopAll: (instanceId: string) => Promise<void>;
+  getServerConfig: (instanceId: string, name: string) => Promise<McpServerConfig>;
+  importConfig: (instanceId: string, path: string) => Promise<ImportResult>;
+  exportConfig: (instanceId: string, path: string, serverNames?: string[]) => Promise<void>;
   reset: () => void;
 }
 
@@ -116,108 +116,108 @@ const initialState = {
 export const useMcpStore = create<McpServerState>((set, get) => ({
   ...initialState,
 
-  fetchServers: async () => {
+  fetchServers: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      const servers = await invoke<McpServerStatus[]>('get_mcp_servers');
+      const servers = await invoke<McpServerStatus[]>('get_mcp_servers', { instanceId });
       set({ servers, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
   },
 
-  addServer: async (config: McpServerConfig) => {
+  addServer: async (instanceId: string, config: McpServerConfig) => {
     set({ loading: true, error: null });
     try {
-      await invoke('add_mcp_server', { config });
+      await invoke('add_mcp_server', { instanceId, config });
       info(`MCP server added: ${config.name}`);
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  updateServer: async (config: McpServerConfig) => {
+  updateServer: async (instanceId: string, config: McpServerConfig) => {
     set({ loading: true, error: null });
     try {
-      await invoke('update_mcp_server', { config });
-      await get().fetchServers();
+      await invoke('update_mcp_server', { instanceId, config });
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  removeServer: async (name: string) => {
+  removeServer: async (instanceId: string, name: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('remove_mcp_server', { name });
+      await invoke('remove_mcp_server', { instanceId, name });
       info(`MCP server removed: ${name}`);
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  startServer: async (name: string) => {
+  startServer: async (instanceId: string, name: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('start_mcp_server', { name });
+      await invoke('start_mcp_server', { instanceId, name });
       info(`MCP server started: ${name}`);
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  stopServer: async (name: string) => {
+  stopServer: async (instanceId: string, name: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('stop_mcp_server', { name });
+      await invoke('stop_mcp_server', { instanceId, name });
       info(`MCP server stopped: ${name}`);
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  startAll: async () => {
+  startAll: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('start_all_servers');
+      await invoke('start_all_servers', { instanceId });
       info('All MCP servers started');
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  stopAll: async () => {
+  stopAll: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('stop_all_servers');
+      await invoke('stop_all_servers', { instanceId });
       info('All MCP servers stopped');
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  getServerConfig: async (name: string) => {
-    return await invoke<McpServerConfig>('get_mcp_server_config', { name });
+  getServerConfig: async (instanceId: string, name: string) => {
+    return await invoke<McpServerConfig>('get_mcp_server_config', { instanceId, name });
   },
 
-  importConfig: async (path: string) => {
+  importConfig: async (instanceId: string, path: string) => {
     set({ loading: true, error: null });
     try {
-      const result = await invoke<ImportResult>('import_config', { path, format: null });
-      await get().fetchServers();
+      const result = await invoke<ImportResult>('import_config', { path, instanceId, format: null });
+      await get().fetchServers(instanceId);
       return result;
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -227,10 +227,10 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
 
   reset: () => set(initialState),
 
-  exportConfig: async (path: string, serverNames?: string[]) => {
+  exportConfig: async (instanceId: string, path: string, serverNames?: string[]) => {
     set({ loading: true, error: null });
     try {
-      await invoke('export_config', { path, serverNames: serverNames || null });
+      await invoke('export_config', { path, instanceId, serverNames: serverNames || null });
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });

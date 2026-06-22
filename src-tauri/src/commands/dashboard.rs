@@ -40,26 +40,32 @@ fn detect_runtime(name: &str, cmd: &str) -> RuntimeInfo {
 
 #[tauri::command]
 pub async fn get_dashboard_data(state: State<'_, AppState>) -> Result<DashboardData, String> {
-    // Connection status
-    let conn = state.connection.read().await;
-    let connected = conn.is_some();
-    let connection_url = conn.as_ref().map(|c| c.url.clone());
-    let connection_profile = conn.as_ref().map(|c| c.profile_name.clone());
-    drop(conn);
+    let runtimes = state.computer_registry.list_runtimes().await;
+    let mut connected = false;
+    let mut connection_url = None;
+    let mut connection_profile = None;
+    let mut mcp_total = 0;
+    let mut mcp_running = 0;
+    let mut tools_count = 0;
 
-    // MCP server stats
-    let lock = state.manager.read().await;
-    let (mcp_total, mcp_running, mcp_stopped, tools_count) = if let Some(mgr) = lock.as_ref() {
-        let statuses = mgr.get_server_status().await;
-        let total = statuses.len();
-        let running = statuses.iter().filter(|(_, r, _)| *r).count();
-        let stopped = total - running;
-        let tools = mgr.list_available_tools().await.len();
-        (total, running, stopped, tools)
-    } else {
-        (0, 0, 0, 0)
-    };
-    drop(lock);
+    for runtime in runtimes {
+        let conn = runtime.connection.read().await;
+        if !connected {
+            connected = conn.is_some();
+            connection_url = conn.as_ref().map(|c| c.url.clone());
+            connection_profile = conn.as_ref().map(|c| c.profile_name.clone());
+        }
+        drop(conn);
+
+        let lock = runtime.manager.read().await;
+        if let Some(mgr) = lock.as_ref() {
+            let statuses = mgr.get_server_status().await;
+            mcp_total += statuses.len();
+            mcp_running += statuses.iter().filter(|(_, running, _)| *running).count();
+            tools_count += mgr.list_available_tools().await.len();
+        }
+    }
+    let mcp_stopped = mcp_total.saturating_sub(mcp_running);
 
     // Recent logs
     let recent_logs = state

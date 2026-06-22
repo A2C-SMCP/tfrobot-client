@@ -29,12 +29,12 @@ interface ConnectionState {
   loading: boolean;
   error: string | null;
 
-  fetchProfiles: () => Promise<void>;
-  fetchStatus: () => Promise<void>;
-  saveProfile: (profile: ConnectionProfile, apiKey?: string) => Promise<void>;
-  deleteProfile: (name: string) => Promise<void>;
-  connect: (profileName: string) => Promise<void>;
-  disconnect: () => Promise<void>;
+  fetchProfiles: (instanceId: string) => Promise<void>;
+  fetchStatus: (instanceId: string) => Promise<void>;
+  saveProfile: (instanceId: string, profile: ConnectionProfile, apiKey?: string) => Promise<void>;
+  deleteProfile: (instanceId: string, name: string) => Promise<void>;
+  connect: (instanceId: string, profileName: string) => Promise<void>;
+  disconnect: (instanceId: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -48,53 +48,53 @@ const initialState = {
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   ...initialState,
 
-  fetchProfiles: async () => {
+  fetchProfiles: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      const profiles = await invoke<ConnectionProfile[]>('list_profiles');
+      const profiles = await invoke<ConnectionProfile[]>('list_profiles', { instanceId });
       set({ profiles, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
   },
 
-  fetchStatus: async () => {
+  fetchStatus: async (instanceId: string) => {
     try {
-      const status = await invoke<ConnectionStatusInfo>('get_connection_status');
+      const status = await invoke<ConnectionStatusInfo>('get_connection_status', { instanceId });
       set({ status });
     } catch (e) {
       set({ error: String(e) });
     }
   },
 
-  saveProfile: async (profile: ConnectionProfile, apiKey?: string) => {
+  saveProfile: async (instanceId: string, profile: ConnectionProfile, apiKey?: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('save_profile', { profile, apiKey: apiKey || null });
-      await get().fetchProfiles();
+      await invoke('save_profile', { instanceId, profile, apiKey: apiKey || null });
+      await get().fetchProfiles(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  deleteProfile: async (name: string) => {
+  deleteProfile: async (instanceId: string, name: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('delete_profile', { name });
-      await get().fetchProfiles();
+      await invoke('delete_profile', { instanceId, name });
+      await get().fetchProfiles(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
     }
   },
 
-  connect: async (profileName: string) => {
+  connect: async (instanceId: string, profileName: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('connect_smcp', { profileName });
+      await invoke('connect_smcp', { instanceId, profileName });
       info(`SMCP connected: ${profileName}`);
-      await get().fetchStatus();
+      await get().fetchStatus(instanceId);
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -104,12 +104,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   reset: () => set(initialState),
 
-  disconnect: async () => {
+  disconnect: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('disconnect_smcp');
+      await invoke('disconnect_smcp', { instanceId });
       info('SMCP disconnected');
-      await get().fetchStatus();
+      await get().fetchStatus(instanceId);
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });

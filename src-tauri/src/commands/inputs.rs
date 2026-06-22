@@ -52,17 +52,27 @@ impl InputDefinition {
 
 /// List all input variable definitions
 #[tauri::command]
-pub async fn list_inputs(state: State<'_, AppState>) -> Result<Vec<InputDefinition>, String> {
-    state.config.load_inputs().map_err(|e| e.to_string())
+pub async fn list_inputs(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<Vec<InputDefinition>, String> {
+    state
+        .config
+        .load_inputs_for_instance(require_instance_id(&instance_id)?)
+        .map_err(|e| e.to_string())
 }
 
 /// Get a single input definition by ID
 #[tauri::command]
 pub async fn get_input(
     state: State<'_, AppState>,
+    instance_id: String,
     id: String,
 ) -> Result<Option<InputDefinition>, String> {
-    let inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
+    let inputs = state
+        .config
+        .load_inputs_for_instance(require_instance_id(&instance_id)?)
+        .map_err(|e| e.to_string())?;
     Ok(inputs.into_iter().find(|i| i.id() == id))
 }
 
@@ -70,17 +80,22 @@ pub async fn get_input(
 #[tauri::command]
 pub async fn add_or_update_input(
     state: State<'_, AppState>,
+    instance_id: String,
     input: InputDefinition,
 ) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
     let id = input.id().to_string();
-    log::info!("Adding/updating input: {}", id);
+    log::info!("Adding/updating input for instance {}: {}", instance_id, id);
 
-    let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
+    let mut inputs = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
     state
         .config
-        .save_inputs(&inputs)
+        .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -88,10 +103,18 @@ pub async fn add_or_update_input(
 
 /// Remove an input variable definition
 #[tauri::command]
-pub async fn remove_input(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    log::info!("Removing input: {}", id);
+pub async fn remove_input(
+    state: State<'_, AppState>,
+    instance_id: String,
+    id: String,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    log::info!("Removing input for instance {}: {}", instance_id, id);
 
-    let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
+    let mut inputs = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     let original_len = inputs.len();
     inputs.retain(|i| i.id() != id);
 
@@ -101,18 +124,18 @@ pub async fn remove_input(state: State<'_, AppState>, id: String) -> Result<(), 
 
     state
         .config
-        .save_inputs(&inputs)
+        .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
 
     // Also remove cached value
     let mut values = state
         .config
-        .load_input_values()
+        .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     values.remove(&id);
     state
         .config
-        .save_input_values(&values)
+        .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -122,19 +145,24 @@ pub async fn remove_input(state: State<'_, AppState>, id: String) -> Result<(), 
 #[tauri::command]
 pub async fn list_input_values(
     state: State<'_, AppState>,
+    instance_id: String,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
-    state.config.load_input_values().map_err(|e| e.to_string())
+    state
+        .config
+        .load_input_values_for_instance(require_instance_id(&instance_id)?)
+        .map_err(|e| e.to_string())
 }
 
 /// Get a single cached input value
 #[tauri::command]
 pub async fn get_input_value(
     state: State<'_, AppState>,
+    instance_id: String,
     id: String,
 ) -> Result<Option<serde_json::Value>, String> {
     let values = state
         .config
-        .load_input_values()
+        .load_input_values_for_instance(require_instance_id(&instance_id)?)
         .map_err(|e| e.to_string())?;
     Ok(values.get(&id).cloned())
 }
@@ -143,19 +171,21 @@ pub async fn get_input_value(
 #[tauri::command]
 pub async fn set_input_value(
     state: State<'_, AppState>,
+    instance_id: String,
     id: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
     log::info!("Setting input value: {}", id);
 
     let mut values = state
         .config
-        .load_input_values()
+        .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     values.insert(id, value);
     state
         .config
-        .save_input_values(&values)
+        .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -163,38 +193,57 @@ pub async fn set_input_value(
 
 /// Remove a cached input value
 #[tauri::command]
-pub async fn remove_input_value(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn remove_input_value(
+    state: State<'_, AppState>,
+    instance_id: String,
+    id: String,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
     let mut values = state
         .config
-        .load_input_values()
+        .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     values.remove(&id);
     state
         .config
-        .save_input_values(&values)
+        .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Clear all cached input values
 #[tauri::command]
-pub async fn clear_input_values(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn clear_input_values(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
     state
         .config
-        .save_input_values(&std::collections::HashMap::new())
+        .save_input_values_for_instance(
+            require_instance_id(&instance_id)?,
+            &std::collections::HashMap::new(),
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Import input definitions from a JSON file
 #[tauri::command]
-pub async fn import_inputs(state: State<'_, AppState>, path: String) -> Result<usize, String> {
+pub async fn import_inputs(
+    state: State<'_, AppState>,
+    instance_id: String,
+    path: String,
+) -> Result<usize, String> {
+    let instance_id = require_instance_id(&instance_id)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let imported: Vec<InputDefinition> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let count = imported.len();
 
-    let mut inputs = state.config.load_inputs().map_err(|e| e.to_string())?;
+    let mut inputs = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     for input in imported {
         let id = input.id().to_string();
         inputs.retain(|i| i.id() != id);
@@ -202,8 +251,16 @@ pub async fn import_inputs(state: State<'_, AppState>, path: String) -> Result<u
     }
     state
         .config
-        .save_inputs(&inputs)
+        .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
 
     Ok(count)
+}
+
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
 }

@@ -7,7 +7,7 @@ import { SchemaForm } from './SchemaForm';
 
 const { Text } = Typography;
 
-export function ToolCallTest({ tool }: { tool: ToolInfo }) {
+export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
   const { t } = useTranslation();
   const { executeTool, lastCallResult, calling } = useDebugStore();
   const [form] = Form.useForm();
@@ -50,7 +50,7 @@ export function ToolCallTest({ tool }: { tool: ToolInfo }) {
       }
     }
 
-    await executeTool(tool.name, params, timeout);
+    await executeTool(instanceId, tool.name, params, timeout);
   };
 
   return (

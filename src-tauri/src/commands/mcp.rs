@@ -1,6 +1,7 @@
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::MCPServerConfig;
+use std::collections::HashMap;
 use tauri::State;
 
 /// Server status returned to frontend
@@ -13,20 +14,52 @@ pub struct McpServerStatus {
 }
 
 #[tauri::command]
-pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServerStatus>, String> {
-    let lock = state.manager.read().await;
+pub async fn get_mcp_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<Vec<McpServerStatus>, String> {
+    get_mcp_servers_core(&state, &instance_id).await
+}
+
+pub async fn get_mcp_servers_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<McpServerStatus>, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let configs = state
+        .config
+        .load_configs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
-    let statuses = mgr.get_server_status().await;
-
-    Ok(statuses
+    let runtime_statuses: HashMap<_, _> = mgr
+        .get_server_status()
+        .await
         .into_iter()
-        .map(|(name, running, status_message)| McpServerStatus {
-            name,
-            running,
-            status_message,
-            disabled: false,
+        .map(|(name, running, status_message)| (name, (running, status_message)))
+        .collect();
+
+    Ok(configs
+        .into_iter()
+        .map(|config| {
+            let name = config.name().to_string();
+            let (running, status_message) = runtime_statuses
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| (false, "Stopped".to_string()));
+            McpServerStatus {
+                name,
+                running,
+                status_message,
+                disabled: config.disabled(),
+            }
         })
         .collect())
 }
@@ -34,9 +67,22 @@ pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServer
 #[tauri::command]
 pub async fn get_mcp_server_config(
     state: State<'_, AppState>,
+    instance_id: String,
     name: String,
 ) -> Result<MCPServerConfig, String> {
-    let configs = state.config.load_configs().map_err(|e| e.to_string())?;
+    get_mcp_server_config_core(&state, &instance_id, &name)
+}
+
+pub fn get_mcp_server_config_core(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<MCPServerConfig, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let configs = state
+        .config
+        .load_configs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     configs
         .into_iter()
         .find(|c| c.name() == name)
@@ -46,17 +92,31 @@ pub async fn get_mcp_server_config(
 #[tauri::command]
 pub async fn add_mcp_server(
     state: State<'_, AppState>,
+    instance_id: String,
     config: MCPServerConfig,
 ) -> Result<(), String> {
-    let name = config.name().to_string();
-    log::info!("Adding MCP server: {}", name);
+    add_mcp_server_core(&state, &instance_id, config).await
+}
 
-    state
+pub async fn add_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let name = config.name().to_string();
+    log::info!("Adding MCP server for instance {}: {}", instance_id, name);
+
+    let updated_instance = state
         .config
-        .add_config(config.clone())
+        .add_config_for_instance(instance_id, config.clone())
         .map_err(|e| e.to_string())?;
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
@@ -64,49 +124,91 @@ pub async fn add_mcp_server(
         .await
         .map_err(|e| e.to_string())?;
 
-    log::info!("MCP server added: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server added: {}", name), None);
+    log::info!("MCP server added for instance {}: {}", instance_id, name);
+    let _ = state.log_service.write(
+        "info",
+        "mcp",
+        &format!("Server added for instance {}: {}", instance_id, name),
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Removing MCP server: {}", name);
+pub async fn remove_mcp_server(
+    state: State<'_, AppState>,
+    instance_id: String,
+    name: String,
+) -> Result<(), String> {
+    remove_mcp_server_core(&state, &instance_id, &name).await
+}
 
-    let lock = state.manager.read().await;
+pub async fn remove_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Removing MCP server for instance {}: {}", instance_id, name);
+
+    let updated_instance = state
+        .config
+        .remove_config_for_instance(instance_id, name)
+        .map_err(|e| e.to_string())?;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
-    mgr.remove_server(&name).await.map_err(|e| e.to_string())?;
+    if let Err(error) = mgr.remove_server(name).await {
+        log::warn!(
+            "Failed to remove MCP server from runtime for instance {}: {}",
+            instance_id,
+            error
+        );
+    }
 
-    state
-        .config
-        .remove_config(&name)
-        .map_err(|e| e.to_string())?;
-
-    log::info!("MCP server removed: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server removed: {}", name), None);
+    log::info!("MCP server removed for instance {}: {}", instance_id, name);
+    let _ = state.log_service.write(
+        "info",
+        "mcp",
+        &format!("Server removed for instance {}: {}", instance_id, name),
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub async fn update_mcp_server(
     state: State<'_, AppState>,
+    instance_id: String,
     config: MCPServerConfig,
 ) -> Result<(), String> {
-    let name = config.name().to_string();
-    log::info!("Updating MCP server: {}", name);
+    update_mcp_server_core(&state, &instance_id, config).await
+}
 
-    state
+pub async fn update_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let name = config.name().to_string();
+    log::info!("Updating MCP server for instance {}: {}", instance_id, name);
+
+    let updated_instance = state
         .config
-        .add_config(config.clone())
+        .add_config_for_instance(instance_id, config.clone())
         .map_err(|e| e.to_string())?;
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
@@ -114,73 +216,162 @@ pub async fn update_mcp_server(
         .await
         .map_err(|e| e.to_string())?;
 
-    log::info!("MCP server updated: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server updated: {}", name), None);
+    log::info!("MCP server updated for instance {}: {}", instance_id, name);
+    let _ = state.log_service.write(
+        "info",
+        "mcp",
+        &format!("Server updated for instance {}: {}", instance_id, name),
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Starting MCP server: {}", name);
+pub async fn start_mcp_server(
+    state: State<'_, AppState>,
+    instance_id: String,
+    name: String,
+) -> Result<(), String> {
+    start_mcp_server_core(&state, &instance_id, &name).await
+}
 
-    let lock = state.manager.read().await;
+pub async fn start_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Starting MCP server for instance {}: {}", instance_id, name);
+
+    let config = get_mcp_server_config_core(state, instance_id, name)?;
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
-    mgr.start_client(&name).await.map_err(|e| e.to_string())?;
+    mgr.add_or_update_server(config)
+        .await
+        .map_err(|e| e.to_string())?;
+    mgr.start_client(name).await.map_err(|e| e.to_string())?;
 
-    log::info!("MCP server started: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server started: {}", name), None);
+    log::info!("MCP server started for instance {}: {}", instance_id, name);
+    let _ = state.log_service.write(
+        "info",
+        "mcp",
+        &format!("Server started for instance {}: {}", instance_id, name),
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Stopping MCP server: {}", name);
+pub async fn stop_mcp_server(
+    state: State<'_, AppState>,
+    instance_id: String,
+    name: String,
+) -> Result<(), String> {
+    stop_mcp_server_core(&state, &instance_id, &name).await
+}
 
-    let lock = state.manager.read().await;
+pub async fn stop_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Stopping MCP server for instance {}: {}", instance_id, name);
+
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_client(&name).await.map_err(|e| e.to_string())?;
+    mgr.stop_client(name).await.map_err(|e| e.to_string())?;
 
-    log::info!("MCP server stopped: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server stopped: {}", name), None);
+    log::info!("MCP server stopped for instance {}: {}", instance_id, name);
+    let _ = state.log_service.write(
+        "info",
+        "mcp",
+        &format!("Server stopped for instance {}: {}", instance_id, name),
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn start_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("Starting all MCP servers");
+pub async fn start_all_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    start_all_servers_core(&state, &instance_id).await
+}
 
-    let lock = state.manager.read().await;
+pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Starting all MCP servers for instance {}", instance_id);
+
+    let instance = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(instance.clone())
+        .await;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
+    mgr.initialize(instance.mcp_servers)
+        .await
+        .map_err(|e| e.to_string())?;
     mgr.start_all().await.map_err(|e| e.to_string())?;
 
-    log::info!("All MCP servers started");
+    log::info!("All MCP servers started for instance {}", instance_id);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("Stopping all MCP servers");
+pub async fn stop_all_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    stop_all_servers_core(&state, &instance_id).await
+}
 
-    let lock = state.manager.read().await;
+pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Stopping all MCP servers for instance {}", instance_id);
+
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let lock = runtime.manager.read().await;
     let mgr = lock
         .as_ref()
         .ok_or("MCP manager not initialized".to_string())?;
     mgr.stop_all().await.map_err(|e| e.to_string())?;
 
-    log::info!("All MCP servers stopped");
+    log::info!("All MCP servers stopped for instance {}", instance_id);
     Ok(())
+}
+
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useInputStore, type InputDefinition } from '@/stores/inputStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 function resetStore() {
   useInputStore.setState({ inputs: [], values: {}, loading: false, error: null });
@@ -20,9 +21,9 @@ describe('inputStore', () => {
       ];
       mockedInvoke.mockResolvedValueOnce(mockInputs);
 
-      await useInputStore.getState().fetchInputs();
+      await useInputStore.getState().fetchInputs(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('list_inputs');
+      expect(mockedInvoke).toHaveBeenCalledWith('list_inputs', { instanceId });
       expect(useInputStore.getState().inputs).toEqual(mockInputs);
       expect(useInputStore.getState().loading).toBe(false);
     });
@@ -30,7 +31,7 @@ describe('inputStore', () => {
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('load failed');
 
-      await useInputStore.getState().fetchInputs();
+      await useInputStore.getState().fetchInputs(instanceId);
 
       expect(useInputStore.getState().error).toBe('load failed');
       expect(useInputStore.getState().loading).toBe(false);
@@ -42,9 +43,9 @@ describe('inputStore', () => {
       const mockValues = { api_key: 'secret123' };
       mockedInvoke.mockResolvedValueOnce(mockValues);
 
-      await useInputStore.getState().fetchValues();
+      await useInputStore.getState().fetchValues(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('list_input_values');
+      expect(mockedInvoke).toHaveBeenCalledWith('list_input_values', { instanceId });
       expect(useInputStore.getState().values).toEqual(mockValues);
     });
   });
@@ -55,9 +56,9 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined); // add_or_update_input
       mockedInvoke.mockResolvedValueOnce([input]);   // fetchInputs
 
-      await useInputStore.getState().addOrUpdateInput(input);
+      await useInputStore.getState().addOrUpdateInput(instanceId, input);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('add_or_update_input', { input });
+      expect(mockedInvoke).toHaveBeenCalledWith('add_or_update_input', { instanceId, input });
       expect(useInputStore.getState().inputs).toEqual([input]);
     });
 
@@ -65,7 +66,7 @@ describe('inputStore', () => {
       mockedInvoke.mockRejectedValueOnce('save failed');
 
       await expect(
-        useInputStore.getState().addOrUpdateInput({ type: 'PromptString', id: 'x', label: 'X' })
+        useInputStore.getState().addOrUpdateInput(instanceId, { type: 'PromptString', id: 'x', label: 'X' })
       ).rejects.toBe('save failed');
 
       expect(useInputStore.getState().error).toBe('save failed');
@@ -78,9 +79,9 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce([]);         // fetchInputs
       mockedInvoke.mockResolvedValueOnce({});          // fetchValues
 
-      await useInputStore.getState().removeInput('api_key');
+      await useInputStore.getState().removeInput(instanceId, 'api_key');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('remove_input', { id: 'api_key' });
+      expect(mockedInvoke).toHaveBeenCalledWith('remove_input', { instanceId, id: 'api_key' });
     });
   });
 
@@ -89,9 +90,9 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);     // set_input_value
       mockedInvoke.mockResolvedValueOnce({ key: 'val' }); // fetchValues
 
-      await useInputStore.getState().setValue('key', 'val');
+      await useInputStore.getState().setValue(instanceId, 'key', 'val');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('set_input_value', { id: 'key', value: 'val' });
+      expect(mockedInvoke).toHaveBeenCalledWith('set_input_value', { instanceId, id: 'key', value: 'val' });
     });
   });
 
@@ -100,9 +101,9 @@ describe('inputStore', () => {
       useInputStore.setState({ values: { a: '1', b: '2' } });
       mockedInvoke.mockResolvedValueOnce(undefined);
 
-      await useInputStore.getState().clearValues();
+      await useInputStore.getState().clearValues(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('clear_input_values');
+      expect(mockedInvoke).toHaveBeenCalledWith('clear_input_values', { instanceId });
       expect(useInputStore.getState().values).toEqual({});
     });
   });

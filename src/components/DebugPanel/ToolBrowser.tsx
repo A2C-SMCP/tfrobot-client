@@ -8,15 +8,19 @@ import { ToolCallTest } from './ToolCallTest';
 
 const { Text, Paragraph } = Typography;
 
-export function ToolBrowser() {
+interface ToolBrowserProps {
+  instanceId: string;
+}
+
+export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   const { t } = useTranslation();
   const { tools, toolsLoading, selectedTool, fetchTools, selectTool } = useDebugStore();
   const [search, setSearch] = useState('');
   const [serverFilter, setServerFilter] = useState<string | undefined>();
 
   useEffect(() => {
-    fetchTools();
-  }, [fetchTools]);
+    fetchTools(instanceId);
+  }, [fetchTools, instanceId]);
 
   const servers = [...new Set(tools.map((t) => t.server))];
 
@@ -41,7 +45,7 @@ export function ToolBrowser() {
               onChange={(e) => setSearch(e.target.value)}
               allowClear
             />
-            <Button icon={<ReloadOutlined />} onClick={() => fetchTools()} loading={toolsLoading} />
+            <Button icon={<ReloadOutlined />} onClick={() => fetchTools(instanceId)} loading={toolsLoading} />
           </Space.Compact>
           <Select
             style={{ width: '100%' }}
@@ -94,7 +98,7 @@ export function ToolBrowser() {
       {/* Right: Tool Detail + Call Test */}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {selectedTool ? (
-          <ToolDetail tool={selectedTool} />
+          <ToolDetail instanceId={instanceId} tool={selectedTool} />
         ) : (
           <Empty description={t('debug.selectTool')} style={{ marginTop: 80 }} />
         )}
@@ -103,7 +107,7 @@ export function ToolBrowser() {
   );
 }
 
-function ToolDetail({ tool }: { tool: ToolInfo }) {
+function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
   const { t } = useTranslation();
 
   return (
@@ -121,7 +125,7 @@ function ToolDetail({ tool }: { tool: ToolInfo }) {
       </pre>
 
       <Divider orientation="left">{t('debug.callTest')}</Divider>
-      <ToolCallTest tool={tool} />
+      <ToolCallTest instanceId={instanceId} tool={tool} />
     </div>
   );
 }

@@ -4,14 +4,18 @@ import { ToolBrowser } from './ToolBrowser';
 import { CallHistory } from './CallHistory';
 import { ResourceBrowser } from './ResourceBrowser';
 
-export function DebugPanel() {
+interface DebugPanelProps {
+  instanceId: string;
+}
+
+export function DebugPanel({ instanceId }: DebugPanelProps) {
   const { t } = useTranslation();
 
   const items = [
     {
       key: 'tools',
       label: t('debug.tabs.tools'),
-      children: <ToolBrowser />,
+      children: <ToolBrowser instanceId={instanceId} />,
     },
     {
       key: 'resources',
