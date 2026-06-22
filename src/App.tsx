@@ -1,12 +1,8 @@
 import { Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
-  ApiOutlined,
   FileTextOutlined,
-  CloudServerOutlined,
   DashboardOutlined,
-  FormOutlined,
-  BugOutlined,
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
@@ -15,15 +11,12 @@ import {
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
-import { McpConfig } from './components/McpConfig';
-import { InputVariables } from './components/InputVariables';
-import { SmcpConnection } from './components/SmcpConnection';
-import { DebugPanel } from './components/DebugPanel';
-import { DesktopResources } from './components/DesktopResources';
 import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
 import { ManagerAccount } from './components/ManagerAccount';
+import { Computer } from './components/Computer';
+import { toComputerDetailTab } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
 
 const { Header, Sider, Content } = Layout;
@@ -32,6 +25,7 @@ const { Title } = Typography;
 function App() {
   const { t, i18n } = useTranslation();
   const [selectedKey, setSelectedKey] = useState('dashboard');
+  const menuSelectedKey = selectedKey.startsWith('computer-detail') ? 'computer' : selectedKey;
   const { resolved, setMode, initFromSettings } = useThemeStore();
 
   // Initialize theme from persisted settings
@@ -63,44 +57,22 @@ function App() {
           icon: <DashboardOutlined />,
           label: t('nav.dashboard'),
         },
-      ],
-    },
-    {
-      key: 'config-group',
-      label: t('nav.config'),
-      type: 'group' as const,
-      children: [
         {
-          key: 'mcp',
-          icon: <ApiOutlined />,
-          label: t('mcp.servers'),
-        },
-        {
-          key: 'inputs',
-          icon: <FormOutlined />,
-          label: t('inputs.title'),
+          key: 'computer',
+          icon: <DesktopOutlined />,
+          label: t('computer.title'),
         },
       ],
     },
     {
       key: 'connection-group',
-      label: t('nav.connection'),
+      label: t('nav.connectionLayer'),
       type: 'group' as const,
       children: [
         {
           key: 'manager',
           icon: <UserOutlined />,
           label: t('managerAccount.navLabel'),
-        },
-        {
-          key: 'smcp',
-          icon: <CloudServerOutlined />,
-          label: t('connection.smcpServer'),
-        },
-        {
-          key: 'resources',
-          icon: <DesktopOutlined />,
-          label: t('resources.title'),
         },
       ],
     },
@@ -109,11 +81,6 @@ function App() {
       label: t('nav.development'),
       type: 'group' as const,
       children: [
-        {
-          key: 'debug',
-          icon: <BugOutlined />,
-          label: t('nav.debugPanel'),
-        },
         {
           key: 'logs',
           icon: <FileTextOutlined />,
@@ -136,21 +103,18 @@ function App() {
   ];
 
   const renderContent = () => {
-    switch (selectedKey) {
+    const [pageKey, rawDetailTab] = selectedKey.split(':');
+    const detailTab = toComputerDetailTab(rawDetailTab);
+
+    switch (pageKey) {
       case 'dashboard':
         return <Dashboard onNavigate={setSelectedKey} />;
-      case 'mcp':
-        return <McpConfig />;
-      case 'inputs':
-        return <InputVariables />;
+      case 'computer':
+        return <Computer key="computer-list" />;
+      case 'computer-detail':
+        return <Computer key={`computer-detail-${detailTab}`} initialView="detail" initialTab={detailTab} />;
       case 'manager':
         return <ManagerAccount />;
-      case 'smcp':
-        return <SmcpConnection />;
-      case 'resources':
-        return <DesktopResources />;
-      case 'debug':
-        return <DebugPanel />;
       case 'logs':
         return <LogViewer />;
       case 'settings':
@@ -186,7 +150,7 @@ function App() {
         <Sider width={200} className={styles.sider}>
           <Menu
             mode="inline"
-            selectedKeys={[selectedKey]}
+            selectedKeys={[menuSelectedKey]}
             items={menuItems}
             onClick={({ key }) => setSelectedKey(key)}
             className={styles.menu}

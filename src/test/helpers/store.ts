@@ -8,6 +8,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useDesktopStore } from '@/stores/desktopStore';
 import { useManagerStore } from '@/stores/managerStore';
+import { useComputerStore } from '@/stores/computerStore';
 
 /**
  * Reset all Zustand stores to their initial state.
@@ -25,6 +26,7 @@ export function resetAllStores() {
     useThemeStore,
     useDesktopStore,
     useManagerStore,
+    useComputerStore,
   ];
 
   for (const store of stores) {

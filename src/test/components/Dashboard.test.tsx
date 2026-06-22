@@ -1,4 +1,4 @@
-import { render, screen } from '../helpers/render';
+import { render, screen, fireEvent } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Dashboard } from '@/components/Dashboard';
 
@@ -128,5 +128,23 @@ describe('Dashboard', () => {
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
     expect(screen.getByText('No recent activity')).toBeInTheDocument();
+  });
+
+  it('navigates instance-scoped cards to their Computer detail tabs', () => {
+    mockUseDashboardStore.mockReturnValue({
+      data: mockDashboardData,
+      loading: false,
+      fetchDashboard: mockFetchDashboard,
+    } as any);
+    render(<Dashboard onNavigate={mockOnNavigate} />);
+
+    fireEvent.click(screen.getByText('Connection'));
+    fireEvent.click(screen.getByText('MCP Servers'));
+    fireEvent.click(screen.getByText('Tools'));
+
+    expect(mockOnNavigate).toHaveBeenNthCalledWith(1, 'computer-detail:connection');
+    expect(mockOnNavigate).toHaveBeenNthCalledWith(2, 'computer-detail:mcp');
+    expect(mockOnNavigate).toHaveBeenNthCalledWith(3, 'computer-detail:debug');
+    expect(mockOnNavigate).toHaveBeenCalledTimes(3);
   });
 });

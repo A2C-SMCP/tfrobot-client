@@ -22,9 +22,35 @@
     "dashboard": "Dashboard",
     "config": "CONFIGURATION",
     "connection": "CONNECTION",
+    "connectionLayer": "CONNECTION LAYER",
     "development": "DEVELOPMENT",
     "system": "SYSTEM",
     "debugPanel": "Debug Panel"
+  },
+  "computer": {
+    "title": "Computer",
+    "defaultName": "Default Computer",
+    "create": "Create Computer",
+    "empty": "No Computer instances",
+    "openDetails": "Open Details",
+    "backToList": "Back to Computers",
+    "start": "Start",
+    "stop": "Stop",
+    "robotConnection": "Robot Connection",
+    "noRobotBound": "No robot bound",
+    "boundRobot": "Bound robot: {{name}}",
+    "connectionProfile": "Connection profile: {{name}}",
+    "mcpServers": "{{count}} MCP servers",
+    "tools": "{{count}} tools",
+    "status": {
+      "running": "Running",
+      "stopped": "Stopped",
+      "error": "Error"
+    },
+    "connection": {
+      "connected": "Connected",
+      "disconnected": "Disconnected"
+    }
   },
   "dashboard": {
     "connection": "Connection",

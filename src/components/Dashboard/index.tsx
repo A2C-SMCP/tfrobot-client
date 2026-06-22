@@ -44,7 +44,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         <Col xs={24} sm={12} lg={8}>
           <Card
             hoverable
-            onClick={() => onNavigate('smcp')}
+            onClick={() => onNavigate('computer-detail:connection')}
             title={<><CloudServerOutlined /> {t('dashboard.connection')}</>}
           >
             <Tag color={data.connected ? 'green' : 'default'}>
@@ -62,7 +62,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         <Col xs={24} sm={12} lg={8}>
           <Card
             hoverable
-            onClick={() => onNavigate('mcp')}
+            onClick={() => onNavigate('computer-detail:mcp')}
             title={<><ApiOutlined /> {t('dashboard.mcpServers')}</>}
           >
             <Text>{t('dashboard.total')}: {data.mcp_total}</Text>
@@ -76,7 +76,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         <Col xs={24} sm={12} lg={8}>
           <Card
             hoverable
-            onClick={() => onNavigate('debug')}
+            onClick={() => onNavigate('computer-detail:debug')}
             title={<><ToolOutlined /> {t('dashboard.tools')}</>}
           >
             <Text style={{ fontSize: 24, fontWeight: 600 }}>{data.tools_count}</Text>

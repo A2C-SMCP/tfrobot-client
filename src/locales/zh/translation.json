@@ -22,9 +22,35 @@
     "dashboard": "仪表盘",
     "config": "配置",
     "connection": "连接",
+    "connectionLayer": "连接层",
     "development": "开发",
     "system": "系统",
     "debugPanel": "调试面板"
+  },
+  "computer": {
+    "title": "Computer",
+    "defaultName": "默认 Computer",
+    "create": "创建 Computer",
+    "empty": "暂无 Computer 实例",
+    "openDetails": "进入详情",
+    "backToList": "返回 Computer 列表",
+    "start": "启动",
+    "stop": "停止",
+    "robotConnection": "Robot 连接",
+    "noRobotBound": "未绑定 Robot",
+    "boundRobot": "已绑定 Robot：{{name}}",
+    "connectionProfile": "连接配置：{{name}}",
+    "mcpServers": "{{count}} 个 MCP 服务器",
+    "tools": "{{count}} 个工具",
+    "status": {
+      "running": "运行中",
+      "stopped": "已停止",
+      "error": "错误"
+    },
+    "connection": {
+      "connected": "已连接",
+      "disconnected": "未连接"
+    }
   },
   "dashboard": {
     "connection": "连接状态",
