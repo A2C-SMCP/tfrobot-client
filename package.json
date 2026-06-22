@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:rust": "cargo nextest run --manifest-path src-tauri/Cargo.toml",

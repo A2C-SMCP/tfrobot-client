@@ -1,5 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import type {
   UserInfo,
   DigitalEmployeeBrief,
@@ -75,6 +76,7 @@ import { EmployeeList } from '@/components/ManagerAccount/EmployeeList';
 import { ManagerAccount } from '@/components/ManagerAccount';
 
 const mockUseManagerStore = vi.mocked(useManagerStore);
+const mockedInvoke = vi.mocked(invoke);
 
 function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
   mockUseManagerStore.mockReturnValue({ ...mockStore, ...overrides } as ReturnType<
@@ -85,6 +87,7 @@ function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
 describe('ManagerAccount', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedInvoke.mockResolvedValue({ connected: false });
     // connectionStore 是真实 store（未 mock），复位到断开状态，让 EmployeeList 默认渲染"连接"而非"已连接"
     useConnectionStore.setState({
       profiles: [],
@@ -94,6 +97,14 @@ describe('ManagerAccount', () => {
     });
     applyMock();
   });
+
+  async function waitForConnectionStatusFetch() {
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', {
+        instanceId: 'computer-a',
+      });
+    });
+  }
 
   describe('LoginForm', () => {
     it('renders the sign-in heading and baseUrl hint', () => {
@@ -202,14 +213,16 @@ describe('ManagerAccount', () => {
       applyMock({ session: user, employees: [employee], fetchEmployeesIfStale });
 
       render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
       expect(fetchEmployeesIfStale).toHaveBeenCalled();
       expect(screen.getByText('bot-one')).toBeInTheDocument();
       expect(screen.getByText('robot-a')).toBeInTheDocument();
     });
 
-    it('shows empty state when no employees', () => {
+    it('shows empty state when no employees', async () => {
       applyMock({ session: user, employees: [] });
       render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
       expect(
         screen.getByText('No digital employees are available for this account.'),
       ).toBeInTheDocument();
@@ -218,6 +231,7 @@ describe('ManagerAccount', () => {
     it('invokes selectEmployeeAndConnect on connect click', async () => {
       const selectEmployeeAndConnect = vi.fn().mockResolvedValue({ name: 'bot-one' });
       applyMock({ session: user, employees: [employee], selectEmployeeAndConnect });
+      mockedInvoke.mockImplementationOnce(() => new Promise(() => {}));
 
       render(<EmployeeList />);
       fireEvent.click(screen.getByRole('button', { name: /Connect/i }));
@@ -227,29 +241,53 @@ describe('ManagerAccount', () => {
       });
     });
 
-    it('disables connect button for non-running status', () => {
+    it('shows disconnect for manager connection even when robotId is missing', async () => {
+      const connectedWithoutRobotId = { ...employee, robotId: undefined };
+      applyMock({ session: user, employees: [connectedWithoutRobotId] });
+      mockedInvoke.mockResolvedValueOnce({
+        connected: true,
+        office_id: 'server-rid',
+        profile_name: 'manager:11',
+      });
+      useConnectionStore.setState({
+        status: {
+          connected: true,
+          office_id: 'server-rid',
+          profile_name: 'manager:11',
+        },
+      });
+
+      render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
+      expect(screen.getByRole('button', { name: /Disconnect/i })).toBeInTheDocument();
+    });
+
+    it('disables connect button for non-running status', async () => {
       applyMock({
         session: user,
         employees: [{ ...employee, status: 'suspended' }],
       });
       render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     });
 
-    it('disables connect when robotAccountId is missing (cannot token-exchange)', () => {
+    it('disables connect when robotAccountId is missing (cannot token-exchange)', async () => {
       const noAccount = { ...employee, robotAccountId: undefined };
       applyMock({ session: user, employees: [noAccount] });
       render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
-    }, 10_000);
+    });
 
-    it('renders payment_required alert with renew button when redirectUrl present', () => {
+    it('renders payment_required alert with renew button when redirectUrl present', async () => {
       applyMock({
         session: user,
         employees: [employee],
         paymentRequired: { message: 'Balance low', redirectUrl: 'https://pay.example.com' },
       });
       render(<EmployeeList />);
+      await waitForConnectionStatusFetch();
       expect(screen.getByText('Balance low')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Renew subscription' })).toBeInTheDocument();
     });
@@ -278,12 +316,13 @@ describe('ManagerAccount', () => {
       expect(screen.getByText('Choose an account')).toBeInTheDocument();
     });
 
-    it('renders EmployeeList when session is present', () => {
+    it('renders EmployeeList when session is present', async () => {
       applyMock({
         session: { userId: 9, accountId: 16, accountName: 'client_uat' },
         employees: [],
       });
       render(<ManagerAccount />);
+      await waitForConnectionStatusFetch();
       expect(screen.getByText('Digital Employees')).toBeInTheDocument();
     });
   });

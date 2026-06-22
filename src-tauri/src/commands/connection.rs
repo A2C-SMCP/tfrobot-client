@@ -1,3 +1,4 @@
+use crate::services::computer::{RobotBindingMetadata, DEFAULT_COMPUTER_INSTANCE_ID};
 use crate::services::manager_client::{ExchangedToken, ManagerClient, ManagerError};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,8 @@ pub struct ManagerConnectionParams {
     pub robot_account_id: u64,
     /// 可选 scope（None = server 缺省全部能力）。
     pub scope: Option<String>,
+    /// Persisted Robot binding metadata for the target ComputerInstance.
+    pub robot_binding: RobotBindingMetadata,
 }
 
 /// 预刷新换连接的结果：要么换上了新连接（持有需关闭的旧 client），要么连接已被换/断
@@ -54,6 +57,12 @@ pub enum SwapResult {
     Replaced(SmcpComputerClient),
     /// 连接已不属于本代（用户断开 / 改连别的机器人）；内含需丢弃的新 client。
     Stale(SmcpComputerClient),
+}
+
+#[derive(Debug)]
+enum ManagerConnectionDecision {
+    Proceed,
+    AlreadyConnected,
 }
 
 /// Connection Profile stored to disk (API Key stored separately in Keychain)
@@ -116,12 +125,16 @@ pub async fn save_profile(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(&instance_id)?;
     let name = profile.name.clone();
-    log::info!("Saving connection profile for instance {}: {}", instance_id, name);
+    log::info!(
+        "Saving connection profile for instance {}: {}",
+        instance_id,
+        name
+    );
 
     // Store API key in keychain if provided
     if let Some(key) = &api_key {
         if !key.is_empty() {
-            let keychain_id = format!("profile:{}", name);
+            let keychain_id = profile_keychain_id(instance_id, &name);
             crate::services::keychain::save_credential(&keychain_id, key)
                 .map_err(|e| e.to_string())?;
         }
@@ -149,10 +162,18 @@ pub async fn delete_profile(
     name: String,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(&instance_id)?;
-    log::info!("Deleting connection profile for instance {}: {}", instance_id, name);
+    log::info!(
+        "Deleting connection profile for instance {}: {}",
+        instance_id,
+        name
+    );
 
-    let keychain_id = format!("profile:{}", name);
+    let keychain_id = profile_keychain_id(instance_id, &name);
     let _ = crate::services::keychain::delete_credential(&keychain_id);
+    if can_migrate_legacy_profile_key(instance_id) {
+        let legacy_keychain_id = legacy_profile_keychain_id(&name);
+        let _ = crate::services::keychain::delete_credential(&legacy_keychain_id);
+    }
 
     let mut profiles = state
         .config
@@ -183,7 +204,11 @@ pub async fn connect_smcp_core(
     profile_name: String,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
-    log::info!("Connecting instance {} with profile: {}", instance_id, profile_name);
+    log::info!(
+        "Connecting instance {} with profile: {}",
+        instance_id,
+        profile_name
+    );
 
     let profiles = state
         .config
@@ -195,10 +220,7 @@ pub async fn connect_smcp_core(
         .ok_or_else(|| format!("Profile not found: {}", profile_name))?
         .clone();
 
-    // Retrieve API key from keychain
-    let keychain_id = format!("profile:{}", profile.name);
-    let api_key =
-        crate::services::keychain::get_credential(&keychain_id).map_err(|e| e.to_string())?;
+    let api_key = load_profile_api_key(instance_id, &profile.name).map_err(|e| e.to_string())?;
 
     let runtime = state
         .computer_registry
@@ -206,42 +228,53 @@ pub async fn connect_smcp_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    // smcp-computer #86：连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`），HTTP header 退役鉴权、
-    // 仅承载路由（profile.headers，如 X-TF-*）。profile 中保存的密钥包成 `{"token": <secret>}` 注入 auth dict。
-    // Connection auth lives solely in the Socket.IO auth dict (`token`); HTTP headers are routing-only.
-    let auth_payload = api_key
-        .filter(|k| !k.is_empty())
-        .map(|tok| serde_json::json!({ "token": tok }));
-
-    let client = smcp_computer::socketio_client::SmcpComputerClient::new(
-        &profile.url,
-        runtime.manager.clone(),
-        profile.computer_name.clone(),
-        auth_payload,
-        runtime.inputs.clone(),
-        Some(profile.headers.clone()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if let Err(e) = client.join_office(&profile.office_id).await {
-        disconnect_smcp_client(client, "after join_office failure").await;
-        return Err(e.to_string());
-    }
-
-    let new_connection = ConnectionState {
-        client,
-        profile_name: profile.name.clone(),
-        url: profile.url.clone(),
-        office_id: profile.office_id.clone(),
-        computer_name: profile.computer_name.clone(),
-        connected_at: chrono::Utc::now(),
-        generation: next_generation(),
-        // 手动 profile 连接用静态密钥、不做 token-exchange，故无预刷新任务。
-        refresh_task: None,
-    };
-
     let previous_connection = {
+        let _guard = state.connection_establish_lock.lock().await;
+
+        if matches!(
+            check_profile_connection_allowed(state, instance_id, &profile.office_id)
+                .await
+                .map_err(|e| e.to_string())?,
+            ManagerConnectionDecision::AlreadyConnected
+        ) {
+            return Ok(());
+        }
+
+        // smcp-computer #86：连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`），HTTP header 退役鉴权、
+        // 仅承载路由（profile.headers，如 X-TF-*）。profile 中保存的密钥包成 `{"token": <secret>}` 注入 auth dict。
+        // Connection auth lives solely in the Socket.IO auth dict (`token`); HTTP headers are routing-only.
+        let auth_payload = api_key
+            .filter(|k| !k.is_empty())
+            .map(|tok| serde_json::json!({ "token": tok }));
+
+        let client = smcp_computer::socketio_client::SmcpComputerClient::new(
+            &profile.url,
+            runtime.manager.clone(),
+            profile.computer_name.clone(),
+            auth_payload,
+            runtime.inputs.clone(),
+            Some(profile.headers.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if let Err(e) = client.join_office(&profile.office_id).await {
+            disconnect_smcp_client(client, "after join_office failure").await;
+            return Err(e.to_string());
+        }
+
+        let new_connection = ConnectionState {
+            client,
+            profile_name: profile.name.clone(),
+            url: profile.url.clone(),
+            office_id: profile.office_id.clone(),
+            computer_name: profile.computer_name.clone(),
+            connected_at: chrono::Utc::now(),
+            generation: next_generation(),
+            // 手动 profile 连接用静态密钥、不做 token-exchange，故无预刷新任务。
+            refresh_task: None,
+        };
+
         let mut runtime_conn = runtime.connection.write().await;
         runtime_conn.replace(new_connection)
     };
@@ -257,6 +290,35 @@ pub async fn connect_smcp_core(
         None,
     );
     Ok(())
+}
+
+async fn check_profile_connection_allowed(
+    state: &AppState,
+    instance_id: &str,
+    office_id: &str,
+) -> Result<ManagerConnectionDecision, ManagerError> {
+    let runtimes = state.computer_registry.list_runtimes().await;
+    for runtime in runtimes {
+        let guard = runtime.connection.read().await;
+        let Some(connection) = guard.as_ref() else {
+            continue;
+        };
+
+        match manager_connection_decision(
+            instance_id,
+            &runtime.instance.id,
+            &runtime.instance.name,
+            &connection.office_id,
+            office_id,
+        )? {
+            ManagerConnectionDecision::Proceed => {}
+            ManagerConnectionDecision::AlreadyConnected => {
+                return Ok(ManagerConnectionDecision::AlreadyConnected)
+            }
+        }
+    }
+
+    Ok(ManagerConnectionDecision::Proceed)
 }
 
 /// Disconnect from SMCP server
@@ -380,12 +442,16 @@ pub async fn get_connection_status(
 /// `robot_account_id` 取自 digital-employee 列表的 `robotAccountId`（TFRM-183，nullable —— 前端
 /// 应对 null 项禁用连接）。错误沿用 [`ManagerError`]（前端按 `kind` 分支）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn manager_connect_smcp(
     app: AppHandle,
     state: State<'_, AppState>,
     instance_id: String,
     employee_id: u64,
     robot_account_id: u64,
+    robot_id: Option<String>,
+    robot_name: Option<String>,
+    namespace: Option<String>,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
     let instance_id = require_instance_id(&instance_id)
@@ -420,13 +486,24 @@ pub async fn manager_connect_smcp(
     let params = ManagerConnectionParams {
         url,
         computer_name,
-        office_id,
+        office_id: office_id.clone(),
         // 只保留纯路由头注入 HTTP header；剔除 legacy 鉴权密钥（如 connection-info 仍下发的
         // `access_token`）——鉴权唯一走 Socket.IO auth dict（#86），凭据不得进网关可读的 header。
         routing_headers: routing_only_headers(info.routing_headers.clone()),
         employee_id,
         robot_account_id,
         scope,
+        robot_binding: RobotBindingMetadata {
+            employee_id,
+            robot_id: robot_id
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| Some(office_id.clone())),
+            robot_account_id: Some(robot_account_id),
+            namespace: namespace
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| info.namespace.clone()),
+            robot_name: robot_name.filter(|s| !s.trim().is_empty()),
+        },
     };
 
     // 2) 换短 JWT
@@ -479,44 +556,63 @@ async fn establish_manager_connection(
         .computer_registry
         .runtime(instance_id)
         .await
-        .ok_or_else(|| ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}")))?;
-    // 先把新连接建成功，再替换/关旧——build 失败则保留旧连接（与手动 profile 切换同一不变量）。
-    // 用户发起的连接通常切到「不同机器人」（office 不同），不会撞 room；同机器人重连由 UI 阻止
-    // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 leave-first 路径。
-    let client = build_and_join(&runtime.manager, &runtime.inputs, &params, &token.access_token)
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}"))
+        })?;
+    let previous = {
+        let _guard = state.connection_establish_lock.lock().await;
+
+        if matches!(
+            check_manager_connection_allowed(state, instance_id, &params).await?,
+            ManagerConnectionDecision::AlreadyConnected
+        ) {
+            persist_robot_binding(state, instance_id, &params.robot_binding).await?;
+            emit_connection_changed(app);
+            return Ok(());
+        }
+        // 先把新连接建成功，再替换/关旧——build 失败则保留旧连接（与手动 profile 切换同一不变量）。
+        // 用户发起的连接通常切到「不同机器人」（office 不同），不会撞 room；同机器人重连由 UI 阻止
+        // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 leave-first 路径。
+        let client = build_and_join(
+            &runtime.manager,
+            &runtime.inputs,
+            &params,
+            &token.access_token,
+        )
         .await
         .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
 
-    let generation = next_generation();
-    let refresh_task = spawn_refresh_task(
-        app,
-        state,
-        runtime.connection.clone(),
-        runtime.manager.clone(),
-        runtime.inputs.clone(),
-        params.clone(),
-        generation,
-        token.expires_in,
-    );
+        let generation = next_generation();
+        let refresh_task = spawn_refresh_task(
+            app,
+            state,
+            runtime.connection.clone(),
+            runtime.manager.clone(),
+            runtime.inputs.clone(),
+            params.clone(),
+            generation,
+            token.expires_in,
+        );
 
-    let new_connection = ConnectionState {
-        client,
-        profile_name: format!("manager:{}", params.employee_id),
-        url: params.url.clone(),
-        office_id: params.office_id.clone(),
-        computer_name: params.computer_name.clone(),
-        connected_at: chrono::Utc::now(),
-        generation,
-        refresh_task: Some(refresh_task),
-    };
+        let new_connection = ConnectionState {
+            client,
+            profile_name: format!("manager:{}", params.employee_id),
+            url: params.url.clone(),
+            office_id: params.office_id.clone(),
+            computer_name: params.computer_name.clone(),
+            connected_at: chrono::Utc::now(),
+            generation,
+            refresh_task: Some(refresh_task),
+        };
 
-    let previous = {
         let mut runtime_conn = runtime.connection.write().await;
         runtime_conn.replace(new_connection)
     };
     if let Some(previous) = previous {
         close_smcp_connection(previous).await;
     }
+
+    persist_robot_binding(state, instance_id, &params.robot_binding).await?;
 
     let _ = state.log_service.write(
         "info",
@@ -531,11 +627,85 @@ async fn establish_manager_connection(
     Ok(())
 }
 
+async fn persist_robot_binding(
+    state: &AppState,
+    instance_id: &str,
+    robot_binding: &RobotBindingMetadata,
+) -> Result<(), ManagerError> {
+    let updated = state
+        .config
+        .update_computer_instance(instance_id, |instance| {
+            instance.robot_binding = Some(robot_binding.clone());
+        })
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    state
+        .computer_registry
+        .update_runtime_instance(updated)
+        .await;
+    Ok(())
+}
+
+async fn check_manager_connection_allowed(
+    state: &AppState,
+    instance_id: &str,
+    params: &ManagerConnectionParams,
+) -> Result<ManagerConnectionDecision, ManagerError> {
+    let runtimes = state.computer_registry.list_runtimes().await;
+    for runtime in runtimes {
+        let guard = runtime.connection.read().await;
+        let Some(connection) = guard.as_ref() else {
+            continue;
+        };
+
+        match manager_connection_decision(
+            instance_id,
+            &runtime.instance.id,
+            &runtime.instance.name,
+            &connection.office_id,
+            &params.office_id,
+        )? {
+            ManagerConnectionDecision::Proceed => {}
+            ManagerConnectionDecision::AlreadyConnected => {
+                return Ok(ManagerConnectionDecision::AlreadyConnected)
+            }
+        }
+    }
+
+    Ok(ManagerConnectionDecision::Proceed)
+}
+
+fn manager_connection_decision(
+    target_instance_id: &str,
+    connected_instance_id: &str,
+    connected_instance_name: &str,
+    connected_office_id: &str,
+    target_office_id: &str,
+) -> Result<ManagerConnectionDecision, ManagerError> {
+    if connected_instance_id == target_instance_id {
+        if connected_office_id == target_office_id {
+            return Ok(ManagerConnectionDecision::AlreadyConnected);
+        }
+        return Err(ManagerError::InvalidResponse(
+            "Computer instance is already connected to another Robot; disconnect before switching Robot"
+                .to_string(),
+        ));
+    }
+
+    if connected_office_id == target_office_id {
+        return Err(ManagerError::InvalidResponse(format!(
+            "Robot is already connected by Computer instance {connected_instance_name}"
+        )));
+    }
+
+    Ok(ManagerConnectionDecision::Proceed)
+}
+
 /// 后台预刷新重连任务：`expires_in - 60s` 重新 exchange → 原地换新连接 → 关旧连接。
 ///
 /// SMCP 长连接 token 不能热刷新（握手时绑定一次），只能 teardown+reconnect。任务整段生命周期由
 /// [`ConnectionState::refresh_task`] 持有，连接被关闭/替换时 abort。换连接前用 `generation` 确认
 /// 「仍是我这条连接」，避免与用户期间手动断开/改连竞态时误覆盖。
+#[allow(clippy::too_many_arguments)]
 fn spawn_refresh_task(
     app: &AppHandle,
     state: &AppState,
@@ -764,6 +934,41 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
     Ok(instance_id)
 }
 
+fn profile_keychain_id(instance_id: &str, profile_name: &str) -> String {
+    format!("profile:{instance_id}:{profile_name}")
+}
+
+fn legacy_profile_keychain_id(profile_name: &str) -> String {
+    format!("profile:{profile_name}")
+}
+
+fn can_migrate_legacy_profile_key(instance_id: &str) -> bool {
+    instance_id == DEFAULT_COMPUTER_INSTANCE_ID
+}
+
+fn load_profile_api_key(
+    instance_id: &str,
+    profile_name: &str,
+) -> Result<Option<String>, crate::services::keychain::KeychainError> {
+    let scoped_keychain_id = profile_keychain_id(instance_id, profile_name);
+    if let Some(api_key) = crate::services::keychain::get_credential(&scoped_keychain_id)? {
+        return Ok(Some(api_key));
+    }
+
+    if !can_migrate_legacy_profile_key(instance_id) {
+        return Ok(None);
+    }
+
+    let legacy_keychain_id = legacy_profile_keychain_id(profile_name);
+    let Some(api_key) = crate::services::keychain::get_credential(&legacy_keychain_id)? else {
+        return Ok(None);
+    };
+
+    crate::services::keychain::save_credential(&scoped_keychain_id, &api_key)?;
+    let _ = crate::services::keychain::delete_credential(&legacy_keychain_id);
+    Ok(Some(api_key))
+}
+
 /// Active connection state held in AppState
 pub struct ConnectionState {
     pub client: SmcpComputerClient,
@@ -815,6 +1020,71 @@ mod tests {
         assert_eq!(
             out.get("X-TF-RobotType").map(String::as_str),
             Some("tfrobot")
+        );
+    }
+
+    #[test]
+    fn profile_keychain_id_is_scoped_by_instance() {
+        assert_eq!(
+            profile_keychain_id("computer-a", "prod"),
+            "profile:computer-a:prod"
+        );
+        assert_eq!(legacy_profile_keychain_id("prod"), "profile:prod");
+    }
+
+    #[test]
+    fn legacy_profile_key_migration_is_limited_to_default_instance() {
+        assert!(can_migrate_legacy_profile_key(DEFAULT_COMPUTER_INSTANCE_ID));
+        assert!(!can_migrate_legacy_profile_key("computer-a"));
+        assert!(!can_migrate_legacy_profile_key(""));
+    }
+
+    #[test]
+    fn manager_connection_decision_is_idempotent_for_same_instance_same_robot() {
+        let decision = manager_connection_decision(
+            "computer-a",
+            "computer-a",
+            "Computer A",
+            "robot-1",
+            "robot-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            decision,
+            ManagerConnectionDecision::AlreadyConnected
+        ));
+    }
+
+    #[test]
+    fn manager_connection_decision_rejects_switching_robot_without_disconnect() {
+        let err = manager_connection_decision(
+            "computer-a",
+            "computer-a",
+            "Computer A",
+            "robot-1",
+            "robot-2",
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ManagerError::InvalidResponse(message) if message.contains("disconnect before switching Robot"))
+        );
+    }
+
+    #[test]
+    fn manager_connection_decision_rejects_cross_instance_same_robot() {
+        let err = manager_connection_decision(
+            "computer-a",
+            "computer-b",
+            "Computer B",
+            "robot-1",
+            "robot-1",
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ManagerError::InvalidResponse(message) if message.contains("Computer B"))
         );
     }
 }

@@ -14,7 +14,9 @@ use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_smcp_core, reconnect_with_token, try_install_refreshed_client,
     ConnectionProfile, ConnectionState, ManagerConnectionParams, RefreshOutcome, SwapResult,
 };
-use tfrobot_client_lib::services::computer::{ComputerInstance, ComputerInstanceRuntime};
+use tfrobot_client_lib::services::computer::{
+    ComputerInstance, ComputerInstanceRuntime, RobotBindingMetadata,
+};
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -41,7 +43,12 @@ async fn create_test_runtime(state: &AppState) -> ComputerInstanceRuntime {
         .unwrap();
     state
         .computer_registry
-        .upsert_runtime(state.config.get_computer_instance(TEST_INSTANCE_ID).unwrap())
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(TEST_INSTANCE_ID)
+                .unwrap(),
+        )
         .await
 }
 
@@ -279,7 +286,7 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
 }
 
 #[tokio::test]
-async fn successful_profile_switch_closes_previous_smcp_connection() {
+async fn profile_switch_to_different_robot_requires_disconnect() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
@@ -323,44 +330,228 @@ async fn successful_profile_switch_closes_previous_smcp_connection() {
 
     state
         .config
-        .save_profiles_for_instance(TEST_INSTANCE_ID, &[ConnectionProfile {
-            name: "new-profile".to_string(),
-            url: new_server_url.clone(),
-            namespace: "/smcp".to_string(),
-            office_id: "new-office".to_string(),
-            computer_name: "new-computer".to_string(),
-            api_key_ref: None,
-            headers: HashMap::new(),
-            auto_connect: true,
-            auto_reconnect: true,
-        }])
+        .save_profiles_for_instance(
+            TEST_INSTANCE_ID,
+            &[ConnectionProfile {
+                name: "new-profile".to_string(),
+                url: new_server_url.clone(),
+                namespace: "/smcp".to_string(),
+                office_id: "new-office".to_string(),
+                computer_name: "new-computer".to_string(),
+                api_key_ref: None,
+                headers: HashMap::new(),
+                auto_connect: true,
+                auto_reconnect: true,
+            }],
+        )
         .expect("save profiles");
 
-    connect_smcp_core(&state, TEST_INSTANCE_ID, "new-profile".to_string())
+    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "new-profile".to_string())
         .await
-        .expect("connect new profile");
-
-    wait_for("server never observed the new SMCP socket", || {
-        new_stats.active() == 1 && new_stats.connected() == 1
-    })
-    .await;
-    wait_for("old SMCP connection was not closed after switch", || {
-        old_stats.leave_events() == 1 && old_stats.active() == 0 && old_stats.disconnected() == 1
-    })
-    .await;
+        .expect_err("switching robots without disconnect should fail");
+    assert!(
+        err.contains("disconnect before switching Robot"),
+        "error should instruct the user to disconnect first, got: {err}"
+    );
 
     let conn = runtime.connection.read().await;
-    let connection = conn.as_ref().expect("new connection should be retained");
-    assert_eq!(connection.profile_name, "new-profile");
-    assert_eq!(connection.office_id, "new-office");
+    let connection = conn.as_ref().expect("old connection should be retained");
+    assert_eq!(connection.profile_name, "old-profile");
+    assert_eq!(connection.office_id, "old-office");
     drop(conn);
+    assert_eq!(old_stats.active(), 1);
+    assert_eq!(old_stats.disconnected(), 0);
+    assert_eq!(
+        new_stats.active(),
+        0,
+        "rejected profile switch must not open a new socket"
+    );
 
-    let new_connection = {
+    let old_connection = {
         let mut conn = runtime.connection.write().await;
         conn.take()
     };
-    if let Some(connection) = new_connection {
+    if let Some(connection) = old_connection {
         close_smcp_connection(connection).await;
+    }
+}
+
+#[tokio::test]
+async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    create_test_runtime(&state).await;
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    let other_instance_id = "other-computer";
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: other_instance_id.to_string(),
+            name: "Other Computer".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+    let other_runtime = state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(other_instance_id)
+                .unwrap(),
+        )
+        .await;
+
+    let other_client = SmcpComputerClient::new(
+        &server_url,
+        other_runtime.manager.clone(),
+        "other-computer".to_string(),
+        None,
+        other_runtime.inputs.clone(),
+        None,
+    )
+    .await
+    .expect("connect other smcp client");
+    other_client
+        .join_office("shared-office")
+        .await
+        .expect("join shared office");
+    wait_for("server never observed the other SMCP socket", || {
+        stats.active() == 1 && stats.connected() == 1
+    })
+    .await;
+
+    {
+        let mut conn = other_runtime.connection.write().await;
+        *conn = Some(ConnectionState {
+            client: other_client,
+            profile_name: "other-profile".to_string(),
+            url: server_url.clone(),
+            office_id: "shared-office".to_string(),
+            computer_name: "other-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            generation: 0,
+            refresh_task: None,
+        });
+    }
+
+    state
+        .config
+        .save_profiles_for_instance(
+            TEST_INSTANCE_ID,
+            &[ConnectionProfile {
+                name: "target-profile".to_string(),
+                url: server_url,
+                namespace: "/smcp".to_string(),
+                office_id: "shared-office".to_string(),
+                computer_name: "target-computer".to_string(),
+                api_key_ref: None,
+                headers: HashMap::new(),
+                auto_connect: true,
+                auto_reconnect: true,
+            }],
+        )
+        .expect("save target profile");
+
+    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "target-profile".to_string())
+        .await
+        .expect_err("same robot connected by another instance should fail");
+    assert!(
+        err.contains("Other Computer"),
+        "error should identify the owning computer, got: {err}"
+    );
+
+    assert_eq!(
+        stats.active(),
+        1,
+        "rejected profile connect must not open a second socket"
+    );
+
+    let existing_connection = {
+        let mut conn = other_runtime.connection.write().await;
+        conn.take()
+    };
+    if let Some(connection) = existing_connection {
+        close_smcp_connection(connection).await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let target_runtime = create_test_runtime(&state).await;
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    let other_instance_id = "other-computer";
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: other_instance_id.to_string(),
+            name: "Other Computer".to_string(),
+            ..ComputerInstance::default_instance()
+        })
+        .unwrap();
+    let other_runtime = state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(other_instance_id)
+                .unwrap(),
+        )
+        .await;
+
+    let profile_name = "shared-profile";
+    for instance_id in [TEST_INSTANCE_ID, other_instance_id] {
+        state
+            .config
+            .save_profiles_for_instance(
+                instance_id,
+                &[ConnectionProfile {
+                    name: profile_name.to_string(),
+                    url: server_url.clone(),
+                    namespace: "/smcp".to_string(),
+                    office_id: "shared-office".to_string(),
+                    computer_name: format!("{instance_id}-computer"),
+                    api_key_ref: None,
+                    headers: HashMap::new(),
+                    auto_connect: true,
+                    auto_reconnect: true,
+                }],
+            )
+            .expect("save profile");
+    }
+
+    let (target_result, other_result) = tokio::join!(
+        connect_smcp_core(&state, TEST_INSTANCE_ID, profile_name.to_string()),
+        connect_smcp_core(&state, other_instance_id, profile_name.to_string())
+    );
+
+    let success_count = usize::from(target_result.is_ok()) + usize::from(other_result.is_ok());
+    assert_eq!(
+        success_count, 1,
+        "exactly one concurrent connection may win; target={target_result:?} other={other_result:?}"
+    );
+    let error = target_result.err().or_else(|| other_result.err()).unwrap();
+    assert!(
+        error.contains("already connected") || error.contains("disconnect before switching Robot"),
+        "losing connection should fail by duplicate-connection guard, got: {error}"
+    );
+
+    wait_for("server should only have one active socket", || {
+        stats.active() == 1 && stats.connected() == 1
+    })
+    .await;
+
+    for runtime in [target_runtime, other_runtime] {
+        let existing_connection = {
+            let mut conn = runtime.connection.write().await;
+            conn.take()
+        };
+        if let Some(connection) = existing_connection {
+            close_smcp_connection(connection).await;
+        }
     }
 }
 
@@ -480,6 +671,13 @@ async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
         employee_id: 1,
         robot_account_id: 42,
         scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: 1,
+            robot_id: Some("office".to_string()),
+            robot_account_id: Some(42),
+            namespace: Some("tfrobotserver".to_string()),
+            robot_name: Some("Robot".to_string()),
+        },
     };
     let token = ExchangedToken {
         access_token: "new-jwt".to_string(),

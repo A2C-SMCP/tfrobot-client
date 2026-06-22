@@ -297,9 +297,14 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         instanceId,
         employeeId,
         robotAccountId: employee.robotAccountId,
+        robotId: employee.robotId ?? null,
+        robotName: employee.name,
+        namespace: employee.namespace ?? null,
         scope: null,
       });
       info(`manager: connected via token-exchange employee=${employee.name}`);
+      await useComputerStore.getState().fetchInstances();
+      await useConnectionStore.getState().fetchStatus(instanceId);
       set({ loading: false });
       return { name: employee.name };
     } catch (e) {

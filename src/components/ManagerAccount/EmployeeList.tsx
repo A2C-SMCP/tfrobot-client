@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import {
   App,
   Card,
@@ -88,16 +88,16 @@ export function EmployeeList() {
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
   const selectedInstanceId = useComputerStore((s) => s.selectedInstanceId);
 
-  const refreshConnectionStatus = () => {
+  const refreshConnectionStatus = useCallback(() => {
     if (!selectedInstanceId) return Promise.resolve();
     return fetchConnectionStatus(selectedInstanceId);
-  };
+  }, [fetchConnectionStatus, selectedInstanceId]);
 
   useEffect(() => {
     refreshConnectionStatus().catch(() => {
       /* noop */
     });
-  }, [selectedInstanceId, fetchConnectionStatus]);
+  }, [refreshConnectionStatus]);
 
   // 后端在连接 / 断开 / 后台预刷新重连时 emit 'connection'，据此刷新连接状态徽标（TFRC-11）。
   useEffect(() => {
@@ -109,7 +109,7 @@ export function EmployeeList() {
     return () => {
       unlisten.then((off) => off()).catch(() => {});
     };
-  }, [selectedInstanceId, fetchConnectionStatus]);
+  }, [refreshConnectionStatus]);
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
@@ -162,13 +162,11 @@ export function EmployeeList() {
     }
   };
 
-  /** 判定某个 employee 是否正是当前 SMCP 连接的目标（按 office_id = robotId 匹配）。 */
-  const isConnectedEmployee = (emp: DigitalEmployeeBrief): boolean =>
-    !!(
-      connectionStatus?.connected &&
-      emp.robotId &&
-      connectionStatus.office_id === emp.robotId
-    );
+  const isConnectedEmployee = (emp: DigitalEmployeeBrief): boolean => {
+    if (!connectionStatus?.connected) return false;
+    if (connectionStatus.profile_name === `manager:${emp.id}`) return true;
+    return !!(emp.robotId && connectionStatus.office_id === emp.robotId);
+  };
 
   const handleLogout = async () => {
     try {

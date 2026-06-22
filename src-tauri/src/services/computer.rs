@@ -83,9 +83,9 @@ impl ComputerInstancesConfig {
 
         if !self.default_instance_id.is_empty()
             && !self
-            .instances
-            .iter()
-            .any(|instance| instance.id == self.default_instance_id)
+                .instances
+                .iter()
+                .any(|instance| instance.id == self.default_instance_id)
         {
             self.default_instance_id.clear();
         }
@@ -222,6 +222,7 @@ impl From<&ConnectionState> for ConnectionStateSummary {
 }
 
 pub struct ComputerRegistry {
+    default_instance_id: RwLock<ComputerInstanceId>,
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
 }
 
@@ -237,14 +238,20 @@ impl ComputerRegistry {
         config.normalize();
         let mut runtimes = HashMap::new();
 
+        let default_instance_id = config.default_instance_id.clone();
+
         for instance in config.instances {
             let instance_id = instance.id.clone();
             let runtime = ComputerInstanceRuntime::new(instance);
             runtimes.insert(instance_id, runtime);
         }
 
-        let initial_runtime = runtimes.values().next().cloned();
+        let initial_runtime = runtimes
+            .get(&default_instance_id)
+            .cloned()
+            .or_else(|| runtimes.values().next().cloned());
         let registry = Self {
+            default_instance_id: RwLock::new(default_instance_id),
             runtimes: RwLock::new(runtimes),
         };
 
@@ -262,8 +269,12 @@ impl ComputerRegistry {
     }
 
     pub async fn default_runtime(&self) -> Option<ComputerInstanceRuntime> {
+        let default_instance_id = self.default_instance_id.read().await.clone();
         let runtimes = self.runtimes.read().await;
-        runtimes.values().next().cloned()
+        runtimes
+            .get(&default_instance_id)
+            .cloned()
+            .or_else(|| runtimes.values().next().cloned())
     }
 
     pub async fn runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {

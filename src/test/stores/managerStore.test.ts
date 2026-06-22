@@ -149,6 +149,8 @@ describe('managerStore', () => {
     it('invokes manager_connect_smcp with robotAccountId and returns the robot name', async () => {
       // 后端编排全路径（exchange + connect + 预刷新）为单条命令。
       mockedInvoke.mockResolvedValueOnce(undefined); // manager_connect_smcp
+      mockedInvoke.mockResolvedValueOnce([]); // list_computer_instances
+      mockedInvoke.mockResolvedValueOnce({ connected: true }); // get_connection_status
 
       const ret = await useManagerStore.getState().selectEmployeeAndConnect(11);
 
@@ -157,7 +159,14 @@ describe('managerStore', () => {
         instanceId: 'computer-a',
         employeeId: 11,
         robotAccountId: 4242,
+        robotId: 'robot-a',
+        robotName: 'bot-one',
+        namespace: 'ns-a',
         scope: null,
+      });
+      expect(mockedInvoke).toHaveBeenCalledWith('list_computer_instances');
+      expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', {
+        instanceId: 'computer-a',
       });
       // 不再走 profile 构建/保存/connect_smcp 老路径。
       expect(mockedInvoke).not.toHaveBeenCalledWith('save_profile', expect.anything());

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Application state shared across all Tauri commands
 pub struct AppState {
@@ -29,6 +29,9 @@ pub struct AppState {
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
     /// Runtime registry for all configured Computer instances
     pub computer_registry: Arc<ComputerRegistry>,
+    /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
+    /// happen as one transaction across Computer instances.
+    pub connection_establish_lock: Arc<Mutex<()>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
     /// Settings persistence service
@@ -66,6 +69,7 @@ impl AppState {
             inputs: legacy_runtime.inputs,
             connection: legacy_runtime.connection,
             computer_registry: Arc::new(computer_registry),
+            connection_establish_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
             manager_client: Arc::new(ManagerClient::new()),

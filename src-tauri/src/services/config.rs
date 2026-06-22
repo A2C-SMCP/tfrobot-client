@@ -27,9 +27,7 @@ impl ConfigService {
 
     pub fn load_configs(&self) -> Result<Vec<MCPServerConfig>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        let instance_id = instances
-            .default_instance_id
-            .as_str();
+        let instance_id = instances.default_instance_id.as_str();
         if instance_id.is_empty() {
             return Err(ConfigError::InvalidOperation(
                 "instance_id is required for MCP configs".to_string(),
@@ -43,12 +41,12 @@ impl ConfigService {
         instance_id: &str,
     ) -> Result<Vec<MCPServerConfig>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        Ok(instances
+        instances
             .instances
             .iter()
             .find(|instance| instance.id == instance_id)
             .map(|instance| instance.mcp_servers.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
     pub fn save_configs_for_instance(
@@ -69,7 +67,8 @@ impl ConfigService {
                 "instance_id is required for MCP configs".to_string(),
             ));
         }
-        self.save_configs_for_instance(instance_id, configs).map(|_| ())
+        self.save_configs_for_instance(instance_id, configs)
+            .map(|_| ())
     }
 
     pub fn add_config(&self, config: MCPServerConfig) -> Result<(), ConfigError> {
@@ -80,7 +79,8 @@ impl ConfigService {
                 "instance_id is required for MCP configs".to_string(),
             ));
         }
-        self.add_config_for_instance(instance_id, config).map(|_| ())
+        self.add_config_for_instance(instance_id, config)
+            .map(|_| ())
     }
 
     pub fn add_config_for_instance(
@@ -117,7 +117,8 @@ impl ConfigService {
                 "instance_id is required for MCP configs".to_string(),
             ));
         }
-        self.remove_config_for_instance(instance_id, name).map(|_| ())
+        self.remove_config_for_instance(instance_id, name)
+            .map(|_| ())
     }
 
     // --- Input Definitions ---
@@ -138,12 +139,12 @@ impl ConfigService {
         instance_id: &str,
     ) -> Result<Vec<InputDefinition>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        Ok(instances
+        instances
             .instances
             .iter()
             .find(|instance| instance.id == instance_id)
             .map(|instance| instance.inputs.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
     pub fn save_inputs_for_instance(
@@ -164,7 +165,8 @@ impl ConfigService {
                 "instance_id is required for inputs".to_string(),
             ));
         }
-        self.save_inputs_for_instance(instance_id, inputs).map(|_| ())
+        self.save_inputs_for_instance(instance_id, inputs)
+            .map(|_| ())
     }
 
     // --- Input Values ---
@@ -185,12 +187,12 @@ impl ConfigService {
         instance_id: &str,
     ) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        Ok(instances
+        instances
             .instances
             .iter()
             .find(|instance| instance.id == instance_id)
             .map(|instance| instance.input_values.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
     pub fn save_input_values(
@@ -236,12 +238,12 @@ impl ConfigService {
         instance_id: &str,
     ) -> Result<Vec<ConnectionProfile>, ConfigError> {
         let instances = self.load_computer_instances()?;
-        Ok(instances
+        instances
             .instances
             .iter()
             .find(|instance| instance.id == instance_id)
             .map(|instance| instance.connection_profiles.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))?)
+            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
     pub fn save_profiles_for_instance(
@@ -587,7 +589,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(removed.id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert!(svc.get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID).is_err());
+        assert!(svc
+            .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+            .is_err());
     }
 
     #[test]

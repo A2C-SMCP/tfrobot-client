@@ -34,6 +34,9 @@ vi.mock('@/components/InputVariables', () => ({
 vi.mock('@/components/SmcpConnection', () => ({
   SmcpConnection: ({ instanceId }: { instanceId: string }) => <div data-testid="smcp-connection">SmcpConnection:{instanceId}</div>,
 }));
+vi.mock('@/components/ManagerAccount', () => ({
+  ManagerAccount: () => <div data-testid="manager-account">ManagerAccount</div>,
+}));
 vi.mock('@/components/DesktopResources', () => ({
   DesktopResources: ({ instanceId }: { instanceId: string }) => <div data-testid="desktop-resources">DesktopResources:{instanceId}</div>,
 }));
@@ -103,6 +106,7 @@ describe('Computer', () => {
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
     expect(screen.getByText('Back to Computers')).toBeInTheDocument();
+    expect(screen.getByTestId('manager-account')).toBeInTheDocument();
     expect(screen.getByTestId('smcp-connection')).toHaveTextContent('default');
   });
 

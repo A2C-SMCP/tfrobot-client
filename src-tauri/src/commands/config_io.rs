@@ -95,8 +95,8 @@ pub async fn import_config_core(
     };
 
     match fmt {
-        ConfigFormat::CliNative => import_cli_native(&state, &instance_id, &content).await,
-        ConfigFormat::ClaudeDesktop => import_claude_desktop(&state, &instance_id, &content).await,
+        ConfigFormat::CliNative => import_cli_native(state, &instance_id, &content).await,
+        ConfigFormat::ClaudeDesktop => import_claude_desktop(state, &instance_id, &content).await,
     }
 }
 
