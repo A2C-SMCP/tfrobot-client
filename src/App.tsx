@@ -6,7 +6,7 @@ import {
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
-  UserOutlined,
+  ApiOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -14,7 +14,7 @@ import styles from './styles/App.module.css';
 import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
-import { ManagerAccount } from './components/ManagerAccount';
+import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { toComputerDetailTab } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
@@ -70,9 +70,9 @@ function App() {
       type: 'group' as const,
       children: [
         {
-          key: 'manager',
-          icon: <UserOutlined />,
-          label: t('managerAccount.navLabel'),
+          key: 'robot-connections',
+          icon: <ApiOutlined />,
+          label: t('nav.robotConnections'),
         },
       ],
     },
@@ -113,8 +113,8 @@ function App() {
         return <Computer key="computer-list" />;
       case 'computer-detail':
         return <Computer key={`computer-detail-${detailTab}`} initialView="detail" initialTab={detailTab} />;
-      case 'manager':
-        return <ManagerAccount />;
+      case 'robot-connections':
+        return <RobotConnections />;
       case 'logs':
         return <LogViewer />;
       case 'settings':

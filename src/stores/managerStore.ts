@@ -336,12 +336,10 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   logout: async () => {
     set({ loading: true, error: null });
     try {
-      if (useConnectionStore.getState().status.connected) {
+      const instanceId = useComputerStore.getState().selectedInstanceId;
+      if (instanceId && useConnectionStore.getState().getStatus(instanceId).connected) {
         try {
-          const instanceId = useComputerStore.getState().selectedInstanceId;
-          if (instanceId) {
-            await useConnectionStore.getState().disconnect(instanceId);
-          }
+          await useConnectionStore.getState().disconnect(instanceId);
         } catch (e) {
           warn(`manager: logout disconnect failed: ${String(e)}`);
         }

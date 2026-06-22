@@ -328,12 +328,16 @@ describe('managerStore', () => {
       useManagerStore.setState({ session: user, employees: [employeeA] });
       useConnectionStore.setState({
         ...useConnectionStore.getState(),
-        status: { connected: true, profile_name: 'bot-one' },
+        statuses: {
+          'computer-a': { connected: true, profile_name: 'bot-one' },
+        },
       });
       // disconnect_smcp
       mockedInvoke.mockResolvedValueOnce(undefined);
       // get_connection_status after disconnect
       mockedInvoke.mockResolvedValueOnce({ connected: false });
+      // list_computer_instances after disconnect
+      mockedInvoke.mockResolvedValueOnce([]);
       // manager_logout
       mockedInvoke.mockResolvedValueOnce(undefined);
 

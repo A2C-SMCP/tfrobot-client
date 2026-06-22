@@ -1,4 +1,6 @@
 use crate::services::computer::{RobotBindingMetadata, DEFAULT_COMPUTER_INSTANCE_ID};
+use crate::services::config::normalize_manual_smcp_target;
+use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
 use crate::services::manager_client::{ExchangedToken, ManagerClient, ManagerError};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -65,6 +67,9 @@ enum ManagerConnectionDecision {
     AlreadyConnected,
 }
 
+const SOURCE_MANUAL_SMCP: &str = "manual_smcp";
+const SOURCE_MANAGER_ROBOT: &str = "manager_robot";
+
 /// Connection Profile stored to disk (API Key stored separately in Keychain)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionProfile {
@@ -101,6 +106,80 @@ pub struct ConnectionStatusInfo {
     pub computer_name: Option<String>,
     pub connected_at: Option<String>,
     pub profile_name: Option<String>,
+    pub source_type: Option<String>,
+    pub target_id: Option<String>,
+    pub target_name: Option<String>,
+    pub employee_id: Option<u64>,
+}
+
+/// List globally managed manual SMCP targets.
+#[tauri::command]
+pub async fn list_manual_smcp_targets(
+    state: State<'_, AppState>,
+) -> Result<Vec<ManualSmcpTarget>, String> {
+    state
+        .config
+        .list_manual_smcp_targets()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_manual_smcp_target(
+    state: State<'_, AppState>,
+    target: ManualSmcpTarget,
+    api_key: Option<String>,
+) -> Result<ManualSmcpTarget, String> {
+    let target = normalize_manual_smcp_target(target);
+    let credential_key = manual_target_keychain_id(&target.id);
+    let previous_credential = match api_key.as_deref().filter(|key| !key.is_empty()) {
+        Some(_) => {
+            crate::services::keychain::get_credential(&credential_key).map_err(|e| e.to_string())?
+        }
+        None => None,
+    };
+
+    if let Some(key) = api_key.as_deref().filter(|key| !key.is_empty()) {
+        crate::services::keychain::save_credential(&credential_key, key)
+            .map_err(|e| e.to_string())?;
+    }
+
+    match state.config.save_manual_smcp_target(target) {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            if api_key.as_deref().is_some_and(|key| !key.is_empty()) {
+                if let Some(previous) = previous_credential {
+                    let _ = crate::services::keychain::save_credential(&credential_key, &previous);
+                } else {
+                    let _ = crate::services::keychain::delete_credential(&credential_key);
+                }
+            }
+            Err(error.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn delete_manual_smcp_target(
+    state: State<'_, AppState>,
+    target_id: String,
+) -> Result<(), String> {
+    for runtime in state.computer_registry.list_runtimes().await {
+        let guard = runtime.connection.read().await;
+        if guard
+            .as_ref()
+            .and_then(|connection| connection.target_id.as_deref())
+            == Some(target_id.as_str())
+        {
+            return Err("Cannot delete a manual SMCP target while it is connected".to_string());
+        }
+    }
+
+    state
+        .config
+        .delete_manual_smcp_target(&target_id)
+        .map_err(|e| e.to_string())?;
+    let _ = crate::services::keychain::delete_credential(&manual_target_keychain_id(&target_id));
+    Ok(())
 }
 
 /// List all saved connection profiles
@@ -232,9 +311,14 @@ pub async fn connect_smcp_core(
         let _guard = state.connection_establish_lock.lock().await;
 
         if matches!(
-            check_profile_connection_allowed(state, instance_id, &profile.office_id)
-                .await
-                .map_err(|e| e.to_string())?,
+            check_connection_target_allowed(
+                state,
+                instance_id,
+                &legacy_profile_target_id(instance_id, &profile.name),
+                &profile.office_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
             ManagerConnectionDecision::AlreadyConnected
         ) {
             return Ok(());
@@ -270,6 +354,10 @@ pub async fn connect_smcp_core(
             office_id: profile.office_id.clone(),
             computer_name: profile.computer_name.clone(),
             connected_at: chrono::Utc::now(),
+            source_type: SOURCE_MANUAL_SMCP.to_string(),
+            target_id: Some(legacy_profile_target_id(instance_id, &profile.name)),
+            target_name: Some(profile.name.clone()),
+            employee_id: None,
             generation: next_generation(),
             // 手动 profile 连接用静态密钥、不做 token-exchange，故无预刷新任务。
             refresh_task: None,
@@ -292,9 +380,92 @@ pub async fn connect_smcp_core(
     Ok(())
 }
 
-async fn check_profile_connection_allowed(
+#[tauri::command]
+pub async fn connect_connection_target(
+    state: State<'_, AppState>,
+    instance_id: String,
+    target_id: String,
+) -> Result<(), String> {
+    connect_connection_target_core(&state, &instance_id, &target_id).await
+}
+
+pub async fn connect_connection_target_core(
     state: &AppState,
     instance_id: &str,
+    target_id: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let target = state
+        .config
+        .get_manual_smcp_target(target_id)
+        .map_err(|e| e.to_string())?;
+    let api_key = crate::services::keychain::get_credential(&manual_target_keychain_id(&target.id))
+        .map_err(|e| e.to_string())?;
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+
+    let previous_connection = {
+        let _guard = state.connection_establish_lock.lock().await;
+        if matches!(
+            check_connection_target_allowed(state, instance_id, &target.id, &target.office_id)
+                .await
+                .map_err(|e| e.to_string())?,
+            ManagerConnectionDecision::AlreadyConnected
+        ) {
+            return Ok(());
+        }
+
+        let auth_payload = api_key
+            .filter(|k| !k.is_empty())
+            .map(|tok| serde_json::json!({ "token": tok }));
+        let client = SmcpComputerClient::new(
+            &target.url,
+            runtime.manager.clone(),
+            target.computer_name.clone(),
+            auth_payload,
+            runtime.inputs.clone(),
+            Some(target.headers.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if let Err(e) = client.join_office(&target.office_id).await {
+            disconnect_smcp_client(client, "after manual target join_office failure").await;
+            return Err(e.to_string());
+        }
+
+        let new_connection = ConnectionState {
+            client,
+            profile_name: target.name.clone(),
+            url: target.url.clone(),
+            office_id: target.office_id.clone(),
+            computer_name: target.computer_name.clone(),
+            connected_at: chrono::Utc::now(),
+            source_type: SOURCE_MANUAL_SMCP.to_string(),
+            target_id: Some(target.id.clone()),
+            target_name: Some(target.name.clone()),
+            employee_id: None,
+            generation: next_generation(),
+            refresh_task: None,
+        };
+
+        let mut runtime_conn = runtime.connection.write().await;
+        runtime_conn.replace(new_connection)
+    };
+
+    if let Some(connection) = previous_connection {
+        close_smcp_connection(connection).await;
+    }
+    Ok(())
+}
+
+async fn check_connection_target_allowed(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
     office_id: &str,
 ) -> Result<ManagerConnectionDecision, ManagerError> {
     let runtimes = state.computer_registry.list_runtimes().await;
@@ -308,6 +479,8 @@ async fn check_profile_connection_allowed(
             instance_id,
             &runtime.instance.id,
             &runtime.instance.name,
+            connection.target_id.as_deref(),
+            target_id,
             &connection.office_id,
             office_id,
         )? {
@@ -419,6 +592,10 @@ pub async fn get_connection_status(
             computer_name: Some(c.computer_name.clone()),
             connected_at: Some(c.connected_at.to_rfc3339()),
             profile_name: Some(c.profile_name.clone()),
+            source_type: Some(c.source_type.clone()),
+            target_id: c.target_id.clone(),
+            target_name: c.target_name.clone(),
+            employee_id: c.employee_id,
         }),
         None => Ok(ConnectionStatusInfo {
             connected: false,
@@ -427,6 +604,10 @@ pub async fn get_connection_status(
             computer_name: None,
             connected_at: None,
             profile_name: None,
+            source_type: None,
+            target_id: None,
+            target_name: None,
+            employee_id: None,
         }),
     }
 }
@@ -563,7 +744,13 @@ async fn establish_manager_connection(
         let _guard = state.connection_establish_lock.lock().await;
 
         if matches!(
-            check_manager_connection_allowed(state, instance_id, &params).await?,
+            check_connection_target_allowed(
+                state,
+                instance_id,
+                &manager_target_id(params.employee_id),
+                &params.office_id,
+            )
+            .await?,
             ManagerConnectionDecision::AlreadyConnected
         ) {
             persist_robot_binding(state, instance_id, &params.robot_binding).await?;
@@ -601,6 +788,10 @@ async fn establish_manager_connection(
             office_id: params.office_id.clone(),
             computer_name: params.computer_name.clone(),
             connected_at: chrono::Utc::now(),
+            source_type: SOURCE_MANAGER_ROBOT.to_string(),
+            target_id: Some(manager_target_id(params.employee_id)),
+            target_name: params.robot_binding.robot_name.clone(),
+            employee_id: Some(params.employee_id),
             generation,
             refresh_task: Some(refresh_task),
         };
@@ -645,44 +836,17 @@ async fn persist_robot_binding(
     Ok(())
 }
 
-async fn check_manager_connection_allowed(
-    state: &AppState,
-    instance_id: &str,
-    params: &ManagerConnectionParams,
-) -> Result<ManagerConnectionDecision, ManagerError> {
-    let runtimes = state.computer_registry.list_runtimes().await;
-    for runtime in runtimes {
-        let guard = runtime.connection.read().await;
-        let Some(connection) = guard.as_ref() else {
-            continue;
-        };
-
-        match manager_connection_decision(
-            instance_id,
-            &runtime.instance.id,
-            &runtime.instance.name,
-            &connection.office_id,
-            &params.office_id,
-        )? {
-            ManagerConnectionDecision::Proceed => {}
-            ManagerConnectionDecision::AlreadyConnected => {
-                return Ok(ManagerConnectionDecision::AlreadyConnected)
-            }
-        }
-    }
-
-    Ok(ManagerConnectionDecision::Proceed)
-}
-
 fn manager_connection_decision(
     target_instance_id: &str,
     connected_instance_id: &str,
     connected_instance_name: &str,
+    connected_target_id: Option<&str>,
+    target_id: &str,
     connected_office_id: &str,
     target_office_id: &str,
 ) -> Result<ManagerConnectionDecision, ManagerError> {
     if connected_instance_id == target_instance_id {
-        if connected_office_id == target_office_id {
+        if connected_target_id == Some(target_id) {
             return Ok(ManagerConnectionDecision::AlreadyConnected);
         }
         return Err(ManagerError::InvalidResponse(
@@ -691,7 +855,7 @@ fn manager_connection_decision(
         ));
     }
 
-    if connected_office_id == target_office_id {
+    if connected_target_id == Some(target_id) || connected_office_id == target_office_id {
         return Err(ManagerError::InvalidResponse(format!(
             "Robot is already connected by Computer instance {connected_instance_name}"
         )));
@@ -938,6 +1102,14 @@ fn profile_keychain_id(instance_id: &str, profile_name: &str) -> String {
     format!("profile:{instance_id}:{profile_name}")
 }
 
+fn legacy_profile_target_id(instance_id: &str, profile_name: &str) -> String {
+    format!("legacy-profile:{instance_id}:{profile_name}")
+}
+
+fn manager_target_id(employee_id: u64) -> String {
+    format!("manager:{employee_id}")
+}
+
 fn legacy_profile_keychain_id(profile_name: &str) -> String {
     format!("profile:{profile_name}")
 }
@@ -977,6 +1149,10 @@ pub struct ConnectionState {
     pub office_id: String,
     pub computer_name: String,
     pub connected_at: chrono::DateTime<chrono::Utc>,
+    pub source_type: String,
+    pub target_id: Option<String>,
+    pub target_name: Option<String>,
+    pub employee_id: Option<u64>,
     /// 代际号；Manager 驱动连接由预刷新任务用它确认连接归属。手动 profile 连接也分配（不复用）。
     pub generation: u64,
     /// Manager 驱动连接的预刷新重连后台任务句柄；手动 profile 连接为 `None`。
@@ -1045,6 +1221,8 @@ mod tests {
             "computer-a",
             "computer-a",
             "Computer A",
+            Some("manager:1"),
+            "manager:1",
             "robot-1",
             "robot-1",
         )
@@ -1062,8 +1240,28 @@ mod tests {
             "computer-a",
             "computer-a",
             "Computer A",
+            Some("manager:1"),
+            "manager:2",
             "robot-1",
             "robot-2",
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ManagerError::InvalidResponse(message) if message.contains("disconnect before switching Robot"))
+        );
+    }
+
+    #[test]
+    fn manager_connection_decision_rejects_same_instance_same_office_different_target() {
+        let err = manager_connection_decision(
+            "computer-a",
+            "computer-a",
+            "Computer A",
+            Some("manual:old"),
+            "manual:new",
+            "robot-1",
+            "robot-1",
         )
         .unwrap_err();
 
@@ -1078,6 +1276,8 @@ mod tests {
             "computer-a",
             "computer-b",
             "Computer B",
+            Some("manager:1"),
+            "manager:1",
             "robot-1",
             "robot-1",
         )

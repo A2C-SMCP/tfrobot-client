@@ -7,7 +7,7 @@ const instanceId = 'computer-a';
 function resetStore() {
   useConnectionStore.setState({
     profiles: [],
-    status: { connected: false },
+    statuses: {},
     loading: false,
     error: null,
   });
@@ -58,7 +58,24 @@ describe('connectionStore', () => {
       await useConnectionStore.getState().fetchStatus(instanceId);
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', { instanceId });
-      expect(useConnectionStore.getState().status).toEqual(status);
+      expect(useConnectionStore.getState().getStatus(instanceId)).toEqual(status);
+    });
+
+    it('keeps connection status isolated by instance', async () => {
+      mockedInvoke
+        .mockResolvedValueOnce({ connected: true, profile_name: 'prod-a' })
+        .mockResolvedValueOnce({ connected: false });
+
+      await useConnectionStore.getState().fetchStatus('computer-a');
+      await useConnectionStore.getState().fetchStatus('computer-b');
+
+      expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({
+        connected: true,
+        profile_name: 'prod-a',
+      });
+      expect(useConnectionStore.getState().getStatus('computer-b')).toEqual({
+        connected: false,
+      });
     });
   });
 
@@ -105,6 +122,7 @@ describe('connectionStore', () => {
     it('connect invokes connect_smcp and refreshes status', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);                          // connect_smcp
       mockedInvoke.mockResolvedValueOnce({ connected: true, url: 'x' });     // fetchStatus
+      mockedInvoke.mockResolvedValueOnce([]);                                // fetchInstances
 
       await useConnectionStore.getState().connect(instanceId, 'dev');
 
@@ -115,6 +133,7 @@ describe('connectionStore', () => {
     it('disconnect invokes disconnect_smcp and refreshes status', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce({ connected: false });
+      mockedInvoke.mockResolvedValueOnce([]);
 
       await useConnectionStore.getState().disconnect(instanceId);
 

@@ -91,7 +91,7 @@ describe('ManagerAccount', () => {
     // connectionStore 是真实 store（未 mock），复位到断开状态，让 EmployeeList 默认渲染"连接"而非"已连接"
     useConnectionStore.setState({
       profiles: [],
-      status: { connected: false },
+      statuses: {},
       loading: false,
       error: null,
     });
@@ -250,10 +250,12 @@ describe('ManagerAccount', () => {
         profile_name: 'manager:11',
       });
       useConnectionStore.setState({
-        status: {
-          connected: true,
-          office_id: 'server-rid',
-          profile_name: 'manager:11',
+        statuses: {
+          'computer-a': {
+            connected: true,
+            office_id: 'server-rid',
+            profile_name: 'manager:11',
+          },
         },
       });
 

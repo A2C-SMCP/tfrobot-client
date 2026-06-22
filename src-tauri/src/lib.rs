@@ -5,6 +5,7 @@ pub mod tray;
 use commands::connection::ConnectionState;
 use services::computer::{ComputerInstanceRuntime, ComputerRegistry};
 use services::config::ConfigService;
+use services::connection_targets::manual_target_keychain_id;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
 use services::settings::SettingsService;
@@ -46,6 +47,9 @@ impl AppState {
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
+        if let Err(error) = migrate_legacy_connection_profiles(&config) {
+            log::warn!("Failed to migrate legacy SMCP profiles: {}", error);
+        }
         let instances = config.load_computer_instances().unwrap_or_else(|error| {
             log::error!(
                 "Failed to load ComputerInstance configuration; starting with default instance: {}",
@@ -75,6 +79,41 @@ impl AppState {
             manager_client: Arc::new(ManagerClient::new()),
         }
     }
+}
+
+fn migrate_legacy_connection_profiles(config: &ConfigService) -> Result<(), String> {
+    let migrated_keys = config
+        .migrate_legacy_profiles_to_manual_targets()
+        .map_err(|error| error.to_string())?;
+    for (instance_id, profile_name, target_id) in migrated_keys {
+        let target_key = manual_target_keychain_id(&target_id);
+        if crate::services::keychain::get_credential(&target_key)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            continue;
+        }
+
+        let scoped_key = format!("profile:{instance_id}:{profile_name}");
+        if let Some(api_key) = crate::services::keychain::get_credential(&scoped_key)
+            .map_err(|error| error.to_string())?
+        {
+            crate::services::keychain::save_credential(&target_key, &api_key)
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+
+        if instance_id == services::computer::DEFAULT_COMPUTER_INSTANCE_ID {
+            let legacy_key = format!("profile:{profile_name}");
+            if let Some(api_key) = crate::services::keychain::get_credential(&legacy_key)
+                .map_err(|error| error.to_string())?
+            {
+                crate::services::keychain::save_credential(&target_key, &api_key)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove log files older than `retention_days` from the given directory.
@@ -232,6 +271,10 @@ pub fn run() {
             commands::connection::save_profile,
             commands::connection::delete_profile,
             commands::connection::connect_smcp,
+            commands::connection::list_manual_smcp_targets,
+            commands::connection::save_manual_smcp_target,
+            commands::connection::delete_manual_smcp_target,
+            commands::connection::connect_connection_target,
             commands::connection::manager_connect_smcp,
             commands::connection::disconnect_smcp,
             commands::connection::get_connection_status,

@@ -12,11 +12,10 @@ import { useEffect, useState } from 'react';
 import { useComputerStore, type ComputerInstance, type ComputerStatus } from '@/stores/computerStore';
 import { McpConfig } from '@/components/McpConfig';
 import { InputVariables } from '@/components/InputVariables';
-import { SmcpConnection } from '@/components/SmcpConnection';
 import { DesktopResources } from '@/components/DesktopResources';
 import { DebugPanel } from '@/components/DebugPanel';
 import { RuntimeSettings } from '@/components/Settings/RuntimeSettings';
-import { ManagerAccount } from '@/components/ManagerAccount';
+import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
 
 const { Title, Text } = Typography;
@@ -143,12 +142,7 @@ export function Computer({ initialView = 'list', initialTab = 'mcp' }: ComputerP
             items={[
               { key: 'mcp', label: <><ApiOutlined /> {t('mcp.servers')}</>, children: <McpConfig instanceId={selectedInstance.id} /> },
               { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
-              { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: (
-                <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                  <ManagerAccount />
-                  <SmcpConnection instanceId={selectedInstance.id} />
-                </Space>
-              ) },
+              { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} /> },
               { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
               { key: 'runtime', label: <><SettingOutlined /> {t('settings.runtime')}</>, children: <RuntimeSettings /> },

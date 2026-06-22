@@ -23,6 +23,7 @@
     "config": "CONFIGURATION",
     "connection": "CONNECTION",
     "connectionLayer": "CONNECTION LAYER",
+    "robotConnections": "Robot Connections",
     "development": "DEVELOPMENT",
     "system": "SYSTEM",
     "debugPanel": "Debug Panel"

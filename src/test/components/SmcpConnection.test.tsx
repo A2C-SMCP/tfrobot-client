@@ -4,7 +4,7 @@ import { SmcpConnection } from '@/components/SmcpConnection';
 
 const mockStore = {
   profiles: [],
-  status: { connected: false },
+  getStatus: vi.fn(() => ({ connected: false })),
   loading: false,
   error: null,
   fetchProfiles: vi.fn().mockResolvedValue(undefined),
@@ -38,6 +38,7 @@ const mockProfiles = [
 describe('SmcpConnection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockStore.getStatus.mockReturnValue({ connected: false });
     mockUseConnectionStore.mockReturnValue({ ...mockStore } as any);
   });
 
@@ -54,7 +55,10 @@ describe('SmcpConnection', () => {
   });
 
   it('renders connected status with details', () => {
-    mockUseConnectionStore.mockReturnValue({ ...mockStore, status: connectedStatus } as any);
+    mockUseConnectionStore.mockReturnValue({
+      ...mockStore,
+      getStatus: vi.fn(() => connectedStatus),
+    } as any);
     render(<SmcpConnection instanceId="computer-a" />);
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(screen.getByText('https://smcp.example.com')).toBeInTheDocument();

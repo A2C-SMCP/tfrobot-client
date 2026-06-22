@@ -23,6 +23,7 @@
     "config": "配置",
     "connection": "连接",
     "connectionLayer": "连接层",
+    "robotConnections": "Robot 连接",
     "development": "开发",
     "system": "系统",
     "debugPanel": "调试面板"

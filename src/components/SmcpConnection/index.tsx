@@ -25,7 +25,7 @@ export function SmcpConnection({ instanceId }: SmcpConnectionProps) {
   const { message } = App.useApp();
   const {
     profiles,
-    status,
+    getStatus,
     loading,
     error,
     fetchProfiles,
@@ -35,6 +35,7 @@ export function SmcpConnection({ instanceId }: SmcpConnectionProps) {
     connect,
     disconnect,
   } = useConnectionStore();
+  const status = getStatus(instanceId);
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ConnectionProfile | undefined>();

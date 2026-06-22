@@ -1,5 +1,6 @@
 pub mod computer;
 pub mod config;
+pub mod connection_targets;
 pub mod keychain;
 pub mod logger;
 pub mod manager_client;

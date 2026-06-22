@@ -1,6 +1,8 @@
 use crate::commands::connection::ConnectionProfile;
 use crate::commands::inputs::InputDefinition;
 use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
+use crate::services::connection_targets::{ConnectionTargetsConfig, ManualSmcpTarget};
+use sha2::{Digest, Sha256};
 use smcp_computer::mcp_clients::MCPServerConfig;
 use std::collections::HashMap;
 use std::fs;
@@ -10,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub struct ConfigService {
     config_dir: PathBuf,
     computer_instances_file: PathBuf,
+    connection_targets_file: PathBuf,
 }
 
 impl ConfigService {
@@ -19,6 +22,7 @@ impl ConfigService {
 
         Ok(Self {
             computer_instances_file: app_data_dir.join("computer_instances.json"),
+            connection_targets_file: app_data_dir.join("connection_targets.json"),
             config_dir: app_data_dir,
         })
     }
@@ -349,9 +353,152 @@ impl ConfigService {
         Ok(removed)
     }
 
+    // --- Connection Targets ---
+
+    pub fn load_connection_targets(&self) -> Result<ConnectionTargetsConfig, ConfigError> {
+        load_json_file(&self.connection_targets_file)
+    }
+
+    pub fn save_connection_targets(
+        &self,
+        targets: &ConnectionTargetsConfig,
+    ) -> Result<(), ConfigError> {
+        save_json_file(&self.connection_targets_file, targets)
+    }
+
+    pub fn list_manual_smcp_targets(&self) -> Result<Vec<ManualSmcpTarget>, ConfigError> {
+        Ok(self.load_connection_targets()?.manual_smcp_targets)
+    }
+
+    pub fn save_manual_smcp_target(
+        &self,
+        mut target: ManualSmcpTarget,
+    ) -> Result<ManualSmcpTarget, ConfigError> {
+        target.id = stable_or_existing_manual_target_id(&target.id, &target);
+        let mut targets = self.load_connection_targets()?;
+        targets
+            .manual_smcp_targets
+            .retain(|existing| existing.id != target.id);
+        targets.manual_smcp_targets.push(target.clone());
+        self.save_connection_targets(&targets)?;
+        Ok(target)
+    }
+
+    pub fn get_manual_smcp_target(&self, id: &str) -> Result<ManualSmcpTarget, ConfigError> {
+        self.load_connection_targets()?
+            .manual_smcp_targets
+            .into_iter()
+            .find(|target| target.id == id)
+            .ok_or_else(|| ConfigError::NotFound(id.to_string()))
+    }
+
+    pub fn delete_manual_smcp_target(&self, id: &str) -> Result<ManualSmcpTarget, ConfigError> {
+        let mut targets = self.load_connection_targets()?;
+        let index = targets
+            .manual_smcp_targets
+            .iter()
+            .position(|target| target.id == id)
+            .ok_or_else(|| ConfigError::NotFound(id.to_string()))?;
+        let removed = targets.manual_smcp_targets.remove(index);
+        self.save_connection_targets(&targets)?;
+        Ok(removed)
+    }
+
+    pub fn migrate_legacy_profiles_to_manual_targets(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, ConfigError> {
+        let instances = self.load_computer_instances()?;
+        let mut targets = self.load_connection_targets()?;
+        let mut migrated_keys = Vec::new();
+
+        for instance in instances.instances {
+            for profile in instance.connection_profiles {
+                let target = ManualSmcpTarget {
+                    id: stable_manual_target_id(&profile),
+                    name: profile.name.clone(),
+                    url: profile.url,
+                    namespace: profile.namespace,
+                    office_id: profile.office_id,
+                    computer_name: profile.computer_name,
+                    headers: profile.headers,
+                    auto_connect: profile.auto_connect,
+                    auto_reconnect: profile.auto_reconnect,
+                };
+                if !targets
+                    .manual_smcp_targets
+                    .iter()
+                    .any(|existing| existing.id == target.id)
+                {
+                    targets.manual_smcp_targets.push(target.clone());
+                }
+                migrated_keys.push((instance.id.clone(), profile.name, target.id));
+            }
+        }
+
+        self.save_connection_targets(&targets)?;
+        Ok(migrated_keys)
+    }
+
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
+}
+
+pub fn normalize_manual_smcp_target(mut target: ManualSmcpTarget) -> ManualSmcpTarget {
+    target.id = stable_or_existing_manual_target_id(&target.id, &target);
+    target
+}
+
+fn stable_or_existing_manual_target_id(id: &str, target: &ManualSmcpTarget) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        stable_manual_target_id_from_parts(
+            &target.name,
+            &target.url,
+            &target.office_id,
+            &target.computer_name,
+            &target.headers,
+        )
+    } else {
+        id.to_string()
+    }
+}
+
+fn stable_manual_target_id(profile: &ConnectionProfile) -> String {
+    stable_manual_target_id_from_parts(
+        &profile.name,
+        &profile.url,
+        &profile.office_id,
+        &profile.computer_name,
+        &profile.headers,
+    )
+}
+
+fn stable_manual_target_id_from_parts(
+    name: &str,
+    url: &str,
+    office_id: &str,
+    computer_name: &str,
+    headers: &HashMap<String, String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hash_string_field(&mut hasher, name);
+    hash_string_field(&mut hasher, url);
+    hash_string_field(&mut hasher, office_id);
+    hash_string_field(&mut hasher, computer_name);
+    let mut header_pairs: Vec<_> = headers.iter().collect();
+    header_pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, value) in header_pairs {
+        hash_string_field(&mut hasher, key);
+        hash_string_field(&mut hasher, value);
+    }
+    let digest = hasher.finalize();
+    format!("manual-{}", hex::encode(&digest[..16]))
+}
+
+fn hash_string_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn load_json_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, ConfigError> {
@@ -807,6 +954,76 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "prod");
         assert_eq!(loaded[0].url, "https://smcp.example.com");
+    }
+
+    #[test]
+    fn test_legacy_profiles_migrate_to_global_manual_targets() {
+        let (svc, _tmp) = setup();
+        let profile: ConnectionProfile = serde_json::from_value(serde_json::json!({
+            "name": "prod",
+            "url": "https://smcp.example.com",
+            "namespace": "/smcp",
+            "office_id": "office-1",
+            "computer_name": "my-pc",
+            "headers": { "X-TF-Namespace": "ns" },
+            "auto_connect": true,
+            "auto_reconnect": true
+        }))
+        .unwrap();
+        svc.save_profiles_for_instance(
+            DEFAULT_COMPUTER_INSTANCE_ID,
+            std::slice::from_ref(&profile),
+        )
+        .unwrap();
+
+        let migrated = svc.migrate_legacy_profiles_to_manual_targets().unwrap();
+        let targets = svc.list_manual_smcp_targets().unwrap();
+
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "prod");
+        assert_eq!(targets[0].office_id, "office-1");
+        assert_eq!(
+            targets[0].headers.get("X-TF-Namespace").map(String::as_str),
+            Some("ns")
+        );
+
+        svc.migrate_legacy_profiles_to_manual_targets().unwrap();
+        assert_eq!(svc.list_manual_smcp_targets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_manual_target_id_is_stable_and_independent_of_header_order() {
+        let mut headers_a = HashMap::new();
+        headers_a.insert("X-TF-Namespace".to_string(), "ns".to_string());
+        headers_a.insert("X-TF-Region".to_string(), "cn".to_string());
+
+        let mut headers_b = HashMap::new();
+        headers_b.insert("X-TF-Region".to_string(), "cn".to_string());
+        headers_b.insert("X-TF-Namespace".to_string(), "ns".to_string());
+
+        let target_a = ManualSmcpTarget {
+            id: String::new(),
+            name: "prod".to_string(),
+            url: "https://smcp.example.com".to_string(),
+            namespace: "/smcp".to_string(),
+            office_id: "office-1".to_string(),
+            computer_name: "my-pc".to_string(),
+            headers: headers_a,
+            auto_connect: true,
+            auto_reconnect: true,
+        };
+        let target_b = ManualSmcpTarget {
+            headers: headers_b,
+            ..target_a.clone()
+        };
+
+        let id_a = normalize_manual_smcp_target(target_a).id;
+        let id_b = normalize_manual_smcp_target(target_b).id;
+
+        assert_eq!(id_a, id_b);
+        assert!(id_a.starts_with("manual-"));
+        assert_eq!(id_a.len(), "manual-".len() + 32);
     }
 
     // --- File Permissions (Unix only) ---

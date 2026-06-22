@@ -29,10 +29,12 @@ import {
   type DigitalEmployeeBrief,
   type ManagerError,
 } from '@/stores/managerStore';
-import { useConnectionStore } from '@/stores/connectionStore';
+import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connectionStore';
 import { useComputerStore } from '@/stores/computerStore';
 
 const { Title, Text } = Typography;
+
+const DISCONNECTED_STATUS: ConnectionStatusInfo = { connected: false };
 
 function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
@@ -83,10 +85,13 @@ export function EmployeeList() {
     clearError,
     dismissPaymentRequired,
   } = useManagerStore();
-  const connectionStatus = useConnectionStore((s) => s.status);
   const fetchConnectionStatus = useConnectionStore((s) => s.fetchStatus);
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
   const selectedInstanceId = useComputerStore((s) => s.selectedInstanceId);
+  const selectedConnectionStatus = useConnectionStore((s) =>
+    selectedInstanceId ? s.statuses[selectedInstanceId] : undefined,
+  );
+  const connectionStatus = selectedConnectionStatus ?? DISCONNECTED_STATUS;
 
   const refreshConnectionStatus = useCallback(() => {
     if (!selectedInstanceId) return Promise.resolve();
