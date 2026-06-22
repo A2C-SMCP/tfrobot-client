@@ -1,3 +1,4 @@
+pub mod computer;
 pub mod config_io;
 pub mod connection;
 pub mod dashboard;

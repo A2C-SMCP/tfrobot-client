@@ -165,16 +165,15 @@ pub fn run() {
                 .log_service
                 .cleanup(settings.log_retention_days as i64);
 
-            // Initialize manager with saved configs in background
-            let manager = state.manager.clone();
-            let configs = saved_configs.clone();
+            // Initialize the default Computer runtime with saved configs in background.
+            let computer_registry = state.computer_registry.clone();
             tauri::async_runtime::spawn(async move {
-                let lock = manager.read().await;
-                if let Some(mgr) = lock.as_ref() {
-                    if let Err(e) = mgr.initialize(configs).await {
+                if let Some(runtime) = computer_registry.default_runtime().await {
+                    if let Err(e) = runtime.start().await {
                         log::error!("Failed to initialize MCP servers: {}", e);
+                        return;
                     }
-                    log::info!("MCP servers initialized");
+                    log::info!("Default Computer runtime initialized");
                 }
             });
 
@@ -231,6 +230,15 @@ pub fn run() {
             commands::connection::manager_connect_smcp,
             commands::connection::disconnect_smcp,
             commands::connection::get_connection_status,
+            // Computer instance management
+            commands::computer::list_computer_instances,
+            commands::computer::get_computer_instance_status,
+            commands::computer::create_computer_instance,
+            commands::computer::rename_computer_instance,
+            commands::computer::duplicate_computer_instance,
+            commands::computer::delete_computer_instance,
+            commands::computer::start_computer_instance,
+            commands::computer::stop_computer_instance,
             // Config import/export
             commands::config_io::detect_config_format,
             commands::config_io::import_config,
@@ -355,5 +363,21 @@ mod tests {
         assert!(Arc::ptr_eq(&state.manager, &default_runtime.manager));
         assert!(Arc::ptr_eq(&state.inputs, &default_runtime.inputs));
         assert!(Arc::ptr_eq(&state.connection, &default_runtime.connection));
+    }
+
+    #[tokio::test]
+    async fn default_runtime_start_marks_legacy_default_state_running() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+
+        let state = AppState::new(config, log_service, settings_service);
+        let default_runtime = state.computer_registry.default_runtime().await.unwrap();
+
+        default_runtime.start().await.unwrap();
+
+        assert!(default_runtime.is_running().await);
+        assert!(Arc::ptr_eq(&state.manager, &default_runtime.manager));
     }
 }

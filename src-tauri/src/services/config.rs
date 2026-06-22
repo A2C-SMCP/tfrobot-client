@@ -125,6 +125,76 @@ impl ConfigService {
         save_json_file(&self.computer_instances_file, &instances)
     }
 
+    pub fn get_computer_instance(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
+        let instances = self.load_computer_instances()?;
+        instances
+            .instances
+            .into_iter()
+            .find(|instance| instance.id == id)
+            .ok_or_else(|| ConfigError::NotFound(id.to_string()))
+    }
+
+    pub fn add_computer_instance(&self, instance: ComputerInstance) -> Result<(), ConfigError> {
+        let mut instances = self.load_computer_instances()?;
+        if instances
+            .instances
+            .iter()
+            .any(|existing| existing.id == instance.id)
+        {
+            return Err(ConfigError::AlreadyExists(instance.id));
+        }
+        instances.instances.push(instance);
+        self.save_computer_instances(&instances)
+    }
+
+    pub fn rename_computer_instance(
+        &self,
+        id: &str,
+        name: String,
+    ) -> Result<ComputerInstance, ConfigError> {
+        self.update_computer_instance(id, |instance| {
+            instance.name = name;
+        })
+    }
+
+    pub fn update_computer_instance<F>(
+        &self,
+        id: &str,
+        update: F,
+    ) -> Result<ComputerInstance, ConfigError>
+    where
+        F: FnOnce(&mut ComputerInstance),
+    {
+        let mut instances = self.load_computer_instances()?;
+        let instance = instances
+            .instances
+            .iter_mut()
+            .find(|instance| instance.id == id)
+            .ok_or_else(|| ConfigError::NotFound(id.to_string()))?;
+        update(instance);
+        let updated = instance.clone();
+        self.save_computer_instances(&instances)?;
+        Ok(updated)
+    }
+
+    pub fn remove_computer_instance(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
+        let mut instances = self.load_computer_instances()?;
+        if instances.default_instance_id == id {
+            return Err(ConfigError::InvalidOperation(
+                "default computer instance cannot be deleted".to_string(),
+            ));
+        }
+
+        let index = instances
+            .instances
+            .iter()
+            .position(|instance| instance.id == id)
+            .ok_or_else(|| ConfigError::NotFound(id.to_string()))?;
+        let removed = instances.instances.remove(index);
+        self.save_computer_instances(&instances)?;
+        Ok(removed)
+    }
+
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
@@ -169,8 +239,14 @@ pub enum ConfigError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Server not found: {0}")]
+    #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("Already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }
 
 #[cfg(test)]
@@ -326,6 +402,57 @@ mod tests {
             .find(|instance| instance.id == "second")
             .unwrap();
         assert_eq!(second.mcp_servers[0].name(), "second-server");
+    }
+
+    #[test]
+    fn test_add_get_rename_and_remove_computer_instance() {
+        let (svc, _tmp) = setup();
+        let instance = ComputerInstance {
+            id: "second".to_string(),
+            name: "Second".to_string(),
+            ..ComputerInstance::default_instance()
+        };
+
+        svc.add_computer_instance(instance).unwrap();
+        assert_eq!(svc.get_computer_instance("second").unwrap().name, "Second");
+
+        let renamed = svc
+            .rename_computer_instance("second", "Renamed".to_string())
+            .unwrap();
+        assert_eq!(renamed.name, "Renamed");
+        assert_eq!(svc.get_computer_instance("second").unwrap().name, "Renamed");
+
+        let removed = svc.remove_computer_instance("second").unwrap();
+        assert_eq!(removed.id, "second");
+        assert!(svc.get_computer_instance("second").is_err());
+    }
+
+    #[test]
+    fn test_add_duplicate_computer_instance_returns_error() {
+        let (svc, _tmp) = setup();
+        let instance = ComputerInstance {
+            id: "dup".to_string(),
+            name: "Duplicate".to_string(),
+            ..ComputerInstance::default_instance()
+        };
+
+        svc.add_computer_instance(instance.clone()).unwrap();
+        let error = svc.add_computer_instance(instance).unwrap_err();
+
+        assert!(error.to_string().contains("Already exists"));
+    }
+
+    #[test]
+    fn test_remove_default_computer_instance_returns_error() {
+        let (svc, _tmp) = setup();
+
+        let error = svc
+            .remove_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("default computer instance cannot be deleted"));
     }
 
     #[test]

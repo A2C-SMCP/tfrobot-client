@@ -121,6 +121,7 @@ pub struct ComputerInstanceRuntime {
     pub manager: Arc<RwLock<Option<MCPServerManager>>>,
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
+    running: Arc<RwLock<bool>>,
 }
 
 impl ComputerInstanceRuntime {
@@ -133,7 +134,32 @@ impl ComputerInstanceRuntime {
             manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             connection: Arc::new(RwLock::new(None)),
+            running: Arc::new(RwLock::new(false)),
         }
+    }
+
+    fn with_instance(&self, instance: ComputerInstance) -> Self {
+        Self {
+            instance,
+            manager: self.manager.clone(),
+            inputs: self.inputs.clone(),
+            connection: self.connection.clone(),
+            running: self.running.clone(),
+        }
+    }
+
+    pub async fn start(&self) -> Result<(), String> {
+        let lock = self.manager.read().await;
+        let manager = lock
+            .as_ref()
+            .ok_or_else(|| "MCP manager not initialized".to_string())?;
+        manager
+            .initialize(self.instance.mcp_servers.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut running = self.running.write().await;
+        *running = true;
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -148,6 +174,46 @@ impl ComputerInstanceRuntime {
         let lock = self.manager.read().await;
         if let Some(manager) = lock.as_ref() {
             let _ = manager.stop_all().await;
+        }
+
+        let mut running = self.running.write().await;
+        *running = false;
+    }
+
+    pub async fn is_running(&self) -> bool {
+        *self.running.read().await
+    }
+
+    pub async fn is_connected(&self) -> bool {
+        self.connection.read().await.is_some()
+    }
+
+    pub async fn connection_status(&self) -> Option<ConnectionStateSummary> {
+        self.connection
+            .read()
+            .await
+            .as_ref()
+            .map(ConnectionStateSummary::from)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionStateSummary {
+    pub url: String,
+    pub office_id: String,
+    pub computer_name: String,
+    pub connected_at: String,
+    pub profile_name: String,
+}
+
+impl From<&ConnectionState> for ConnectionStateSummary {
+    fn from(connection: &ConnectionState) -> Self {
+        Self {
+            url: connection.url.clone(),
+            office_id: connection.office_id.clone(),
+            computer_name: connection.computer_name.clone(),
+            connected_at: connection.connected_at.to_rfc3339(),
+            profile_name: connection.profile_name.clone(),
         }
     }
 }
@@ -195,6 +261,58 @@ impl ComputerRegistry {
     pub async fn runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {
         let runtimes = self.runtimes.read().await;
         runtimes.get(id).cloned()
+    }
+
+    pub async fn list_runtimes(&self) -> Vec<ComputerInstanceRuntime> {
+        let runtimes = self.runtimes.read().await;
+        let mut values: Vec<_> = runtimes.values().cloned().collect();
+        values.sort_by(|a, b| a.instance.name.cmp(&b.instance.name));
+        values
+    }
+
+    pub async fn upsert_runtime(&self, instance: ComputerInstance) -> ComputerInstanceRuntime {
+        let runtime = ComputerInstanceRuntime::new(instance.clone());
+        let mut runtimes = self.runtimes.write().await;
+        runtimes.insert(instance.id, runtime.clone());
+        runtime
+    }
+
+    pub async fn update_runtime_instance(
+        &self,
+        instance: ComputerInstance,
+    ) -> ComputerInstanceRuntime {
+        let mut runtimes = self.runtimes.write().await;
+        let runtime = match runtimes.get(&instance.id) {
+            Some(existing) => existing.with_instance(instance.clone()),
+            None => ComputerInstanceRuntime::new(instance.clone()),
+        };
+        runtimes.insert(instance.id, runtime.clone());
+        runtime
+    }
+
+    pub async fn remove_runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {
+        if id == self.default_instance_id {
+            return None;
+        }
+        let mut runtimes = self.runtimes.write().await;
+        runtimes.remove(id)
+    }
+
+    pub async fn start_runtime(&self, id: &str) -> Result<(), String> {
+        let runtime = self
+            .runtime(id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {id}"))?;
+        runtime.start().await
+    }
+
+    pub async fn stop_runtime(&self, id: &str) -> Result<(), String> {
+        let runtime = self
+            .runtime(id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {id}"))?;
+        runtime.shutdown().await;
+        Ok(())
     }
 
     pub async fn shutdown_all(&self) {
@@ -316,5 +434,119 @@ mod tests {
             &default_runtime.connection,
             &registry_default.connection
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_start_stop_only_changes_target_instance() {
+        let config = ComputerInstancesConfig {
+            schema_version: 1,
+            default_instance_id: "one".to_string(),
+            instances: vec![
+                ComputerInstance {
+                    id: "one".to_string(),
+                    name: "One".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+                ComputerInstance {
+                    id: "two".to_string(),
+                    name: "Two".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+            ],
+        };
+        let registry = ComputerRegistry::from_config(config);
+
+        registry.start_runtime("one").await.unwrap();
+        assert!(registry.runtime("one").await.unwrap().is_running().await);
+        assert!(!registry.runtime("two").await.unwrap().is_running().await);
+
+        registry.stop_runtime("one").await.unwrap();
+        assert!(!registry.runtime("one").await.unwrap().is_running().await);
+        assert!(!registry.runtime("two").await.unwrap().is_running().await);
+    }
+
+    #[tokio::test]
+    async fn update_runtime_instance_preserves_runtime_handles() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            default_instance_id: "one".to_string(),
+            instances: vec![ComputerInstance {
+                id: "one".to_string(),
+                name: "One".to_string(),
+                ..ComputerInstance::default_instance()
+            }],
+        });
+
+        let before = registry.runtime("one").await.unwrap();
+        registry.start_runtime("one").await.unwrap();
+        let after = registry
+            .update_runtime_instance(ComputerInstance {
+                id: "one".to_string(),
+                name: "Renamed".to_string(),
+                ..ComputerInstance::default_instance()
+            })
+            .await;
+
+        assert_eq!(after.instance.name, "Renamed");
+        assert!(after.is_running().await);
+        assert!(Arc::ptr_eq(&before.manager, &after.manager));
+        assert!(Arc::ptr_eq(&before.inputs, &after.inputs));
+        assert!(Arc::ptr_eq(&before.connection, &after.connection));
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_rejects_default_and_returns_non_default_runtime() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            default_instance_id: "one".to_string(),
+            instances: vec![
+                ComputerInstance {
+                    id: "one".to_string(),
+                    name: "One".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+                ComputerInstance {
+                    id: "two".to_string(),
+                    name: "Two".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+            ],
+        });
+
+        assert!(registry.remove_runtime("one").await.is_none());
+        assert!(registry.runtime("one").await.is_some());
+
+        let removed = registry.remove_runtime("two").await.unwrap();
+        assert_eq!(removed.instance.id, "two");
+        assert!(registry.runtime("two").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn removed_running_runtime_can_be_shutdown_without_affecting_others() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            default_instance_id: "one".to_string(),
+            instances: vec![
+                ComputerInstance {
+                    id: "one".to_string(),
+                    name: "One".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+                ComputerInstance {
+                    id: "two".to_string(),
+                    name: "Two".to_string(),
+                    ..ComputerInstance::default_instance()
+                },
+            ],
+        });
+        registry.start_runtime("one").await.unwrap();
+        registry.start_runtime("two").await.unwrap();
+
+        let removed = registry.remove_runtime("two").await.unwrap();
+        removed.shutdown().await;
+
+        assert!(!removed.is_running().await);
+        assert!(registry.runtime("one").await.unwrap().is_running().await);
+        assert!(registry.runtime("two").await.is_none());
     }
 }
