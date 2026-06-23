@@ -5,11 +5,18 @@ test.describe('MCP Server CRUD', () => {
   test.beforeEach(async ({ page }) => {
     await setupInvokeMock(page);
     await page.goto('/');
-    await page.locator('.ant-layout-sider').getByText('MCP Servers').click();
+    await page.locator('.ant-layout-sider').getByText('Computer').click();
+    await page.getByText('Open Details').first().click();
   });
 
-  test('displays server list with test server', async ({ page }) => {
-    await expect(page.getByText('test-stdio-server')).toBeVisible();
+  test('displays default Computer server list with test server', async ({ page }) => {
+    await expect(page.getByText('default-stdio-server')).toBeVisible();
+    await expect
+      .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
+      .toContainEqual(expect.objectContaining({
+        cmd: 'get_mcp_servers',
+        args: { instanceId: 'default' },
+      }));
   });
 
   test('shows Add Server button', async ({ page }) => {
@@ -29,5 +36,21 @@ test.describe('MCP Server CRUD', () => {
   test('add server opens modal', async ({ page }) => {
     await page.getByText('Add Server').click();
     await expect(page.locator('.ant-modal')).toBeVisible();
+  });
+
+  test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
+    await page.getByText('Back to Computers').click();
+    await page.getByText('Second Computer').click();
+    await page.getByText('Open Details').nth(1).click();
+
+    await expect(page.getByText('Robot B')).toBeVisible();
+    await expect(page.getByText('second-stdio-server')).toBeVisible();
+    await expect(page.getByText('default-stdio-server')).not.toBeVisible();
+    await expect
+      .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
+      .toContainEqual(expect.objectContaining({
+        cmd: 'get_mcp_servers',
+        args: { instanceId: 'computer-b' },
+      }));
   });
 });

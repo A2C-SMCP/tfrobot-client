@@ -50,6 +50,7 @@ pub async fn list_computer_instances_core(
         .map_err(|error| error.to_string())?;
     let mut statuses = Vec::with_capacity(config.instances.len());
 
+    let default_instance_id = config.default_instance_id.clone();
     for instance in config.instances {
         let runtime = match state.computer_registry.runtime(&instance.id).await {
             Some(_) => {
@@ -65,7 +66,9 @@ pub async fn list_computer_instances_core(
                     .await
             }
         };
-        statuses.push(status_from_instance(&instance, false, &runtime).await);
+        statuses.push(
+            status_from_instance(&instance, instance.id == default_instance_id, &runtime).await,
+        );
     }
 
     Ok(statuses)
@@ -87,6 +90,7 @@ pub async fn get_computer_instance_status_core(
         .config
         .load_computer_instances()
         .map_err(|error| error.to_string())?;
+    let default_instance_id = config.default_instance_id.clone();
     let instance = config
         .instances
         .into_iter()
@@ -97,7 +101,7 @@ pub async fn get_computer_instance_status_core(
         .update_runtime_instance(instance.clone())
         .await;
 
-    Ok(status_from_instance(&instance, false, &runtime).await)
+    Ok(status_from_instance(&instance, instance.id == default_instance_id, &runtime).await)
 }
 
 #[tauri::command]
@@ -128,7 +132,7 @@ pub async fn create_computer_instance_core(
         .upsert_runtime(instance.clone())
         .await;
 
-    Ok(status_from_instance(&instance, false, &runtime).await)
+    status_from_current_default(state, &instance, &runtime).await
 }
 
 #[tauri::command]
@@ -153,7 +157,7 @@ pub async fn rename_computer_instance_core(
         .update_runtime_instance(updated.clone())
         .await;
 
-    Ok(status_from_instance(&updated, false, &runtime).await)
+    status_from_current_default(state, &updated, &runtime).await
 }
 
 #[tauri::command]
@@ -185,7 +189,7 @@ pub async fn duplicate_computer_instance_core(
         .upsert_runtime(instance.clone())
         .await;
 
-    Ok(status_from_instance(&instance, false, &runtime).await)
+    status_from_current_default(state, &instance, &runtime).await
 }
 
 #[tauri::command]
@@ -234,7 +238,7 @@ pub async fn start_computer_instance_core(
         .await;
     runtime.start().await?;
 
-    Ok(status_from_instance(&instance, false, &runtime).await)
+    status_from_current_default(state, &instance, &runtime).await
 }
 
 #[tauri::command]
@@ -260,7 +264,20 @@ pub async fn stop_computer_instance_core(
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
     runtime.shutdown().await;
 
-    Ok(status_from_instance(&instance, false, &runtime).await)
+    status_from_current_default(state, &instance, &runtime).await
+}
+
+async fn status_from_current_default(
+    state: &AppState,
+    instance: &ComputerInstance,
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Result<ComputerInstanceStatus, String> {
+    let default_instance_id = state
+        .config
+        .load_computer_instances()
+        .map_err(|error| error.to_string())?
+        .default_instance_id;
+    Ok(status_from_instance(instance, instance.id == default_instance_id, runtime).await)
 }
 
 async fn status_from_instance(

@@ -20,6 +20,9 @@ interface InputState {
   values: Record<string, unknown>;
   loading: boolean;
   error: string | null;
+  activeInstanceId: string | null;
+  inputsRequestId: number;
+  valuesRequestId: number;
 
   fetchInputs: (instanceId: string) => Promise<void>;
   fetchValues: (instanceId: string) => Promise<void>;
@@ -37,6 +40,9 @@ const initialState = {
   values: {} as Record<string, unknown>,
   loading: false,
   error: null as string | null,
+  activeInstanceId: null as string | null,
+  inputsRequestId: 0,
+  valuesRequestId: 0,
 };
 
 export const useInputStore = create<InputState>((set, get) => ({
@@ -45,20 +51,46 @@ export const useInputStore = create<InputState>((set, get) => ({
   reset: () => set(initialState),
 
   fetchInputs: async (instanceId: string) => {
-    set({ loading: true, error: null });
+    const requestId = get().inputsRequestId + 1;
+    set({
+      activeInstanceId: instanceId,
+      inputsRequestId: requestId,
+      inputs: [],
+      loading: true,
+      error: null,
+    });
     try {
       const inputs = await invoke<InputDefinition[]>('list_inputs', { instanceId });
+      if (get().inputsRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ inputs, loading: false });
     } catch (e) {
+      if (get().inputsRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ error: String(e), loading: false });
     }
   },
 
   fetchValues: async (instanceId: string) => {
+    const requestId = get().valuesRequestId + 1;
+    set({
+      activeInstanceId: instanceId,
+      valuesRequestId: requestId,
+      values: {},
+      error: null,
+    });
     try {
       const values = await invoke<Record<string, unknown>>('list_input_values', { instanceId });
+      if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ values });
     } catch (e) {
+      if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ error: String(e) });
     }
   },

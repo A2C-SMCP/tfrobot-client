@@ -5,7 +5,25 @@ const mockedInvoke = vi.mocked(invoke);
 const instanceId = 'computer-a';
 
 function resetStore() {
-  useInputStore.setState({ inputs: [], values: {}, loading: false, error: null });
+  useInputStore.setState({
+    inputs: [],
+    values: {},
+    loading: false,
+    error: null,
+    activeInstanceId: null,
+    inputsRequestId: 0,
+    valuesRequestId: 0,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('inputStore', () => {
@@ -36,6 +54,31 @@ describe('inputStore', () => {
       expect(useInputStore.getState().error).toBe('load failed');
       expect(useInputStore.getState().loading).toBe(false);
     });
+
+    it('ignores stale input definitions from a previous computer instance', async () => {
+      const first = deferred<InputDefinition[]>();
+      const second = deferred<InputDefinition[]>();
+      const inputsA: InputDefinition[] = [
+        { type: 'PromptString', id: 'api_key_a', label: 'API Key A' },
+      ];
+      const inputsB: InputDefinition[] = [
+        { type: 'PromptString', id: 'api_key_b', label: 'API Key B' },
+      ];
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
+
+      const firstFetch = useInputStore.getState().fetchInputs('computer-a');
+      const secondFetch = useInputStore.getState().fetchInputs('computer-b');
+
+      second.resolve(inputsB);
+      await secondFetch;
+      first.resolve(inputsA);
+      await firstFetch;
+
+      expect(useInputStore.getState().inputs).toEqual(inputsB);
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useInputStore.getState().loading).toBe(false);
+    });
   });
 
   describe('fetchValues', () => {
@@ -47,6 +90,54 @@ describe('inputStore', () => {
 
       expect(mockedInvoke).toHaveBeenCalledWith('list_input_values', { instanceId });
       expect(useInputStore.getState().values).toEqual(mockValues);
+    });
+
+    it('ignores stale input values from a previous computer instance', async () => {
+      const first = deferred<Record<string, unknown>>();
+      const second = deferred<Record<string, unknown>>();
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
+
+      const firstFetch = useInputStore.getState().fetchValues('computer-a');
+      const secondFetch = useInputStore.getState().fetchValues('computer-b');
+
+      second.resolve({ token: 'b-secret' });
+      await secondFetch;
+      first.resolve({ token: 'a-secret' });
+      await firstFetch;
+
+      expect(useInputStore.getState().values).toEqual({ token: 'b-secret' });
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
+    });
+
+    it('keeps definitions and values scoped during a component-style instance switch', async () => {
+      const inputsA = deferred<InputDefinition[]>();
+      const inputsB = deferred<InputDefinition[]>();
+      const valuesB = deferred<Record<string, unknown>>();
+      const definitionsB: InputDefinition[] = [
+        { type: 'PromptString', id: 'token_b', label: 'Token B' },
+      ];
+      mockedInvoke.mockReturnValueOnce(inputsA.promise as any);
+      mockedInvoke.mockReturnValueOnce(inputsB.promise as any);
+      mockedInvoke.mockReturnValueOnce(valuesB.promise as any);
+
+      const firstInputsFetch = useInputStore.getState().fetchInputs('computer-a');
+      const secondInputsFetch = useInputStore.getState().fetchInputs('computer-b');
+      const secondValuesFetch = useInputStore.getState().fetchValues('computer-b');
+
+      inputsB.resolve(definitionsB);
+      valuesB.resolve({ token_b: 'b-secret' });
+      await secondInputsFetch;
+      await secondValuesFetch;
+
+      inputsA.resolve([{ type: 'PromptString', id: 'token_a', label: 'Token A' }]);
+      await firstInputsFetch;
+
+      expect(useInputStore.getState().inputs).toEqual(definitionsB);
+      expect(useInputStore.getState().values).toEqual({ token_b: 'b-secret' });
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useInputStore.getState().loading).toBe(false);
+      expect(useInputStore.getState().error).toBeNull();
     });
   });
 

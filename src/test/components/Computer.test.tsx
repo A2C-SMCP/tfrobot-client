@@ -25,6 +25,25 @@ const mockComputerInstances = [
   },
 ];
 
+const twoComputerInstances = [
+  {
+    ...mockComputerInstances[0],
+    id: 'default',
+    name: 'Default Computer',
+    is_default: true,
+    mcp_server_count: 1,
+  },
+  {
+    ...mockComputerInstances[0],
+    id: 'computer-b',
+    name: 'Second Computer',
+    is_default: false,
+    connected: false,
+    mcp_server_count: 2,
+    connection: null,
+  },
+];
+
 vi.mock('@/components/McpConfig', () => ({
   McpConfig: ({ instanceId }: { instanceId: string }) => <div data-testid="mcp-config">McpConfig:{instanceId}</div>,
 }));
@@ -102,6 +121,20 @@ describe('Computer', () => {
     expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('default');
+  });
+
+  it('opens the selected second Computer with scoped detail tabs', async () => {
+    mockInvoke.mockResolvedValueOnce(twoComputerInstances);
+
+    render(<Computer />);
+
+    fireEvent.click(await screen.findByText('Second Computer'));
+    fireEvent.click(screen.getAllByText('Open Details')[1]);
+
+    expect(screen.getByText('Second Computer')).toBeInTheDocument();
+    expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByText('Input Variables'));
+    expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
   });
 
   it('can render the detail view directly', async () => {

@@ -1,15 +1,52 @@
 import { Page } from '@playwright/test';
 
 const mockResponses: Record<string, unknown> = {
-  get_mcp_servers: [
+  list_computer_instances: [
     {
-      name: 'test-stdio-server',
-      type: 'stdio',
-      status: 'stopped',
-      command: 'node',
-      args: ['server.js'],
+      id: 'default',
+      name: 'Default Computer',
+      is_default: true,
+      running: true,
+      connected: false,
+      mcp_server_count: 1,
+      robot_binding: null,
+      connection: null,
+    },
+    {
+      id: 'computer-b',
+      name: 'Second Computer',
+      is_default: false,
+      running: true,
+      connected: false,
+      mcp_server_count: 1,
+      robot_binding: {
+        employee_id: 1001,
+        robot_id: 'robot-b',
+        robot_account_id: 2001,
+        namespace: 'test',
+        robot_name: 'Robot B',
+      },
+      connection: null,
     },
   ],
+  get_mcp_servers_by_instance: {
+    default: [
+      {
+        name: 'default-stdio-server',
+        running: false,
+        disabled: false,
+        status_message: 'Stopped',
+      },
+    ],
+    'computer-b': [
+      {
+        name: 'second-stdio-server',
+        running: false,
+        disabled: false,
+        status_message: 'Stopped',
+      },
+    ],
+  },
   get_dashboard_data: {
     connected: false,
     connection_url: null,
@@ -35,7 +72,7 @@ const mockResponses: Record<string, unknown> = {
     custom_runtime_paths: {},
   },
   get_logs: [],
-  list_input_definitions: [],
+  list_inputs: [],
   list_input_values: {},
   get_available_tools: [],
   detect_runtimes: { node: '/usr/local/bin/node' },
@@ -55,10 +92,22 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
   const responses = { ...mockResponses, ...overrides };
 
   await page.addInitScript((data) => {
+    const getMockResponse = (responses: Record<string, unknown>, cmd: string, args?: unknown) => {
+      if (cmd === 'get_mcp_servers') {
+        const instanceId = typeof args === 'object' && args !== null && 'instanceId' in args
+          ? String((args as { instanceId: unknown }).instanceId)
+          : 'default';
+        const byInstance = responses.get_mcp_servers_by_instance as Record<string, unknown> | undefined;
+        return byInstance?.[instanceId] ?? byInstance?.default;
+      }
+      return responses[cmd];
+    };
+
     (window as any).__TAURI_INTERNALS__ = {
       invoke: (cmd: string, args?: unknown) => {
+        ((window as any).__TAURI_INVOKES__ ??= []).push({ cmd, args });
         console.log(`[mock invoke] ${cmd}`, args);
-        const response = (data as Record<string, unknown>)[cmd];
+        const response = getMockResponse(data as Record<string, unknown>, cmd, args);
         if (response !== undefined) {
           return Promise.resolve(JSON.parse(JSON.stringify(response)));
         }

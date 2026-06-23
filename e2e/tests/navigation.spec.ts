@@ -13,8 +13,7 @@ test('default page is dashboard', async ({ page }) => {
 test('sidebar shows all navigation groups', async ({ page }) => {
   const sidebar = page.locator('.ant-layout-sider');
   await expect(sidebar.getByText('OVERVIEW')).toBeVisible();
-  await expect(sidebar.getByText('CONFIGURATION')).toBeVisible();
-  await expect(sidebar.getByText('CONNECTION')).toBeVisible();
+  await expect(sidebar.getByText('CONNECTION LAYER')).toBeVisible();
   await expect(sidebar.getByText('DEVELOPMENT')).toBeVisible();
   await expect(sidebar.getByText('SYSTEM')).toBeVisible();
 });
@@ -22,13 +21,15 @@ test('sidebar shows all navigation groups', async ({ page }) => {
 test('sidebar shows all menu items', async ({ page }) => {
   const sidebar = page.locator('.ant-layout-sider');
   await expect(sidebar.getByText('Dashboard')).toBeVisible();
-  await expect(sidebar.getByText('MCP Servers')).toBeVisible();
+  await expect(sidebar.getByText('Computer')).toBeVisible();
+  await expect(sidebar.getByText('Robot Connections')).toBeVisible();
   await expect(sidebar.getByText('Settings')).toBeVisible();
 });
 
-test('clicking MCP Servers navigates to MCP page', async ({ page }) => {
-  await page.locator('.ant-layout-sider').getByText('MCP Servers').click();
-  await expect(page.getByText('Add Server')).toBeVisible();
+test('clicking Computer navigates to Computer page', async ({ page }) => {
+  await page.locator('.ant-layout-sider').getByText('Computer').click();
+  await expect(page.getByText('Default Computer')).toBeVisible();
+  await expect(page.getByText('Open Details')).toBeVisible();
 });
 
 test('clicking Settings navigates to settings page', async ({ page }) => {
