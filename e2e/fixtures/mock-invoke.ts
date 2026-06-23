@@ -46,13 +46,30 @@ const mockResponses: Record<string, unknown> = {
     ],
   },
   get_dashboard_data: {
-    connected: false,
-    connection_url: null,
-    connection_profile: null,
-    mcp_total: 1,
-    mcp_running: 0,
-    mcp_stopped: 1,
-    tools_count: 0,
+    computer_total: 2,
+    computer_running: 2,
+    computer_stopped: 0,
+    computer_connected: 0,
+    computers: [
+      {
+        id: 'computer-a',
+        name: 'Computer A',
+        running: true,
+        connected: false,
+        mcp_server_count: 1,
+        robot_name: null,
+        connection_profile: null,
+      },
+      {
+        id: 'computer-b',
+        name: 'Second Computer',
+        running: true,
+        connected: false,
+        mcp_server_count: 1,
+        robot_name: 'Robot B',
+        connection_profile: null,
+      },
+    ],
     recent_logs: [],
     runtimes: [
       { name: 'Node.js', path: '/usr/local/bin/node', available: true },
@@ -60,6 +77,20 @@ const mockResponses: Record<string, unknown> = {
       { name: 'uv', path: null, available: false },
       { name: 'pnpm', path: null, available: false },
     ],
+  },
+  get_computer_overview_data: {
+    id: 'computer-a',
+    name: 'Computer A',
+    running: true,
+    connected: false,
+    connection_url: null,
+    connection_profile: null,
+    robot_name: null,
+    mcp_total: 1,
+    mcp_running: 0,
+    mcp_stopped: 1,
+    tools_count: 0,
+    recent_logs: [],
   },
   list_profiles: [],
   get_connection_status: { connected: false },
@@ -94,9 +125,9 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
       if (cmd === 'get_mcp_servers') {
         const instanceId = typeof args === 'object' && args !== null && 'instanceId' in args
           ? String((args as { instanceId: unknown }).instanceId)
-          : 'default';
+          : 'computer-a';
         const byInstance = responses.get_mcp_servers_by_instance as Record<string, unknown> | undefined;
-        return byInstance?.[instanceId] ?? byInstance?.default;
+        return byInstance?.[instanceId] ?? byInstance?.['computer-a'];
       }
       return responses[cmd];
     };

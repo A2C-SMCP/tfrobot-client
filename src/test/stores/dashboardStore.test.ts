@@ -12,13 +12,19 @@ function resetStore() {
 }
 
 const mockData: DashboardData = {
-  connected: true,
-  connection_url: 'http://localhost:3000',
-  connection_profile: 'default',
-  mcp_total: 3,
-  mcp_running: 2,
-  mcp_stopped: 1,
-  tools_count: 10,
+  computer_total: 1,
+  computer_running: 1,
+  computer_stopped: 0,
+  computer_connected: 1,
+  computers: [
+    {
+      id: 'computer-a',
+      name: 'Computer A',
+      running: true,
+      connected: true,
+      mcp_server_count: 3,
+    },
+  ],
   recent_logs: [],
   runtimes: [
     { name: 'Node.js', path: '/usr/bin/node', available: true },

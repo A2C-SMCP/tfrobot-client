@@ -7,6 +7,7 @@ test.describe('MCP Server CRUD', () => {
     await page.goto('/');
     await page.locator('.ant-layout-sider').getByText('Computer').click();
     await page.getByText('Open Details').first().click();
+    await page.getByRole('tab', { name: /MCP Servers/ }).click();
   });
 
   test('displays first Computer server list with test server', async ({ page }) => {
@@ -42,6 +43,7 @@ test.describe('MCP Server CRUD', () => {
     await page.getByText('Back to Computers').click();
     await page.getByText('Second Computer').click();
     await page.getByText('Open Details').nth(1).click();
+    await page.getByRole('tab', { name: /MCP Servers/ }).click();
 
     await expect(page.getByText('Robot B')).toBeVisible();
     await expect(page.getByText('second-stdio-server')).toBeVisible();

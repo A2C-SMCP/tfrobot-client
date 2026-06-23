@@ -12,18 +12,41 @@ vi.mock('@/stores/dashboardStore', () => ({
   })),
 }));
 
+const mockSelectInstance = vi.fn();
+
+vi.mock('@/stores/computerStore', () => ({
+  useComputerStore: vi.fn(() => ({
+    selectInstance: mockSelectInstance,
+  })),
+}));
+
 // Access the mocked module for dynamic return values
 import { useDashboardStore } from '@/stores/dashboardStore';
 const mockUseDashboardStore = vi.mocked(useDashboardStore);
 
 const mockDashboardData = {
-  connected: true,
-  connection_url: 'https://smcp.example.com',
-  connection_profile: 'prod',
-  mcp_total: 5,
-  mcp_running: 3,
-  mcp_stopped: 2,
-  tools_count: 12,
+  computer_total: 2,
+  computer_running: 1,
+  computer_stopped: 1,
+  computer_connected: 1,
+  computers: [
+    {
+      id: 'computer-a',
+      name: 'Computer A',
+      running: true,
+      connected: true,
+      mcp_server_count: 5,
+      robot_name: 'Robot A',
+      connection_profile: 'prod',
+    },
+    {
+      id: 'computer-b',
+      name: 'Computer B',
+      running: false,
+      connected: false,
+      mcp_server_count: 2,
+    },
+  ],
   recent_logs: [
     { id: 1, timestamp: '2025-01-01T10:00:00Z', level: 'info', category: 'system', message: 'Server started' },
     { id: 2, timestamp: '2025-01-01T10:01:00Z', level: 'error', category: 'mcp', message: 'Connection failed' },
@@ -75,38 +98,36 @@ describe('Dashboard', () => {
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
 
-    // Connection card
-    expect(screen.getByText('Connected')).toBeInTheDocument();
-    // MCP card
-    expect(screen.getByText(/5/)).toBeInTheDocument();
-    // Tools count
-    expect(screen.getByText('12')).toBeInTheDocument();
-    // Runtimes
+    expect(screen.getByText('Computer A')).toBeInTheDocument();
+    expect(screen.getByText('Computer B')).toBeInTheDocument();
+    expect(screen.getByText('Robot A')).toBeInTheDocument();
+    expect(screen.getAllByText('Connection failed').length).toBeGreaterThan(0);
     expect(screen.getByText('Node.js')).toBeInTheDocument();
     expect(screen.getByText('Python')).toBeInTheDocument();
   });
 
-  it('shows disconnected badge when not connected', () => {
+  it('shows runtime availability status', () => {
     mockUseDashboardStore.mockReturnValue({
-      data: { ...mockDashboardData, connected: false, connection_profile: undefined },
+      data: mockDashboardData,
       loading: false,
       fetchDashboard: mockFetchDashboard,
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
-    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
   });
 
-  it('shows correct server counts', () => {
+  it('shows correct computer counts', () => {
     mockUseDashboardStore.mockReturnValue({
       data: mockDashboardData,
       loading: false,
       fetchDashboard: mockFetchDashboard,
     } as any);
     const { container } = render(<Dashboard onNavigate={mockOnNavigate} />);
-    // Verify running and stopped counts exist in the rendered output
     const text = container.textContent || '';
-    expect(text).toContain('3');
-    expect(text).toContain('2');
+    expect(text).toContain('Running1');
+    expect(text).toContain('Stopped1');
+    expect(text).toContain('Connected1');
   });
 
   it('renders log entries with level tags', () => {
@@ -117,7 +138,7 @@ describe('Dashboard', () => {
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
     expect(screen.getByText('Server started')).toBeInTheDocument();
-    expect(screen.getByText('Connection failed')).toBeInTheDocument();
+    expect(screen.getAllByText('Connection failed').length).toBeGreaterThan(0);
   });
 
   it('renders empty activity when no logs', () => {
@@ -130,7 +151,7 @@ describe('Dashboard', () => {
     expect(screen.getByText('No recent activity')).toBeInTheDocument();
   });
 
-  it('navigates instance-scoped cards to their Computer detail tabs', () => {
+  it('opens a selected Computer overview from the shortcut list', () => {
     mockUseDashboardStore.mockReturnValue({
       data: mockDashboardData,
       loading: false,
@@ -138,13 +159,9 @@ describe('Dashboard', () => {
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
 
-    fireEvent.click(screen.getByText('Connection'));
-    fireEvent.click(screen.getByText('MCP Servers'));
-    fireEvent.click(screen.getByText('Tools'));
+    fireEvent.click(screen.getAllByText('Open Details')[0]);
 
-    expect(mockOnNavigate).toHaveBeenNthCalledWith(1, 'computer-detail:connection');
-    expect(mockOnNavigate).toHaveBeenNthCalledWith(2, 'computer-detail:mcp');
-    expect(mockOnNavigate).toHaveBeenNthCalledWith(3, 'computer-detail:debug');
-    expect(mockOnNavigate).toHaveBeenCalledTimes(3);
+    expect(mockSelectInstance).toHaveBeenCalledWith('computer-a');
+    expect(mockOnNavigate).toHaveBeenCalledWith('computer-detail:overview');
   });
 });

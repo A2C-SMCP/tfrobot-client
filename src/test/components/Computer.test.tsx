@@ -64,6 +64,9 @@ vi.mock('@/components/LogViewer', () => ({
 vi.mock('@/components/Settings/RuntimeSettings', () => ({
   RuntimeSettings: () => <div data-testid="runtime-settings">RuntimeSettings</div>,
 }));
+vi.mock('@/components/Computer/ComputerOverview', () => ({
+  ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
+}));
 
 describe('Computer', () => {
   beforeEach(() => {
@@ -109,6 +112,7 @@ describe('Computer', () => {
 
     fireEvent.click(await screen.findByText('Open Details'));
 
+    expect(screen.getByText('Overview')).toBeInTheDocument();
     expect(screen.getByText('MCP Servers')).toBeInTheDocument();
     expect(screen.getByText('Input Variables')).toBeInTheDocument();
     expect(screen.getByText('Robot Connection')).toBeInTheDocument();
@@ -116,7 +120,7 @@ describe('Computer', () => {
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
     expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
-    expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
   });
 
   it('opens the selected second Computer with scoped detail tabs', async () => {
@@ -128,6 +132,8 @@ describe('Computer', () => {
     fireEvent.click(screen.getAllByText('Open Details')[1]);
 
     expect(screen.getByText('Second Computer')).toBeInTheDocument();
+    expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByText('MCP Servers'));
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');

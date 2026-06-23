@@ -53,15 +53,24 @@
     }
   },
   "dashboard": {
+    "overview": "概览",
+    "computers": "Computer",
     "connection": "连接状态",
     "mcpServers": "MCP 服务器",
     "tools": "工具",
     "runtimes": "运行时",
+    "issues": "问题",
+    "needsAttention": "需要处理",
+    "computerShortcuts": "Computer",
     "recentActivity": "最近活动",
     "total": "总计",
     "running": "运行中",
     "stopped": "已停止",
+    "runtimeAvailable": "可用",
+    "runtimeUnavailable": "不可用",
+    "recentWarnings": "最近警告和错误",
     "toolsAvailable": "个可用工具",
+    "noIssues": "暂无问题",
     "noActivity": "暂无最近活动"
   },
   "mcp": {

@@ -12,7 +12,7 @@ vi.mock('@/stores/themeStore', () => ({
 
 vi.mock('@/components/Dashboard', () => ({
   Dashboard: ({ onNavigate }: { onNavigate: (key: string) => void }) => (
-    <button onClick={() => onNavigate('computer-detail:connection')}>Open Computer Detail</button>
+    <button onClick={() => onNavigate('computer-detail:overview')}>Open Computer Detail</button>
   ),
 }));
 vi.mock('@/components/Computer', () => ({
@@ -43,7 +43,7 @@ describe('App', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Open Computer Detail'));
     });
-    expect(screen.getByText('Computer Detail View: connection')).toBeInTheDocument();
+    expect(screen.getByText('Computer Detail View: overview')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByText('Computer'));

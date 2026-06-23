@@ -8,14 +8,22 @@ export interface RuntimeInfo {
   available: boolean;
 }
 
-export interface DashboardData {
+export interface DashboardComputerSummary {
+  id: string;
+  name: string;
+  running: boolean;
   connected: boolean;
-  connection_url?: string;
+  mcp_server_count: number;
+  robot_name?: string;
   connection_profile?: string;
-  mcp_total: number;
-  mcp_running: number;
-  mcp_stopped: number;
-  tools_count: number;
+}
+
+export interface DashboardData {
+  computer_total: number;
+  computer_running: number;
+  computer_stopped: number;
+  computer_connected: number;
+  computers: DashboardComputerSummary[];
   recent_logs: LogEntry[];
   runtimes: RuntimeInfo[];
 }

@@ -19,6 +19,7 @@ import { LogViewer } from '@/components/LogViewer';
 import { RuntimeSettings } from '@/components/Settings/RuntimeSettings';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
+import { ComputerOverview } from './ComputerOverview';
 
 const { Title, Text } = Typography;
 
@@ -85,7 +86,7 @@ function ComputerCard({
   );
 }
 
-export function Computer({ initialView = 'list', initialTab = 'mcp' }: ComputerProps) {
+export function Computer({ initialView = 'list', initialTab = 'overview' }: ComputerProps) {
   const { t } = useTranslation();
   const { instances, loading, selectedInstanceId, fetchInstances, selectInstance } = useComputerStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
@@ -142,6 +143,7 @@ export function Computer({ initialView = 'list', initialTab = 'mcp' }: ComputerP
             activeKey={activeTab}
             onChange={(key) => setActiveTab(toComputerDetailTab(key))}
             items={[
+              { key: 'overview', label: <><DesktopOutlined /> {t('dashboard.overview')}</>, children: <ComputerOverview instanceId={selectedInstance.id} onOpenTab={setActiveTab} /> },
               { key: 'mcp', label: <><ApiOutlined /> {t('mcp.servers')}</>, children: <McpConfig instanceId={selectedInstance.id} /> },
               { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
               { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} /> },

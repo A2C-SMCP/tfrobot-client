@@ -53,15 +53,24 @@
     }
   },
   "dashboard": {
+    "overview": "Overview",
+    "computers": "Computers",
     "connection": "Connection",
     "mcpServers": "MCP Servers",
     "tools": "Tools",
     "runtimes": "Runtimes",
+    "issues": "Issues",
+    "needsAttention": "Needs Attention",
+    "computerShortcuts": "Computers",
     "recentActivity": "Recent Activity",
     "total": "Total",
     "running": "Running",
     "stopped": "Stopped",
+    "runtimeAvailable": "Available",
+    "runtimeUnavailable": "Unavailable",
+    "recentWarnings": "recent warnings and errors",
     "toolsAvailable": "tools available",
+    "noIssues": "No issues",
     "noActivity": "No recent activity"
   },
   "mcp": {

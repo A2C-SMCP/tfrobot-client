@@ -284,6 +284,7 @@ pub fn run() {
             commands::logs::clear_logs,
             // Dashboard
             commands::dashboard::get_dashboard_data,
+            commands::dashboard::get_computer_overview_data,
             // Settings
             commands::settings::get_settings,
             commands::settings::update_settings,
