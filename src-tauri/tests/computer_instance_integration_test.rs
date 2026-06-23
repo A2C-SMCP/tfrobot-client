@@ -11,7 +11,8 @@ use tfrobot_client_lib::commands::computer::{
 };
 use tfrobot_client_lib::commands::inputs::InputDefinition;
 use tfrobot_client_lib::commands::mcp;
-use tfrobot_client_lib::services::computer::ComputerInstance;
+use tfrobot_client_lib::services::computer::{ComputerInstance, RobotBindingMetadata};
+use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 
 const LEGACY_INSTANCE_ID: &str = "default";
 
@@ -24,11 +25,13 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         &state,
         CreateComputerInstanceRequest {
             name: "  Second Computer  ".to_string(),
+            description: Some("  Test description  ".to_string()),
         },
     )
     .await
     .unwrap();
     assert_eq!(created.name, "Second Computer");
+    assert_eq!(created.description.as_deref(), Some("Test description"));
     assert!(!created.running);
 
     let renamed = rename_computer_instance_core(
@@ -36,11 +39,13 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         RenameComputerInstanceRequest {
             id: created.id.clone(),
             name: "Renamed Computer".to_string(),
+            description: Some("Renamed description".to_string()),
         },
     )
     .await
     .unwrap();
     assert_eq!(renamed.name, "Renamed Computer");
+    assert_eq!(renamed.description.as_deref(), Some("Renamed description"));
 
     let list = list_computer_instances_core(&state).await.unwrap();
     assert_eq!(list.len(), 1);
@@ -65,6 +70,7 @@ async fn created_instances_use_uuid_based_ids() {
         &state,
         CreateComputerInstanceRequest {
             name: "First".to_string(),
+            description: None,
         },
     )
     .await
@@ -73,6 +79,7 @@ async fn created_instances_use_uuid_based_ids() {
         &state,
         CreateComputerInstanceRequest {
             name: "Second".to_string(),
+            description: None,
         },
     )
     .await
@@ -91,6 +98,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
         &state,
         CreateComputerInstanceRequest {
             name: "Source".to_string(),
+            description: Some("Source description".to_string()),
         },
     )
     .await
@@ -98,10 +106,34 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     state
         .config
         .update_computer_instance(&source.id, |instance| {
+            instance.robot_binding = Some(RobotBindingMetadata {
+                employee_id: 42,
+                robot_id: Some("robot-42".to_string()),
+                robot_account_id: Some(4200),
+                namespace: Some("test".to_string()),
+                robot_name: Some("Robot 42".to_string()),
+            });
             instance.input_values.insert(
                 "token".to_string(),
                 serde_json::Value::String("persisted-input".to_string()),
             );
+        })
+        .unwrap();
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "target-a".to_string(),
+            name: "Target A".to_string(),
+            url: "https://smcp.example.com".to_string(),
+            namespace: "/smcp".to_string(),
+            office_id: "office-a".to_string(),
+            computer_name: "computer-a".to_string(),
+            headers: std::collections::HashMap::from([(
+                "X-TF-Route".to_string(),
+                "route-a".to_string(),
+            )]),
+            auto_connect: true,
+            auto_reconnect: false,
         })
         .unwrap();
     start_computer_instance_core(&state, source.id.clone())
@@ -113,6 +145,9 @@ async fn duplicate_copies_configuration_without_runtime_state() {
         DuplicateComputerInstanceRequest {
             source_id: source.id.clone(),
             name: "Duplicate".to_string(),
+            description: Some("Duplicate description".to_string()),
+            copy_robot_binding: true,
+            connection_target_id: Some(target.id.clone()),
         },
     )
     .await
@@ -120,12 +155,33 @@ async fn duplicate_copies_configuration_without_runtime_state() {
 
     let duplicate_config = state.config.get_computer_instance(&duplicate.id).unwrap();
     assert_eq!(duplicate.name, "Duplicate");
+    assert_eq!(
+        duplicate.description.as_deref(),
+        Some("Duplicate description")
+    );
     assert_ne!(duplicate.id, source.id);
     assert_uuid_instance_id(&duplicate.id);
     assert_eq!(
         duplicate_config.input_values.get("token"),
         Some(&serde_json::Value::String("persisted-input".to_string()))
     );
+    assert_eq!(
+        duplicate_config
+            .robot_binding
+            .as_ref()
+            .and_then(|binding| binding.robot_name.as_deref()),
+        Some("Robot 42")
+    );
+    assert_eq!(duplicate_config.connection_profiles.len(), 1);
+    let profile = &duplicate_config.connection_profiles[0];
+    assert_eq!(profile.name, "Target A");
+    assert_eq!(profile.url, "https://smcp.example.com");
+    assert_eq!(profile.office_id, "office-a");
+    assert_eq!(
+        profile.headers.get("X-TF-Route").map(String::as_str),
+        Some("route-a")
+    );
+    assert!(!profile.auto_reconnect);
     assert!(!duplicate.running);
     assert!(!duplicate.connected);
     assert!(
@@ -147,6 +203,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         &state,
         CreateComputerInstanceRequest {
             name: "One".to_string(),
+            description: None,
         },
     )
     .await
@@ -155,6 +212,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         &state,
         CreateComputerInstanceRequest {
             name: "Two".to_string(),
+            description: None,
         },
     )
     .await
@@ -246,6 +304,7 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
         &state,
         CreateComputerInstanceRequest {
             name: "Second".to_string(),
+            description: None,
         },
     )
     .await
@@ -361,6 +420,7 @@ async fn blank_names_are_rejected_and_default_named_instance_is_not_special() {
         &state,
         CreateComputerInstanceRequest {
             name: "   ".to_string(),
+            description: None,
         },
     )
     .await

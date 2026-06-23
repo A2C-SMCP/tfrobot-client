@@ -1,6 +1,8 @@
+use crate::commands::connection::ConnectionProfile;
 use crate::services::computer::{
     ComputerInstance, ComputerInstanceId, ConnectionStateSummary, RobotBindingMetadata,
 };
+use crate::services::connection_targets::ManualSmcpTarget;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -9,6 +11,7 @@ use tauri::State;
 pub struct ComputerInstanceStatus {
     pub id: ComputerInstanceId,
     pub name: String,
+    pub description: Option<String>,
     pub running: bool,
     pub connected: bool,
     pub mcp_server_count: usize,
@@ -17,20 +20,28 @@ pub struct ComputerInstanceStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateComputerInstanceRequest {
     pub name: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenameComputerInstanceRequest {
     pub id: ComputerInstanceId,
     pub name: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DuplicateComputerInstanceRequest {
     pub source_id: ComputerInstanceId,
     pub name: String,
+    pub description: Option<String>,
+    pub copy_robot_binding: bool,
+    pub connection_target_id: Option<String>,
 }
 
 #[tauri::command]
@@ -115,6 +126,7 @@ pub async fn create_computer_instance_core(
     let instance = ComputerInstance {
         id: generate_instance_id(),
         name,
+        description: normalize_optional_text(request.description),
         mcp_servers: Vec::new(),
         inputs: Vec::new(),
         input_values: Default::default(),
@@ -149,7 +161,10 @@ pub async fn rename_computer_instance_core(
     let name = normalize_name(&request.name)?;
     let updated = state
         .config
-        .rename_computer_instance(&request.id, name)
+        .update_computer_instance(&request.id, |instance| {
+            instance.name = name;
+            instance.description = normalize_optional_text(request.description);
+        })
         .map_err(|error| error.to_string())?;
     let runtime = state
         .computer_registry
@@ -178,6 +193,18 @@ pub async fn duplicate_computer_instance_core(
         .map_err(|error| error.to_string())?;
     instance.id = generate_instance_id();
     instance.name = name;
+    instance.description = normalize_optional_text(request.description);
+    if !request.copy_robot_binding {
+        instance.robot_binding = None;
+    }
+    if let Some(target_id) = normalize_optional_text(request.connection_target_id) {
+        let target = state
+            .config
+            .get_manual_smcp_target(&target_id)
+            .map_err(|error| error.to_string())?;
+        let profile = connection_profile_from_manual_target(&target);
+        instance.connection_profiles = vec![profile];
+    }
 
     state
         .config
@@ -273,6 +300,7 @@ async fn status_from_instance(
     ComputerInstanceStatus {
         id: instance.id.clone(),
         name: instance.name.clone(),
+        description: instance.description.clone(),
         running: runtime.is_running().await,
         connected: runtime.is_connected().await,
         mcp_server_count: instance.mcp_servers.len(),
@@ -287,6 +315,31 @@ fn normalize_name(name: &str) -> Result<String, String> {
         return Err("Computer instance name cannot be empty".to_string());
     }
     Ok(name.to_string())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn connection_profile_from_manual_target(target: &ManualSmcpTarget) -> ConnectionProfile {
+    ConnectionProfile {
+        name: target.name.clone(),
+        url: target.url.clone(),
+        namespace: target.namespace.clone(),
+        office_id: target.office_id.clone(),
+        computer_name: target.computer_name.clone(),
+        api_key_ref: None,
+        headers: target.headers.clone(),
+        auto_connect: target.auto_connect,
+        auto_reconnect: target.auto_reconnect,
+    }
 }
 
 fn generate_instance_id() -> ComputerInstanceId {

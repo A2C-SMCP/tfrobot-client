@@ -1,12 +1,17 @@
-import { Button, Card, Col, Empty, Row, Skeleton, Space, Tabs, Tag, Typography } from 'antd';
+import { App, Button, Card, Col, Empty, Form, Input, Modal, Popconfirm, Row, Select, Skeleton, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   BugOutlined,
   CloudServerOutlined,
+  CopyOutlined,
   DesktopOutlined,
+  DeleteOutlined,
+  EditOutlined,
   FileTextOutlined,
   FormOutlined,
+  PlayCircleOutlined,
   SettingOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
@@ -18,6 +23,7 @@ import { DebugPanel } from '@/components/DebugPanel';
 import { LogViewer } from '@/components/LogViewer';
 import { RuntimeSettings } from '@/components/Settings/RuntimeSettings';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
+import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
 import { ComputerOverview } from './ComputerOverview';
 
@@ -37,18 +43,40 @@ interface ComputerProps {
 function ComputerCard({
   instance,
   onOpen,
+  onEdit,
+  onDuplicate,
+  onStart,
+  onStop,
+  onDelete,
+  loading,
 }: {
   instance: ComputerInstance;
   onOpen: () => void;
+  onEdit: () => void;
+  onDuplicate: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  loading: boolean;
 }) {
   const { t } = useTranslation();
+  const startStopLabel = instance.status === 'running' ? t('computer.stop') : t('computer.start');
+  const startStopIcon = instance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />;
+  const startStopColor = instance.status === 'running' ? '#fa8c16' : '#52c41a';
+  const startStopAction = instance.status === 'running' ? onStop : onStart;
 
   return (
     <Card
       title={
         <Space>
           <DesktopOutlined />
-          <span>{instance.name}</span>
+          <Button
+            type="link"
+            onClick={onOpen}
+            style={{ padding: 0, height: 'auto', fontWeight: 600 }}
+          >
+            {instance.name}
+          </Button>
         </Space>
       }
       extra={
@@ -56,41 +84,90 @@ function ComputerCard({
           {t(`computer.status.${instance.status}`)}
         </Tag>
       }
-      actions={[
-        <Button key="open" type="link" onClick={onOpen}>
-          {t('computer.openDetails')}
-        </Button>,
-      ]}
     >
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        <Space wrap>
-          <Tag color={instance.connectionStatus === 'connected' ? 'green' : 'default'}>
-            {t(`computer.connection.${instance.connectionStatus}`)}
-          </Tag>
-          <Tag icon={<ApiOutlined />}>
-            {t('computer.mcpServers', { count: instance.mcpServerCount })}
-          </Tag>
-        </Space>
-        <Text type="secondary">
-          {instance.robotName
-            ? t('computer.boundRobot', { name: instance.robotName })
-            : t('computer.noRobotBound')}
-        </Text>
-        {instance.connectionProfile && (
+      <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
+        <Space direction="vertical" size={8} style={{ flex: 1, minWidth: 0 }}>
+          <Text type="secondary" copyable>{instance.id}</Text>
+          {instance.description && <Text>{instance.description}</Text>}
+          <Space wrap>
+            <Tag color={instance.connectionStatus === 'connected' ? 'green' : 'default'}>
+              {t(`computer.connection.${instance.connectionStatus}`)}
+            </Tag>
+            <Tag icon={<ApiOutlined />}>
+              {t('computer.mcpServers', { count: instance.mcpServerCount })}
+            </Tag>
+          </Space>
           <Text type="secondary">
-            {t('computer.connectionProfile', { name: instance.connectionProfile })}
+            {instance.robotName
+              ? t('computer.boundRobot', { name: instance.robotName })
+              : t('computer.noRobotBound')}
           </Text>
-        )}
-      </Space>
+          {instance.connectionProfile && (
+            <Text type="secondary">
+              {t('computer.connectionProfile', { name: instance.connectionProfile })}
+            </Text>
+          )}
+        </Space>
+
+        <Space
+          direction="vertical"
+          size={6}
+          style={{ borderLeft: '1px solid #f0f0f0', paddingLeft: 12, justifyContent: 'center' }}
+        >
+          <Tooltip title={startStopLabel} placement="right">
+            <Button
+              aria-label={startStopLabel}
+              type="text"
+              icon={startStopIcon}
+              loading={loading}
+              style={{ color: startStopColor }}
+              onClick={startStopAction}
+            />
+          </Tooltip>
+          <Tooltip title={t('computer.edit')} placement="right">
+            <Button aria-label={t('computer.edit')} type="text" icon={<EditOutlined />} onClick={onEdit} />
+          </Tooltip>
+          <Tooltip title={t('computer.duplicate')} placement="right">
+            <Button aria-label={t('computer.duplicate')} type="text" icon={<CopyOutlined />} onClick={onDuplicate} />
+          </Tooltip>
+          <Tooltip title={t('computer.delete')} placement="right">
+            <Popconfirm title={t('computer.confirmDelete')} onConfirm={onDelete}>
+              <Button aria-label={t('computer.delete')} type="text" danger icon={<DeleteOutlined />} loading={loading} />
+            </Popconfirm>
+          </Tooltip>
+        </Space>
+      </div>
     </Card>
   );
 }
 
 export function Computer({ initialView = 'list', initialTab = 'overview' }: ComputerProps) {
   const { t } = useTranslation();
-  const { instances, loading, selectedInstanceId, fetchInstances, selectInstance } = useComputerStore();
+  const { message } = App.useApp();
+  const {
+    instances,
+    loading,
+    selectedInstanceId,
+    fetchInstances,
+    selectInstance,
+    createInstance,
+    updateInstance,
+    duplicateInstance,
+    deleteInstance,
+    startInstance,
+    stopInstance,
+  } = useComputerStore();
+  const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
   const [activeTab, setActiveTab] = useState<ComputerDetailTab>(initialTab);
+  const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
+  const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
+  const [form] = Form.useForm<{
+    name: string;
+    description?: string;
+    copyRobotBinding?: boolean;
+    connectionTargetId?: string;
+  }>();
 
   useEffect(() => {
     fetchInstances();
@@ -104,6 +181,141 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
 
+  const openCreateModal = () => {
+    setTargetInstance(null);
+    setModalMode('create');
+    form.setFieldsValue({ name: '', description: undefined });
+  };
+
+  const openEditModal = (instance: ComputerInstance) => {
+    setTargetInstance(instance);
+    setModalMode('edit');
+    form.setFieldsValue({ name: instance.name, description: instance.description });
+  };
+
+  const openDuplicateModal = (instance: ComputerInstance) => {
+    setTargetInstance(instance);
+    setModalMode('duplicate');
+    fetchManualTargets();
+    form.setFieldsValue({
+      name: `${instance.name} Copy`,
+      description: instance.description,
+      copyRobotBinding: true,
+      connectionTargetId: undefined,
+    });
+  };
+
+  const closeModal = () => {
+    setModalMode(null);
+    setTargetInstance(null);
+    form.resetFields();
+  };
+
+  const handleModalOk = async () => {
+    const values = await form.validateFields();
+    try {
+      if (modalMode === 'create') {
+        await createInstance({ name: values.name, description: values.description });
+        message.success(t('computer.messages.created'));
+      } else if (modalMode === 'edit' && targetInstance) {
+        await updateInstance(targetInstance.id, { name: values.name, description: values.description });
+        message.success(t('computer.messages.updated'));
+      } else if (modalMode === 'duplicate' && targetInstance) {
+        await duplicateInstance({
+          sourceId: targetInstance.id,
+          name: values.name,
+          description: values.description,
+          copyRobotBinding: values.copyRobotBinding ?? true,
+          connectionTargetId: values.connectionTargetId,
+        });
+        message.success(t('computer.messages.duplicated'));
+      }
+      closeModal();
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const handleDelete = async (instance: ComputerInstance) => {
+    try {
+      await deleteInstance(instance.id);
+      message.success(t('computer.messages.deleted'));
+      if (showDetail && selectedInstance.id === instance.id) {
+        setView('list');
+      }
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const handleStartStop = async (instance: ComputerInstance) => {
+    try {
+      if (instance.status === 'running') {
+        await stopInstance(instance.id);
+        message.success(t('computer.messages.stopped'));
+      } else {
+        await startInstance(instance.id);
+        message.success(t('computer.messages.started'));
+      }
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const modalTitle = modalMode === 'create'
+    ? t('computer.create')
+    : modalMode === 'edit'
+      ? t('computer.edit')
+      : t('computer.duplicate');
+
+  const renderComputerModal = () => (
+    <Modal
+      title={modalTitle}
+      open={modalMode !== null}
+      onCancel={closeModal}
+      onOk={() => handleModalOk()}
+      confirmLoading={loading}
+      forceRender
+      destroyOnHidden
+    >
+      <Form form={form} layout="vertical">
+        <Form.Item
+          name="name"
+          label={t('computer.form.name')}
+          rules={[
+            {
+              validator: (_, value) => value?.trim()
+                ? Promise.resolve()
+                : Promise.reject(new Error(t('computer.form.nameRequired'))),
+            },
+          ]}
+        >
+          <Input autoFocus />
+        </Form.Item>
+        <Form.Item name="description" label={t('computer.form.description')}>
+          <Input.TextArea rows={3} />
+        </Form.Item>
+        {modalMode === 'duplicate' && (
+          <>
+            <Form.Item name="copyRobotBinding" label={t('computer.form.copyRobotBinding')} valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item name="connectionTargetId" label={t('computer.form.connectionTarget')}>
+              <Select
+                allowClear
+                placeholder={t('computer.form.useOriginalConnectionConfig')}
+                options={manualTargets.map((target) => ({
+                  value: target.id,
+                  label: `${target.name} (${target.office_id})`,
+                }))}
+              />
+            </Form.Item>
+          </>
+        )}
+      </Form>
+    </Modal>
+  );
+
   if (loading && instances.length === 0) {
     return <Skeleton active paragraph={{ rows: 4 }} />;
   }
@@ -115,6 +327,10 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
             <div>
               <Title level={4} style={{ margin: 0 }}>{selectedInstance.name}</Title>
+              <Text type="secondary" copyable>{selectedInstance.id}</Text>
+              {selectedInstance.description && (
+                <Text style={{ display: 'block', marginTop: 8 }}>{selectedInstance.description}</Text>
+              )}
               <Space wrap style={{ marginTop: 8 }}>
                 <Tag color={statusColor[selectedInstance.status]}>
                   {t(`computer.status.${selectedInstance.status}`)}
@@ -134,9 +350,29 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
                 )}
               </Space>
             </div>
-            <Button onClick={() => setView('list')}>
-              {t('computer.backToList')}
-            </Button>
+            <Space wrap>
+              <Button onClick={() => setView('list')}>
+                {t('computer.backToList')}
+              </Button>
+              <Button icon={<EditOutlined />} onClick={() => openEditModal(selectedInstance)}>
+                {t('computer.edit')}
+              </Button>
+              <Button icon={<CopyOutlined />} onClick={() => openDuplicateModal(selectedInstance)}>
+                {t('computer.duplicate')}
+              </Button>
+              <Button
+                icon={selectedInstance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />}
+                loading={loading}
+                onClick={() => handleStartStop(selectedInstance)}
+              >
+                {selectedInstance.status === 'running' ? t('computer.stop') : t('computer.start')}
+              </Button>
+              <Popconfirm title={t('computer.confirmDelete')} onConfirm={() => handleDelete(selectedInstance)}>
+                <Button danger icon={<DeleteOutlined />} loading={loading}>
+                  {t('computer.delete')}
+                </Button>
+              </Popconfirm>
+            </Space>
           </div>
 
           <Tabs
@@ -154,6 +390,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
             ]}
           />
         </Space>
+        {renderComputerModal()}
       </div>
     );
   }
@@ -162,7 +399,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('computer.title')}</Title>
-        <Button type="primary" disabled>
+        <Button type="primary" onClick={openCreateModal}>
           {t('computer.create')}
         </Button>
       </div>
@@ -179,11 +416,18 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
                   selectInstance(instance.id);
                   setView('detail');
                 }}
+                onEdit={() => openEditModal(instance)}
+                onDuplicate={() => openDuplicateModal(instance)}
+                onStart={() => handleStartStop(instance)}
+                onStop={() => handleStartStop(instance)}
+                onDelete={() => handleDelete(instance)}
+                loading={loading}
               />
             </Col>
           ))}
         </Row>
       )}
+      {renderComputerModal()}
     </div>
   );
 }

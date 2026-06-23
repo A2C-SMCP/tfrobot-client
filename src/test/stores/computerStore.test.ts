@@ -1,0 +1,119 @@
+import { invoke } from '@tauri-apps/api/core';
+import { useComputerStore } from '@/stores/computerStore';
+
+const mockedInvoke = vi.mocked(invoke);
+
+const baseStatus = {
+  id: 'computer-a',
+  name: 'Computer A',
+  description: 'Primary',
+  running: false,
+  connected: false,
+  mcp_server_count: 1,
+  robot_binding: null,
+  connection: null,
+};
+
+function resetStore() {
+  useComputerStore.setState({
+    instances: [],
+    loading: false,
+    error: null,
+    selectedInstanceId: null,
+  });
+}
+
+describe('computerStore', () => {
+  beforeEach(() => {
+    resetStore();
+    mockedInvoke.mockReset();
+  });
+
+  it('creates a Computer and selects it', async () => {
+    mockedInvoke.mockResolvedValueOnce(baseStatus);
+
+    await useComputerStore.getState().createInstance({ name: ' Computer A ', description: ' Primary ' });
+
+    expect(mockedInvoke).toHaveBeenCalledWith('create_computer_instance', {
+      request: { name: 'Computer A', description: 'Primary' },
+    });
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      id: 'computer-a',
+      name: 'Computer A',
+      description: 'Primary',
+    });
+    expect(useComputerStore.getState().selectedInstanceId).toBe('computer-a');
+  });
+
+  it('updates a Computer name and description', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'Old', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 }],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockResolvedValueOnce({ ...baseStatus, name: 'New', description: null });
+
+    await useComputerStore.getState().updateInstance('computer-a', { name: 'New', description: '   ' });
+
+    expect(mockedInvoke).toHaveBeenCalledWith('rename_computer_instance', {
+      request: { id: 'computer-a', name: 'New', description: undefined },
+    });
+    expect(useComputerStore.getState().instances[0].name).toBe('New');
+    expect(useComputerStore.getState().instances[0].description).toBeUndefined();
+  });
+
+  it('duplicates a Computer with Robot binding and connection target options', async () => {
+    mockedInvoke.mockResolvedValueOnce({ ...baseStatus, id: 'computer-copy', name: 'Computer A Copy' });
+
+    await useComputerStore.getState().duplicateInstance({
+      sourceId: 'computer-a',
+      name: 'Computer A Copy',
+      description: 'Copy',
+      copyRobotBinding: true,
+      connectionTargetId: 'target-a',
+    });
+
+    expect(mockedInvoke).toHaveBeenCalledWith('duplicate_computer_instance', {
+      request: {
+        sourceId: 'computer-a',
+        name: 'Computer A Copy',
+        description: 'Copy',
+        copyRobotBinding: true,
+        connectionTargetId: 'target-a',
+      },
+    });
+    expect(useComputerStore.getState().selectedInstanceId).toBe('computer-copy');
+  });
+
+  it('deletes a selected Computer and falls back to the first remaining instance', async () => {
+    useComputerStore.setState({
+      instances: [
+        { id: 'computer-a', name: 'A', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 },
+        { id: 'computer-b', name: 'B', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 },
+      ],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockResolvedValueOnce(null);
+
+    await useComputerStore.getState().deleteInstance('computer-a');
+
+    expect(mockedInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
+    expect(useComputerStore.getState().instances.map((instance) => instance.id)).toEqual(['computer-b']);
+    expect(useComputerStore.getState().selectedInstanceId).toBe('computer-b');
+  });
+
+  it('starts and stops a Computer', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 }],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke
+      .mockResolvedValueOnce({ ...baseStatus, running: true })
+      .mockResolvedValueOnce({ ...baseStatus, running: false });
+
+    await useComputerStore.getState().startInstance('computer-a');
+    expect(useComputerStore.getState().instances[0].status).toBe('running');
+
+    await useComputerStore.getState().stopInstance('computer-a');
+    expect(useComputerStore.getState().instances[0].status).toBe('stopped');
+  });
+});

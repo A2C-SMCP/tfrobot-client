@@ -23,6 +23,7 @@ export interface ConnectionStateSummary {
 export interface ComputerInstanceStatus {
   id: string;
   name: string;
+  description?: string;
   running: boolean;
   connected: boolean;
   mcp_server_count: number;
@@ -33,11 +34,24 @@ export interface ComputerInstanceStatus {
 export interface ComputerInstance {
   id: string;
   name: string;
+  description?: string;
   status: ComputerStatus;
   connectionStatus: ComputerConnectionStatus;
   connectionProfile?: string;
   robotName?: string;
+  robotBinding?: RobotBindingMetadata | null;
   mcpServerCount: number;
+}
+
+export interface ComputerFormValues {
+  name: string;
+  description?: string;
+}
+
+export interface DuplicateComputerValues extends ComputerFormValues {
+  sourceId: string;
+  copyRobotBinding: boolean;
+  connectionTargetId?: string;
 }
 
 interface ComputerState {
@@ -46,6 +60,12 @@ interface ComputerState {
   error: string | null;
   selectedInstanceId: string | null;
   fetchInstances: () => Promise<void>;
+  createInstance: (values: ComputerFormValues) => Promise<ComputerInstance>;
+  updateInstance: (id: string, values: ComputerFormValues) => Promise<ComputerInstance>;
+  duplicateInstance: (values: DuplicateComputerValues) => Promise<ComputerInstance>;
+  deleteInstance: (id: string) => Promise<void>;
+  startInstance: (id: string) => Promise<ComputerInstance>;
+  stopInstance: (id: string) => Promise<ComputerInstance>;
   selectInstance: (id: string) => void;
   reset: () => void;
 }
@@ -61,12 +81,29 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
   return {
     id: status.id,
     name: status.name,
+    description: status.description ?? undefined,
     status: status.running ? 'running' : 'stopped',
     connectionStatus: status.connected ? 'connected' : 'disconnected',
     connectionProfile: status.connection?.profile_name,
     robotName: status.robot_binding?.robot_name,
+    robotBinding: status.robot_binding,
     mcpServerCount: status.mcp_server_count,
   };
+}
+
+function normalizeFormValues(values: ComputerFormValues): ComputerFormValues {
+  const name = values.name.trim();
+  const description = values.description?.trim();
+  return {
+    name,
+    description: description || undefined,
+  };
+}
+
+function upsertInstance(instances: ComputerInstance[], instance: ComputerInstance): ComputerInstance[] {
+  const index = instances.findIndex((item) => item.id === instance.id);
+  if (index === -1) return [...instances, instance];
+  return instances.map((item) => (item.id === instance.id ? instance : item));
 }
 
 export const useComputerStore = create<ComputerState>((set) => ({
@@ -86,6 +123,118 @@ export const useComputerStore = create<ComputerState>((set) => ({
       }));
     } catch (e) {
       set({ error: String(e), loading: false });
+    }
+  },
+
+  createInstance: async (values) => {
+    set({ loading: true, error: null });
+    try {
+      const created = toComputerInstance(await invoke<ComputerInstanceStatus>('create_computer_instance', {
+        request: normalizeFormValues(values),
+      }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, created),
+        selectedInstanceId: created.id,
+        loading: false,
+      }));
+      return created;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  updateInstance: async (id, values) => {
+    set({ loading: true, error: null });
+    try {
+      const updated = toComputerInstance(await invoke<ComputerInstanceStatus>('rename_computer_instance', {
+        request: { id, ...normalizeFormValues(values) },
+      }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, updated),
+        selectedInstanceId: state.selectedInstanceId,
+        loading: false,
+      }));
+      return updated;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  duplicateInstance: async (values) => {
+    set({ loading: true, error: null });
+    try {
+      const request = {
+        sourceId: values.sourceId,
+        ...normalizeFormValues(values),
+        copyRobotBinding: values.copyRobotBinding,
+        connectionTargetId: values.connectionTargetId || undefined,
+      };
+      const duplicated = toComputerInstance(await invoke<ComputerInstanceStatus>('duplicate_computer_instance', {
+        request,
+      }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, duplicated),
+        selectedInstanceId: duplicated.id,
+        loading: false,
+      }));
+      return duplicated;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  deleteInstance: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('delete_computer_instance', { id });
+      set((state) => {
+        const instances = state.instances.filter((instance) => instance.id !== id);
+        return {
+          instances,
+          selectedInstanceId: state.selectedInstanceId === id
+            ? instances[0]?.id ?? null
+            : state.selectedInstanceId,
+          loading: false,
+        };
+      });
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  startInstance: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      const started = toComputerInstance(await invoke<ComputerInstanceStatus>('start_computer_instance', { id }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, started),
+        selectedInstanceId: state.selectedInstanceId,
+        loading: false,
+      }));
+      return started;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  stopInstance: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      const stopped = toComputerInstance(await invoke<ComputerInstanceStatus>('stop_computer_instance', { id }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, stopped),
+        selectedInstanceId: state.selectedInstanceId,
+        loading: false,
+      }));
+      return stopped;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
     }
   },
 

@@ -36,6 +36,10 @@
     "backToList": "返回 Computer 列表",
     "start": "启动",
     "stop": "停止",
+    "edit": "编辑",
+    "duplicate": "复制",
+    "delete": "删除",
+    "confirmDelete": "删除这个 Computer？",
     "robotConnection": "Robot 连接",
     "noRobotBound": "未绑定 Robot",
     "boundRobot": "已绑定 Robot：{{name}}",
@@ -50,6 +54,22 @@
     "connection": {
       "connected": "已连接",
       "disconnected": "未连接"
+    },
+    "form": {
+      "name": "名称",
+      "nameRequired": "名称不能为空",
+      "description": "描述",
+      "copyRobotBinding": "复制 Robot 绑定",
+      "connectionTarget": "连接目标",
+      "useOriginalConnectionConfig": "使用原 Computer 连接配置"
+    },
+    "messages": {
+      "created": "Computer 已创建",
+      "updated": "Computer 已更新",
+      "duplicated": "Computer 已复制",
+      "deleted": "Computer 已删除",
+      "started": "Computer 已启动",
+      "stopped": "Computer 已停止"
     }
   },
   "dashboard": {

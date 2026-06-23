@@ -26,6 +26,8 @@ pub struct RobotBindingMetadata {
 pub struct ComputerInstance {
     pub id: ComputerInstanceId,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<MCPServerConfig>,
     #[serde(default)]
@@ -43,6 +45,7 @@ impl ComputerInstance {
         Self {
             id: id.into(),
             name: name.into(),
+            description: None,
             mcp_servers: Vec::new(),
             inputs: Vec::new(),
             input_values: HashMap::new(),

@@ -36,6 +36,10 @@
     "backToList": "Back to Computers",
     "start": "Start",
     "stop": "Stop",
+    "edit": "Edit",
+    "duplicate": "Duplicate",
+    "delete": "Delete",
+    "confirmDelete": "Delete this Computer?",
     "robotConnection": "Robot Connection",
     "noRobotBound": "No robot bound",
     "boundRobot": "Bound robot: {{name}}",
@@ -50,6 +54,22 @@
     "connection": {
       "connected": "Connected",
       "disconnected": "Disconnected"
+    },
+    "form": {
+      "name": "Name",
+      "nameRequired": "Name is required",
+      "description": "Description",
+      "copyRobotBinding": "Copy Robot binding",
+      "connectionTarget": "Connection target",
+      "useOriginalConnectionConfig": "Use original connection config"
+    },
+    "messages": {
+      "created": "Computer created",
+      "updated": "Computer updated",
+      "duplicated": "Computer duplicated",
+      "deleted": "Computer deleted",
+      "started": "Computer started",
+      "stopped": "Computer stopped"
     }
   },
   "dashboard": {
