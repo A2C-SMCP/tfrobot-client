@@ -20,8 +20,6 @@ const mockProfile: ConnectionProfile = {
   office_id: 'office-1',
   computer_name: 'my-pc',
   headers: {},
-  auto_connect: false,
-  auto_reconnect: true,
 };
 
 describe('connectionStore', () => {

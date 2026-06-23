@@ -212,7 +212,7 @@ describe('ManagerAccount', () => {
       const fetchEmployeesIfStale = vi.fn().mockResolvedValue(undefined);
       applyMock({ session: user, employees: [employee], fetchEmployeesIfStale });
 
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(fetchEmployeesIfStale).toHaveBeenCalled();
       expect(screen.getByText('bot-one')).toBeInTheDocument();
@@ -221,11 +221,21 @@ describe('ManagerAccount', () => {
 
     it('shows empty state when no employees', async () => {
       applyMock({ session: user, employees: [] });
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(
         screen.getByText('No digital employees are available for this account.'),
       ).toBeInTheDocument();
+    });
+
+    it('renders Manager robots as resources without connection actions when no Computer is scoped', () => {
+      applyMock({ session: user, employees: [employee] });
+
+      render(<EmployeeList />);
+
+      expect(screen.getByText('bot-one')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Connect/i })).not.toBeInTheDocument();
+      expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
     });
 
     it('invokes selectEmployeeAndConnect on connect click', async () => {
@@ -233,11 +243,11 @@ describe('ManagerAccount', () => {
       applyMock({ session: user, employees: [employee], selectEmployeeAndConnect });
       mockedInvoke.mockImplementationOnce(() => new Promise(() => {}));
 
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       fireEvent.click(screen.getByRole('button', { name: /Connect/i }));
       await waitFor(() => {
         expect(selectEmployeeAndConnect).toHaveBeenCalled();
-        expect(selectEmployeeAndConnect.mock.calls[0][0]).toBe(11);
+        expect(selectEmployeeAndConnect.mock.calls[0]).toEqual(['computer-a', 11]);
       });
     });
 
@@ -259,7 +269,7 @@ describe('ManagerAccount', () => {
         },
       });
 
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Disconnect/i })).toBeInTheDocument();
     });
@@ -269,7 +279,7 @@ describe('ManagerAccount', () => {
         session: user,
         employees: [{ ...employee, status: 'suspended' }],
       });
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     });
@@ -277,7 +287,7 @@ describe('ManagerAccount', () => {
     it('disables connect when robotAccountId is missing (cannot token-exchange)', async () => {
       const noAccount = { ...employee, robotAccountId: undefined };
       applyMock({ session: user, employees: [noAccount] });
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     });
@@ -288,7 +298,7 @@ describe('ManagerAccount', () => {
         employees: [employee],
         paymentRequired: { message: 'Balance low', redirectUrl: 'https://pay.example.com' },
       });
-      render(<EmployeeList />);
+      render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByText('Balance low')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Renew subscription' })).toBeInTheDocument();
@@ -324,7 +334,6 @@ describe('ManagerAccount', () => {
         employees: [],
       });
       render(<ManagerAccount />);
-      await waitForConnectionStatusFetch();
       expect(screen.getByText('Digital Employees')).toBeInTheDocument();
     });
   });

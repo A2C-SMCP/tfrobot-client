@@ -83,14 +83,6 @@ pub struct ConnectionProfile {
     pub api_key_ref: Option<String>,
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    #[serde(default = "default_true")]
-    pub auto_connect: bool,
-    #[serde(default = "default_true")]
-    pub auto_reconnect: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_namespace() -> String {
@@ -460,6 +452,9 @@ pub async fn connect_connection_target_core(
     if let Some(connection) = previous_connection {
         close_smcp_connection(connection).await;
     }
+    persist_manual_connection_target(state, instance_id, &target.id)
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = state.log_service.write_for_instance(
         "info",
         "connection",
@@ -467,6 +462,23 @@ pub async fn connect_connection_target_core(
         None,
         Some(instance_id),
     );
+    Ok(())
+}
+
+async fn persist_manual_connection_target(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
+) -> Result<(), crate::services::config::ConfigError> {
+    let updated = state
+        .config
+        .update_computer_instance(instance_id, |instance| {
+            instance.manual_connection_policy.target_id = Some(target_id.to_string());
+        })?;
+    state
+        .computer_registry
+        .update_runtime_instance(updated)
+        .await;
     Ok(())
 }
 

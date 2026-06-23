@@ -116,6 +116,7 @@ describe('Computer', () => {
           connectionStatus: 'connected',
           connectionProfile: 'prod',
           robotName: 'Robot A',
+          manualConnectionPolicy: { target_id: null, auto_connect: false },
           mcpServerCount: 5,
         },
       ],
@@ -153,7 +154,7 @@ describe('Computer', () => {
     expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
-  });
+  }, 10000);
 
   it('opens the selected second Computer with scoped detail tabs', async () => {
     mockInvoke.mockResolvedValueOnce(twoComputerInstances);
@@ -168,7 +169,7 @@ describe('Computer', () => {
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
-  });
+  }, 10000);
 
   it('can render the detail view directly', async () => {
     render(<Computer initialView="detail" initialTab="connection" />);

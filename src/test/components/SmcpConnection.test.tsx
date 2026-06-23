@@ -32,7 +32,7 @@ const connectedStatus = {
 };
 
 const mockProfiles = [
-  { name: 'prod', url: 'https://smcp.example.com', namespace: 'default', office_id: 'office-1', computer_name: 'my-pc', headers: {}, auto_connect: false, auto_reconnect: false },
+  { name: 'prod', url: 'https://smcp.example.com', namespace: 'default', office_id: 'office-1', computer_name: 'my-pc', headers: {} },
 ];
 
 describe('SmcpConnection', () => {

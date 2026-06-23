@@ -20,6 +20,11 @@ export interface ConnectionStateSummary {
   profile_name: string;
 }
 
+export interface ManualConnectionPolicy {
+  target_id?: string | null;
+  auto_connect: boolean;
+}
+
 export interface ComputerInstanceStatus {
   id: string;
   name: string;
@@ -28,6 +33,7 @@ export interface ComputerInstanceStatus {
   connected: boolean;
   mcp_server_count: number;
   robot_binding?: RobotBindingMetadata | null;
+  manual_connection_policy?: ManualConnectionPolicy;
   connection?: ConnectionStateSummary | null;
 }
 
@@ -40,6 +46,7 @@ export interface ComputerInstance {
   connectionProfile?: string;
   robotName?: string;
   robotBinding?: RobotBindingMetadata | null;
+  manualConnectionPolicy: ManualConnectionPolicy;
   mcpServerCount: number;
 }
 
@@ -66,6 +73,10 @@ interface ComputerState {
   deleteInstance: (id: string) => Promise<void>;
   startInstance: (id: string) => Promise<ComputerInstance>;
   stopInstance: (id: string) => Promise<ComputerInstance>;
+  updateManualConnectionPolicy: (
+    id: string,
+    policy: ManualConnectionPolicy,
+  ) => Promise<ComputerInstance>;
   selectInstance: (id: string) => void;
   reset: () => void;
 }
@@ -87,6 +98,7 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     connectionProfile: status.connection?.profile_name,
     robotName: status.robot_binding?.robot_name,
     robotBinding: status.robot_binding,
+    manualConnectionPolicy: status.manual_connection_policy ?? { target_id: null, auto_connect: false },
     mcpServerCount: status.mcp_server_count,
   };
 }
@@ -232,6 +244,28 @@ export const useComputerStore = create<ComputerState>((set) => ({
         loading: false,
       }));
       return stopped;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  updateManualConnectionPolicy: async (id, policy) => {
+    set({ loading: true, error: null });
+    try {
+      const updated = toComputerInstance(await invoke<ComputerInstanceStatus>('update_manual_connection_policy', {
+        request: {
+          id,
+          targetId: policy.target_id || null,
+          autoConnect: policy.auto_connect,
+        },
+      }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, updated),
+        selectedInstanceId: state.selectedInstanceId,
+        loading: false,
+      }));
+      return updated;
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;

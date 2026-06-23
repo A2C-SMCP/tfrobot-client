@@ -30,11 +30,14 @@ import {
   type ManagerError,
 } from '@/stores/managerStore';
 import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connectionStore';
-import { useComputerStore } from '@/stores/computerStore';
 
 const { Title, Text } = Typography;
 
 const DISCONNECTED_STATUS: ConnectionStatusInfo = { connected: false };
+
+interface EmployeeListProps {
+  instanceId?: string;
+}
 
 function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
@@ -66,7 +69,7 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
   return (emp.status ?? 'running') === 'running';
 }
 
-export function EmployeeList() {
+export function EmployeeList({ instanceId }: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -87,16 +90,16 @@ export function EmployeeList() {
   } = useManagerStore();
   const fetchConnectionStatus = useConnectionStore((s) => s.fetchStatus);
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
-  const selectedInstanceId = useComputerStore((s) => s.selectedInstanceId);
   const selectedConnectionStatus = useConnectionStore((s) =>
-    selectedInstanceId ? s.statuses[selectedInstanceId] : undefined,
+    instanceId ? s.statuses[instanceId] : undefined,
   );
+  const connectionEnabled = Boolean(instanceId);
   const connectionStatus = selectedConnectionStatus ?? DISCONNECTED_STATUS;
 
   const refreshConnectionStatus = useCallback(() => {
-    if (!selectedInstanceId) return Promise.resolve();
-    return fetchConnectionStatus(selectedInstanceId);
-  }, [fetchConnectionStatus, selectedInstanceId]);
+    if (!instanceId) return Promise.resolve();
+    return fetchConnectionStatus(instanceId);
+  }, [fetchConnectionStatus, instanceId]);
 
   useEffect(() => {
     refreshConnectionStatus().catch(() => {
@@ -139,9 +142,10 @@ export function EmployeeList() {
   }, [setOnline]);
 
   const handleConnect = async (employee: DigitalEmployeeBrief) => {
+    if (!instanceId) return;
     clearError();
     try {
-      const res = await selectEmployeeAndConnect(employee.id);
+      const res = await selectEmployeeAndConnect(instanceId, employee.id);
       if (res) {
         message.success(t('managerAccount.employees.connectSuccess', { name: res.name }));
         // 刷新连接状态，让 UI 上"已连接"标识立即生效
@@ -159,8 +163,8 @@ export function EmployeeList() {
 
   const handleDisconnectEmployee = async () => {
     try {
-      if (!selectedInstanceId) return;
-      await disconnectSmcp(selectedInstanceId);
+      if (!instanceId) return;
+      await disconnectSmcp(instanceId);
       message.success(t('managerAccount.employees.disconnectSuccess'));
     } catch (e) {
       message.error(String(e));
@@ -289,35 +293,39 @@ export function EmployeeList() {
               );
               return (
                 <List.Item
-                  actions={[
-                    isConnected ? (
-                      <Button
-                        key="disconnect"
-                        danger
-                        icon={<DisconnectOutlined />}
-                        loading={loading}
-                        onClick={handleDisconnectEmployee}
-                      >
-                        {t('managerAccount.employees.disconnect')}
-                      </Button>
-                    ) : noRobotAccount ? (
-                      <Tooltip
-                        key="connect"
-                        title={t('managerAccount.employees.noRobotAccount')}
-                      >
-                        <span>{connectButton}</span>
-                      </Tooltip>
-                    ) : (
-                      connectButton
-                    ),
-                  ]}
+                  actions={
+                    connectionEnabled
+                      ? [
+                          isConnected ? (
+                            <Button
+                              key="disconnect"
+                              danger
+                              icon={<DisconnectOutlined />}
+                              loading={loading}
+                              onClick={handleDisconnectEmployee}
+                            >
+                              {t('managerAccount.employees.disconnect')}
+                            </Button>
+                          ) : noRobotAccount ? (
+                            <Tooltip
+                              key="connect"
+                              title={t('managerAccount.employees.noRobotAccount')}
+                            >
+                              <span>{connectButton}</span>
+                            </Tooltip>
+                          ) : (
+                            connectButton
+                          ),
+                        ]
+                      : []
+                  }
                 >
                   <List.Item.Meta
                     avatar={<RobotOutlined style={{ fontSize: 24 }} />}
                     title={
                       <Space size={4} wrap>
                         <Text strong>{emp.name}</Text>
-                        {isConnected && (
+                        {connectionEnabled && isConnected && (
                           <Tag icon={<CheckCircleOutlined />} color="success">
                             {t('managerAccount.employees.connected')}
                           </Tag>

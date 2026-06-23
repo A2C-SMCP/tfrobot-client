@@ -673,9 +673,7 @@ async fn test_profiles_crud() {
             "namespace": "/smcp",
             "office_id": "office-1",
             "computer_name": "my-pc",
-            "headers": {},
-            "auto_connect": true,
-            "auto_reconnect": true
+            "headers": {}
         }))
         .unwrap();
 

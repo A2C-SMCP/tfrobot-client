@@ -13,10 +13,6 @@ pub struct ManualSmcpTarget {
     pub computer_name: String,
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    #[serde(default = "default_true")]
-    pub auto_connect: bool,
-    #[serde(default = "default_true")]
-    pub auto_reconnect: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -29,10 +25,6 @@ pub struct ConnectionTargetsConfig {
 
 fn default_schema_version() -> u32 {
     1
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_namespace() -> String {

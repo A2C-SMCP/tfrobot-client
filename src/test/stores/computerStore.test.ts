@@ -11,7 +11,15 @@ const baseStatus = {
   connected: false,
   mcp_server_count: 1,
   robot_binding: null,
+  manual_connection_policy: { target_id: null, auto_connect: false },
   connection: null,
+};
+
+const baseInstance = {
+  status: 'stopped' as const,
+  connectionStatus: 'disconnected' as const,
+  manualConnectionPolicy: { target_id: null, auto_connect: false },
+  mcpServerCount: 0,
 };
 
 function resetStore() {
@@ -47,7 +55,7 @@ describe('computerStore', () => {
 
   it('updates a Computer name and description', async () => {
     useComputerStore.setState({
-      instances: [{ id: 'computer-a', name: 'Old', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 }],
+      instances: [{ id: 'computer-a', name: 'Old', ...baseInstance }],
       selectedInstanceId: 'computer-a',
     });
     mockedInvoke.mockResolvedValueOnce({ ...baseStatus, name: 'New', description: null });
@@ -87,8 +95,8 @@ describe('computerStore', () => {
   it('deletes a selected Computer and falls back to the first remaining instance', async () => {
     useComputerStore.setState({
       instances: [
-        { id: 'computer-a', name: 'A', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 },
-        { id: 'computer-b', name: 'B', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 },
+        { id: 'computer-a', name: 'A', ...baseInstance },
+        { id: 'computer-b', name: 'B', ...baseInstance },
       ],
       selectedInstanceId: 'computer-a',
     });
@@ -103,7 +111,7 @@ describe('computerStore', () => {
 
   it('starts and stops a Computer', async () => {
     useComputerStore.setState({
-      instances: [{ id: 'computer-a', name: 'A', status: 'stopped', connectionStatus: 'disconnected', mcpServerCount: 0 }],
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
       selectedInstanceId: 'computer-a',
     });
     mockedInvoke
@@ -115,5 +123,29 @@ describe('computerStore', () => {
 
     await useComputerStore.getState().stopInstance('computer-a');
     expect(useComputerStore.getState().instances[0].status).toBe('stopped');
+  });
+
+  it('updates manual connection policy for a Computer', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      ...baseStatus,
+      manual_connection_policy: { target_id: 'target-a', auto_connect: true },
+    });
+
+    await useComputerStore.getState().updateManualConnectionPolicy('computer-a', {
+      target_id: 'target-a',
+      auto_connect: true,
+    });
+
+    expect(mockedInvoke).toHaveBeenCalledWith('update_manual_connection_policy', {
+      request: { id: 'computer-a', targetId: 'target-a', autoConnect: true },
+    });
+    expect(useComputerStore.getState().instances[0].manualConnectionPolicy).toEqual({
+      target_id: 'target-a',
+      auto_connect: true,
+    });
   });
 });

@@ -7,7 +7,11 @@ import { EmployeeList } from './EmployeeList';
 
 const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
 
-export function ManagerAccount() {
+interface ManagerAccountProps {
+  instanceId?: string;
+}
+
+export function ManagerAccount({ instanceId }: ManagerAccountProps) {
   const { session, pendingAccountSelection, handleAuthExpired } = useManagerStore();
 
   useEffect(() => {
@@ -21,7 +25,7 @@ export function ManagerAccount() {
     };
   }, [handleAuthExpired]);
 
-  if (session) return <EmployeeList />;
+  if (session) return <EmployeeList instanceId={instanceId} />;
   if (pendingAccountSelection) return <AccountSelection />;
   return <LoginForm />;
 }

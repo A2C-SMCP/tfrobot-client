@@ -154,8 +154,6 @@ const mockResponses: Record<string, unknown> = {
       office_id: 'office-a',
       computer_name: 'computer-a',
       headers: {},
-      auto_connect: true,
-      auto_reconnect: true,
     },
   ],
   list_profiles: [],

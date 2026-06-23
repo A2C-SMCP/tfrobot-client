@@ -302,8 +302,6 @@ impl ConfigService {
                     office_id: profile.office_id,
                     computer_name: profile.computer_name,
                     headers: profile.headers,
-                    auto_connect: profile.auto_connect,
-                    auto_reconnect: profile.auto_reconnect,
                 };
                 if !targets
                     .manual_smcp_targets
@@ -826,9 +824,7 @@ mod tests {
             "namespace": "default",
             "office_id": "office-1",
             "computer_name": "my-pc",
-            "headers": {},
-            "auto_connect": true,
-            "auto_reconnect": true
+            "headers": {}
         }))
         .unwrap();
 
@@ -849,9 +845,7 @@ mod tests {
             "namespace": "/smcp",
             "office_id": "office-1",
             "computer_name": "my-pc",
-            "headers": { "X-TF-Namespace": "ns" },
-            "auto_connect": true,
-            "auto_reconnect": true
+            "headers": { "X-TF-Namespace": "ns" }
         }))
         .unwrap();
         svc.save_profiles_for_instance(TEST_INSTANCE_ID, std::slice::from_ref(&profile))
@@ -891,8 +885,6 @@ mod tests {
             office_id: "office-1".to_string(),
             computer_name: "my-pc".to_string(),
             headers: headers_a,
-            auto_connect: true,
-            auto_reconnect: true,
         };
         let target_b = ManualSmcpTarget {
             headers: headers_b,

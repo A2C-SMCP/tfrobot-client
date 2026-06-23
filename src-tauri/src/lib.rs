@@ -266,6 +266,7 @@ pub fn run() {
             commands::computer::delete_computer_instance,
             commands::computer::start_computer_instance,
             commands::computer::stop_computer_instance,
+            commands::computer::update_manual_connection_policy,
             // Config import/export
             commands::config_io::detect_config_format,
             commands::config_io::import_config,

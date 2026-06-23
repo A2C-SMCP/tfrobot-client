@@ -16,8 +16,6 @@ const target: ManualSmcpTarget = {
   office_id: 'office-1',
   computer_name: 'my-pc',
   headers: { 'X-TF-Namespace': 'ns' },
-  auto_connect: true,
-  auto_reconnect: true,
 };
 
 function resetStores() {

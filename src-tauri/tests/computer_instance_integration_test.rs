@@ -132,8 +132,6 @@ async fn duplicate_copies_configuration_without_runtime_state() {
                 "X-TF-Route".to_string(),
                 "route-a".to_string(),
             )]),
-            auto_connect: true,
-            auto_reconnect: false,
         })
         .unwrap();
     start_computer_instance_core(&state, source.id.clone())
@@ -172,16 +170,13 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             .and_then(|binding| binding.robot_name.as_deref()),
         Some("Robot 42")
     );
-    assert_eq!(duplicate_config.connection_profiles.len(), 1);
-    let profile = &duplicate_config.connection_profiles[0];
-    assert_eq!(profile.name, "Target A");
-    assert_eq!(profile.url, "https://smcp.example.com");
-    assert_eq!(profile.office_id, "office-a");
     assert_eq!(
-        profile.headers.get("X-TF-Route").map(String::as_str),
-        Some("route-a")
+        duplicate_config
+            .manual_connection_policy
+            .target_id
+            .as_deref(),
+        Some(target.id.as_str())
     );
-    assert!(!profile.auto_reconnect);
     assert!(!duplicate.running);
     assert!(!duplicate.connected);
     assert!(

@@ -1,8 +1,8 @@
-use crate::commands::connection::ConnectionProfile;
+use crate::commands::connection::connect_connection_target_core;
 use crate::services::computer::{
-    ComputerInstance, ComputerInstanceId, ConnectionStateSummary, RobotBindingMetadata,
+    ComputerInstance, ComputerInstanceId, ConnectionStateSummary, ManualConnectionPolicy,
+    RobotBindingMetadata,
 };
-use crate::services::connection_targets::ManualSmcpTarget;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -16,6 +16,7 @@ pub struct ComputerInstanceStatus {
     pub connected: bool,
     pub mcp_server_count: usize,
     pub robot_binding: Option<RobotBindingMetadata>,
+    pub manual_connection_policy: ManualConnectionPolicy,
     pub connection: Option<ConnectionStateSummary>,
 }
 
@@ -42,6 +43,14 @@ pub struct DuplicateComputerInstanceRequest {
     pub description: Option<String>,
     pub copy_robot_binding: bool,
     pub connection_target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateManualConnectionPolicyRequest {
+    pub id: ComputerInstanceId,
+    pub target_id: Option<String>,
+    pub auto_connect: bool,
 }
 
 #[tauri::command]
@@ -131,6 +140,7 @@ pub async fn create_computer_instance_core(
         inputs: Vec::new(),
         input_values: Default::default(),
         connection_profiles: Vec::new(),
+        manual_connection_policy: ManualConnectionPolicy::default(),
         robot_binding: None,
     };
 
@@ -198,12 +208,11 @@ pub async fn duplicate_computer_instance_core(
         instance.robot_binding = None;
     }
     if let Some(target_id) = normalize_optional_text(request.connection_target_id) {
-        let target = state
+        state
             .config
             .get_manual_smcp_target(&target_id)
             .map_err(|error| error.to_string())?;
-        let profile = connection_profile_from_manual_target(&target);
-        instance.connection_profiles = vec![profile];
+        instance.manual_connection_policy.target_id = Some(target_id);
     }
 
     state
@@ -263,6 +272,19 @@ pub async fn start_computer_instance_core(
         .update_runtime_instance(instance.clone())
         .await;
     runtime.start().await?;
+    if instance.manual_connection_policy.auto_connect {
+        if let Some(target_id) = instance.manual_connection_policy.target_id.as_deref() {
+            if let Err(error) = connect_connection_target_core(state, &id, target_id).await {
+                let _ = state.log_service.write_for_instance(
+                    "warn",
+                    "connection",
+                    &format!("Auto connect failed: {error}"),
+                    None,
+                    Some(&id),
+                );
+            }
+        }
+    }
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -293,6 +315,43 @@ pub async fn stop_computer_instance_core(
     Ok(status_from_instance(&instance, &runtime).await)
 }
 
+#[tauri::command]
+pub async fn update_manual_connection_policy(
+    state: State<'_, AppState>,
+    request: UpdateManualConnectionPolicyRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    update_manual_connection_policy_core(&state, request).await
+}
+
+pub async fn update_manual_connection_policy_core(
+    state: &AppState,
+    request: UpdateManualConnectionPolicyRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    let target_id = normalize_optional_text(request.target_id);
+    if let Some(target_id) = target_id.as_deref() {
+        state
+            .config
+            .get_manual_smcp_target(target_id)
+            .map_err(|error| error.to_string())?;
+    }
+
+    let updated = state
+        .config
+        .update_computer_instance(&request.id, |instance| {
+            instance.manual_connection_policy = ManualConnectionPolicy {
+                target_id,
+                auto_connect: request.auto_connect,
+            };
+        })
+        .map_err(|error| error.to_string())?;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(updated.clone())
+        .await;
+
+    Ok(status_from_instance(&updated, &runtime).await)
+}
+
 async fn status_from_instance(
     instance: &ComputerInstance,
     runtime: &crate::services::computer::ComputerInstanceRuntime,
@@ -305,6 +364,7 @@ async fn status_from_instance(
         connected: runtime.is_connected().await,
         mcp_server_count: instance.mcp_servers.len(),
         robot_binding: instance.robot_binding.clone(),
+        manual_connection_policy: instance.manual_connection_policy.clone(),
         connection: runtime.connection_status().await,
     }
 }
@@ -326,20 +386,6 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(value)
         }
     })
-}
-
-fn connection_profile_from_manual_target(target: &ManualSmcpTarget) -> ConnectionProfile {
-    ConnectionProfile {
-        name: target.name.clone(),
-        url: target.url.clone(),
-        namespace: target.namespace.clone(),
-        office_id: target.office_id.clone(),
-        computer_name: target.computer_name.clone(),
-        api_key_ref: None,
-        headers: target.headers.clone(),
-        auto_connect: target.auto_connect,
-        auto_reconnect: target.auto_reconnect,
-    }
 }
 
 fn generate_instance_id() -> ComputerInstanceId {

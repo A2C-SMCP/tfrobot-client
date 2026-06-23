@@ -1,33 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   App,
   Alert,
   Button,
-  Card,
-  Descriptions,
   Modal,
   Popconfirm,
-  Select,
   Space,
   Table,
   Tabs,
-  Tag,
   Typography,
 } from 'antd';
 import {
   ApiOutlined,
-  CheckCircleOutlined,
   DeleteOutlined,
   EditOutlined,
-  LinkOutlined,
   PlusOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { ManagerAccount } from '@/components/ManagerAccount';
 import { ProfileForm } from '@/components/SmcpConnection/ProfileForm';
-import { useComputerStore } from '@/stores/computerStore';
-import { useConnectionStore } from '@/stores/connectionStore';
 import {
   useConnectionTargetStore,
   type ManualSmcpTarget,
@@ -44,8 +36,6 @@ function targetToProfile(target: ManualSmcpTarget): ConnectionProfile {
     office_id: target.office_id,
     computer_name: target.computer_name,
     headers: target.headers,
-    auto_connect: target.auto_connect,
-    auto_reconnect: target.auto_reconnect,
   };
 }
 
@@ -58,16 +48,12 @@ function profileToTarget(profile: ConnectionProfile, current?: ManualSmcpTarget)
     office_id: profile.office_id,
     computer_name: profile.computer_name,
     headers: profile.headers,
-    auto_connect: profile.auto_connect,
-    auto_reconnect: profile.auto_reconnect,
   };
 }
 
 export function RobotConnections() {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const { instances, selectedInstanceId, fetchInstances, selectInstance } = useComputerStore();
-  const { getStatus, fetchStatus } = useConnectionStore();
   const {
     manualTargets,
     loading,
@@ -75,27 +61,13 @@ export function RobotConnections() {
     fetchManualTargets,
     saveManualTarget,
     deleteManualTarget,
-    connectTarget,
   } = useConnectionTargetStore();
   const [formOpen, setFormOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<ManualSmcpTarget | undefined>();
 
   useEffect(() => {
-    fetchInstances();
     fetchManualTargets();
-  }, [fetchInstances, fetchManualTargets]);
-
-  useEffect(() => {
-    if (selectedInstanceId) {
-      fetchStatus(selectedInstanceId);
-    }
-  }, [fetchStatus, selectedInstanceId]);
-
-  const selectedComputer = useMemo(
-    () => instances.find((instance) => instance.id === selectedInstanceId),
-    [instances, selectedInstanceId],
-  );
-  const status = selectedInstanceId ? getStatus(selectedInstanceId) : { connected: false };
+  }, [fetchManualTargets]);
 
   const handleSubmit = async (profile: ConnectionProfile, apiKey?: string) => {
     await saveManualTarget(profileToTarget(profile, editingTarget), apiKey);
@@ -104,29 +76,12 @@ export function RobotConnections() {
     setFormOpen(false);
   };
 
-  const handleConnect = async (target: ManualSmcpTarget) => {
-    if (!selectedInstanceId) {
-      message.error('Select a Computer first');
-      return;
-    }
-    await connectTarget(selectedInstanceId, target.id);
-    message.success(t('connection.messages.connected'));
-  };
-
   const columns = [
     {
       title: t('connection.table.name'),
       dataIndex: 'name',
       key: 'name',
-      render: (name: string, record: ManualSmcpTarget) => {
-        const active = status.connected && status.target_id === record.id;
-        return (
-          <Space>
-            {active && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
-            <Text strong={active}>{name}</Text>
-          </Space>
-        );
-      },
+      render: (name: string) => <Text strong>{name}</Text>,
     },
     { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
     { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
@@ -134,24 +89,10 @@ export function RobotConnections() {
     {
       title: t('connection.table.actions'),
       key: 'actions',
-      width: 230,
+      width: 140,
       render: (_: unknown, record: ManualSmcpTarget) => {
-        const active = status.connected && status.target_id === record.id;
         return (
           <Space>
-            {active ? (
-              <Tag color="success">{t('connection.connected')}</Tag>
-            ) : (
-              <Button
-                size="small"
-                type="primary"
-                icon={<LinkOutlined />}
-                loading={loading}
-                onClick={() => handleConnect(record).catch((e) => message.error(String(e)))}
-              >
-                {t('connection.connect')}
-              </Button>
-            )}
             <Button
               type="text"
               size="small"
@@ -181,37 +122,10 @@ export function RobotConnections() {
         <Title level={3} style={{ marginBottom: 4 }}>
           Robot Connections
         </Title>
-        <Text type="secondary">Manage Manager Robots and local manual SMCP targets.</Text>
+        <Text type="secondary">
+          Manage Robot and SMCP connection resources available to Computer instances.
+        </Text>
       </div>
-
-      <Card size="small">
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Space wrap>
-            <Text strong>Target Computer</Text>
-            <Select
-              style={{ minWidth: 260 }}
-              value={selectedInstanceId ?? undefined}
-              placeholder="Select Computer"
-              onChange={selectInstance}
-              options={instances.map((instance) => ({ value: instance.id, label: instance.name }))}
-            />
-            <Button onClick={() => fetchInstances()}>{t('common.refresh')}</Button>
-          </Space>
-          {selectedComputer && (
-            <Descriptions size="small" column={3}>
-              <Descriptions.Item label="Status">
-                <Tag color={selectedComputer.connectionStatus === 'connected' ? 'green' : 'default'}>
-                  {selectedComputer.connectionStatus}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="Target">
-                {status.target_name ?? status.profile_name ?? '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Source">{status.source_type ?? '-'}</Descriptions.Item>
-            </Descriptions>
-          )}
-        </Space>
-      </Card>
 
       <Tabs
         items={[

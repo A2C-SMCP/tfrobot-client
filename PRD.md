@@ -273,8 +273,8 @@ Modal 或 Drawer 形式，根据类型动态渲染：
 | Computer 名称 | 在 Office 中显示的名称 | 明文 |
 | API Key | 认证密钥 | **Keychain 加密存储** |
 | 自定义 Headers | HTTP 请求头（键值对） | **敏感值存 Keychain** |
-| 自动连接 | 是否自动连接（默认 true） | 明文 |
-| 自动重连 | 是否自动重连（默认 true） | 明文 |
+
+自动连接不属于 Profile 本身，由每个 Computer 的连接策略独立管理。
 
 **Profile 列表**：
 - 显示所有已保存 Profile
@@ -695,8 +695,6 @@ interface ConnectionProfile {
   computer_name: string;
   api_key_ref?: string;     // Keychain 引用（不存实际值）
   headers?: Record<string, string>;
-  auto_connect: boolean;
-  auto_reconnect: boolean;
 }
 
 // 连接状态
@@ -855,7 +853,7 @@ interface AppSettings {
 
 ### 8.3 可靠性
 
-- SMCP 断线自动重连（configurable）
+- SMCP 连接状态可观测，断开后由用户或 Computer 级策略重新连接
 - MCP 服务器异常退出自动标记错误状态
 - 应用崩溃不丢失配置数据（配置即时持久化）
 

@@ -1,4 +1,4 @@
-import { Form, Button, Space, Switch, Card } from 'antd';
+import { Form, Button, Space, Card } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -19,8 +19,6 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
     if (!initialValues) {
       return {
         namespace: '/smcp',
-        auto_connect: true,
-        auto_reconnect: true,
         headers: [],
       };
     }
@@ -44,8 +42,6 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       office_id: values.office_id as string,
       computer_name: values.computer_name as string,
       headers,
-      auto_connect: values.auto_connect as boolean ?? true,
-      auto_reconnect: values.auto_reconnect as boolean ?? true,
     };
 
     await onSubmit(profile, values.api_key as string | undefined);
@@ -99,18 +95,6 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
           )}
         </Form.List>
       </Card>
-
-      <Space style={{ marginBottom: 16 }}>
-        <Form.Item name="auto_connect" valuePropName="checked" noStyle>
-          <Switch />
-        </Form.Item>
-        <span>{t('connection.form.autoConnect')}</span>
-
-        <Form.Item name="auto_reconnect" valuePropName="checked" noStyle style={{ marginLeft: 24 }}>
-          <Switch />
-        </Form.Item>
-        <span>{t('connection.form.autoReconnect')}</span>
-      </Space>
 
       <Form.Item>
         <Space>

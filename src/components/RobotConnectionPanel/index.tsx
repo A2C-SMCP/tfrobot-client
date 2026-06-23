@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { App, Button, Card, Descriptions, Select, Space, Tag, Typography } from 'antd';
-import { DisconnectOutlined, LinkOutlined, ReloadOutlined } from '@ant-design/icons';
+import { App, Button, Card, Descriptions, Select, Space, Switch, Tabs, Tag, Typography } from 'antd';
+import { ApiOutlined, DisconnectOutlined, LinkOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { ManagerAccount } from '@/components/ManagerAccount';
+import { useComputerStore } from '@/stores/computerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 
@@ -14,6 +16,7 @@ interface RobotConnectionPanelProps {
 export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  const { instances, updateManualConnectionPolicy } = useComputerStore();
   const { getStatus, fetchStatus, disconnect, loading: connectionLoading } = useConnectionStore();
   const {
     manualTargets,
@@ -22,11 +25,21 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
     loading: targetLoading,
   } = useConnectionTargetStore();
   const [selectedTargetId, setSelectedTargetId] = useState<string>();
+  const [autoConnect, setAutoConnect] = useState(false);
+  const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
     fetchStatus(instanceId);
     fetchManualTargets();
   }, [fetchStatus, fetchManualTargets, instanceId]);
+
+  useEffect(() => {
+    setSelectedTargetId(selectedInstance?.manualConnectionPolicy.target_id ?? undefined);
+    setAutoConnect(selectedInstance?.manualConnectionPolicy.auto_connect ?? false);
+  }, [
+    selectedInstance?.manualConnectionPolicy.auto_connect,
+    selectedInstance?.manualConnectionPolicy.target_id,
+  ]);
 
   const selectedTarget = useMemo(
     () => manualTargets.find((target) => target.id === selectedTargetId),
@@ -41,8 +54,20 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
 
   const handleConnect = async () => {
     if (!selectedTargetId) return;
+    await updateManualConnectionPolicy(instanceId, {
+      target_id: selectedTargetId,
+      auto_connect: autoConnect,
+    });
     await connectTarget(instanceId, selectedTargetId);
     message.success(t('connection.messages.connected'));
+  };
+
+  const handleSavePolicy = async () => {
+    await updateManualConnectionPolicy(instanceId, {
+      target_id: selectedTargetId ?? null,
+      auto_connect: autoConnect,
+    });
+    message.success(t('common.saved'));
   };
 
   return (
@@ -98,33 +123,68 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
         )}
       </Card>
 
-      <Card size="small" title="Change Connection Target">
-        <Space wrap>
-          <Select
-            style={{ minWidth: 320 }}
-            value={selectedTargetId}
-            placeholder="Select a Manual SMCP target"
-            onChange={setSelectedTargetId}
-            options={manualTargets.map((target) => ({
-              value: target.id,
-              label: `${target.name} (${target.office_id})`,
-            }))}
-          />
-          <Button onClick={() => fetchManualTargets()}>{t('common.refresh')}</Button>
-          <Button
-            type="primary"
-            icon={<LinkOutlined />}
-            disabled={!selectedTarget || status.connected}
-            loading={targetLoading}
-            onClick={() => handleConnect().catch((e) => message.error(String(e)))}
-          >
-            {t('connection.connect')}
-          </Button>
-          {status.connected && (
-            <Text type="secondary">Disconnect the current target before connecting another.</Text>
-          )}
-        </Space>
-      </Card>
+      <Tabs
+        items={[
+          {
+            key: 'manager',
+            label: (
+              <>
+                <UserOutlined /> Manager Robots
+              </>
+            ),
+            children: <ManagerAccount instanceId={instanceId} />,
+          },
+          {
+            key: 'manual',
+            label: (
+              <>
+                <ApiOutlined /> Manual SMCP
+              </>
+            ),
+            children: (
+              <Card size="small" title="Change Connection Target">
+                <Space wrap>
+                  <Select
+                    style={{ minWidth: 320 }}
+                    value={selectedTargetId}
+                    placeholder="Select a Manual SMCP target"
+                    onChange={setSelectedTargetId}
+                    options={manualTargets.map((target) => ({
+                      value: target.id,
+                      label: `${target.name} (${target.office_id})`,
+                    }))}
+                  />
+                  <Button onClick={() => fetchManualTargets()}>{t('common.refresh')}</Button>
+                  <Space>
+                    <Switch checked={autoConnect} onChange={setAutoConnect} />
+                    <Text>{t('connection.form.autoConnect')}</Text>
+                  </Space>
+                  <Button
+                    disabled={targetLoading}
+                    onClick={() => handleSavePolicy().catch((e) => message.error(String(e)))}
+                  >
+                    {t('common.save')}
+                  </Button>
+                  <Button
+                    type="primary"
+                    icon={<LinkOutlined />}
+                    disabled={!selectedTarget || status.connected}
+                    loading={targetLoading}
+                    onClick={() => handleConnect().catch((e) => message.error(String(e)))}
+                  >
+                    {t('connection.connect')}
+                  </Button>
+                  {status.connected && (
+                    <Text type="secondary">
+                      Disconnect the current target before connecting another.
+                    </Text>
+                  )}
+                </Space>
+              </Card>
+            ),
+          },
+        ]}
+      />
     </Space>
   );
 }

@@ -352,8 +352,6 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
                 computer_name: "new-computer".to_string(),
                 api_key_ref: None,
                 headers: HashMap::new(),
-                auto_connect: true,
-                auto_reconnect: true,
             }],
         )
         .expect("save profiles");
@@ -463,8 +461,6 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
                 computer_name: "target-computer".to_string(),
                 api_key_ref: None,
                 headers: HashMap::new(),
-                auto_connect: true,
-                auto_reconnect: true,
             }],
         )
         .expect("save target profile");
@@ -532,8 +528,6 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
                     computer_name: format!("{instance_id}-computer"),
                     api_key_ref: None,
                     headers: HashMap::new(),
-                    auto_connect: true,
-                    auto_reconnect: true,
                 }],
             )
             .expect("save profile");

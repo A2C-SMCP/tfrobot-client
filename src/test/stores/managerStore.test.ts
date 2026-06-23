@@ -7,7 +7,6 @@ import {
   type UserInfo,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
-import { useComputerStore } from '@/stores/computerStore';
 import { resetAllStores } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
@@ -45,7 +44,6 @@ const employeeB: DigitalEmployeeBrief = {
 describe('managerStore', () => {
   beforeEach(() => {
     resetAllStores();
-    useComputerStore.setState({ selectedInstanceId: 'computer-a' });
     mockedInvoke.mockReset();
   });
 
@@ -152,7 +150,7 @@ describe('managerStore', () => {
       mockedInvoke.mockResolvedValueOnce([]); // list_computer_instances
       mockedInvoke.mockResolvedValueOnce({ connected: true }); // get_connection_status
 
-      const ret = await useManagerStore.getState().selectEmployeeAndConnect(11);
+      const ret = await useManagerStore.getState().selectEmployeeAndConnect('computer-a', 11);
 
       expect(ret).toEqual({ name: 'bot-one' });
       expect(mockedInvoke).toHaveBeenCalledWith('manager_connect_smcp', {
@@ -178,7 +176,7 @@ describe('managerStore', () => {
       useManagerStore.setState({ employees: [employeeB] });
 
       await expect(
-        useManagerStore.getState().selectEmployeeAndConnect(employeeB.id),
+        useManagerStore.getState().selectEmployeeAndConnect('computer-a', employeeB.id),
       ).rejects.toMatchObject({ kind: 'invalid_response' });
       expect(mockedInvoke).not.toHaveBeenCalled();
     });
@@ -191,7 +189,7 @@ describe('managerStore', () => {
       mockedInvoke.mockRejectedValueOnce(err); // manager_connect_smcp
 
       await expect(
-        useManagerStore.getState().selectEmployeeAndConnect(11),
+        useManagerStore.getState().selectEmployeeAndConnect('computer-a', 11),
       ).rejects.toEqual(err);
       expect(useManagerStore.getState().paymentRequired).toEqual({
         message: 'Quota exceeded',
@@ -207,7 +205,7 @@ describe('managerStore', () => {
       mockedInvoke.mockRejectedValueOnce(err); // manager_connect_smcp
 
       await expect(
-        useManagerStore.getState().selectEmployeeAndConnect(11),
+        useManagerStore.getState().selectEmployeeAndConnect('computer-a', 11),
       ).rejects.toEqual(err);
       expect(useManagerStore.getState().error).toEqual(err);
     });
@@ -302,7 +300,7 @@ describe('managerStore', () => {
       mockedInvoke.mockResolvedValueOnce([employeeB]);
 
       await expect(
-        useManagerStore.getState().selectEmployeeAndConnect(employeeA.id),
+        useManagerStore.getState().selectEmployeeAndConnect('computer-a', employeeA.id),
       ).rejects.toEqual(err);
 
       // 列表已剔除不可见项 + refetch 校准
@@ -324,7 +322,7 @@ describe('managerStore', () => {
   });
 
   describe('logout', () => {
-    it('disconnects active SMCP connection before clearing session', async () => {
+    it('clears Manager session without disconnecting any Computer', async () => {
       useManagerStore.setState({ session: user, employees: [employeeA] });
       useConnectionStore.setState({
         ...useConnectionStore.getState(),
@@ -332,18 +330,12 @@ describe('managerStore', () => {
           'computer-a': { connected: true, profile_name: 'bot-one' },
         },
       });
-      // disconnect_smcp
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      // get_connection_status after disconnect
-      mockedInvoke.mockResolvedValueOnce({ connected: false });
-      // list_computer_instances after disconnect
-      mockedInvoke.mockResolvedValueOnce([]);
       // manager_logout
       mockedInvoke.mockResolvedValueOnce(undefined);
 
       await useManagerStore.getState().logout();
 
-      expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp', { instanceId: 'computer-a' });
+      expect(mockedInvoke).not.toHaveBeenCalledWith('disconnect_smcp', expect.anything());
       expect(mockedInvoke).toHaveBeenCalledWith('manager_logout');
       expect(useManagerStore.getState().session).toBeNull();
       expect(useManagerStore.getState().employees).toEqual([]);

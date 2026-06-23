@@ -11,8 +11,6 @@ export interface ConnectionProfile {
   computer_name: string;
   api_key_ref?: string;
   headers: Record<string, string>;
-  auto_connect: boolean;
-  auto_reconnect: boolean;
 }
 
 export interface ConnectionStatusInfo {

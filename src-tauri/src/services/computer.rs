@@ -22,6 +22,23 @@ pub struct RobotBindingMetadata {
     pub robot_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManualConnectionPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub auto_connect: bool,
+}
+
+impl Default for ManualConnectionPolicy {
+    fn default() -> Self {
+        Self {
+            target_id: None,
+            auto_connect: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputerInstance {
     pub id: ComputerInstanceId,
@@ -36,6 +53,8 @@ pub struct ComputerInstance {
     pub input_values: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub connection_profiles: Vec<ConnectionProfile>,
+    #[serde(default)]
+    pub manual_connection_policy: ManualConnectionPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_binding: Option<RobotBindingMetadata>,
 }
@@ -50,6 +69,7 @@ impl ComputerInstance {
             inputs: Vec::new(),
             input_values: HashMap::new(),
             connection_profiles: Vec::new(),
+            manual_connection_policy: ManualConnectionPolicy::default(),
             robot_binding: None,
         }
     }

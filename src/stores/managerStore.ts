@@ -120,7 +120,10 @@ interface ManagerState {
    * 并起后台预刷新重连。鉴权不再走静态 token / profile。
    * 返回 `{ name }`（已连接的机器人名）或 `null`（前置校验未过）。
    */
-  selectEmployeeAndConnect: (employeeId: number) => Promise<{ name: string } | null>;
+  selectEmployeeAndConnect: (
+    instanceId: string,
+    employeeId: number,
+  ) => Promise<{ name: string } | null>;
   logout: () => Promise<void>;
   handleAuthExpired: () => void;
   dismissPaymentRequired: () => void;
@@ -263,8 +266,16 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     }
   },
 
-  selectEmployeeAndConnect: async (employeeId) => {
+  selectEmployeeAndConnect: async (instanceId, employeeId) => {
     set({ loading: true, error: null, selectedEmployeeId: employeeId, paymentRequired: null });
+    if (!instanceId) {
+      const err: ManagerError = {
+        kind: 'invalid_response',
+        detail: 'No Computer instance selected',
+      };
+      set({ error: err, loading: false });
+      throw err;
+    }
     const employee = get().employees.find((e) => e.id === employeeId);
     if (!employee) {
       const err: ManagerError = { kind: 'not_found' };
@@ -277,15 +288,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       const err: ManagerError = {
         kind: 'invalid_response',
         detail: 'robotAccountId missing for this robot',
-      };
-      set({ error: err, loading: false });
-      throw err;
-    }
-    const instanceId = useComputerStore.getState().selectedInstanceId;
-    if (!instanceId) {
-      const err: ManagerError = {
-        kind: 'invalid_response',
-        detail: 'No Computer instance selected',
       };
       set({ error: err, loading: false });
       throw err;
@@ -336,14 +338,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   logout: async () => {
     set({ loading: true, error: null });
     try {
-      const instanceId = useComputerStore.getState().selectedInstanceId;
-      if (instanceId && useConnectionStore.getState().getStatus(instanceId).connected) {
-        try {
-          await useConnectionStore.getState().disconnect(instanceId);
-        } catch (e) {
-          warn(`manager: logout disconnect failed: ${String(e)}`);
-        }
-      }
       await invoke('manager_logout');
       info('manager: logout ok');
       set({

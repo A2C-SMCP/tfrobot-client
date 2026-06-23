@@ -11,8 +11,6 @@ export interface ManualSmcpTarget {
   office_id: string;
   computer_name: string;
   headers: Record<string, string>;
-  auto_connect: boolean;
-  auto_reconnect: boolean;
 }
 
 interface ConnectionTargetState {

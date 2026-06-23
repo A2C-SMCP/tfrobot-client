@@ -5,6 +5,7 @@
   "common": {
     "add": "Add",
     "save": "Save",
+    "saved": "Saved",
     "cancel": "Cancel",
     "delete": "Delete",
     "edit": "Edit",
@@ -238,8 +239,7 @@
       "apiKeyUnchanged": "Leave empty to keep current key",
       "headers": "Custom Headers",
       "addHeader": "Add Header",
-      "autoConnect": "Auto Connect",
-      "autoReconnect": "Auto Reconnect"
+      "autoConnect": "Auto Connect"
     },
     "messages": {
       "profileSaved": "Profile saved successfully",
