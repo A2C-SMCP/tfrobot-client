@@ -7,9 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub const DEFAULT_COMPUTER_INSTANCE_ID: &str = "default";
-pub const DEFAULT_COMPUTER_INSTANCE_NAME: &str = "Default Computer";
-
 pub type ComputerInstanceId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,10 +39,10 @@ pub struct ComputerInstance {
 }
 
 impl ComputerInstance {
-    pub fn default_instance() -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
-            id: DEFAULT_COMPUTER_INSTANCE_ID.to_string(),
-            name: DEFAULT_COMPUTER_INSTANCE_NAME.to_string(),
+            id: id.into(),
+            name: name.into(),
             mcp_servers: Vec::new(),
             inputs: Vec::new(),
             input_values: HashMap::new(),
@@ -59,8 +56,6 @@ impl ComputerInstance {
 pub struct ComputerInstancesConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    #[serde(default = "default_instance_id")]
-    pub default_instance_id: ComputerInstanceId,
     #[serde(default)]
     pub instances: Vec<ComputerInstance>,
 }
@@ -69,7 +64,6 @@ impl Default for ComputerInstancesConfig {
     fn default() -> Self {
         Self {
             schema_version: default_schema_version(),
-            default_instance_id: String::new(),
             instances: Vec::new(),
         }
     }
@@ -80,42 +74,11 @@ impl ComputerInstancesConfig {
         let mut seen = HashSet::new();
         self.instances
             .retain(|instance| !instance.id.trim().is_empty() && seen.insert(instance.id.clone()));
-
-        if !self.default_instance_id.is_empty()
-            && !self
-                .instances
-                .iter()
-                .any(|instance| instance.id == self.default_instance_id)
-        {
-            self.default_instance_id.clear();
-        }
-    }
-
-    #[cfg(test)]
-    pub fn ensure_default_instance(&mut self) {
-        self.normalize();
-    }
-
-    pub fn default_instance(&self) -> Option<&ComputerInstance> {
-        self.instances
-            .iter()
-            .find(|instance| instance.id == self.default_instance_id)
-    }
-
-    pub fn default_instance_mut(&mut self) -> Option<&mut ComputerInstance> {
-        let default_id = self.default_instance_id.clone();
-        self.instances
-            .iter_mut()
-            .find(|instance| instance.id == default_id)
     }
 }
 
 fn default_schema_version() -> u32 {
     1
-}
-
-fn default_instance_id() -> ComputerInstanceId {
-    DEFAULT_COMPUTER_INSTANCE_ID.to_string()
 }
 
 #[derive(Clone)]
@@ -222,7 +185,6 @@ impl From<&ConnectionState> for ConnectionStateSummary {
 }
 
 pub struct ComputerRegistry {
-    default_instance_id: RwLock<ComputerInstanceId>,
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
 }
 
@@ -238,43 +200,18 @@ impl ComputerRegistry {
         config.normalize();
         let mut runtimes = HashMap::new();
 
-        let default_instance_id = config.default_instance_id.clone();
-
         for instance in config.instances {
             let instance_id = instance.id.clone();
             let runtime = ComputerInstanceRuntime::new(instance);
             runtimes.insert(instance_id, runtime);
         }
 
-        let initial_runtime = runtimes
-            .get(&default_instance_id)
-            .cloned()
-            .or_else(|| runtimes.values().next().cloned());
+        let initial_runtime = runtimes.values().next().cloned();
         let registry = Self {
-            default_instance_id: RwLock::new(default_instance_id),
             runtimes: RwLock::new(runtimes),
         };
 
         (registry, initial_runtime)
-    }
-
-    pub fn from_config_with_default_runtime(
-        config: ComputerInstancesConfig,
-    ) -> (Self, ComputerInstanceRuntime) {
-        let (registry, runtime) = Self::from_config_with_initial_runtime(config);
-        (
-            registry,
-            runtime.expect("configured runtime should exist for legacy default-runtime tests"),
-        )
-    }
-
-    pub async fn default_runtime(&self) -> Option<ComputerInstanceRuntime> {
-        let default_instance_id = self.default_instance_id.read().await.clone();
-        let runtimes = self.runtimes.read().await;
-        runtimes
-            .get(&default_instance_id)
-            .cloned()
-            .or_else(|| runtimes.values().next().cloned())
     }
 
     pub async fn runtime(&self, id: &str) -> Option<ComputerInstanceRuntime> {
@@ -347,35 +284,29 @@ impl ComputerRegistry {
 mod tests {
     use super::*;
 
+    fn instance(id: &str, name: &str) -> ComputerInstance {
+        ComputerInstance::new(id, name)
+    }
+
     #[test]
     fn computer_instances_config_can_be_empty() {
         let config = ComputerInstancesConfig::default();
 
-        assert!(config.default_instance_id.is_empty());
         assert!(config.instances.is_empty());
-        assert!(config.default_instance().is_none());
     }
 
     #[test]
-    fn ensure_default_instance_removes_duplicate_ids() {
+    fn normalize_removes_duplicate_ids_and_empty_ids() {
         let mut config = ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "dup".to_string(),
             instances: vec![
-                ComputerInstance {
-                    id: "dup".to_string(),
-                    name: "First".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "dup".to_string(),
-                    name: "Second".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
+                instance("dup", "First"),
+                instance("dup", "Second"),
+                instance("", "Empty"),
             ],
         };
 
-        config.ensure_default_instance();
+        config.normalize();
 
         assert_eq!(config.instances.len(), 1);
         assert_eq!(config.instances[0].name, "First");
@@ -385,23 +316,11 @@ mod tests {
     async fn registry_builds_independent_runtimes() {
         let config = ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "one".to_string(),
-            instances: vec![
-                ComputerInstance {
-                    id: "one".to_string(),
-                    name: "One".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "two".to_string(),
-                    name: "Two".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-            ],
+            instances: vec![instance("one", "One"), instance("two", "Two")],
         };
 
         let registry = ComputerRegistry::from_config(config);
-        let one = registry.default_runtime().await.unwrap();
+        let one = registry.runtime("one").await.unwrap();
         let two = registry.runtime("two").await.unwrap();
 
         assert_eq!(one.instance.id, "one");
@@ -412,60 +331,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returned_default_runtime_matches_registry_runtime_with_duplicate_ids() {
+    async fn initial_runtime_is_some_when_any_instance_exists() {
         let config = ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "dup".to_string(),
-            instances: vec![
-                ComputerInstance {
-                    id: "dup".to_string(),
-                    name: "First".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "dup".to_string(),
-                    name: "Second".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-            ],
+            instances: vec![instance("one", "One"), instance("two", "Two")],
         };
 
-        let (registry, default_runtime) =
-            ComputerRegistry::from_config_with_default_runtime(config);
-        let registry_default = registry.default_runtime().await.unwrap();
+        let (_registry, initial_runtime) =
+            ComputerRegistry::from_config_with_initial_runtime(config);
 
-        assert_eq!(default_runtime.instance.name, "First");
-        assert!(Arc::ptr_eq(
-            &default_runtime.manager,
-            &registry_default.manager
+        assert!(matches!(
+            initial_runtime.map(|runtime| runtime.instance.id),
+            Some(id) if id == "one" || id == "two"
         ));
-        assert!(Arc::ptr_eq(
-            &default_runtime.inputs,
-            &registry_default.inputs
-        ));
-        assert!(Arc::ptr_eq(
-            &default_runtime.connection,
-            &registry_default.connection
-        ));
+    }
+
+    #[tokio::test]
+    async fn initial_runtime_is_none_when_registry_is_empty() {
+        let (_registry, initial_runtime) =
+            ComputerRegistry::from_config_with_initial_runtime(ComputerInstancesConfig::default());
+
+        assert!(initial_runtime.is_none());
     }
 
     #[tokio::test]
     async fn runtime_start_stop_only_changes_target_instance() {
         let config = ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "one".to_string(),
-            instances: vec![
-                ComputerInstance {
-                    id: "one".to_string(),
-                    name: "One".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "two".to_string(),
-                    name: "Two".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-            ],
+            instances: vec![instance("one", "One"), instance("two", "Two")],
         };
         let registry = ComputerRegistry::from_config(config);
 
@@ -482,22 +375,13 @@ mod tests {
     async fn update_runtime_instance_preserves_runtime_handles() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "one".to_string(),
-            instances: vec![ComputerInstance {
-                id: "one".to_string(),
-                name: "One".to_string(),
-                ..ComputerInstance::default_instance()
-            }],
+            instances: vec![instance("one", "One")],
         });
 
         let before = registry.runtime("one").await.unwrap();
         registry.start_runtime("one").await.unwrap();
         let after = registry
-            .update_runtime_instance(ComputerInstance {
-                id: "one".to_string(),
-                name: "Renamed".to_string(),
-                ..ComputerInstance::default_instance()
-            })
+            .update_runtime_instance(instance("one", "Renamed"))
             .await;
 
         assert_eq!(after.instance.name, "Renamed");
@@ -511,19 +395,7 @@ mod tests {
     async fn remove_runtime_allows_any_configured_instance() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "one".to_string(),
-            instances: vec![
-                ComputerInstance {
-                    id: "one".to_string(),
-                    name: "One".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "two".to_string(),
-                    name: "Two".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-            ],
+            instances: vec![instance("one", "One"), instance("two", "Two")],
         });
 
         let removed_one = registry.remove_runtime("one").await.unwrap();
@@ -539,19 +411,7 @@ mod tests {
     async fn removed_running_runtime_can_be_shutdown_without_affecting_others() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "one".to_string(),
-            instances: vec![
-                ComputerInstance {
-                    id: "one".to_string(),
-                    name: "One".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-                ComputerInstance {
-                    id: "two".to_string(),
-                    name: "Two".to_string(),
-                    ..ComputerInstance::default_instance()
-                },
-            ],
+            instances: vec![instance("one", "One"), instance("two", "Two")],
         });
         registry.start_runtime("one").await.unwrap();
         registry.start_runtime("two").await.unwrap();

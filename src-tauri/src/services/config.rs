@@ -29,17 +29,6 @@ impl ConfigService {
 
     // --- MCP Server Configs ---
 
-    pub fn load_configs(&self) -> Result<Vec<MCPServerConfig>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for MCP configs".to_string(),
-            ));
-        }
-        self.load_configs_for_instance(instance_id)
-    }
-
     pub fn load_configs_for_instance(
         &self,
         instance_id: &str,
@@ -61,30 +50,6 @@ impl ConfigService {
         self.update_computer_instance(instance_id, |instance| {
             instance.mcp_servers = configs.to_vec();
         })
-    }
-
-    pub fn save_configs(&self, configs: &[MCPServerConfig]) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for MCP configs".to_string(),
-            ));
-        }
-        self.save_configs_for_instance(instance_id, configs)
-            .map(|_| ())
-    }
-
-    pub fn add_config(&self, config: MCPServerConfig) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for MCP configs".to_string(),
-            ));
-        }
-        self.add_config_for_instance(instance_id, config)
-            .map(|_| ())
     }
 
     pub fn add_config_for_instance(
@@ -113,30 +78,7 @@ impl ConfigService {
         self.save_configs_for_instance(instance_id, &configs)
     }
 
-    pub fn remove_config(&self, name: &str) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for MCP configs".to_string(),
-            ));
-        }
-        self.remove_config_for_instance(instance_id, name)
-            .map(|_| ())
-    }
-
     // --- Input Definitions ---
-
-    pub fn load_inputs(&self) -> Result<Vec<InputDefinition>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for inputs".to_string(),
-            ));
-        }
-        self.load_inputs_for_instance(instance_id)
-    }
 
     pub fn load_inputs_for_instance(
         &self,
@@ -161,30 +103,7 @@ impl ConfigService {
         })
     }
 
-    pub fn save_inputs(&self, inputs: &[InputDefinition]) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for inputs".to_string(),
-            ));
-        }
-        self.save_inputs_for_instance(instance_id, inputs)
-            .map(|_| ())
-    }
-
     // --- Input Values ---
-
-    pub fn load_input_values(&self) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for input values".to_string(),
-            ));
-        }
-        self.load_input_values_for_instance(instance_id)
-    }
 
     pub fn load_input_values_for_instance(
         &self,
@@ -199,21 +118,6 @@ impl ConfigService {
             .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
-    pub fn save_input_values(
-        &self,
-        values: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for input values".to_string(),
-            ));
-        }
-        self.save_input_values_for_instance(instance_id, values)
-            .map(|_| ())
-    }
-
     pub fn save_input_values_for_instance(
         &self,
         instance_id: &str,
@@ -225,17 +129,6 @@ impl ConfigService {
     }
 
     // --- Connection Profiles ---
-
-    pub fn load_profiles(&self) -> Result<Vec<ConnectionProfile>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for connection profiles".to_string(),
-            ));
-        }
-        self.load_profiles_for_instance(instance_id)
-    }
 
     pub fn load_profiles_for_instance(
         &self,
@@ -258,18 +151,6 @@ impl ConfigService {
         self.update_computer_instance(instance_id, |instance| {
             instance.connection_profiles = profiles.to_vec();
         })
-    }
-
-    pub fn save_profiles(&self, profiles: &[ConnectionProfile]) -> Result<(), ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let instance_id = instances.default_instance_id.as_str();
-        if instance_id.is_empty() {
-            return Err(ConfigError::InvalidOperation(
-                "instance_id is required for connection profiles".to_string(),
-            ));
-        }
-        self.save_profiles_for_instance(instance_id, profiles)
-            .map(|_| ())
     }
 
     // --- Computer Instances ---
@@ -540,17 +421,15 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::computer::DEFAULT_COMPUTER_INSTANCE_ID;
     use tempfile::tempdir;
+
+    const TEST_INSTANCE_ID: &str = "computer-a";
 
     fn setup() -> (ConfigService, tempfile::TempDir) {
         let tmp = tempdir().unwrap();
         let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
-        svc.add_computer_instance(ComputerInstance::default_instance())
+        svc.add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer"))
             .unwrap();
-        let mut instances = svc.load_computer_instances().unwrap();
-        instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
-        svc.save_computer_instances(&instances).unwrap();
         (svc, tmp)
     }
 
@@ -565,7 +444,7 @@ mod tests {
     #[test]
     fn test_load_empty_configs() {
         let (svc, _tmp) = setup();
-        let configs = svc.load_configs().unwrap();
+        let configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert!(configs.is_empty());
     }
 
@@ -575,7 +454,6 @@ mod tests {
         let instances = svc.load_computer_instances().unwrap();
 
         assert!(instances.instances.is_empty());
-        assert!(instances.default_instance_id.is_empty());
     }
 
     #[test]
@@ -592,8 +470,9 @@ mod tests {
         }))
         .unwrap();
 
-        svc.save_configs(std::slice::from_ref(&config)).unwrap();
-        let loaded = svc.load_configs().unwrap();
+        svc.save_configs_for_instance(TEST_INSTANCE_ID, std::slice::from_ref(&config))
+            .unwrap();
+        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name(), "test-server");
     }
@@ -635,7 +514,6 @@ mod tests {
 
         let loaded = svc.load_computer_instances().unwrap();
 
-        assert!(loaded.default_instance_id.is_empty());
         assert!(loaded.instances.is_empty());
     }
 
@@ -656,19 +534,18 @@ mod tests {
         .unwrap();
         let instances = ComputerInstancesConfig {
             schema_version: 1,
-            default_instance_id: "first".to_string(),
             instances: vec![
                 ComputerInstance {
                     id: "first".to_string(),
                     name: "First".to_string(),
                     mcp_servers: vec![first_config],
-                    ..ComputerInstance::default_instance()
+                    ..ComputerInstance::new("", "")
                 },
                 ComputerInstance {
                     id: "second".to_string(),
                     name: "Second".to_string(),
                     mcp_servers: vec![second_config],
-                    ..ComputerInstance::default_instance()
+                    ..ComputerInstance::new("", "")
                 },
             ],
         };
@@ -677,10 +554,12 @@ mod tests {
         let loaded = svc.load_computer_instances().unwrap();
 
         assert_eq!(loaded.instances.len(), 2);
-        assert_eq!(
-            loaded.default_instance().unwrap().mcp_servers[0].name(),
-            "first-server"
-        );
+        let first = loaded
+            .instances
+            .iter()
+            .find(|instance| instance.id == "first")
+            .unwrap();
+        assert_eq!(first.mcp_servers[0].name(), "first-server");
         let second = loaded
             .instances
             .iter()
@@ -695,7 +574,7 @@ mod tests {
         let instance = ComputerInstance {
             id: "second".to_string(),
             name: "Second".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         };
 
         svc.add_computer_instance(instance).unwrap();
@@ -718,7 +597,7 @@ mod tests {
         let instance = ComputerInstance {
             id: "dup".to_string(),
             name: "Duplicate".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         };
 
         svc.add_computer_instance(instance.clone()).unwrap();
@@ -728,17 +607,13 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_default_named_computer_instance_succeeds() {
+    fn test_remove_legacy_default_id_computer_instance_succeeds() {
         let (svc, _tmp) = setup();
 
-        let removed = svc
-            .remove_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
-            .unwrap();
+        let removed = svc.remove_computer_instance(TEST_INSTANCE_ID).unwrap();
 
-        assert_eq!(removed.id, DEFAULT_COMPUTER_INSTANCE_ID);
-        assert!(svc
-            .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
-            .is_err());
+        assert_eq!(removed.id, TEST_INSTANCE_ID);
+        assert!(svc.get_computer_instance(TEST_INSTANCE_ID).is_err());
     }
 
     #[test]
@@ -755,8 +630,9 @@ mod tests {
         }))
         .unwrap();
 
-        svc.add_config(config).unwrap();
-        let loaded = svc.load_configs().unwrap();
+        svc.add_config_for_instance(TEST_INSTANCE_ID, config)
+            .unwrap();
+        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name(), "added-server");
     }
@@ -777,10 +653,12 @@ mod tests {
         }))
         .unwrap();
 
-        svc.add_config(config1).unwrap();
-        svc.add_config(config2).unwrap();
+        svc.add_config_for_instance(TEST_INSTANCE_ID, config1)
+            .unwrap();
+        svc.add_config_for_instance(TEST_INSTANCE_ID, config2)
+            .unwrap();
 
-        let loaded = svc.load_configs().unwrap();
+        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name(), "dup-server");
         // Verify content was actually replaced (command: "node" → "python")
@@ -802,7 +680,7 @@ mod tests {
         svc.add_computer_instance(ComputerInstance {
             id: "second".to_string(),
             name: "Second".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         })
         .unwrap();
 
@@ -819,18 +697,16 @@ mod tests {
         }))
         .unwrap();
 
-        svc.add_config_for_instance(DEFAULT_COMPUTER_INSTANCE_ID, first_config)
+        svc.add_config_for_instance(TEST_INSTANCE_ID, first_config)
             .unwrap();
         svc.add_config_for_instance("second", second_config)
             .unwrap();
 
-        let default_configs = svc
-            .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
-            .unwrap();
+        let first_configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         let second_configs = svc.load_configs_for_instance("second").unwrap();
 
-        assert_eq!(default_configs.len(), 1);
-        assert_eq!(default_configs[0].name(), "first-server");
+        assert_eq!(first_configs.len(), 1);
+        assert_eq!(first_configs[0].name(), "first-server");
         assert_eq!(second_configs.len(), 1);
         assert_eq!(second_configs[0].name(), "second-server");
     }
@@ -845,17 +721,19 @@ mod tests {
         }))
         .unwrap();
 
-        svc.add_config(config).unwrap();
-        svc.remove_config("to-remove").unwrap();
+        svc.add_config_for_instance(TEST_INSTANCE_ID, config)
+            .unwrap();
+        svc.remove_config_for_instance(TEST_INSTANCE_ID, "to-remove")
+            .unwrap();
 
-        let loaded = svc.load_configs().unwrap();
+        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert!(loaded.is_empty());
     }
 
     #[test]
     fn test_remove_nonexistent_config_returns_error() {
         let (svc, _tmp) = setup();
-        let result = svc.remove_config("nonexistent");
+        let result = svc.remove_config_for_instance(TEST_INSTANCE_ID, "nonexistent");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -864,7 +742,7 @@ mod tests {
     fn test_load_corrupted_json_file() {
         let (svc, tmp) = setup();
         std::fs::write(tmp.path().join("computer_instances.json"), "not json").unwrap();
-        let result = svc.load_configs();
+        let result = svc.load_configs_for_instance(TEST_INSTANCE_ID);
         assert!(result.is_err());
     }
 
@@ -874,7 +752,6 @@ mod tests {
         std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
         let instances = svc.load_computer_instances().unwrap();
         assert!(instances.instances.is_empty());
-        assert!(instances.default_instance_id.is_empty());
     }
 
     // --- Input Definitions ---
@@ -882,7 +759,7 @@ mod tests {
     #[test]
     fn test_load_empty_inputs() {
         let (svc, _tmp) = setup();
-        let inputs = svc.load_inputs().unwrap();
+        let inputs = svc.load_inputs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert!(inputs.is_empty());
     }
 
@@ -897,8 +774,9 @@ mod tests {
         }))
         .unwrap();
 
-        svc.save_inputs(&[input]).unwrap();
-        let loaded = svc.load_inputs().unwrap();
+        svc.save_inputs_for_instance(TEST_INSTANCE_ID, &[input])
+            .unwrap();
+        let loaded = svc.load_inputs_for_instance(TEST_INSTANCE_ID).unwrap();
         assert_eq!(loaded.len(), 1);
     }
 
@@ -907,7 +785,9 @@ mod tests {
     #[test]
     fn test_load_empty_input_values() {
         let (svc, _tmp) = setup();
-        let values = svc.load_input_values().unwrap();
+        let values = svc
+            .load_input_values_for_instance(TEST_INSTANCE_ID)
+            .unwrap();
         assert!(values.is_empty());
     }
 
@@ -918,8 +798,11 @@ mod tests {
         values.insert("key1".to_string(), serde_json::json!("value1"));
         values.insert("key2".to_string(), serde_json::json!(42));
 
-        svc.save_input_values(&values).unwrap();
-        let loaded = svc.load_input_values().unwrap();
+        svc.save_input_values_for_instance(TEST_INSTANCE_ID, &values)
+            .unwrap();
+        let loaded = svc
+            .load_input_values_for_instance(TEST_INSTANCE_ID)
+            .unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded["key1"], serde_json::json!("value1"));
         assert_eq!(loaded["key2"], serde_json::json!(42));
@@ -930,7 +813,7 @@ mod tests {
     #[test]
     fn test_load_empty_profiles() {
         let (svc, _tmp) = setup();
-        let profiles = svc.load_profiles().unwrap();
+        let profiles = svc.load_profiles_for_instance(TEST_INSTANCE_ID).unwrap();
         assert!(profiles.is_empty());
     }
 
@@ -949,8 +832,9 @@ mod tests {
         }))
         .unwrap();
 
-        svc.save_profiles(&[profile]).unwrap();
-        let loaded = svc.load_profiles().unwrap();
+        svc.save_profiles_for_instance(TEST_INSTANCE_ID, &[profile])
+            .unwrap();
+        let loaded = svc.load_profiles_for_instance(TEST_INSTANCE_ID).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "prod");
         assert_eq!(loaded[0].url, "https://smcp.example.com");
@@ -970,11 +854,8 @@ mod tests {
             "auto_reconnect": true
         }))
         .unwrap();
-        svc.save_profiles_for_instance(
-            DEFAULT_COMPUTER_INSTANCE_ID,
-            std::slice::from_ref(&profile),
-        )
-        .unwrap();
+        svc.save_profiles_for_instance(TEST_INSTANCE_ID, std::slice::from_ref(&profile))
+            .unwrap();
 
         let migrated = svc.migrate_legacy_profiles_to_manual_targets().unwrap();
         let targets = svc.list_manual_smcp_targets().unwrap();
@@ -1042,7 +923,7 @@ mod tests {
             "server_parameters": { "command": "node", "args": [], "env": {} }
         }))
         .unwrap();
-        let result = svc.add_config(config);
+        let result = svc.add_config_for_instance(TEST_INSTANCE_ID, config);
         assert!(result.is_err());
     }
 }

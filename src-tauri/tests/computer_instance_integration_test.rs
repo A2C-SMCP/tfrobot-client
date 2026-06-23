@@ -11,7 +11,9 @@ use tfrobot_client_lib::commands::computer::{
 };
 use tfrobot_client_lib::commands::inputs::InputDefinition;
 use tfrobot_client_lib::commands::mcp;
-use tfrobot_client_lib::services::computer::{ComputerInstance, DEFAULT_COMPUTER_INSTANCE_ID};
+use tfrobot_client_lib::services::computer::ComputerInstance;
+
+const LEGACY_INSTANCE_ID: &str = "default";
 
 #[tokio::test]
 async fn command_core_creates_renames_lists_and_deletes_instance() {
@@ -27,7 +29,6 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     .await
     .unwrap();
     assert_eq!(created.name, "Second Computer");
-    assert!(!created.is_default);
     assert!(!created.running);
 
     let renamed = rename_computer_instance_core(
@@ -43,7 +44,6 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
 
     let list = list_computer_instances_core(&state).await.unwrap();
     assert_eq!(list.len(), 1);
-    assert!(!list.iter().any(|instance| instance.is_default));
     assert!(list
         .iter()
         .any(|instance| instance.id == created.id && instance.name == "Renamed Computer"));
@@ -193,78 +193,45 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         .await
         .unwrap();
     assert!(state.computer_registry.runtime(&two.id).await.is_none());
-    assert!(state.computer_registry.default_runtime().await.is_some());
 }
 
 #[tokio::test]
-async fn list_marks_only_configured_default_instance() {
+async fn legacy_default_id_instance_is_a_normal_instance() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     state
         .config
-        .add_computer_instance(ComputerInstance::default_instance())
+        .add_computer_instance(ComputerInstance::new(LEGACY_INSTANCE_ID, "Legacy Computer"))
         .unwrap();
-    let mut instances = state.config.load_computer_instances().unwrap();
-    instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
-    state.config.save_computer_instances(&instances).unwrap();
-    let second = create_computer_instance_core(
-        &state,
-        CreateComputerInstanceRequest {
-            name: "Second".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let list = list_computer_instances_core(&state).await.unwrap();
-
-    let default = list
-        .iter()
-        .find(|instance| instance.id == DEFAULT_COMPUTER_INSTANCE_ID)
-        .unwrap();
-    let second = list
-        .iter()
-        .find(|instance| instance.id == second.id)
-        .unwrap();
-    assert!(default.is_default);
-    assert!(!second.is_default);
-}
-
-#[tokio::test]
-async fn default_instance_status_is_preserved_across_status_and_lifecycle_commands() {
-    let dir = TempDir::new().unwrap();
-    let state = create_test_app_state(dir.path());
-    state
-        .config
-        .add_computer_instance(ComputerInstance::default_instance())
-        .unwrap();
-    let mut instances = state.config.load_computer_instances().unwrap();
-    instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
-    state.config.save_computer_instances(&instances).unwrap();
     state
         .computer_registry
         .upsert_runtime(
             state
                 .config
-                .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+                .get_computer_instance(LEGACY_INSTANCE_ID)
                 .unwrap(),
         )
         .await;
 
-    let status =
-        get_computer_instance_status_core(&state, DEFAULT_COMPUTER_INSTANCE_ID.to_string())
-            .await
-            .unwrap();
-    let started = start_computer_instance_core(&state, DEFAULT_COMPUTER_INSTANCE_ID.to_string())
+    let list = list_computer_instances_core(&state).await.unwrap();
+    assert!(list
+        .iter()
+        .any(|instance| instance.id == LEGACY_INSTANCE_ID && instance.name == "Legacy Computer"));
+
+    let status = get_computer_instance_status_core(&state, LEGACY_INSTANCE_ID.to_string())
         .await
         .unwrap();
-    let stopped = stop_computer_instance_core(&state, DEFAULT_COMPUTER_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(&state, LEGACY_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let stopped = stop_computer_instance_core(&state, LEGACY_INSTANCE_ID.to_string())
         .await
         .unwrap();
 
-    assert!(status.is_default);
-    assert!(started.is_default);
-    assert!(stopped.is_default);
+    assert_eq!(status.id, LEGACY_INSTANCE_ID);
+    assert!(!status.running);
+    assert!(started.running);
+    assert!(!stopped.running);
 }
 
 #[tokio::test]
@@ -273,7 +240,7 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
     let state = create_test_app_state(dir.path());
     state
         .config
-        .add_computer_instance(ComputerInstance::default_instance())
+        .add_computer_instance(ComputerInstance::new(LEGACY_INSTANCE_ID, "Legacy Computer"))
         .unwrap();
     let second = create_computer_instance_core(
         &state,
@@ -286,7 +253,7 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
 
     mcp::add_mcp_server_core(
         &state,
-        DEFAULT_COMPUTER_INSTANCE_ID,
+        LEGACY_INSTANCE_ID,
         common::echo_server_config("default-only"),
     )
     .await
@@ -301,7 +268,7 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
     state
         .config
         .save_inputs_for_instance(
-            DEFAULT_COMPUTER_INSTANCE_ID,
+            LEGACY_INSTANCE_ID,
             &[InputDefinition::PromptString {
                 id: "token".to_string(),
                 label: "Default token".to_string(),
@@ -327,7 +294,7 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
     state
         .config
         .save_input_values_for_instance(
-            DEFAULT_COMPUTER_INSTANCE_ID,
+            LEGACY_INSTANCE_ID,
             &std::collections::HashMap::from([(
                 "token".to_string(),
                 serde_json::Value::String("default-secret".to_string()),
@@ -345,18 +312,18 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
         )
         .unwrap();
 
-    let default_servers = mcp::get_mcp_servers_core(&state, DEFAULT_COMPUTER_INSTANCE_ID)
+    let default_servers = mcp::get_mcp_servers_core(&state, LEGACY_INSTANCE_ID)
         .await
         .unwrap();
     let second_servers = mcp::get_mcp_servers_core(&state, &second.id).await.unwrap();
     let default_inputs = state
         .config
-        .load_inputs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .load_inputs_for_instance(LEGACY_INSTANCE_ID)
         .unwrap();
     let second_inputs = state.config.load_inputs_for_instance(&second.id).unwrap();
     let default_values = state
         .config
-        .load_input_values_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .load_input_values_for_instance(LEGACY_INSTANCE_ID)
         .unwrap();
     let second_values = state
         .config

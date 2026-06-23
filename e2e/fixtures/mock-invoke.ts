@@ -3,9 +3,8 @@ import { Page } from '@playwright/test';
 const mockResponses: Record<string, unknown> = {
   list_computer_instances: [
     {
-      id: 'default',
-      name: 'Default Computer',
-      is_default: true,
+      id: 'computer-a',
+      name: 'Computer A',
       running: true,
       connected: false,
       mcp_server_count: 1,
@@ -15,7 +14,6 @@ const mockResponses: Record<string, unknown> = {
     {
       id: 'computer-b',
       name: 'Second Computer',
-      is_default: false,
       running: true,
       connected: false,
       mcp_server_count: 1,
@@ -30,9 +28,9 @@ const mockResponses: Record<string, unknown> = {
     },
   ],
   get_mcp_servers_by_instance: {
-    default: [
+    'computer-a': [
       {
-        name: 'default-stdio-server',
+        name: 'computer-a-stdio-server',
         running: false,
         disabled: false,
         status_message: 'Stopped',

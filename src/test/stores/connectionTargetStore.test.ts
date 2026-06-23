@@ -94,7 +94,6 @@ describe('connectionTargetStore', () => {
       {
         id: 'computer-a',
         name: 'Computer A',
-        is_default: true,
         running: true,
         connected: true,
         mcp_server_count: 0,

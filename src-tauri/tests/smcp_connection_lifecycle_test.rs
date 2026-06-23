@@ -38,7 +38,7 @@ async fn create_test_runtime(state: &AppState) -> ComputerInstanceRuntime {
         .add_computer_instance(ComputerInstance {
             id: TEST_INSTANCE_ID.to_string(),
             name: "Test Computer".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         })
         .unwrap();
     state
@@ -401,7 +401,7 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
         .add_computer_instance(ComputerInstance {
             id: other_instance_id.to_string(),
             name: "Other Computer".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         })
         .unwrap();
     let other_runtime = state
@@ -505,7 +505,7 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
         .add_computer_instance(ComputerInstance {
             id: other_instance_id.to_string(),
             name: "Other Computer".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new("", "")
         })
         .unwrap();
     let other_runtime = state

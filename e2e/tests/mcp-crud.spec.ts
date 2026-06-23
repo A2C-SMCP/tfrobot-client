@@ -9,13 +9,13 @@ test.describe('MCP Server CRUD', () => {
     await page.getByText('Open Details').first().click();
   });
 
-  test('displays default Computer server list with test server', async ({ page }) => {
-    await expect(page.getByText('default-stdio-server')).toBeVisible();
+  test('displays first Computer server list with test server', async ({ page }) => {
+    await expect(page.getByText('computer-a-stdio-server')).toBeVisible();
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({
         cmd: 'get_mcp_servers',
-        args: { instanceId: 'default' },
+        args: { instanceId: 'computer-a' },
       }));
   });
 
@@ -45,7 +45,7 @@ test.describe('MCP Server CRUD', () => {
 
     await expect(page.getByText('Robot B')).toBeVisible();
     await expect(page.getByText('second-stdio-server')).toBeVisible();
-    await expect(page.getByText('default-stdio-server')).not.toBeVisible();
+    await expect(page.getByText('computer-a-stdio-server')).not.toBeVisible();
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({

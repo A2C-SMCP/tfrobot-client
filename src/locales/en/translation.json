@@ -30,7 +30,6 @@
   },
   "computer": {
     "title": "Computer",
-    "defaultName": "Default Computer",
     "create": "Create Computer",
     "empty": "No Computer instances",
     "openDetails": "Open Details",

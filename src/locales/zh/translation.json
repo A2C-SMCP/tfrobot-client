@@ -30,7 +30,6 @@
   },
   "computer": {
     "title": "Computer",
-    "defaultName": "默认 Computer",
     "create": "创建 Computer",
     "empty": "暂无 Computer 实例",
     "openDetails": "进入详情",

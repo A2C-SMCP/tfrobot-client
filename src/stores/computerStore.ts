@@ -23,7 +23,6 @@ export interface ConnectionStateSummary {
 export interface ComputerInstanceStatus {
   id: string;
   name: string;
-  is_default: boolean;
   running: boolean;
   connected: boolean;
   mcp_server_count: number;
@@ -34,7 +33,6 @@ export interface ComputerInstanceStatus {
 export interface ComputerInstance {
   id: string;
   name: string;
-  isDefault: boolean;
   status: ComputerStatus;
   connectionStatus: ComputerConnectionStatus;
   connectionProfile?: string;
@@ -63,7 +61,6 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
   return {
     id: status.id,
     name: status.name,
-    isDefault: status.is_default,
     status: status.running ? 'running' : 'stopped',
     connectionStatus: status.connected ? 'connected' : 'disconnected',
     connectionProfile: status.connection?.profile_name,

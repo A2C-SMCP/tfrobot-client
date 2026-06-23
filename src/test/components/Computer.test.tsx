@@ -8,9 +8,8 @@ const mockInvoke = vi.mocked(invoke);
 
 const mockComputerInstances = [
   {
-    id: 'default',
+    id: 'computer-a',
     name: 'prod',
-    is_default: true,
     running: true,
     connected: true,
     mcp_server_count: 5,
@@ -28,16 +27,14 @@ const mockComputerInstances = [
 const twoComputerInstances = [
   {
     ...mockComputerInstances[0],
-    id: 'default',
-    name: 'Default Computer',
-    is_default: true,
+    id: 'computer-a',
+    name: 'Computer A',
     mcp_server_count: 1,
   },
   {
     ...mockComputerInstances[0],
     id: 'computer-b',
     name: 'Second Computer',
-    is_default: false,
     connected: false,
     mcp_server_count: 2,
     connection: null,
@@ -80,9 +77,8 @@ describe('Computer', () => {
     useComputerStore.setState({
       instances: [
         {
-          id: 'default',
+          id: 'computer-a',
           name: 'prod',
-          isDefault: true,
           status: 'running',
           connectionStatus: 'connected',
           connectionProfile: 'prod',
@@ -120,7 +116,7 @@ describe('Computer', () => {
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
     expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
-    expect(screen.getByTestId('mcp-config')).toHaveTextContent('default');
+    expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-a');
   });
 
   it('opens the selected second Computer with scoped detail tabs', async () => {
@@ -142,7 +138,7 @@ describe('Computer', () => {
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
     expect(screen.getByText('Back to Computers')).toBeInTheDocument();
-    expect(screen.getByTestId('robot-connection-panel')).toHaveTextContent('default');
+    expect(screen.getByTestId('robot-connection-panel')).toHaveTextContent('computer-a');
   });
 
   it('keeps detail tabs reachable from loaded Computer instances', async () => {
@@ -150,7 +146,7 @@ describe('Computer', () => {
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
     expect(screen.getByText('Back to Computers')).toBeInTheDocument();
-    expect(screen.getByTestId('debug-panel')).toHaveTextContent('default');
+    expect(screen.getByTestId('debug-panel')).toHaveTextContent('computer-a');
   });
 
   it('can return from detail to list', async () => {

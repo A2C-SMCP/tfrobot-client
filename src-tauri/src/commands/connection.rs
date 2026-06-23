@@ -1,4 +1,4 @@
-use crate::services::computer::{RobotBindingMetadata, DEFAULT_COMPUTER_INSTANCE_ID};
+use crate::services::computer::RobotBindingMetadata;
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
 use crate::services::manager_client::{ExchangedToken, ManagerClient, ManagerError};
@@ -1131,7 +1131,7 @@ fn legacy_profile_keychain_id(profile_name: &str) -> String {
 }
 
 fn can_migrate_legacy_profile_key(instance_id: &str) -> bool {
-    instance_id == DEFAULT_COMPUTER_INSTANCE_ID
+    instance_id == "default"
 }
 
 fn load_profile_api_key(
@@ -1225,8 +1225,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profile_key_migration_is_limited_to_default_instance() {
-        assert!(can_migrate_legacy_profile_key(DEFAULT_COMPUTER_INSTANCE_ID));
+    fn legacy_profile_key_migration_is_limited_to_legacy_default_id() {
+        assert!(can_migrate_legacy_profile_key("default"));
         assert!(!can_migrate_legacy_profile_key("computer-a"));
         assert!(!can_migrate_legacy_profile_key(""));
     }

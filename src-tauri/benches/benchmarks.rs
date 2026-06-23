@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use smcp_computer::mcp_clients::MCPServerConfig;
 use tempfile::tempdir;
+use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::logger::{LogFilter, LogService};
 
@@ -102,26 +103,34 @@ fn make_test_config(name: &str) -> MCPServerConfig {
 fn bench_config_load_save(c: &mut Criterion) {
     let tmp = tempdir().unwrap();
     let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
+    let instance_id = "bench-computer";
+    svc.add_computer_instance(ComputerInstance::new(instance_id, "Bench Computer"))
+        .unwrap();
 
     // Pre-fill 50 server configs
     let configs: Vec<MCPServerConfig> = (0..50)
         .map(|i| make_test_config(&format!("server-{i}")))
         .collect();
-    svc.save_configs(&configs).unwrap();
+    svc.save_configs_for_instance(instance_id, &configs)
+        .unwrap();
 
     let mut group = c.benchmark_group("config");
 
     group.bench_function("load_50_configs", |b| {
-        b.iter(|| svc.load_configs().unwrap());
+        b.iter(|| svc.load_configs_for_instance(instance_id).unwrap());
     });
 
     group.bench_function("save_50_configs", |b| {
-        b.iter(|| svc.save_configs(&configs).unwrap());
+        b.iter(|| {
+            svc.save_configs_for_instance(instance_id, &configs)
+                .unwrap()
+        });
     });
 
     group.bench_function("add_config", |b| {
         b.iter(|| {
-            svc.add_config(make_test_config("bench-add")).unwrap();
+            svc.add_config_for_instance(instance_id, make_test_config("bench-add"))
+                .unwrap();
         });
     });
 

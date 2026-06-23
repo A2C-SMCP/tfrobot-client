@@ -9,7 +9,6 @@ use tauri::State;
 pub struct ComputerInstanceStatus {
     pub id: ComputerInstanceId,
     pub name: String,
-    pub is_default: bool,
     pub running: bool,
     pub connected: bool,
     pub mcp_server_count: usize,
@@ -50,7 +49,6 @@ pub async fn list_computer_instances_core(
         .map_err(|error| error.to_string())?;
     let mut statuses = Vec::with_capacity(config.instances.len());
 
-    let default_instance_id = config.default_instance_id.clone();
     for instance in config.instances {
         let runtime = match state.computer_registry.runtime(&instance.id).await {
             Some(_) => {
@@ -66,9 +64,7 @@ pub async fn list_computer_instances_core(
                     .await
             }
         };
-        statuses.push(
-            status_from_instance(&instance, instance.id == default_instance_id, &runtime).await,
-        );
+        statuses.push(status_from_instance(&instance, &runtime).await);
     }
 
     Ok(statuses)
@@ -90,7 +86,6 @@ pub async fn get_computer_instance_status_core(
         .config
         .load_computer_instances()
         .map_err(|error| error.to_string())?;
-    let default_instance_id = config.default_instance_id.clone();
     let instance = config
         .instances
         .into_iter()
@@ -101,7 +96,7 @@ pub async fn get_computer_instance_status_core(
         .update_runtime_instance(instance.clone())
         .await;
 
-    Ok(status_from_instance(&instance, instance.id == default_instance_id, &runtime).await)
+    Ok(status_from_instance(&instance, &runtime).await)
 }
 
 #[tauri::command]
@@ -120,7 +115,11 @@ pub async fn create_computer_instance_core(
     let instance = ComputerInstance {
         id: generate_instance_id(),
         name,
-        ..ComputerInstance::default_instance()
+        mcp_servers: Vec::new(),
+        inputs: Vec::new(),
+        input_values: Default::default(),
+        connection_profiles: Vec::new(),
+        robot_binding: None,
     };
 
     state
@@ -132,7 +131,7 @@ pub async fn create_computer_instance_core(
         .upsert_runtime(instance.clone())
         .await;
 
-    status_from_current_default(state, &instance, &runtime).await
+    Ok(status_from_instance(&instance, &runtime).await)
 }
 
 #[tauri::command]
@@ -157,7 +156,7 @@ pub async fn rename_computer_instance_core(
         .update_runtime_instance(updated.clone())
         .await;
 
-    status_from_current_default(state, &updated, &runtime).await
+    Ok(status_from_instance(&updated, &runtime).await)
 }
 
 #[tauri::command]
@@ -189,7 +188,7 @@ pub async fn duplicate_computer_instance_core(
         .upsert_runtime(instance.clone())
         .await;
 
-    status_from_current_default(state, &instance, &runtime).await
+    Ok(status_from_instance(&instance, &runtime).await)
 }
 
 #[tauri::command]
@@ -238,7 +237,7 @@ pub async fn start_computer_instance_core(
         .await;
     runtime.start().await?;
 
-    status_from_current_default(state, &instance, &runtime).await
+    Ok(status_from_instance(&instance, &runtime).await)
 }
 
 #[tauri::command]
@@ -264,31 +263,16 @@ pub async fn stop_computer_instance_core(
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
     runtime.shutdown().await;
 
-    status_from_current_default(state, &instance, &runtime).await
-}
-
-async fn status_from_current_default(
-    state: &AppState,
-    instance: &ComputerInstance,
-    runtime: &crate::services::computer::ComputerInstanceRuntime,
-) -> Result<ComputerInstanceStatus, String> {
-    let default_instance_id = state
-        .config
-        .load_computer_instances()
-        .map_err(|error| error.to_string())?
-        .default_instance_id;
-    Ok(status_from_instance(instance, instance.id == default_instance_id, runtime).await)
+    Ok(status_from_instance(&instance, &runtime).await)
 }
 
 async fn status_from_instance(
     instance: &ComputerInstance,
-    is_default: bool,
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> ComputerInstanceStatus {
     ComputerInstanceStatus {
         id: instance.id.clone(),
         name: instance.name.clone(),
-        is_default,
         running: runtime.is_running().await,
         connected: runtime.is_connected().await,
         mcp_server_count: instance.mcp_servers.len(),

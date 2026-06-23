@@ -6,30 +6,29 @@ mod common;
 use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
 use smcp_computer::mcp_clients::MCPServerConfig;
 use tfrobot_client_lib::commands::{config_io, mcp};
-use tfrobot_client_lib::services::computer::{ComputerInstance, DEFAULT_COMPUTER_INSTANCE_ID};
+use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
+
+const TEST_INSTANCE_ID: &str = "computer-a";
 
 async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
     if state
         .config
-        .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .get_computer_instance(TEST_INSTANCE_ID)
         .is_err()
     {
         state
             .config
-            .add_computer_instance(ComputerInstance::default_instance())
+            .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
             .unwrap();
     }
-    let mut instances = state.config.load_computer_instances().unwrap();
-    instances.default_instance_id = DEFAULT_COMPUTER_INSTANCE_ID.to_string();
-    state.config.save_computer_instances(&instances).unwrap();
     state
         .computer_registry
         .upsert_runtime(
             state
                 .config
-                .get_computer_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+                .get_computer_instance(TEST_INSTANCE_ID)
                 .unwrap(),
         )
         .await;
@@ -54,9 +53,15 @@ async fn test_add_and_load_server_config() {
     let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config = echo_server_config("test-echo");
-    state.config.add_config(config).unwrap();
+    state
+        .config
+        .add_config_for_instance(TEST_INSTANCE_ID, config)
+        .unwrap();
 
-    let loaded = state.config.load_configs().unwrap();
+    let loaded = state
+        .config
+        .load_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].name(), "test-echo");
 }
@@ -67,10 +72,19 @@ async fn test_add_remove_server_config() {
     let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config = echo_server_config("to-remove");
-    state.config.add_config(config).unwrap();
-    state.config.remove_config("to-remove").unwrap();
+    state
+        .config
+        .add_config_for_instance(TEST_INSTANCE_ID, config)
+        .unwrap();
+    state
+        .config
+        .remove_config_for_instance(TEST_INSTANCE_ID, "to-remove")
+        .unwrap();
 
-    let loaded = state.config.load_configs().unwrap();
+    let loaded = state
+        .config
+        .load_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert!(loaded.is_empty());
 }
 
@@ -80,13 +94,22 @@ async fn test_update_server_config_replaces() {
     let state = create_mcp_test_app_state(tmp.path()).await;
 
     let config1 = echo_server_config("updatable");
-    state.config.add_config(config1).unwrap();
+    state
+        .config
+        .add_config_for_instance(TEST_INSTANCE_ID, config1)
+        .unwrap();
 
     // Add again with same name (should replace)
     let config2 = echo_server_config("updatable");
-    state.config.add_config(config2).unwrap();
+    state
+        .config
+        .add_config_for_instance(TEST_INSTANCE_ID, config2)
+        .unwrap();
 
-    let loaded = state.config.load_configs().unwrap();
+    let loaded = state
+        .config
+        .load_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert_eq!(loaded.len(), 1);
 }
 
@@ -110,7 +133,7 @@ async fn test_mcp_commands_are_instance_scoped() {
         .add_computer_instance(ComputerInstance {
             id: "second".to_string(),
             name: "Second".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new(TEST_INSTANCE_ID, "Computer A")
         })
         .unwrap();
     state
@@ -124,7 +147,7 @@ async fn test_mcp_commands_are_instance_scoped() {
 
     let default_configs = state
         .config
-        .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .load_configs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     let second_configs = state.config.load_configs_for_instance("second").unwrap();
     let second_statuses = mcp::get_mcp_servers_core(&state, "second").await.unwrap();
@@ -163,7 +186,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
         .add_computer_instance(ComputerInstance {
             id: "second".to_string(),
             name: "Second".to_string(),
-            ..ComputerInstance::default_instance()
+            ..ComputerInstance::new(TEST_INSTANCE_ID, "Computer A")
         })
         .unwrap();
     state
@@ -202,7 +225,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
 
     let default_configs = state
         .config
-        .load_configs_for_instance(DEFAULT_COMPUTER_INSTANCE_ID)
+        .load_configs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     let second_configs = state.config.load_configs_for_instance("second").unwrap();
     let exported: serde_json::Value =
@@ -229,7 +252,12 @@ async fn test_manager_add_and_start_server() {
     let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("lifecycle-test");
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
     mgr.add_or_update_server(config.clone()).await.unwrap();
 
@@ -262,7 +290,12 @@ async fn test_manager_list_tools_after_start() {
     let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("tool-list-test");
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
     mgr.add_or_update_server(config).await.unwrap();
 
@@ -291,7 +324,12 @@ async fn test_manager_execute_echo_tool() {
     let state = create_mcp_test_app_state(tmp.path()).await;
     let config = echo_server_config("echo-call-test");
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
     mgr.add_or_update_server(config).await.unwrap();
 
@@ -323,7 +361,12 @@ async fn test_manager_start_all_stop_all() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
 
     // Use a single server to avoid tool name conflicts (all echo servers
@@ -355,7 +398,12 @@ async fn test_manager_start_nonexistent_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
 
     let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("ghost-server")).await;
@@ -381,7 +429,12 @@ async fn test_manager_invalid_command_fails() {
     }))
     .unwrap();
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
     mgr.add_or_update_server(config).await.unwrap();
 
@@ -404,10 +457,16 @@ async fn test_export_and_reimport_config() {
 
     // Add configs
     let config = echo_server_config("export-me");
-    state.config.add_config(config).unwrap();
+    state
+        .config
+        .add_config_for_instance(TEST_INSTANCE_ID, config)
+        .unwrap();
 
     // Export
-    let configs = state.config.load_configs().unwrap();
+    let configs = state
+        .config
+        .load_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     let export_path = tmp.path().join("exported.json");
     let export_data = serde_json::json!({
         "servers": configs,
@@ -531,12 +590,21 @@ async fn test_input_definitions_crud() {
         }))
         .unwrap();
 
-    let mut inputs = state.config.load_inputs().unwrap();
+    let mut inputs = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     inputs.push(input);
-    state.config.save_inputs(&inputs).unwrap();
+    state
+        .config
+        .save_inputs_for_instance(TEST_INSTANCE_ID, &inputs)
+        .unwrap();
 
     // Read back
-    let loaded = state.config.load_inputs().unwrap();
+    let loaded = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id(), "test-input");
 
@@ -545,9 +613,15 @@ async fn test_input_definitions_crud() {
         .into_iter()
         .filter(|i| i.id() != "test-input")
         .collect();
-    state.config.save_inputs(&filtered).unwrap();
+    state
+        .config
+        .save_inputs_for_instance(TEST_INSTANCE_ID, &filtered)
+        .unwrap();
 
-    let after = state.config.load_inputs().unwrap();
+    let after = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert!(after.is_empty());
 }
 
@@ -560,19 +634,28 @@ async fn test_input_values_crud() {
     let mut values = std::collections::HashMap::new();
     values.insert("key1".to_string(), serde_json::json!("value1"));
     values.insert("key2".to_string(), serde_json::json!(42));
-    state.config.save_input_values(&values).unwrap();
+    state
+        .config
+        .save_input_values_for_instance(TEST_INSTANCE_ID, &values)
+        .unwrap();
 
     // Read back
-    let loaded = state.config.load_input_values().unwrap();
+    let loaded = state
+        .config
+        .load_input_values_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert_eq!(loaded["key1"], serde_json::json!("value1"));
     assert_eq!(loaded["key2"], serde_json::json!(42));
 
     // Clear
     state
         .config
-        .save_input_values(&std::collections::HashMap::new())
+        .save_input_values_for_instance(TEST_INSTANCE_ID, &std::collections::HashMap::new())
         .unwrap();
-    let after = state.config.load_input_values().unwrap();
+    let after = state
+        .config
+        .load_input_values_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert!(after.is_empty());
 }
 
@@ -597,12 +680,21 @@ async fn test_profiles_crud() {
         .unwrap();
 
     // Add
-    let mut profiles = state.config.load_profiles().unwrap();
+    let mut profiles = state
+        .config
+        .load_profiles_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     profiles.push(profile);
-    state.config.save_profiles(&profiles).unwrap();
+    state
+        .config
+        .save_profiles_for_instance(TEST_INSTANCE_ID, &profiles)
+        .unwrap();
 
     // Read
-    let loaded = state.config.load_profiles().unwrap();
+    let loaded = state
+        .config
+        .load_profiles_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].name, "test-profile");
 
@@ -611,9 +703,15 @@ async fn test_profiles_crud() {
         .into_iter()
         .filter(|p| p.name != "test-profile")
         .collect();
-    state.config.save_profiles(&filtered).unwrap();
+    state
+        .config
+        .save_profiles_for_instance(TEST_INSTANCE_ID, &filtered)
+        .unwrap();
 
-    let after = state.config.load_profiles().unwrap();
+    let after = state
+        .config
+        .load_profiles_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
     assert!(after.is_empty());
 }
 
@@ -634,7 +732,12 @@ async fn test_manager_stderr_flood_does_not_block() {
     let state = create_mcp_test_app_state(tmp.path()).await;
     let config = stderr_flood_server_config("stderr-flood-test");
 
-    let lock = state.manager.read().await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let lock = runtime.manager.read().await;
     let mgr = lock.as_ref().unwrap();
     mgr.add_or_update_server(config).await.unwrap();
 

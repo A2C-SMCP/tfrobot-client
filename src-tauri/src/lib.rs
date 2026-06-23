@@ -2,32 +2,22 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
-use commands::connection::ConnectionState;
-use services::computer::{ComputerInstanceRuntime, ComputerRegistry};
+use services::computer::ComputerRegistry;
 use services::config::ConfigService;
 use services::connection_targets::manual_target_keychain_id;
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
 use services::settings::SettingsService;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::mcp_clients::MCPServerManager;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 /// Application state shared across all Tauri commands
 pub struct AppState {
-    /// MCP Server manager from smcp-computer (wrapped in Option for SmcpComputerClient compatibility)
-    pub manager: Arc<RwLock<Option<MCPServerManager>>>,
     /// Configuration persistence service
     pub config: Arc<ConfigService>,
-    /// Input definitions for SMCP (shared with SmcpComputerClient)
-    pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
-    /// Active SMCP connection
-    pub connection: Arc<RwLock<Option<ConnectionState>>>,
     /// Runtime registry for all configured Computer instances
     pub computer_registry: Arc<ComputerRegistry>,
     /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
@@ -52,26 +42,15 @@ impl AppState {
         }
         let instances = config.load_computer_instances().unwrap_or_else(|error| {
             log::error!(
-                "Failed to load ComputerInstance configuration; starting with default instance: {}",
+                "Failed to load ComputerInstance configuration; starting with empty registry: {}",
                 error
             );
             Default::default()
         });
-        let (computer_registry, initial_runtime) =
-            ComputerRegistry::from_config_with_initial_runtime(instances);
-        let legacy_runtime = initial_runtime.unwrap_or_else(|| {
-            ComputerInstanceRuntime::new(services::computer::ComputerInstance {
-                id: String::new(),
-                name: String::new(),
-                ..services::computer::ComputerInstance::default_instance()
-            })
-        });
+        let computer_registry = ComputerRegistry::from_config(instances);
 
         Self {
-            manager: legacy_runtime.manager,
             config: Arc::new(config),
-            inputs: legacy_runtime.inputs,
-            connection: legacy_runtime.connection,
             computer_registry: Arc::new(computer_registry),
             connection_establish_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
@@ -103,7 +82,7 @@ fn migrate_legacy_connection_profiles(config: &ConfigService) -> Result<(), Stri
             continue;
         }
 
-        if instance_id == services::computer::DEFAULT_COMPUTER_INSTANCE_ID {
+        if instance_id == "default" {
             let legacy_key = format!("profile:{profile_name}");
             if let Some(api_key) = crate::services::keychain::get_credential(&legacy_key)
                 .map_err(|error| error.to_string())?
@@ -409,21 +388,14 @@ mod tests {
         let state = AppState::new(config, log_service, settings_service);
 
         assert!(state.computer_registry.list_runtimes().await.is_empty());
-        assert!(state.manager.read().await.is_some());
-        assert!(state.inputs.read().await.is_empty());
-        assert!(state.connection.read().await.is_none());
     }
 
     #[tokio::test]
-    async fn app_state_uses_first_configured_runtime_for_legacy_handles() {
+    async fn app_state_loads_configured_computer_runtimes() {
         let dir = TempDir::new().unwrap();
         let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
         config
-            .add_computer_instance(services::computer::ComputerInstance {
-                id: "one".to_string(),
-                name: "One".to_string(),
-                ..services::computer::ComputerInstance::default_instance()
-            })
+            .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
             .unwrap();
         let log_service = LogService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
@@ -434,6 +406,5 @@ mod tests {
         runtime.start().await.unwrap();
 
         assert!(runtime.is_running().await);
-        assert!(Arc::ptr_eq(&state.manager, &runtime.manager));
     }
 }
