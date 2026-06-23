@@ -25,7 +25,6 @@ function resetStores() {
     error: null,
   });
   useConnectionStore.setState({
-    profiles: [],
     statuses: {},
     loading: false,
     error: null,
@@ -58,12 +57,14 @@ describe('connectionTargetStore', () => {
     mockedInvoke.mockResolvedValueOnce(target);
     mockedInvoke.mockResolvedValueOnce([target]);
 
-    const saved = await useConnectionTargetStore.getState().saveManualTarget(target, 'secret');
+    const saved = await useConnectionTargetStore
+      .getState()
+      .saveManualTarget(target, { kind: 'set', value: 'secret' });
 
     expect(saved).toEqual(target);
     expect(mockedInvoke).toHaveBeenCalledWith('save_manual_smcp_target', {
       target,
-      apiKey: 'secret',
+      apiKeyAction: { kind: 'set', value: 'secret' },
     });
     expect(mockedInvoke).toHaveBeenCalledWith('list_manual_smcp_targets');
     expect(useConnectionTargetStore.getState().manualTargets).toEqual([target]);

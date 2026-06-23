@@ -10,6 +10,7 @@ const mockResponses: Record<string, unknown> = {
       connected: false,
       mcp_server_count: 1,
       robot_binding: null,
+      connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
       connection: null,
     },
     {
@@ -26,6 +27,7 @@ const mockResponses: Record<string, unknown> = {
         namespace: 'test',
         robot_name: 'Robot B',
       },
+      connection_policy: { target: { type: 'manager_robot', id: '1001' }, auto_connect: false },
       connection: null,
     },
   ],
@@ -102,6 +104,7 @@ const mockResponses: Record<string, unknown> = {
     connected: false,
     mcp_server_count: 0,
     robot_binding: null,
+    connection_policy: { target: null, auto_connect: false },
     connection: null,
   },
   rename_computer_instance: {
@@ -112,6 +115,7 @@ const mockResponses: Record<string, unknown> = {
     connected: false,
     mcp_server_count: 1,
     robot_binding: null,
+    connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     connection: null,
   },
   duplicate_computer_instance: {
@@ -122,6 +126,7 @@ const mockResponses: Record<string, unknown> = {
     connected: false,
     mcp_server_count: 1,
     robot_binding: null,
+    connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     connection: null,
   },
   delete_computer_instance: null,
@@ -133,6 +138,7 @@ const mockResponses: Record<string, unknown> = {
     connected: false,
     mcp_server_count: 1,
     robot_binding: null,
+    connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     connection: null,
   },
   stop_computer_instance: {
@@ -143,6 +149,7 @@ const mockResponses: Record<string, unknown> = {
     connected: false,
     mcp_server_count: 1,
     robot_binding: null,
+    connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     connection: null,
   },
   list_manual_smcp_targets: [
@@ -156,7 +163,19 @@ const mockResponses: Record<string, unknown> = {
       headers: {},
     },
   ],
-  list_profiles: [],
+  update_computer_connection_policy: {
+    id: 'computer-a',
+    name: 'Computer A',
+    description: 'Primary test computer',
+    running: true,
+    connected: false,
+    mcp_server_count: 1,
+    robot_binding: null,
+    connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
+    connection: null,
+  },
+  connect_computer_connection_target: null,
+  disconnect_computer_connection_target: null,
   get_connection_status: { connected: false },
   get_settings: {
     theme: 'system',

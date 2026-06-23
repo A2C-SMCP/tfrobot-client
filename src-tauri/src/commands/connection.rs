@@ -1,4 +1,6 @@
-use crate::services::computer::RobotBindingMetadata;
+use crate::services::computer::{
+    ComputerConnectionTarget, ComputerConnectionTargetType, RobotBindingMetadata,
+};
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
 use crate::services::manager_client::{ExchangedToken, ManagerClient, ManagerError};
@@ -70,23 +72,18 @@ enum ManagerConnectionDecision {
 const SOURCE_MANUAL_SMCP: &str = "manual_smcp";
 const SOURCE_MANAGER_ROBOT: &str = "manager_robot";
 
-/// Connection Profile stored to disk (API Key stored separately in Keychain)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionProfile {
-    pub name: String,
-    pub url: String,
-    #[serde(default = "default_namespace")]
-    pub namespace: String,
-    pub office_id: String,
-    pub computer_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_ref: Option<String>,
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManualSmcpApiKeyAction {
+    Unchanged,
+    Set { value: String },
+    Clear,
 }
 
-fn default_namespace() -> String {
-    "/smcp".to_string()
+impl Default for ManualSmcpApiKeyAction {
+    fn default() -> Self {
+        Self::Unchanged
+    }
 }
 
 /// Connection status returned to frontend
@@ -119,35 +116,30 @@ pub async fn list_manual_smcp_targets(
 pub async fn save_manual_smcp_target(
     state: State<'_, AppState>,
     target: ManualSmcpTarget,
-    api_key: Option<String>,
+    api_key_action: Option<ManualSmcpApiKeyAction>,
 ) -> Result<ManualSmcpTarget, String> {
     let target = normalize_manual_smcp_target(target);
     let credential_key = manual_target_keychain_id(&target.id);
-    let previous_credential = match api_key.as_deref().filter(|key| !key.is_empty()) {
-        Some(_) => {
-            crate::services::keychain::get_credential(&credential_key).map_err(|e| e.to_string())?
-        }
-        None => None,
-    };
+    let saved = state
+        .config
+        .save_manual_smcp_target(target)
+        .map_err(|e| e.to_string())?;
 
-    if let Some(key) = api_key.as_deref().filter(|key| !key.is_empty()) {
-        crate::services::keychain::save_credential(&credential_key, key)
-            .map_err(|e| e.to_string())?;
-    }
-
-    match state.config.save_manual_smcp_target(target) {
-        Ok(saved) => Ok(saved),
-        Err(error) => {
-            if api_key.as_deref().is_some_and(|key| !key.is_empty()) {
-                if let Some(previous) = previous_credential {
-                    let _ = crate::services::keychain::save_credential(&credential_key, &previous);
-                } else {
-                    let _ = crate::services::keychain::delete_credential(&credential_key);
-                }
+    match api_key_action.unwrap_or_default() {
+        ManualSmcpApiKeyAction::Unchanged => {}
+        ManualSmcpApiKeyAction::Set { value } => {
+            let value = value.trim();
+            if !value.is_empty() {
+                crate::services::keychain::set_secret(&credential_key, value)
+                    .map_err(|e| e.to_string())?;
             }
-            Err(error.to_string())
+        }
+        ManualSmcpApiKeyAction::Clear => {
+            crate::services::keychain::delete_secret_best_effort(&credential_key);
         }
     }
+
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -170,206 +162,7 @@ pub async fn delete_manual_smcp_target(
         .config
         .delete_manual_smcp_target(&target_id)
         .map_err(|e| e.to_string())?;
-    let _ = crate::services::keychain::delete_credential(&manual_target_keychain_id(&target_id));
-    Ok(())
-}
-
-/// List all saved connection profiles
-#[tauri::command]
-pub async fn list_profiles(
-    state: State<'_, AppState>,
-    instance_id: String,
-) -> Result<Vec<ConnectionProfile>, String> {
-    state
-        .config
-        .load_profiles_for_instance(require_instance_id(&instance_id)?)
-        .map_err(|e| e.to_string())
-}
-
-/// Save (create or update) a connection profile
-#[tauri::command]
-pub async fn save_profile(
-    state: State<'_, AppState>,
-    instance_id: String,
-    profile: ConnectionProfile,
-    api_key: Option<String>,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
-    let name = profile.name.clone();
-    log::info!(
-        "Saving connection profile for instance {}: {}",
-        instance_id,
-        name
-    );
-
-    // Store API key in keychain if provided
-    if let Some(key) = &api_key {
-        if !key.is_empty() {
-            let keychain_id = profile_keychain_id(instance_id, &name);
-            crate::services::keychain::save_credential(&keychain_id, key)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    let mut profiles = state
-        .config
-        .load_profiles_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    profiles.retain(|p| p.name != name);
-    profiles.push(profile);
-    state
-        .config
-        .save_profiles_for_instance(instance_id, &profiles)
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-/// Delete a connection profile
-#[tauri::command]
-pub async fn delete_profile(
-    state: State<'_, AppState>,
-    instance_id: String,
-    name: String,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
-    log::info!(
-        "Deleting connection profile for instance {}: {}",
-        instance_id,
-        name
-    );
-
-    let keychain_id = profile_keychain_id(instance_id, &name);
-    let _ = crate::services::keychain::delete_credential(&keychain_id);
-    if can_migrate_legacy_profile_key(instance_id) {
-        let legacy_keychain_id = legacy_profile_keychain_id(&name);
-        let _ = crate::services::keychain::delete_credential(&legacy_keychain_id);
-    }
-
-    let mut profiles = state
-        .config
-        .load_profiles_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    profiles.retain(|p| p.name != name);
-    state
-        .config
-        .save_profiles_for_instance(instance_id, &profiles)
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-/// Connect to SMCP server using a saved profile
-#[tauri::command]
-pub async fn connect_smcp(
-    state: State<'_, AppState>,
-    instance_id: String,
-    profile_name: String,
-) -> Result<(), String> {
-    connect_smcp_core(&state, &instance_id, profile_name).await
-}
-
-pub async fn connect_smcp_core(
-    state: &AppState,
-    instance_id: &str,
-    profile_name: String,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    log::info!(
-        "Connecting instance {} with profile: {}",
-        instance_id,
-        profile_name
-    );
-
-    let profiles = state
-        .config
-        .load_profiles_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    let profile = profiles
-        .iter()
-        .find(|p| p.name == profile_name)
-        .ok_or_else(|| format!("Profile not found: {}", profile_name))?
-        .clone();
-
-    let api_key = load_profile_api_key(instance_id, &profile.name).map_err(|e| e.to_string())?;
-
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-
-    let previous_connection = {
-        let _guard = state.connection_establish_lock.lock().await;
-
-        if matches!(
-            check_connection_target_allowed(
-                state,
-                instance_id,
-                &legacy_profile_target_id(instance_id, &profile.name),
-                &profile.office_id,
-            )
-            .await
-            .map_err(|e| e.to_string())?,
-            ManagerConnectionDecision::AlreadyConnected
-        ) {
-            return Ok(());
-        }
-
-        // smcp-computer #86：连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`），HTTP header 退役鉴权、
-        // 仅承载路由（profile.headers，如 X-TF-*）。profile 中保存的密钥包成 `{"token": <secret>}` 注入 auth dict。
-        // Connection auth lives solely in the Socket.IO auth dict (`token`); HTTP headers are routing-only.
-        let auth_payload = api_key
-            .filter(|k| !k.is_empty())
-            .map(|tok| serde_json::json!({ "token": tok }));
-
-        let client = smcp_computer::socketio_client::SmcpComputerClient::new(
-            &profile.url,
-            runtime.manager.clone(),
-            profile.computer_name.clone(),
-            auth_payload,
-            runtime.inputs.clone(),
-            Some(profile.headers.clone()),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-        if let Err(e) = client.join_office(&profile.office_id).await {
-            disconnect_smcp_client(client, "after join_office failure").await;
-            return Err(e.to_string());
-        }
-
-        let new_connection = ConnectionState {
-            client,
-            profile_name: profile.name.clone(),
-            url: profile.url.clone(),
-            office_id: profile.office_id.clone(),
-            computer_name: profile.computer_name.clone(),
-            connected_at: chrono::Utc::now(),
-            source_type: SOURCE_MANUAL_SMCP.to_string(),
-            target_id: Some(legacy_profile_target_id(instance_id, &profile.name)),
-            target_name: Some(profile.name.clone()),
-            employee_id: None,
-            generation: next_generation(),
-            // 手动 profile 连接用静态密钥、不做 token-exchange，故无预刷新任务。
-            refresh_task: None,
-        };
-
-        let mut runtime_conn = runtime.connection.write().await;
-        runtime_conn.replace(new_connection)
-    };
-    if let Some(connection) = previous_connection {
-        close_smcp_connection(connection).await;
-    }
-
-    log::info!("Connected to SMCP server: {}", profile.url);
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        &format!("Connected to {}", profile.url),
-        None,
-        Some(instance_id),
-    );
+    crate::services::keychain::delete_secret_best_effort(&manual_target_keychain_id(&target_id));
     Ok(())
 }
 
@@ -392,7 +185,7 @@ pub async fn connect_connection_target_core(
         .config
         .get_manual_smcp_target(target_id)
         .map_err(|e| e.to_string())?;
-    let api_key = crate::services::keychain::get_credential(&manual_target_keychain_id(&target.id))
+    let api_key = crate::services::keychain::get_secret(&manual_target_keychain_id(&target.id))
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
@@ -473,7 +266,10 @@ async fn persist_manual_connection_target(
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
-            instance.manual_connection_policy.target_id = Some(target_id.to_string());
+            instance.connection_policy.target = Some(ComputerConnectionTarget {
+                target_type: ComputerConnectionTargetType::ManualSmcp,
+                id: target_id.to_string(),
+            });
         })?;
     state
         .computer_registry
@@ -523,7 +319,10 @@ pub async fn disconnect_smcp(
     disconnect_smcp_core(&state, &instance_id).await
 }
 
-async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+pub(crate) async fn disconnect_smcp_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
@@ -721,6 +520,74 @@ pub async fn manager_connect_smcp(
     establish_manager_connection(&app, state.inner(), &instance_id, params, token).await
 }
 
+pub async fn connect_manager_robot_target_core(
+    app: &AppHandle,
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+) -> Result<(), ManagerError> {
+    let employee = state
+        .manager_client
+        .list_digital_employees()
+        .await?
+        .into_iter()
+        .find(|employee| employee.id == employee_id)
+        .ok_or(ManagerError::NotFoundOrNoPermission)?;
+    let robot_account_id = employee.robot_account_id.ok_or_else(|| {
+        ManagerError::InvalidResponse("robotAccountId missing for this robot".to_string())
+    })?;
+
+    let token = state
+        .manager_client
+        .exchange_token(&robot_account_id.to_string(), None)
+        .await?;
+    let info = state
+        .manager_client
+        .get_connection_info(employee.id)
+        .await?;
+    let url = info.socket_base_url.clone();
+    if url.trim().is_empty() {
+        return Err(ManagerError::InvalidResponse(
+            "connection-info missing socketBaseURL".into(),
+        ));
+    }
+    let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
+        ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
+    })?;
+    let computer_name = info
+        .computer_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse("connection-info missing computerName".into())
+        })?;
+
+    let params = ManagerConnectionParams {
+        url,
+        computer_name,
+        office_id: office_id.clone(),
+        routing_headers: routing_only_headers(info.routing_headers.clone()),
+        employee_id: employee.id,
+        robot_account_id,
+        scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: employee.id,
+            robot_id: employee
+                .robot_id
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| Some(office_id.clone())),
+            robot_account_id: Some(robot_account_id),
+            namespace: employee
+                .namespace
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| info.namespace.clone()),
+            robot_name: Some(employee.name).filter(|s| !s.trim().is_empty()),
+        },
+    };
+
+    establish_manager_connection(app, state, instance_id, params, token).await
+}
+
 /// 用给定参数 + 短 JWT 构建 [`SmcpComputerClient`] 并 join_office。失败时尽力清理已建客户端。
 async fn build_and_join(
     manager: &Arc<RwLock<Option<MCPServerManager>>>,
@@ -853,6 +720,10 @@ async fn persist_robot_binding(
         .config
         .update_computer_instance(instance_id, |instance| {
             instance.robot_binding = Some(robot_binding.clone());
+            instance.connection_policy.target = Some(ComputerConnectionTarget {
+                target_type: ComputerConnectionTargetType::ManagerRobot,
+                id: robot_binding.employee_id.to_string(),
+            });
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
     state
@@ -1126,47 +997,8 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
     Ok(instance_id)
 }
 
-fn profile_keychain_id(instance_id: &str, profile_name: &str) -> String {
-    format!("profile:{instance_id}:{profile_name}")
-}
-
-fn legacy_profile_target_id(instance_id: &str, profile_name: &str) -> String {
-    format!("legacy-profile:{instance_id}:{profile_name}")
-}
-
 fn manager_target_id(employee_id: u64) -> String {
     format!("manager:{employee_id}")
-}
-
-fn legacy_profile_keychain_id(profile_name: &str) -> String {
-    format!("profile:{profile_name}")
-}
-
-fn can_migrate_legacy_profile_key(instance_id: &str) -> bool {
-    instance_id == "default"
-}
-
-fn load_profile_api_key(
-    instance_id: &str,
-    profile_name: &str,
-) -> Result<Option<String>, crate::services::keychain::KeychainError> {
-    let scoped_keychain_id = profile_keychain_id(instance_id, profile_name);
-    if let Some(api_key) = crate::services::keychain::get_credential(&scoped_keychain_id)? {
-        return Ok(Some(api_key));
-    }
-
-    if !can_migrate_legacy_profile_key(instance_id) {
-        return Ok(None);
-    }
-
-    let legacy_keychain_id = legacy_profile_keychain_id(profile_name);
-    let Some(api_key) = crate::services::keychain::get_credential(&legacy_keychain_id)? else {
-        return Ok(None);
-    };
-
-    crate::services::keychain::save_credential(&scoped_keychain_id, &api_key)?;
-    let _ = crate::services::keychain::delete_credential(&legacy_keychain_id);
-    Ok(Some(api_key))
 }
 
 /// Active connection state held in AppState
@@ -1225,22 +1057,6 @@ mod tests {
             out.get("X-TF-RobotType").map(String::as_str),
             Some("tfrobot")
         );
-    }
-
-    #[test]
-    fn profile_keychain_id_is_scoped_by_instance() {
-        assert_eq!(
-            profile_keychain_id("computer-a", "prod"),
-            "profile:computer-a:prod"
-        );
-        assert_eq!(legacy_profile_keychain_id("prod"), "profile:prod");
-    }
-
-    #[test]
-    fn legacy_profile_key_migration_is_limited_to_legacy_default_id() {
-        assert!(can_migrate_legacy_profile_key("default"));
-        assert!(!can_migrate_legacy_profile_key("computer-a"));
-        assert!(!can_migrate_legacy_profile_key(""));
     }
 
     #[test]

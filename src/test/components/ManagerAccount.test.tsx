@@ -90,7 +90,6 @@ describe('ManagerAccount', () => {
     mockedInvoke.mockResolvedValue({ connected: false });
     // connectionStore 是真实 store（未 mock），复位到断开状态，让 EmployeeList 默认渲染"连接"而非"已连接"
     useConnectionStore.setState({
-      profiles: [],
       statuses: {},
       loading: false,
       error: null,

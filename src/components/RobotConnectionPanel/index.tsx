@@ -3,9 +3,14 @@ import { App, Button, Card, Descriptions, Select, Space, Switch, Tabs, Tag, Typo
 import { ApiOutlined, DisconnectOutlined, LinkOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { ManagerAccount } from '@/components/ManagerAccount';
-import { useComputerStore } from '@/stores/computerStore';
+import {
+  useComputerStore,
+  type ComputerConnectionTarget,
+  type ComputerConnectionTargetType,
+} from '@/stores/computerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
+import { useManagerStore } from '@/stores/managerStore';
 
 const { Text } = Typography;
 
@@ -16,36 +21,42 @@ interface RobotConnectionPanelProps {
 export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const { instances, updateManualConnectionPolicy } = useComputerStore();
+  const { instances, updateConnectionPolicy, connectSelectedTarget } = useComputerStore();
   const { getStatus, fetchStatus, disconnect, loading: connectionLoading } = useConnectionStore();
   const {
     manualTargets,
     fetchManualTargets,
-    connectTarget,
     loading: targetLoading,
   } = useConnectionTargetStore();
-  const [selectedTargetId, setSelectedTargetId] = useState<string>();
+  const { session, employees, fetchEmployeesIfStale } = useManagerStore();
+  const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
     fetchStatus(instanceId);
     fetchManualTargets();
-  }, [fetchStatus, fetchManualTargets, instanceId]);
+    if (session) {
+      fetchEmployeesIfStale().catch(() => {
+        /* manager error is stored in manager store */
+      });
+    }
+  }, [fetchStatus, fetchManualTargets, fetchEmployeesIfStale, instanceId, session]);
 
   useEffect(() => {
-    setSelectedTargetId(selectedInstance?.manualConnectionPolicy.target_id ?? undefined);
-    setAutoConnect(selectedInstance?.manualConnectionPolicy.auto_connect ?? false);
+    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
-    selectedInstance?.manualConnectionPolicy.auto_connect,
-    selectedInstance?.manualConnectionPolicy.target_id,
+    selectedInstance?.connectionPolicy.auto_connect,
+    selectedInstance?.connectionPolicy.target,
   ]);
 
   const selectedTarget = useMemo(
-    () => manualTargets.find((target) => target.id === selectedTargetId),
-    [manualTargets, selectedTargetId],
+    () => valueToTarget(selectedTargetValue),
+    [selectedTargetValue],
   );
   const status = getStatus(instanceId);
+  const canConnect = selectedInstance?.status === 'running' && Boolean(selectedTarget) && !status.connected;
 
   const handleDisconnect = async () => {
     await disconnect(instanceId);
@@ -53,22 +64,44 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
   };
 
   const handleConnect = async () => {
-    if (!selectedTargetId) return;
-    await updateManualConnectionPolicy(instanceId, {
-      target_id: selectedTargetId,
+    if (!selectedTarget) return;
+    await updateConnectionPolicy(instanceId, {
+      target: selectedTarget,
       auto_connect: autoConnect,
     });
-    await connectTarget(instanceId, selectedTargetId);
+    await connectSelectedTarget(instanceId);
+    await fetchStatus(instanceId);
     message.success(t('connection.messages.connected'));
   };
 
   const handleSavePolicy = async () => {
-    await updateManualConnectionPolicy(instanceId, {
-      target_id: selectedTargetId ?? null,
+    await updateConnectionPolicy(instanceId, {
+      target: selectedTarget,
       auto_connect: autoConnect,
     });
     message.success(t('common.saved'));
   };
+
+  const targetOptions = useMemo(() => {
+    const managerOptions = employees.map((employee) => ({
+      value: targetToValue({ type: 'manager_robot', id: String(employee.id) })!,
+      label: employee.name,
+    }));
+    const manualOptions = manualTargets.map((target) => ({
+      value: targetToValue({ type: 'manual_smcp', id: target.id })!,
+      label: `${target.name} (${target.office_id})`,
+    }));
+    return [
+      {
+        label: 'Manager Robots',
+        options: managerOptions,
+      },
+      {
+        label: 'Manual SMCP',
+        options: manualOptions,
+      },
+    ];
+  }, [employees, manualTargets]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -123,6 +156,50 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
         )}
       </Card>
 
+      <Card size="small" title={t('computer.connectionActions.targetTitle')}>
+        <Space wrap>
+          <Select
+            allowClear
+            style={{ minWidth: 360 }}
+            value={selectedTargetValue}
+            placeholder={t('computer.connectionActions.selectTarget')}
+            onChange={setSelectedTargetValue}
+            options={targetOptions}
+          />
+          <Button onClick={() => {
+            fetchManualTargets();
+            if (session) fetchEmployeesIfStale(0);
+          }}>
+            {t('common.refresh')}
+          </Button>
+          <Space>
+            <Switch checked={autoConnect} onChange={setAutoConnect} />
+            <Text>{t('connection.form.autoConnect')}</Text>
+          </Space>
+          <Button
+            disabled={targetLoading}
+            onClick={() => handleSavePolicy().catch((e) => message.error(String(e)))}
+          >
+            {t('common.save')}
+          </Button>
+          <Button
+            type="primary"
+            icon={<LinkOutlined />}
+            disabled={!canConnect}
+            loading={targetLoading}
+            onClick={() => handleConnect().catch((e) => message.error(String(e)))}
+          >
+            {t('connection.connect')}
+          </Button>
+          {!status.connected && selectedInstance?.status !== 'running' && (
+            <Text type="secondary">{t('computer.connectionActions.requiresRunning')}</Text>
+          )}
+          {!status.connected && selectedInstance?.status === 'running' && !selectedTarget && (
+            <Text type="secondary">{t('computer.connectionActions.requiresTarget')}</Text>
+          )}
+        </Space>
+      </Card>
+
       <Tabs
         items={[
           {
@@ -142,43 +219,10 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
               </>
             ),
             children: (
-              <Card size="small" title="Change Connection Target">
-                <Space wrap>
-                  <Select
-                    style={{ minWidth: 320 }}
-                    value={selectedTargetId}
-                    placeholder="Select a Manual SMCP target"
-                    onChange={setSelectedTargetId}
-                    options={manualTargets.map((target) => ({
-                      value: target.id,
-                      label: `${target.name} (${target.office_id})`,
-                    }))}
-                  />
+              <Card size="small">
+                <Space>
+                  <Text type="secondary">{t('computer.connectionActions.manualManagedGlobally')}</Text>
                   <Button onClick={() => fetchManualTargets()}>{t('common.refresh')}</Button>
-                  <Space>
-                    <Switch checked={autoConnect} onChange={setAutoConnect} />
-                    <Text>{t('connection.form.autoConnect')}</Text>
-                  </Space>
-                  <Button
-                    disabled={targetLoading}
-                    onClick={() => handleSavePolicy().catch((e) => message.error(String(e)))}
-                  >
-                    {t('common.save')}
-                  </Button>
-                  <Button
-                    type="primary"
-                    icon={<LinkOutlined />}
-                    disabled={!selectedTarget || status.connected}
-                    loading={targetLoading}
-                    onClick={() => handleConnect().catch((e) => message.error(String(e)))}
-                  >
-                    {t('connection.connect')}
-                  </Button>
-                  {status.connected && (
-                    <Text type="secondary">
-                      Disconnect the current target before connecting another.
-                    </Text>
-                  )}
                 </Space>
               </Card>
             ),
@@ -187,4 +231,17 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
       />
     </Space>
   );
+}
+
+function targetToValue(target?: ComputerConnectionTarget | null): string | undefined {
+  if (!target) return undefined;
+  return `${target.type}:${target.id}`;
+}
+
+function valueToTarget(value?: string): ComputerConnectionTarget | null {
+  if (!value) return null;
+  const [type, ...idParts] = value.split(':');
+  const id = idParts.join(':');
+  if (!id || (type !== 'manager_robot' && type !== 'manual_smcp')) return null;
+  return { type: type as ComputerConnectionTargetType, id };
 }

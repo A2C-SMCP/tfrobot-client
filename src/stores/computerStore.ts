@@ -20,8 +20,15 @@ export interface ConnectionStateSummary {
   profile_name: string;
 }
 
-export interface ManualConnectionPolicy {
-  target_id?: string | null;
+export type ComputerConnectionTargetType = 'manager_robot' | 'manual_smcp';
+
+export interface ComputerConnectionTarget {
+  type: ComputerConnectionTargetType;
+  id: string;
+}
+
+export interface ComputerConnectionPolicy {
+  target?: ComputerConnectionTarget | null;
   auto_connect: boolean;
 }
 
@@ -33,7 +40,7 @@ export interface ComputerInstanceStatus {
   connected: boolean;
   mcp_server_count: number;
   robot_binding?: RobotBindingMetadata | null;
-  manual_connection_policy?: ManualConnectionPolicy;
+  connection_policy?: ComputerConnectionPolicy;
   connection?: ConnectionStateSummary | null;
 }
 
@@ -46,7 +53,7 @@ export interface ComputerInstance {
   connectionProfile?: string;
   robotName?: string;
   robotBinding?: RobotBindingMetadata | null;
-  manualConnectionPolicy: ManualConnectionPolicy;
+  connectionPolicy: ComputerConnectionPolicy;
   mcpServerCount: number;
 }
 
@@ -73,10 +80,12 @@ interface ComputerState {
   deleteInstance: (id: string) => Promise<void>;
   startInstance: (id: string) => Promise<ComputerInstance>;
   stopInstance: (id: string) => Promise<ComputerInstance>;
-  updateManualConnectionPolicy: (
+  updateConnectionPolicy: (
     id: string,
-    policy: ManualConnectionPolicy,
+    policy: ComputerConnectionPolicy,
   ) => Promise<ComputerInstance>;
+  connectSelectedTarget: (id: string) => Promise<void>;
+  disconnectConnection: (id: string) => Promise<void>;
   selectInstance: (id: string) => void;
   reset: () => void;
 }
@@ -98,7 +107,7 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     connectionProfile: status.connection?.profile_name,
     robotName: status.robot_binding?.robot_name,
     robotBinding: status.robot_binding,
-    manualConnectionPolicy: status.manual_connection_policy ?? { target_id: null, auto_connect: false },
+    connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     mcpServerCount: status.mcp_server_count,
   };
 }
@@ -250,13 +259,13 @@ export const useComputerStore = create<ComputerState>((set) => ({
     }
   },
 
-  updateManualConnectionPolicy: async (id, policy) => {
+  updateConnectionPolicy: async (id, policy) => {
     set({ loading: true, error: null });
     try {
-      const updated = toComputerInstance(await invoke<ComputerInstanceStatus>('update_manual_connection_policy', {
+      const updated = toComputerInstance(await invoke<ComputerInstanceStatus>('update_computer_connection_policy', {
         request: {
           id,
-          targetId: policy.target_id || null,
+          target: policy.target ?? null,
           autoConnect: policy.auto_connect,
         },
       }));
@@ -266,6 +275,44 @@ export const useComputerStore = create<ComputerState>((set) => ({
         loading: false,
       }));
       return updated;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  connectSelectedTarget: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('connect_computer_connection_target', { id });
+      const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
+      const instances = statuses.map(toComputerInstance);
+      set((state) => ({
+        instances,
+        selectedInstanceId: instances.some((instance) => instance.id === state.selectedInstanceId)
+          ? state.selectedInstanceId
+          : instances[0]?.id ?? null,
+        loading: false,
+      }));
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  disconnectConnection: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('disconnect_computer_connection_target', { id });
+      const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
+      const instances = statuses.map(toComputerInstance);
+      set((state) => ({
+        instances,
+        selectedInstanceId: instances.some((instance) => instance.id === state.selectedInstanceId)
+          ? state.selectedInstanceId
+          : instances[0]?.id ?? null,
+        loading: false,
+      }));
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;

@@ -1,4 +1,3 @@
-use crate::commands::connection::ConnectionProfile;
 use crate::commands::inputs::InputDefinition;
 use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
 use crate::services::connection_targets::{ConnectionTargetsConfig, ManualSmcpTarget};
@@ -125,31 +124,6 @@ impl ConfigService {
     ) -> Result<ComputerInstance, ConfigError> {
         self.update_computer_instance(instance_id, |instance| {
             instance.input_values = values.clone();
-        })
-    }
-
-    // --- Connection Profiles ---
-
-    pub fn load_profiles_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<Vec<ConnectionProfile>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        instances
-            .instances
-            .iter()
-            .find(|instance| instance.id == instance_id)
-            .map(|instance| instance.connection_profiles.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
-    }
-
-    pub fn save_profiles_for_instance(
-        &self,
-        instance_id: &str,
-        profiles: &[ConnectionProfile],
-    ) -> Result<ComputerInstance, ConfigError> {
-        self.update_computer_instance(instance_id, |instance| {
-            instance.connection_profiles = profiles.to_vec();
         })
     }
 
@@ -285,39 +259,6 @@ impl ConfigService {
         Ok(removed)
     }
 
-    pub fn migrate_legacy_profiles_to_manual_targets(
-        &self,
-    ) -> Result<Vec<(String, String, String)>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        let mut targets = self.load_connection_targets()?;
-        let mut migrated_keys = Vec::new();
-
-        for instance in instances.instances {
-            for profile in instance.connection_profiles {
-                let target = ManualSmcpTarget {
-                    id: stable_manual_target_id(&profile),
-                    name: profile.name.clone(),
-                    url: profile.url,
-                    namespace: profile.namespace,
-                    office_id: profile.office_id,
-                    computer_name: profile.computer_name,
-                    headers: profile.headers,
-                };
-                if !targets
-                    .manual_smcp_targets
-                    .iter()
-                    .any(|existing| existing.id == target.id)
-                {
-                    targets.manual_smcp_targets.push(target.clone());
-                }
-                migrated_keys.push((instance.id.clone(), profile.name, target.id));
-            }
-        }
-
-        self.save_connection_targets(&targets)?;
-        Ok(migrated_keys)
-    }
-
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
@@ -341,16 +282,6 @@ fn stable_or_existing_manual_target_id(id: &str, target: &ManualSmcpTarget) -> S
     } else {
         id.to_string()
     }
-}
-
-fn stable_manual_target_id(profile: &ConnectionProfile) -> String {
-    stable_manual_target_id_from_parts(
-        &profile.name,
-        &profile.url,
-        &profile.office_id,
-        &profile.computer_name,
-        &profile.headers,
-    )
 }
 
 fn stable_manual_target_id_from_parts(
@@ -804,67 +735,6 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded["key1"], serde_json::json!("value1"));
         assert_eq!(loaded["key2"], serde_json::json!(42));
-    }
-
-    // --- Connection Profiles ---
-
-    #[test]
-    fn test_load_empty_profiles() {
-        let (svc, _tmp) = setup();
-        let profiles = svc.load_profiles_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn test_save_and_load_profiles_roundtrip() {
-        let (svc, _tmp) = setup();
-        let profile: ConnectionProfile = serde_json::from_value(serde_json::json!({
-            "name": "prod",
-            "url": "https://smcp.example.com",
-            "namespace": "default",
-            "office_id": "office-1",
-            "computer_name": "my-pc",
-            "headers": {}
-        }))
-        .unwrap();
-
-        svc.save_profiles_for_instance(TEST_INSTANCE_ID, &[profile])
-            .unwrap();
-        let loaded = svc.load_profiles_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "prod");
-        assert_eq!(loaded[0].url, "https://smcp.example.com");
-    }
-
-    #[test]
-    fn test_legacy_profiles_migrate_to_global_manual_targets() {
-        let (svc, _tmp) = setup();
-        let profile: ConnectionProfile = serde_json::from_value(serde_json::json!({
-            "name": "prod",
-            "url": "https://smcp.example.com",
-            "namespace": "/smcp",
-            "office_id": "office-1",
-            "computer_name": "my-pc",
-            "headers": { "X-TF-Namespace": "ns" }
-        }))
-        .unwrap();
-        svc.save_profiles_for_instance(TEST_INSTANCE_ID, std::slice::from_ref(&profile))
-            .unwrap();
-
-        let migrated = svc.migrate_legacy_profiles_to_manual_targets().unwrap();
-        let targets = svc.list_manual_smcp_targets().unwrap();
-
-        assert_eq!(migrated.len(), 1);
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].name, "prod");
-        assert_eq!(targets[0].office_id, "office-1");
-        assert_eq!(
-            targets[0].headers.get("X-TF-Namespace").map(String::as_str),
-            Some("ns")
-        );
-
-        svc.migrate_legacy_profiles_to_manual_targets().unwrap();
-        assert_eq!(svc.list_manual_smcp_targets().unwrap().len(), 1);
     }
 
     #[test]

@@ -6,9 +6,11 @@ import {
   CopyOutlined,
   DesktopOutlined,
   DeleteOutlined,
+  DisconnectOutlined,
   EditOutlined,
   FileTextOutlined,
   FormOutlined,
+  LinkOutlined,
   PlayCircleOutlined,
   SettingOutlined,
   StopOutlined,
@@ -47,6 +49,8 @@ function ComputerCard({
   onDuplicate,
   onStart,
   onStop,
+  onConnect,
+  onDisconnect,
   onDelete,
   loading,
 }: {
@@ -56,6 +60,8 @@ function ComputerCard({
   onDuplicate: () => void;
   onStart: () => void;
   onStop: () => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
   onDelete: () => void;
   loading: boolean;
 }) {
@@ -64,6 +70,13 @@ function ComputerCard({
   const startStopIcon = instance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />;
   const startStopColor = instance.status === 'running' ? '#fa8c16' : '#52c41a';
   const startStopAction = instance.status === 'running' ? onStop : onStart;
+  const connectionTargetSelected = Boolean(instance.connectionPolicy.target);
+  const canConnect = instance.status === 'running' && connectionTargetSelected;
+  const connectDisabledReason = instance.status !== 'running'
+    ? t('computer.connectionActions.requiresRunning')
+    : !connectionTargetSelected
+      ? t('computer.connectionActions.requiresTarget')
+      : undefined;
 
   return (
     <Card
@@ -124,6 +137,30 @@ function ComputerCard({
               onClick={startStopAction}
             />
           </Tooltip>
+          {instance.connectionStatus === 'connected' ? (
+            <Tooltip title={t('connection.disconnect')} placement="right">
+              <Button
+                aria-label={t('connection.disconnect')}
+                type="text"
+                danger
+                icon={<DisconnectOutlined />}
+                loading={loading}
+                onClick={onDisconnect}
+              />
+            </Tooltip>
+          ) : (
+            <Tooltip title={connectDisabledReason ?? t('connection.connect')} placement="right">
+              <Button
+                aria-label={t('connection.connect')}
+                type="text"
+                icon={<LinkOutlined />}
+                disabled={!canConnect}
+                loading={loading}
+                style={{ color: canConnect ? '#1677ff' : undefined }}
+                onClick={onConnect}
+              />
+            </Tooltip>
+          )}
           <Tooltip title={t('computer.edit')} placement="right">
             <Button aria-label={t('computer.edit')} type="text" icon={<EditOutlined />} onClick={onEdit} />
           </Tooltip>
@@ -156,6 +193,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
     deleteInstance,
     startInstance,
     stopInstance,
+    connectSelectedTarget,
+    disconnectConnection,
   } = useComputerStore();
   const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
@@ -262,6 +301,24 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
     }
   };
 
+  const handleConnect = async (instance: ComputerInstance) => {
+    try {
+      await connectSelectedTarget(instance.id);
+      message.success(t('connection.messages.connected'));
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const handleDisconnect = async (instance: ComputerInstance) => {
+    try {
+      await disconnectConnection(instance.id);
+      message.success(t('connection.messages.disconnected'));
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
   const modalTitle = modalMode === 'create'
     ? t('computer.create')
     : modalMode === 'edit'
@@ -354,6 +411,36 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
               <Button onClick={() => setView('list')}>
                 {t('computer.backToList')}
               </Button>
+              {selectedInstance.connectionStatus === 'connected' ? (
+                <Button
+                  danger
+                  icon={<DisconnectOutlined />}
+                  loading={loading}
+                  onClick={() => handleDisconnect(selectedInstance)}
+                >
+                  {t('connection.disconnect')}
+                </Button>
+              ) : (
+                <Tooltip
+                  title={
+                    selectedInstance.status !== 'running'
+                      ? t('computer.connectionActions.requiresRunning')
+                      : !selectedInstance.connectionPolicy.target
+                        ? t('computer.connectionActions.requiresTarget')
+                        : undefined
+                  }
+                >
+                  <Button
+                    type="primary"
+                    icon={<LinkOutlined />}
+                    disabled={selectedInstance.status !== 'running' || !selectedInstance.connectionPolicy.target}
+                    loading={loading}
+                    onClick={() => handleConnect(selectedInstance)}
+                  >
+                    {t('connection.connect')}
+                  </Button>
+                </Tooltip>
+              )}
               <Button icon={<EditOutlined />} onClick={() => openEditModal(selectedInstance)}>
                 {t('computer.edit')}
               </Button>
@@ -420,6 +507,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
                 onDuplicate={() => openDuplicateModal(instance)}
                 onStart={() => handleStartStop(instance)}
                 onStop={() => handleStartStop(instance)}
+                onConnect={() => handleConnect(instance)}
+                onDisconnect={() => handleDisconnect(instance)}
                 onDelete={() => handleDelete(instance)}
                 loading={loading}
               />

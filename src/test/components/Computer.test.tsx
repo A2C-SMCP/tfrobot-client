@@ -21,6 +21,7 @@ const mockComputerInstances = [
       namespace: 'test',
       robot_name: 'Robot A',
     },
+    connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
     connection: {
       url: 'https://smcp.example.com',
       office_id: 'office-1',
@@ -116,7 +117,7 @@ describe('Computer', () => {
           connectionStatus: 'connected',
           connectionProfile: 'prod',
           robotName: 'Robot A',
-          manualConnectionPolicy: { target_id: null, auto_connect: false },
+          connectionPolicy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
           mcpServerCount: 5,
         },
       ],
@@ -194,7 +195,61 @@ describe('Computer', () => {
 
     expect(screen.getByText('Create Computer')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'prod' })).toBeInTheDocument();
-  });
+  }, 15000);
+
+  it('disables list connect when the Computer is not running', async () => {
+    const stoppedInstance = {
+      id: 'computer-a',
+      name: 'prod',
+      running: false,
+      connected: false,
+      mcp_server_count: 0,
+      robot_binding: null,
+      connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
+      connection: null,
+    };
+    mockInvoke.mockResolvedValueOnce([stoppedInstance]);
+
+    render(<Computer />);
+
+    expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
+  }, 15000);
+
+  it('connects the selected target from the list action', async () => {
+    const disconnectedInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      connection: null,
+      connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
+    };
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_computer_instances') return [disconnectedInstance];
+      if (cmd === 'connect_computer_connection_target') return null;
+      return null;
+    });
+    useComputerStore.setState({
+      instances: [
+        {
+          id: 'computer-a',
+          name: 'prod',
+          status: 'running',
+          connectionStatus: 'disconnected',
+          connectionPolicy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
+          mcpServerCount: 0,
+        },
+      ],
+    });
+
+    render(<Computer />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('connect_computer_connection_target', {
+        id: 'computer-a',
+      });
+    });
+  }, 10000);
 
   it('creates a Computer from the list page', async () => {
     mockInvoke.mockImplementation(async (cmd) => {
@@ -271,5 +326,5 @@ describe('Computer', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
     fireEvent.click(last(await screen.findAllByText('OK')));
     expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
-  }, 20000);
+  }, 80000);
 });

@@ -11,12 +11,14 @@ use smcp_computer::socketio_client::SmcpComputerClient;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
 use tfrobot_client_lib::commands::connection::{
-    close_smcp_connection, connect_smcp_core, reconnect_with_token, try_install_refreshed_client,
-    ConnectionProfile, ConnectionState, ManagerConnectionParams, RefreshOutcome, SwapResult,
+    close_smcp_connection, connect_connection_target_core, reconnect_with_token,
+    try_install_refreshed_client, ConnectionState, ManagerConnectionParams, RefreshOutcome,
+    SwapResult,
 };
 use tfrobot_client_lib::services::computer::{
     ComputerInstance, ComputerInstanceRuntime, RobotBindingMetadata,
 };
+use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -269,10 +271,13 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
         });
     }
 
-    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "missing-profile".to_string())
+    let err = connect_connection_target_core(&state, TEST_INSTANCE_ID, "missing-target")
         .await
-        .expect_err("missing profile should fail");
-    assert_eq!(err, "Profile not found: missing-profile");
+        .expect_err("missing target should fail");
+    assert!(
+        err.contains("missing-target"),
+        "error should identify the missing target, got: {err}"
+    );
 
     let conn = runtime.connection.read().await;
     let connection = conn
@@ -340,23 +345,20 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
         });
     }
 
-    state
+    let target = state
         .config
-        .save_profiles_for_instance(
-            TEST_INSTANCE_ID,
-            &[ConnectionProfile {
-                name: "new-profile".to_string(),
-                url: new_server_url.clone(),
-                namespace: "/smcp".to_string(),
-                office_id: "new-office".to_string(),
-                computer_name: "new-computer".to_string(),
-                api_key_ref: None,
-                headers: HashMap::new(),
-            }],
-        )
-        .expect("save profiles");
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "new-target".to_string(),
+            name: "new-target".to_string(),
+            url: new_server_url.clone(),
+            namespace: "/smcp".to_string(),
+            office_id: "new-office".to_string(),
+            computer_name: "new-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
 
-    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "new-profile".to_string())
+    let err = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
         .await
         .expect_err("switching robots without disconnect should fail");
     assert!(
@@ -449,23 +451,20 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
         });
     }
 
-    state
+    let target = state
         .config
-        .save_profiles_for_instance(
-            TEST_INSTANCE_ID,
-            &[ConnectionProfile {
-                name: "target-profile".to_string(),
-                url: server_url,
-                namespace: "/smcp".to_string(),
-                office_id: "shared-office".to_string(),
-                computer_name: "target-computer".to_string(),
-                api_key_ref: None,
-                headers: HashMap::new(),
-            }],
-        )
-        .expect("save target profile");
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "target-profile".to_string(),
+            name: "target-profile".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "shared-office".to_string(),
+            computer_name: "target-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
 
-    let err = connect_smcp_core(&state, TEST_INSTANCE_ID, "target-profile".to_string())
+    let err = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
         .await
         .expect_err("same robot connected by another instance should fail");
     assert!(
@@ -514,28 +513,22 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
         )
         .await;
 
-    let profile_name = "shared-profile";
-    for instance_id in [TEST_INSTANCE_ID, other_instance_id] {
-        state
-            .config
-            .save_profiles_for_instance(
-                instance_id,
-                &[ConnectionProfile {
-                    name: profile_name.to_string(),
-                    url: server_url.clone(),
-                    namespace: "/smcp".to_string(),
-                    office_id: "shared-office".to_string(),
-                    computer_name: format!("{instance_id}-computer"),
-                    api_key_ref: None,
-                    headers: HashMap::new(),
-                }],
-            )
-            .expect("save profile");
-    }
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "shared-target".to_string(),
+            name: "shared-target".to_string(),
+            url: server_url.clone(),
+            namespace: "/smcp".to_string(),
+            office_id: "shared-office".to_string(),
+            computer_name: "shared-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
 
     let (target_result, other_result) = tokio::join!(
-        connect_smcp_core(&state, TEST_INSTANCE_ID, profile_name.to_string()),
-        connect_smcp_core(&state, other_instance_id, profile_name.to_string())
+        connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id),
+        connect_connection_target_core(&state, other_instance_id, &target.id)
     );
 
     let success_count = usize::from(target_result.is_ok()) + usize::from(other_result.is_ok());

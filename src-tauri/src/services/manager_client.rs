@@ -519,7 +519,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            let _ = keychain::delete_credential(&key); // 失败不阻塞 401 路径
+            keychain::delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
     }
@@ -766,7 +766,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            keychain::delete_credential(&key)?;
+            keychain::delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
         Ok(())

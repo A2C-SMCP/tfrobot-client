@@ -134,7 +134,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             )]),
         })
         .unwrap();
-    start_computer_instance_core(&state, source.id.clone())
+    start_computer_instance_core(None, &state, source.id.clone())
         .await
         .unwrap();
 
@@ -172,9 +172,10 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     );
     assert_eq!(
         duplicate_config
-            .manual_connection_policy
-            .target_id
-            .as_deref(),
+            .connection_policy
+            .target
+            .as_ref()
+            .map(|target| target.id.as_str()),
         Some(target.id.as_str())
     );
     assert!(!duplicate.running);
@@ -213,10 +214,10 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
     .await
     .unwrap();
 
-    start_computer_instance_core(&state, one.id.clone())
+    start_computer_instance_core(None, &state, one.id.clone())
         .await
         .unwrap();
-    start_computer_instance_core(&state, two.id.clone())
+    start_computer_instance_core(None, &state, two.id.clone())
         .await
         .unwrap();
 
@@ -274,7 +275,7 @@ async fn legacy_default_id_instance_is_a_normal_instance() {
     let status = get_computer_instance_status_core(&state, LEGACY_INSTANCE_ID.to_string())
         .await
         .unwrap();
-    let started = start_computer_instance_core(&state, LEGACY_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(None, &state, LEGACY_INSTANCE_ID.to_string())
         .await
         .unwrap();
     let stopped = stop_computer_instance_core(&state, LEGACY_INSTANCE_ID.to_string())

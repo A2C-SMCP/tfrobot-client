@@ -1,4 +1,4 @@
-use crate::commands::connection::{close_smcp_connection, ConnectionProfile, ConnectionState};
+use crate::commands::connection::{close_smcp_connection, ConnectionState};
 use crate::commands::inputs::InputDefinition;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::model::MCPServerInput;
@@ -23,20 +23,25 @@ pub struct RobotBindingMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ManualConnectionPolicy {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_id: Option<String>,
-    #[serde(default)]
-    pub auto_connect: bool,
+#[serde(rename_all = "snake_case")]
+pub enum ComputerConnectionTargetType {
+    ManagerRobot,
+    ManualSmcp,
 }
 
-impl Default for ManualConnectionPolicy {
-    fn default() -> Self {
-        Self {
-            target_id: None,
-            auto_connect: false,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerConnectionTarget {
+    #[serde(rename = "type")]
+    pub target_type: ComputerConnectionTargetType,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ComputerConnectionPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ComputerConnectionTarget>,
+    #[serde(default)]
+    pub auto_connect: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,9 +57,7 @@ pub struct ComputerInstance {
     #[serde(default)]
     pub input_values: HashMap<String, serde_json::Value>,
     #[serde(default)]
-    pub connection_profiles: Vec<ConnectionProfile>,
-    #[serde(default)]
-    pub manual_connection_policy: ManualConnectionPolicy,
+    pub connection_policy: ComputerConnectionPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_binding: Option<RobotBindingMetadata>,
 }
@@ -68,8 +71,7 @@ impl ComputerInstance {
             mcp_servers: Vec::new(),
             inputs: Vec::new(),
             input_values: HashMap::new(),
-            connection_profiles: Vec::new(),
-            manual_connection_policy: ManualConnectionPolicy::default(),
+            connection_policy: ComputerConnectionPolicy::default(),
             robot_binding: None,
         }
     }
@@ -151,6 +153,10 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    pub async fn is_running(&self) -> bool {
+        *self.running.read().await
+    }
+
     pub async fn shutdown(&self) {
         let existing_connection = {
             let mut conn = self.connection.write().await;
@@ -167,10 +173,6 @@ impl ComputerInstanceRuntime {
 
         let mut running = self.running.write().await;
         *running = false;
-    }
-
-    pub async fn is_running(&self) -> bool {
-        *self.running.read().await
     }
 
     pub async fn is_connected(&self) -> bool {

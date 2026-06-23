@@ -1,12 +1,12 @@
-import { Form, Button, Space, Card } from 'antd';
+import { Form, Button, Space, Card, Checkbox } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import type { ConnectionProfile } from '@/stores/connectionStore';
+import type { ManualSmcpApiKeyAction, ManualSmcpTarget } from '@/stores/connectionTargetStore';
 
 interface ProfileFormProps {
-  initialValues?: ConnectionProfile;
-  onSubmit: (profile: ConnectionProfile, apiKey?: string) => Promise<void>;
+  initialValues?: ManualSmcpTarget;
+  onSubmit: (target: ManualSmcpTarget, apiKeyAction: ManualSmcpApiKeyAction) => Promise<void>;
   onCancel: () => void;
   loading?: boolean;
 }
@@ -35,7 +35,8 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       if (key) headers[key] = value;
     });
 
-    const profile: ConnectionProfile = {
+    const target: ManualSmcpTarget = {
+      id: initialValues?.id ?? '',
       name: values.name as string,
       url: values.url as string,
       namespace: (values.namespace as string) || '/smcp',
@@ -43,8 +44,14 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       computer_name: values.computer_name as string,
       headers,
     };
+    const apiKey = String(values.api_key ?? '').trim();
+    const apiKeyAction: ManualSmcpApiKeyAction = values.clear_api_key
+      ? { kind: 'clear' }
+      : apiKey
+        ? { kind: 'set', value: apiKey }
+        : { kind: 'unchanged' };
 
-    await onSubmit(profile, values.api_key as string | undefined);
+    await onSubmit(target, apiKeyAction);
   };
 
   return (
@@ -72,6 +79,11 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       <Form.Item name="api_key" label={t('connection.form.apiKey')}>
         <Input.Password placeholder={initialValues ? t('connection.form.apiKeyUnchanged') : ''} />
       </Form.Item>
+      {initialValues && (
+        <Form.Item name="clear_api_key" valuePropName="checked">
+          <Checkbox>{t('connection.form.clearApiKey')}</Checkbox>
+        </Form.Item>
+      )}
 
       <Card size="small" title={t('connection.form.headers')} style={{ marginBottom: 16 }}>
         <Form.List name="headers">

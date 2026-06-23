@@ -10,13 +10,25 @@ pub enum KeychainError {
 }
 
 pub fn save_credential(server_url: &str, api_key: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(SERVICE_NAME, server_url)?;
-    entry.set_password(api_key)?;
-    Ok(())
+    set_secret(server_url, api_key)
 }
 
 pub fn get_credential(server_url: &str) -> Result<Option<String>, KeychainError> {
-    let entry = Entry::new(SERVICE_NAME, server_url)?;
+    get_secret(server_url)
+}
+
+pub fn delete_credential(server_url: &str) -> Result<(), KeychainError> {
+    delete_secret(server_url)
+}
+
+pub fn set_secret(key: &str, secret: &str) -> Result<(), KeychainError> {
+    let entry = Entry::new(SERVICE_NAME, key)?;
+    entry.set_password(secret)?;
+    Ok(())
+}
+
+pub fn get_secret(key: &str) -> Result<Option<String>, KeychainError> {
+    let entry = Entry::new(SERVICE_NAME, key)?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -24,12 +36,18 @@ pub fn get_credential(server_url: &str) -> Result<Option<String>, KeychainError>
     }
 }
 
-pub fn delete_credential(server_url: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(SERVICE_NAME, server_url)?;
+pub fn delete_secret(key: &str) -> Result<(), KeychainError> {
+    let entry = Entry::new(SERVICE_NAME, key)?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+pub fn delete_secret_best_effort(key: &str) {
+    if let Err(error) = delete_secret(key) {
+        log::warn!("Failed to delete keychain secret {key}: {error}");
     }
 }
 

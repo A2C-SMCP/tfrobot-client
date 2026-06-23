@@ -13,12 +13,20 @@ export interface ManualSmcpTarget {
   headers: Record<string, string>;
 }
 
+export type ManualSmcpApiKeyAction =
+  | { kind: 'unchanged' }
+  | { kind: 'set'; value: string }
+  | { kind: 'clear' };
+
 interface ConnectionTargetState {
   manualTargets: ManualSmcpTarget[];
   loading: boolean;
   error: string | null;
   fetchManualTargets: () => Promise<void>;
-  saveManualTarget: (target: ManualSmcpTarget, apiKey?: string) => Promise<ManualSmcpTarget>;
+  saveManualTarget: (
+    target: ManualSmcpTarget,
+    apiKeyAction?: ManualSmcpApiKeyAction,
+  ) => Promise<ManualSmcpTarget>;
   deleteManualTarget: (targetId: string) => Promise<void>;
   connectTarget: (instanceId: string, targetId: string) => Promise<void>;
   reset: () => void;
@@ -43,12 +51,12 @@ export const useConnectionTargetStore = create<ConnectionTargetState>((set, get)
     }
   },
 
-  saveManualTarget: async (target, apiKey) => {
+  saveManualTarget: async (target, apiKeyAction = { kind: 'unchanged' }) => {
     set({ loading: true, error: null });
     try {
       const saved = await invoke<ManualSmcpTarget>('save_manual_smcp_target', {
         target,
-        apiKey: apiKey || null,
+        apiKeyAction,
       });
       await get().fetchManualTargets();
       return saved;

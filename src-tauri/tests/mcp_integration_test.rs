@@ -659,60 +659,6 @@ async fn test_input_values_crud() {
     assert!(after.is_empty());
 }
 
-// ── Connection profiles integration ──
-
-#[tokio::test]
-async fn test_profiles_crud() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = create_mcp_test_app_state(tmp.path()).await;
-
-    let profile: tfrobot_client_lib::commands::connection::ConnectionProfile =
-        serde_json::from_value(serde_json::json!({
-            "name": "test-profile",
-            "url": "https://smcp.example.com",
-            "namespace": "/smcp",
-            "office_id": "office-1",
-            "computer_name": "my-pc",
-            "headers": {}
-        }))
-        .unwrap();
-
-    // Add
-    let mut profiles = state
-        .config
-        .load_profiles_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    profiles.push(profile);
-    state
-        .config
-        .save_profiles_for_instance(TEST_INSTANCE_ID, &profiles)
-        .unwrap();
-
-    // Read
-    let loaded = state
-        .config
-        .load_profiles_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].name, "test-profile");
-
-    // Delete
-    let filtered: Vec<_> = loaded
-        .into_iter()
-        .filter(|p| p.name != "test-profile")
-        .collect();
-    state
-        .config
-        .save_profiles_for_instance(TEST_INSTANCE_ID, &filtered)
-        .unwrap();
-
-    let after = state
-        .config
-        .load_profiles_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    assert!(after.is_empty());
-}
-
 // ── Issue #19 regression: stderr pipe deadlock ──
 // The stderr-flood server writes >64 KB to stderr on startup and per tool call.
 // If smcp-computer does not consume the stderr pipe, the child process blocks

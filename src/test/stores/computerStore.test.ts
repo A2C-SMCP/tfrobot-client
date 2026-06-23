@@ -11,14 +11,14 @@ const baseStatus = {
   connected: false,
   mcp_server_count: 1,
   robot_binding: null,
-  manual_connection_policy: { target_id: null, auto_connect: false },
+  connection_policy: { target: null, auto_connect: false },
   connection: null,
 };
 
 const baseInstance = {
   status: 'stopped' as const,
   connectionStatus: 'disconnected' as const,
-  manualConnectionPolicy: { target_id: null, auto_connect: false },
+  connectionPolicy: { target: null, auto_connect: false },
   mcpServerCount: 0,
 };
 
@@ -125,27 +125,55 @@ describe('computerStore', () => {
     expect(useComputerStore.getState().instances[0].status).toBe('stopped');
   });
 
-  it('updates manual connection policy for a Computer', async () => {
+  it('updates unified connection policy for a Computer', async () => {
     useComputerStore.setState({
       instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
       selectedInstanceId: 'computer-a',
     });
     mockedInvoke.mockResolvedValueOnce({
       ...baseStatus,
-      manual_connection_policy: { target_id: 'target-a', auto_connect: true },
+      connection_policy: { target: { type: 'manager_robot', id: '11' }, auto_connect: true },
     });
 
-    await useComputerStore.getState().updateManualConnectionPolicy('computer-a', {
-      target_id: 'target-a',
+    await useComputerStore.getState().updateConnectionPolicy('computer-a', {
+      target: { type: 'manager_robot', id: '11' },
       auto_connect: true,
     });
 
-    expect(mockedInvoke).toHaveBeenCalledWith('update_manual_connection_policy', {
-      request: { id: 'computer-a', targetId: 'target-a', autoConnect: true },
+    expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
+      request: {
+        id: 'computer-a',
+        target: { type: 'manager_robot', id: '11' },
+        autoConnect: true,
+      },
     });
-    expect(useComputerStore.getState().instances[0].manualConnectionPolicy).toEqual({
-      target_id: 'target-a',
+    expect(useComputerStore.getState().instances[0].connectionPolicy).toEqual({
+      target: { type: 'manager_robot', id: '11' },
       auto_connect: true,
     });
+  });
+
+  it('connects and disconnects the selected target', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce([{ ...baseStatus, connected: true }])
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce([{ ...baseStatus, connected: false }]);
+
+    await useComputerStore.getState().connectSelectedTarget('computer-a');
+    expect(mockedInvoke).toHaveBeenCalledWith('connect_computer_connection_target', {
+      id: 'computer-a',
+    });
+    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connected');
+
+    await useComputerStore.getState().disconnectConnection('computer-a');
+    expect(mockedInvoke).toHaveBeenCalledWith('disconnect_computer_connection_target', {
+      id: 'computer-a',
+    });
+    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('disconnected');
   });
 });

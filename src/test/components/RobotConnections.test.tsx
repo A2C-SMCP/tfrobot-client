@@ -5,6 +5,10 @@ import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 
 const mockedInvoke = vi.mocked(invoke);
 
+vi.mock('@/components/ManagerAccount', () => ({
+  ManagerAccount: () => <div data-testid="manager-account" />,
+}));
+
 describe('RobotConnections', () => {
   beforeEach(() => {
     useConnectionTargetStore.setState({

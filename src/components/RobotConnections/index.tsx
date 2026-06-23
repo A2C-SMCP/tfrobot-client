@@ -22,34 +22,11 @@ import { ManagerAccount } from '@/components/ManagerAccount';
 import { ProfileForm } from '@/components/SmcpConnection/ProfileForm';
 import {
   useConnectionTargetStore,
+  type ManualSmcpApiKeyAction,
   type ManualSmcpTarget,
 } from '@/stores/connectionTargetStore';
-import type { ConnectionProfile } from '@/stores/connectionStore';
 
 const { Title, Text } = Typography;
-
-function targetToProfile(target: ManualSmcpTarget): ConnectionProfile {
-  return {
-    name: target.name,
-    url: target.url,
-    namespace: target.namespace,
-    office_id: target.office_id,
-    computer_name: target.computer_name,
-    headers: target.headers,
-  };
-}
-
-function profileToTarget(profile: ConnectionProfile, current?: ManualSmcpTarget): ManualSmcpTarget {
-  return {
-    id: current?.id ?? '',
-    name: profile.name,
-    url: profile.url,
-    namespace: profile.namespace,
-    office_id: profile.office_id,
-    computer_name: profile.computer_name,
-    headers: profile.headers,
-  };
-}
 
 export function RobotConnections() {
   const { t } = useTranslation();
@@ -69,8 +46,11 @@ export function RobotConnections() {
     fetchManualTargets();
   }, [fetchManualTargets]);
 
-  const handleSubmit = async (profile: ConnectionProfile, apiKey?: string) => {
-    await saveManualTarget(profileToTarget(profile, editingTarget), apiKey);
+  const handleSubmit = async (
+    target: ManualSmcpTarget,
+    apiKeyAction: ManualSmcpApiKeyAction,
+  ) => {
+    await saveManualTarget(target, apiKeyAction);
     message.success(t('connection.messages.profileSaved'));
     setEditingTarget(undefined);
     setFormOpen(false);
@@ -185,7 +165,7 @@ export function RobotConnections() {
         destroyOnHidden
       >
         <ProfileForm
-          initialValues={editingTarget ? targetToProfile(editingTarget) : undefined}
+          initialValues={editingTarget}
           onSubmit={handleSubmit}
           onCancel={() => {
             setEditingTarget(undefined);
