@@ -92,6 +92,8 @@ interface McpServerState {
   servers: McpServerStatus[];
   loading: boolean;
   error: string | null;
+  activeInstanceId: string | null;
+  serversRequestId: number;
 
   fetchServers: (instanceId: string) => Promise<void>;
   addServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
@@ -111,17 +113,32 @@ const initialState = {
   servers: [] as McpServerStatus[],
   loading: false,
   error: null as string | null,
+  activeInstanceId: null as string | null,
+  serversRequestId: 0,
 };
 
 export const useMcpStore = create<McpServerState>((set, get) => ({
   ...initialState,
 
   fetchServers: async (instanceId: string) => {
-    set({ loading: true, error: null });
+    const requestId = get().serversRequestId + 1;
+    set({
+      activeInstanceId: instanceId,
+      serversRequestId: requestId,
+      servers: [],
+      loading: true,
+      error: null,
+    });
     try {
       const servers = await invoke<McpServerStatus[]>('get_mcp_servers', { instanceId });
+      if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ servers, loading: false });
     } catch (e) {
+      if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ error: String(e), loading: false });
     }
   },

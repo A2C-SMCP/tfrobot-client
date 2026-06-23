@@ -4,7 +4,23 @@ import { useMcpStore, getConfigName, getConfigType, type McpServerConfig } from 
 const mockedInvoke = vi.mocked(invoke);
 
 function resetStore() {
-  useMcpStore.setState({ servers: [], loading: false, error: null });
+  useMcpStore.setState({
+    servers: [],
+    loading: false,
+    error: null,
+    activeInstanceId: null,
+    serversRequestId: 0,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 // Helper to create test configs in the correct internally tagged format
@@ -48,6 +64,27 @@ describe('mcpStore', () => {
       await useMcpStore.getState().fetchServers(instanceId);
 
       expect(useMcpStore.getState().error).toBe('connection failed');
+    });
+
+    it('ignores stale server responses from a previous computer instance', async () => {
+      const first = deferred<Array<{ name: string; running: boolean; status_message: string; disabled: boolean }>>();
+      const second = deferred<Array<{ name: string; running: boolean; status_message: string; disabled: boolean }>>();
+      const serversA = [{ name: 'a-only', running: true, status_message: 'Running', disabled: false }];
+      const serversB = [{ name: 'b-only', running: true, status_message: 'Running', disabled: false }];
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
+
+      const firstFetch = useMcpStore.getState().fetchServers('computer-a');
+      const secondFetch = useMcpStore.getState().fetchServers('computer-b');
+
+      second.resolve(serversB);
+      await secondFetch;
+      first.resolve(serversA);
+      await firstFetch;
+
+      expect(useMcpStore.getState().servers).toEqual(serversB);
+      expect(useMcpStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useMcpStore.getState().loading).toBe(false);
     });
   });
 

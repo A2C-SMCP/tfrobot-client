@@ -4,6 +4,7 @@ import {
   BugOutlined,
   CloudServerOutlined,
   DesktopOutlined,
+  FileTextOutlined,
   FormOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
@@ -14,6 +15,7 @@ import { McpConfig } from '@/components/McpConfig';
 import { InputVariables } from '@/components/InputVariables';
 import { DesktopResources } from '@/components/DesktopResources';
 import { DebugPanel } from '@/components/DebugPanel';
+import { LogViewer } from '@/components/LogViewer';
 import { RuntimeSettings } from '@/components/Settings/RuntimeSettings';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
@@ -145,6 +147,7 @@ export function Computer({ initialView = 'list', initialTab = 'mcp' }: ComputerP
               { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} /> },
               { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
+              { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
               { key: 'runtime', label: <><SettingOutlined /> {t('settings.runtime')}</>, children: <RuntimeSettings /> },
             ]}
           />

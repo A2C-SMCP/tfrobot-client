@@ -264,7 +264,9 @@
     "noHistory": "暂无调用记录",
     "replay": "重放",
     "noResources": "暂无可用资源",
-    "resourcesNotAvailable": "资源浏览功能将在 smcp-computer 开放资源 API 后可用。"
+    "selectResourceServer": "选择资源服务器",
+    "noRunningServers": "暂无运行中的 MCP 服务器",
+    "loadMoreResources": "加载更多"
   },
   "logs": {
     "title": "日志",

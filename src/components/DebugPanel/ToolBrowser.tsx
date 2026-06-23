@@ -19,8 +19,9 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   const [serverFilter, setServerFilter] = useState<string | undefined>();
 
   useEffect(() => {
+    selectTool(null);
     fetchTools(instanceId);
-  }, [fetchTools, instanceId]);
+  }, [fetchTools, instanceId, selectTool]);
 
   const servers = [...new Set(tools.map((t) => t.server))];
 

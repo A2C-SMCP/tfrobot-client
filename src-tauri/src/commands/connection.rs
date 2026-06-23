@@ -371,11 +371,12 @@ pub async fn connect_smcp_core(
     }
 
     log::info!("Connected to SMCP server: {}", profile.url);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "connection",
         &format!("Connected to {}", profile.url),
         None,
+        Some(instance_id),
     );
     Ok(())
 }
@@ -459,6 +460,13 @@ pub async fn connect_connection_target_core(
     if let Some(connection) = previous_connection {
         close_smcp_connection(connection).await;
     }
+    let _ = state.log_service.write_for_instance(
+        "info",
+        "connection",
+        &format!("Connected to manual SMCP target {}", target.name),
+        None,
+        Some(instance_id),
+    );
     Ok(())
 }
 
@@ -520,9 +528,13 @@ async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(),
         close_smcp_connection(connection).await;
     }
 
-    let _ = state
-        .log_service
-        .write("info", "connection", "Disconnected from SMCP server", None);
+    let _ = state.log_service.write_for_instance(
+        "info",
+        "connection",
+        "Disconnected from SMCP server",
+        None,
+        Some(instance_id),
+    );
     Ok(())
 }
 
@@ -777,6 +789,7 @@ async fn establish_manager_connection(
             runtime.manager.clone(),
             runtime.inputs.clone(),
             params.clone(),
+            instance_id.to_string(),
             generation,
             token.expires_in,
         );
@@ -805,7 +818,7 @@ async fn establish_manager_connection(
 
     persist_robot_binding(state, instance_id, &params.robot_binding).await?;
 
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "connection",
         &format!(
@@ -813,6 +826,7 @@ async fn establish_manager_connection(
             params.url, params.robot_account_id
         ),
         None,
+        Some(instance_id),
     );
     emit_connection_changed(app);
     Ok(())
@@ -877,6 +891,7 @@ fn spawn_refresh_task(
     manager: Arc<RwLock<Option<MCPServerManager>>>,
     inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     params: ManagerConnectionParams,
+    instance_id: String,
     generation: u64,
     initial_expires_in: i64,
 ) -> tokio::task::JoinHandle<()> {
@@ -909,11 +924,12 @@ fn spawn_refresh_task(
             {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
-                    let _ = log_service.write(
+                    let _ = log_service.write_for_instance(
                         "info",
                         "connection",
                         "Pre-refreshed SMCP token and reconnected",
                         None,
+                        Some(&instance_id),
                     );
                     emit_connection_changed(&app);
                     expires_in = new_ttl;

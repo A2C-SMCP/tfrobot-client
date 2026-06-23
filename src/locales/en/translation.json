@@ -264,7 +264,9 @@
     "noHistory": "No call history",
     "replay": "Replay",
     "noResources": "No resources available",
-    "resourcesNotAvailable": "Resource browsing will be available when smcp-computer exposes resource APIs."
+    "selectResourceServer": "Select resource server",
+    "noRunningServers": "No running MCP servers",
+    "loadMoreResources": "Load more"
   },
   "logs": {
     "title": "Logs",

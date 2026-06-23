@@ -20,12 +20,12 @@ export function DebugPanel({ instanceId }: DebugPanelProps) {
     {
       key: 'resources',
       label: t('debug.tabs.resources'),
-      children: <ResourceBrowser />,
+      children: <ResourceBrowser instanceId={instanceId} />,
     },
     {
       key: 'history',
       label: t('debug.tabs.history'),
-      children: <CallHistory />,
+      children: <CallHistory instanceId={instanceId} />,
     },
   ];
 

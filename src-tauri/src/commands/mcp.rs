@@ -125,11 +125,12 @@ pub async fn add_mcp_server_core(
         .map_err(|e| e.to_string())?;
 
     log::info!("MCP server added for instance {}: {}", instance_id, name);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
         &format!("Server added for instance {}: {}", instance_id, name),
         None,
+        Some(instance_id),
     );
     Ok(())
 }
@@ -172,11 +173,12 @@ pub async fn remove_mcp_server_core(
     }
 
     log::info!("MCP server removed for instance {}: {}", instance_id, name);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
         &format!("Server removed for instance {}: {}", instance_id, name),
         None,
+        Some(instance_id),
     );
     Ok(())
 }
@@ -217,11 +219,12 @@ pub async fn update_mcp_server_core(
         .map_err(|e| e.to_string())?;
 
     log::info!("MCP server updated for instance {}: {}", instance_id, name);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
         &format!("Server updated for instance {}: {}", instance_id, name),
         None,
+        Some(instance_id),
     );
     Ok(())
 }
@@ -259,11 +262,12 @@ pub async fn start_mcp_server_core(
     mgr.start_client(name).await.map_err(|e| e.to_string())?;
 
     log::info!("MCP server started for instance {}: {}", instance_id, name);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
         &format!("Server started for instance {}: {}", instance_id, name),
         None,
+        Some(instance_id),
     );
     Ok(())
 }
@@ -297,11 +301,12 @@ pub async fn stop_mcp_server_core(
     mgr.stop_client(name).await.map_err(|e| e.to_string())?;
 
     log::info!("MCP server stopped for instance {}: {}", instance_id, name);
-    let _ = state.log_service.write(
+    let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
         &format!("Server stopped for instance {}: {}", instance_id, name),
         None,
+        Some(instance_id),
     );
     Ok(())
 }

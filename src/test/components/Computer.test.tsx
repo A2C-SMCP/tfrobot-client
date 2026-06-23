@@ -42,6 +42,9 @@ vi.mock('@/components/DesktopResources', () => ({
 vi.mock('@/components/DebugPanel', () => ({
   DebugPanel: ({ instanceId }: { instanceId: string }) => <div data-testid="debug-panel">DebugPanel:{instanceId}</div>,
 }));
+vi.mock('@/components/LogViewer', () => ({
+  LogViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">LogViewer:{instanceId}</div>,
+}));
 vi.mock('@/components/Settings/RuntimeSettings', () => ({
   RuntimeSettings: () => <div data-testid="runtime-settings">RuntimeSettings</div>,
 }));
@@ -96,6 +99,7 @@ describe('Computer', () => {
     expect(screen.getByText('Robot Connection')).toBeInTheDocument();
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
+    expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('default');
   });
