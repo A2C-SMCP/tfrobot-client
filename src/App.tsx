@@ -9,6 +9,7 @@ import {
   ApiOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
 import { Dashboard } from './components/Dashboard';
@@ -18,20 +19,50 @@ import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { toComputerDetailTab } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
+import { useManagerStore } from './stores/managerStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
+const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
 
 function App() {
   const { t, i18n } = useTranslation();
   const [selectedKey, setSelectedKey] = useState('dashboard');
   const menuSelectedKey = selectedKey.startsWith('computer-detail') ? 'computer' : selectedKey;
   const { resolved, setMode, initFromSettings } = useThemeStore();
+  const {
+    session,
+    pendingAccountSelection,
+    restoreAttempted,
+    restoreSession,
+    handleAuthExpired,
+  } = useManagerStore();
 
   // Initialize theme from persisted settings
   useEffect(() => {
     initFromSettings();
   }, []);
+
+  // Manager authentication is app-wide state: restore it before any page-level
+  // connection action can need the Manager JWT.
+  useEffect(() => {
+    if (!session && !pendingAccountSelection && !restoreAttempted) {
+      restoreSession().catch(() => {
+        /* restore errors are stored in manager store */
+      });
+    }
+  }, [pendingAccountSelection, restoreAttempted, restoreSession, session]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<unknown>(AUTH_EXPIRED_EVENT, () => {
+      handleAuthExpired();
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {
+        /* noop */
+      });
+    };
+  }, [handleAuthExpired]);
 
   // Listen for system theme changes
   useEffect(() => {
@@ -110,9 +141,16 @@ function App() {
       case 'dashboard':
         return <Dashboard onNavigate={setSelectedKey} />;
       case 'computer':
-        return <Computer key="computer-list" />;
+        return <Computer key="computer-list" onNavigate={setSelectedKey} />;
       case 'computer-detail':
-        return <Computer key={`computer-detail-${detailTab}`} initialView="detail" initialTab={detailTab} />;
+        return (
+          <Computer
+            key={`computer-detail-${detailTab}`}
+            initialView="detail"
+            initialTab={detailTab}
+            onNavigate={setSelectedKey}
+          />
+        );
       case 'robot-connections':
         return <RobotConnections />;
       case 'logs':

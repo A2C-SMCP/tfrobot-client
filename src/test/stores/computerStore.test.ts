@@ -132,23 +132,26 @@ describe('computerStore', () => {
     });
     mockedInvoke.mockResolvedValueOnce({
       ...baseStatus,
-      connection_policy: { target: { type: 'manager_robot', id: '11' }, auto_connect: true },
+      connection_policy: {
+        target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
+        auto_connect: true,
+      },
     });
 
     await useComputerStore.getState().updateConnectionPolicy('computer-a', {
-      target: { type: 'manager_robot', id: '11' },
+      target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
       auto_connect: true,
     });
 
     expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
       request: {
         id: 'computer-a',
-        target: { type: 'manager_robot', id: '11' },
+        target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
         autoConnect: true,
       },
     });
     expect(useComputerStore.getState().instances[0].connectionPolicy).toEqual({
-      target: { type: 'manager_robot', id: '11' },
+      target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
       auto_connect: true,
     });
   });

@@ -216,6 +216,7 @@ pub async fn duplicate_computer_instance_core(
         instance.connection_policy.target = Some(ComputerConnectionTarget {
             target_type: ComputerConnectionTargetType::ManualSmcp,
             id: target_id,
+            robot_account_id: None,
         });
     }
 
@@ -415,7 +416,10 @@ async fn connect_computer_connection_target_by_policy(
                 .id
                 .parse::<u64>()
                 .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
-            connect_manager_robot_target_core(app, state, id, employee_id)
+            let robot_account_id = target
+                .robot_account_id
+                .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
+            connect_manager_robot_target_core(app, state, id, employee_id, robot_account_id)
                 .await
                 .map_err(|error| error.to_string())
         }
@@ -430,6 +434,7 @@ fn validate_connection_target_reference(
         Some(ComputerConnectionTarget {
             target_type: ComputerConnectionTargetType::ManualSmcp,
             id,
+            ..
         }) => {
             state
                 .config
@@ -440,10 +445,14 @@ fn validate_connection_target_reference(
         Some(ComputerConnectionTarget {
             target_type: ComputerConnectionTargetType::ManagerRobot,
             id,
-        }) => id
-            .parse::<u64>()
-            .map(|_| ())
-            .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string()),
+            robot_account_id,
+        }) => {
+            id.parse::<u64>()
+                .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
+            robot_account_id
+                .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
+            Ok(())
+        }
         None => Ok(()),
     }
 }

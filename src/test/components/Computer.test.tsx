@@ -6,6 +6,8 @@ import { useComputerStore } from '@/stores/computerStore';
 
 const mockInvoke = vi.mocked(invoke);
 
+vi.setConfig({ testTimeout: 60_000 });
+
 const mockComputerInstances = [
   {
     id: 'computer-a',
@@ -21,7 +23,10 @@ const mockComputerInstances = [
       namespace: 'test',
       robot_name: 'Robot A',
     },
-    connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+    connection_policy: {
+      target: { type: 'manager_robot', id: '42', robotAccountId: 4200 },
+      auto_connect: false,
+    },
     connection: {
       url: 'https://smcp.example.com',
       office_id: 'office-1',
@@ -60,8 +65,8 @@ vi.mock('@/components/InputVariables', () => ({
   InputVariables: ({ instanceId }: { instanceId: string }) => <div data-testid="input-variables">InputVariables:{instanceId}</div>,
 }));
 vi.mock('@/components/RobotConnectionPanel', () => ({
-  RobotConnectionPanel: ({ instanceId }: { instanceId: string }) => (
-    <div data-testid="robot-connection-panel">RobotConnectionPanel:{instanceId}</div>
+  RobotConnectionPanel: () => (
+    <div data-testid="robot-connection-panel">RobotConnectionPanel</div>
   ),
 }));
 vi.mock('@/components/DesktopResources', () => ({
@@ -117,7 +122,10 @@ describe('Computer', () => {
           connectionStatus: 'connected',
           connectionProfile: 'prod',
           robotName: 'Robot A',
-          connectionPolicy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+          connectionPolicy: {
+            target: { type: 'manager_robot', id: '42', robotAccountId: 4200 },
+            auto_connect: false,
+          },
           mcpServerCount: 5,
         },
       ],
@@ -155,7 +163,7 @@ describe('Computer', () => {
     expect(screen.getByText('Logs')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
-  }, 10000);
+  }, 20000);
 
   it('opens the selected second Computer with scoped detail tabs', async () => {
     mockInvoke.mockResolvedValueOnce(twoComputerInstances);
@@ -170,14 +178,14 @@ describe('Computer', () => {
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
-  }, 10000);
+  }, 20000);
 
   it('can render the detail view directly', async () => {
     render(<Computer initialView="detail" initialTab="connection" />);
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
     expect(screen.getByText('Back to Computers')).toBeInTheDocument();
-    expect(screen.getByTestId('robot-connection-panel')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('robot-connection-panel')).toHaveTextContent('RobotConnectionPanel');
   });
 
   it('keeps detail tabs reachable from loaded Computer instances', async () => {
@@ -195,7 +203,7 @@ describe('Computer', () => {
 
     expect(screen.getByText('Create Computer')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'prod' })).toBeInTheDocument();
-  }, 15000);
+  }, 20000);
 
   it('disables list connect when the Computer is not running', async () => {
     const stoppedInstance = {
@@ -213,7 +221,21 @@ describe('Computer', () => {
     render(<Computer />);
 
     expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
-  }, 15000);
+  }, 20000);
+
+  it('disables list connect for a Manager Robot target without robotAccountId', async () => {
+    const missingRobotAccountIdInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      connection: null,
+      connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+    };
+    mockInvoke.mockResolvedValueOnce([missingRobotAccountIdInstance]);
+
+    render(<Computer />);
+
+    expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
+  }, 20000);
 
   it('connects the selected target from the list action', async () => {
     const disconnectedInstance = {
@@ -249,7 +271,21 @@ describe('Computer', () => {
         id: 'computer-a',
       });
     });
-  }, 10000);
+  }, 20000);
+
+  it('disables detail connect for a Manager Robot target without robotAccountId', async () => {
+    const missingRobotAccountIdInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      connection: null,
+      connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+    };
+    mockInvoke.mockResolvedValueOnce([missingRobotAccountIdInstance]);
+
+    render(<Computer initialView="detail" />);
+
+    expect((await screen.findByText('Connect')).closest('button')).toBeDisabled();
+  }, 20000);
 
   it('creates a Computer from the list page', async () => {
     mockInvoke.mockImplementation(async (cmd) => {

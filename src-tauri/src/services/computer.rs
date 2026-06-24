@@ -34,6 +34,13 @@ pub struct ComputerConnectionTarget {
     #[serde(rename = "type")]
     pub target_type: ComputerConnectionTargetType,
     pub id: String,
+    #[serde(
+        rename = "robotAccountId",
+        alias = "robot_account_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub robot_account_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -25,6 +25,7 @@ export type ComputerConnectionTargetType = 'manager_robot' | 'manual_smcp';
 export interface ComputerConnectionTarget {
   type: ComputerConnectionTargetType;
   id: string;
+  robotAccountId?: number;
 }
 
 export interface ComputerConnectionPolicy {

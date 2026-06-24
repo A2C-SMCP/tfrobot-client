@@ -61,7 +61,17 @@
       "selectTarget": "Select a Robot or Manual SMCP target",
       "requiresRunning": "Start this Computer before connecting.",
       "requiresTarget": "Select a connection target first.",
-      "manualManagedGlobally": "Manual SMCP targets are managed globally on this page; select one above to bind it to this Computer."
+      "missingRobotAccountId": "robotAccountId is missing; this Robot cannot be connected.",
+      "robotNotRunning": "This Robot is not running and cannot be connected.",
+      "manualManagedGlobally": "Manual SMCP targets are managed globally on this page; select one above to bind it to this Computer.",
+      "readOnlyTitle": "This page shows connection resources available to this Computer.",
+      "readOnlyDescription": "Connection status, login, configuration, and connect/disconnect actions are managed on the Robot Connections page.",
+      "openRobotConnections": "Open Robot Connections",
+      "managerLoginRequired": "No Manager account is signed in. Sign in on the Robot Connections page to view Robots.",
+      "manualTargetsTitle": "Global Manual SMCP Configurations",
+      "configureTargets": "Configure",
+      "openTargetDetails": "Details",
+      "noManualTargets": "No Manual SMCP configurations. Add one on the Robot Connections page."
     },
     "form": {
       "name": "Name",
@@ -212,6 +222,7 @@
     }
   },
   "connection": {
+    "manualSmcp": "Manual SMCP",
     "smcpServer": "SMCP Server",
     "profiles": "Connection Profiles",
     "addProfile": "Add Profile",
@@ -396,6 +407,7 @@
     },
     "employees": {
       "title": "Digital Employees",
+      "managerRobots": "Manager Robots",
       "signedInAs": "Signed in as {{name}}",
       "empty": "No digital employees are available for this account.",
       "robotId": "Robot ID",

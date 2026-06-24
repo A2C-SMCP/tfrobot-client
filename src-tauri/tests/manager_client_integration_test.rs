@@ -351,7 +351,8 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
                 "items": [
                     {"id": 11, "name": "本地联调员工", "robotId": "r-1",
                      "status": "running", "templateType": "tfrserver", "templateDisplayName": "智能客服",
-                     "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver"},
+                     "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver",
+                     "robot_account_id": 4242},
                     {"id": 12, "name": "robot-2"}
                 ]
             })),
@@ -370,6 +371,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     assert_eq!(list[0].template_type.as_deref(), Some("tfrserver"));
     assert_eq!(list[0].status.as_deref(), Some("running"));
     assert_eq!(list[0].cluster_name.as_deref(), Some("local-tfrobotserver"));
+    assert_eq!(list[0].robot_account_id, Some(4242));
 
     // Bearer token 应当在第二个请求（list）里
     let reqs = captured.lock().await;

@@ -66,6 +66,11 @@ export type LoginResult =
   | { kind: 'authenticated'; user: UserInfo }
   | { kind: 'account_selection_required'; accounts: AccountOption[] };
 
+export interface RestoredManagerSession {
+  baseUrl: string;
+  user: UserInfo;
+}
+
 export type ManagerError =
   | { kind: 'network_error'; detail: string }
   | { kind: 'unauthorized' }
@@ -94,6 +99,7 @@ interface ManagerState {
   employees: DigitalEmployeeBrief[];
   selectedEmployeeId: number | null;
   loading: boolean;
+  restoreAttempted: boolean;
   error: ManagerError | null;
   paymentRequired: PaymentRequiredInfo | null;
   /** 上次成功拉取员工列表的时间戳（ms）。null = 尚未成功拉过。用于 60s staleness 兜底。 */
@@ -102,6 +108,7 @@ interface ManagerState {
   online: boolean;
 
   setBaseUrl: (url: string) => void;
+  restoreSession: () => Promise<RestoredManagerSession | null>;
   login: (phone: string, password: string, baseUrl?: string) => Promise<LoginResult>;
   selectAccount: (accountId: number) => Promise<void>;
   fetchEmployees: () => Promise<void>;
@@ -141,6 +148,7 @@ const initialState = {
   employees: [] as DigitalEmployeeBrief[],
   selectedEmployeeId: null as number | null,
   loading: false,
+  restoreAttempted: false,
   error: null as ManagerError | null,
   paymentRequired: null as PaymentRequiredInfo | null,
   lastFetchAt: null as number | null,
@@ -165,6 +173,31 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
 
   clearError: () => set({ error: null }),
   dismissPaymentRequired: () => set({ paymentRequired: null }),
+
+  restoreSession: async () => {
+    if (get().restoreAttempted || get().session) return null;
+    set({ loading: true, error: null, restoreAttempted: true });
+    try {
+      const restored = await invoke<RestoredManagerSession | null>('manager_restore_session');
+      if (restored) {
+        info(`manager: restored session, accountId=${restored.user.accountId}`);
+        set({
+          session: restored.user,
+          pendingAccountSelection: null,
+          baseUrl: restored.baseUrl,
+          loading: false,
+        });
+      } else {
+        set({ loading: false });
+      }
+      return restored;
+    } catch (e) {
+      const err = toManagerError(e);
+      warn(`manager: restore_session failed, kind=${err.kind}`);
+      set({ error: err, loading: false });
+      return null;
+    }
+  },
 
   login: async (phone, password, baseUrl) => {
     set({ loading: true, error: null, paymentRequired: null });
@@ -346,6 +379,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         employees: [],
         selectedEmployeeId: null,
         loading: false,
+        restoreAttempted: true,
         lastFetchAt: null,
       });
     } catch (e) {

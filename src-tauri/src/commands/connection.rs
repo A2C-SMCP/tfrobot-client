@@ -3,7 +3,9 @@ use crate::services::computer::{
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
-use crate::services::manager_client::{ExchangedToken, ManagerClient, ManagerError};
+use crate::services::manager_client::{
+    DigitalEmployeeBrief, ExchangedToken, ManagerClient, ManagerError,
+};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::model::MCPServerInput;
@@ -72,18 +74,15 @@ enum ManagerConnectionDecision {
 const SOURCE_MANUAL_SMCP: &str = "manual_smcp";
 const SOURCE_MANAGER_ROBOT: &str = "manager_robot";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManualSmcpApiKeyAction {
+    #[default]
     Unchanged,
-    Set { value: String },
+    Set {
+        value: String,
+    },
     Clear,
-}
-
-impl Default for ManualSmcpApiKeyAction {
-    fn default() -> Self {
-        Self::Unchanged
-    }
 }
 
 /// Connection status returned to frontend
@@ -269,6 +268,7 @@ async fn persist_manual_connection_target(
             instance.connection_policy.target = Some(ComputerConnectionTarget {
                 target_type: ComputerConnectionTargetType::ManualSmcp,
                 id: target_id.to_string(),
+                robot_account_id: None,
             });
         })?;
     state
@@ -464,6 +464,8 @@ pub async fn manager_connect_smcp(
     log::info!(
         "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
     );
+    let employee =
+        validate_manager_robot_account(state.inner(), employee_id, robot_account_id).await?;
 
     // 1) 握手参数
     let info = state
@@ -501,12 +503,16 @@ pub async fn manager_connect_smcp(
             employee_id,
             robot_id: robot_id
                 .filter(|s| !s.trim().is_empty())
+                .or_else(|| employee.robot_id.clone())
                 .or_else(|| Some(office_id.clone())),
             robot_account_id: Some(robot_account_id),
             namespace: namespace
                 .filter(|s| !s.trim().is_empty())
+                .or_else(|| employee.namespace.clone())
                 .or_else(|| info.namespace.clone()),
-            robot_name: robot_name.filter(|s| !s.trim().is_empty()),
+            robot_name: robot_name
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| Some(employee.name.clone())),
         },
     };
 
@@ -525,25 +531,16 @@ pub async fn connect_manager_robot_target_core(
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
+    robot_account_id: u64,
 ) -> Result<(), ManagerError> {
-    let employee = state
-        .manager_client
-        .list_digital_employees()
-        .await?
-        .into_iter()
-        .find(|employee| employee.id == employee_id)
-        .ok_or(ManagerError::NotFoundOrNoPermission)?;
-    let robot_account_id = employee.robot_account_id.ok_or_else(|| {
-        ManagerError::InvalidResponse("robotAccountId missing for this robot".to_string())
-    })?;
-
+    let employee = validate_manager_robot_account(state, employee_id, robot_account_id).await?;
     let token = state
         .manager_client
         .exchange_token(&robot_account_id.to_string(), None)
         .await?;
     let info = state
         .manager_client
-        .get_connection_info(employee.id)
+        .get_connection_info(employee_id)
         .await?;
     let url = info.socket_base_url.clone();
     if url.trim().is_empty() {
@@ -567,25 +564,61 @@ pub async fn connect_manager_robot_target_core(
         computer_name,
         office_id: office_id.clone(),
         routing_headers: routing_only_headers(info.routing_headers.clone()),
-        employee_id: employee.id,
+        employee_id,
         robot_account_id,
         scope: None,
         robot_binding: RobotBindingMetadata {
-            employee_id: employee.id,
+            employee_id,
             robot_id: employee
                 .robot_id
-                .filter(|s| !s.trim().is_empty())
+                .clone()
                 .or_else(|| Some(office_id.clone())),
             robot_account_id: Some(robot_account_id),
             namespace: employee
                 .namespace
-                .filter(|s| !s.trim().is_empty())
+                .clone()
                 .or_else(|| info.namespace.clone()),
-            robot_name: Some(employee.name).filter(|s| !s.trim().is_empty()),
+            robot_name: Some(employee.name.clone()),
         },
     };
 
     establish_manager_connection(app, state, instance_id, params, token).await
+}
+
+async fn validate_manager_robot_account(
+    state: &AppState,
+    employee_id: u64,
+    robot_account_id: u64,
+) -> Result<DigitalEmployeeBrief, ManagerError> {
+    let employees = state.manager_client.list_digital_employees().await?;
+    validate_manager_robot_account_from_list(&employees, employee_id, robot_account_id)
+}
+
+fn validate_manager_robot_account_from_list(
+    employees: &[DigitalEmployeeBrief],
+    employee_id: u64,
+    robot_account_id: u64,
+) -> Result<DigitalEmployeeBrief, ManagerError> {
+    let employee = employees
+        .iter()
+        .find(|item| item.id == employee_id)
+        .cloned()
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse(format!(
+                "Manager Robot target employee {employee_id} is not visible"
+            ))
+        })?;
+    let actual_robot_account_id = employee.robot_account_id.ok_or_else(|| {
+        ManagerError::InvalidResponse(format!(
+            "robotAccountId missing for Manager Robot target employee {employee_id}"
+        ))
+    })?;
+    if actual_robot_account_id != robot_account_id {
+        return Err(ManagerError::InvalidResponse(format!(
+            "robotAccountId mismatch for Manager Robot target employee {employee_id}"
+        )));
+    }
+    Ok(employee)
 }
 
 /// 用给定参数 + 短 JWT 构建 [`SmcpComputerClient`] 并 join_office。失败时尽力清理已建客户端。
@@ -723,6 +756,7 @@ async fn persist_robot_binding(
             instance.connection_policy.target = Some(ComputerConnectionTarget {
                 target_type: ComputerConnectionTargetType::ManagerRobot,
                 id: robot_binding.employee_id.to_string(),
+                robot_account_id: robot_binding.robot_account_id,
             });
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
@@ -1056,6 +1090,55 @@ mod tests {
         assert_eq!(
             out.get("X-TF-RobotType").map(String::as_str),
             Some("tfrobot")
+        );
+    }
+
+    #[test]
+    fn validate_manager_robot_account_accepts_matching_employee() {
+        let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
+            { "id": 41, "name": "old", "robotAccountId": 4100 },
+            {
+                "id": 42,
+                "name": "target",
+                "robotAccountId": 4200,
+                "robotId": "robot-a",
+                "namespace": "tf"
+            }
+        ]))
+        .unwrap();
+
+        let employee = validate_manager_robot_account_from_list(&employees, 42, 4200).unwrap();
+
+        assert_eq!(employee.id, 42);
+        assert_eq!(employee.robot_account_id, Some(4200));
+        assert_eq!(employee.robot_id.as_deref(), Some("robot-a"));
+    }
+
+    #[test]
+    fn validate_manager_robot_account_rejects_mismatched_account() {
+        let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
+            { "id": 42, "name": "target", "robotAccountId": 4200 }
+        ]))
+        .unwrap();
+
+        let err = validate_manager_robot_account_from_list(&employees, 42, 4300).unwrap_err();
+
+        assert!(
+            matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId mismatch"))
+        );
+    }
+
+    #[test]
+    fn validate_manager_robot_account_rejects_missing_account() {
+        let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
+            { "id": 42, "name": "target", "robotAccountId": null }
+        ]))
+        .unwrap();
+
+        let err = validate_manager_robot_account_from_list(&employees, 42, 4200).unwrap_err();
+
+        assert!(
+            matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId missing"))
         );
     }
 

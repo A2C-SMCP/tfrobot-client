@@ -252,6 +252,7 @@ pub fn run() {
             commands::settings::get_app_info,
             commands::settings::get_detected_path,
             // TFRSManager HTTP client (issue #23)
+            commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,
             commands::manager::manager_list_digital_employees,

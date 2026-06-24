@@ -1,47 +1,96 @@
 import { useEffect, useMemo, useState } from 'react';
-import { App, Button, Card, Descriptions, Select, Space, Switch, Tabs, Tag, Typography } from 'antd';
-import { ApiOutlined, DisconnectOutlined, LinkOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons';
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Descriptions,
+  Empty,
+  List,
+  Modal,
+  Select,
+  Space,
+  Switch,
+  Table,
+  Tabs,
+  Tag,
+  Typography,
+} from 'antd';
+import {
+  ApiOutlined,
+  ExportOutlined,
+  InfoCircleOutlined,
+  LoginOutlined,
+  RobotOutlined,
+  UserOutlined,
+} from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { ManagerAccount } from '@/components/ManagerAccount';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
   type ComputerConnectionTargetType,
 } from '@/stores/computerStore';
-import { useConnectionStore } from '@/stores/connectionStore';
-import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
-import { useManagerStore } from '@/stores/managerStore';
+import { useConnectionTargetStore, type ManualSmcpTarget } from '@/stores/connectionTargetStore';
+import { useManagerStore, type DepartmentRef } from '@/stores/managerStore';
 
 const { Text } = Typography;
 
 interface RobotConnectionPanelProps {
   instanceId: string;
+  onNavigate?: (key: string) => void;
 }
 
-export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) {
+function formatDeptBreadcrumb(dept: DepartmentRef): string {
+  const chain = dept.ancestors?.length ? dept.ancestors.map((ancestor) => ancestor.name) : [dept.name];
+  return chain.join(' / ');
+}
+
+function employeeStatusTagColor(status?: string): string {
+  switch (status) {
+    case 'running':
+      return 'green';
+    case 'suspended':
+      return 'orange';
+    case 'stopped':
+      return 'default';
+    case 'init_failed':
+    case 'failed':
+      return 'red';
+    default:
+      return 'blue';
+  }
+}
+
+export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnectionPanelProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const { instances, updateConnectionPolicy, connectSelectedTarget } = useComputerStore();
-  const { getStatus, fetchStatus, disconnect, loading: connectionLoading } = useConnectionStore();
+  const [detailTarget, setDetailTarget] = useState<ManualSmcpTarget | null>(null);
+  const { instances, updateConnectionPolicy } = useComputerStore();
+  const {
+    session,
+    employees,
+    loading: managerLoading,
+    error: managerError,
+    fetchEmployeesIfStale,
+  } = useManagerStore();
   const {
     manualTargets,
-    fetchManualTargets,
     loading: targetLoading,
+    error: targetError,
+    fetchManualTargets,
   } = useConnectionTargetStore();
-  const { session, employees, fetchEmployeesIfStale } = useManagerStore();
   const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
-    fetchStatus(instanceId);
     fetchManualTargets();
     if (session) {
       fetchEmployeesIfStale().catch(() => {
-        /* manager error is stored in manager store */
+        /* error is rendered from manager store */
       });
     }
-  }, [fetchStatus, fetchManualTargets, fetchEmployeesIfStale, instanceId, session]);
+  }, [fetchManualTargets, fetchEmployeesIfStale, session]);
 
   useEffect(() => {
     setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
@@ -52,29 +101,74 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
   ]);
 
   const selectedTarget = useMemo(
-    () => valueToTarget(selectedTargetValue),
-    [selectedTargetValue],
+    () => valueToTarget(
+      selectedTargetValue,
+      employees,
+      selectedInstance?.connectionPolicy.target,
+    ),
+    [employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
   );
-  const status = getStatus(instanceId);
-  const canConnect = selectedInstance?.status === 'running' && Boolean(selectedTarget) && !status.connected;
+  const targetOptions = useMemo(() => {
+    const managerOptions = employees
+      .filter((employee) => (employee.status ?? 'running') === 'running' && employee.robotAccountId != null)
+      .map((employee) => ({
+        value: targetToValue({
+          type: 'manager_robot',
+          id: String(employee.id),
+          robotAccountId: employee.robotAccountId,
+        })!,
+        label: formatManagerRobotOption(employee),
+      }));
+    const manualOptions = manualTargets.map((target) => ({
+      value: targetToValue({ type: 'manual_smcp', id: target.id })!,
+      label: `${target.name} (${target.office_id})`,
+    }));
+    return [
+      {
+        label: t('managerAccount.employees.managerRobots'),
+        options: managerOptions,
+      },
+      {
+        label: t('connection.manualSmcp'),
+        options: manualOptions,
+      },
+    ];
+  }, [employees, manualTargets, t]);
 
-  const handleDisconnect = async () => {
-    await disconnect(instanceId);
-    message.success(t('connection.messages.disconnected'));
-  };
-
-  const handleConnect = async () => {
-    if (!selectedTarget) return;
-    await updateConnectionPolicy(instanceId, {
-      target: selectedTarget,
-      auto_connect: autoConnect,
-    });
-    await connectSelectedTarget(instanceId);
-    await fetchStatus(instanceId);
-    message.success(t('connection.messages.connected'));
-  };
+  const manualColumns = useMemo(
+    () => [
+      {
+        title: t('connection.table.name'),
+        dataIndex: 'name',
+        key: 'name',
+        render: (name: string) => <Text strong>{name}</Text>,
+      },
+      { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
+      { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
+      { title: t('connection.table.computer'), dataIndex: 'computer_name', key: 'computer_name' },
+      {
+        title: t('connection.table.actions'),
+        key: 'actions',
+        width: 120,
+        render: (_: unknown, record: ManualSmcpTarget) => (
+          <Button
+            type="link"
+            icon={<InfoCircleOutlined />}
+            onClick={() => setDetailTarget(record)}
+          >
+            {t('computer.connectionActions.openTargetDetails')}
+          </Button>
+        ),
+      },
+    ],
+    [t],
+  );
 
   const handleSavePolicy = async () => {
+    if (selectedTarget?.type === 'manager_robot' && selectedTarget.robotAccountId == null) {
+      message.error(t('managerAccount.employees.noRobotAccount'));
+      return;
+    }
     await updateConnectionPolicy(instanceId, {
       target: selectedTarget,
       auto_connect: autoConnect,
@@ -82,79 +176,23 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
     message.success(t('common.saved'));
   };
 
-  const targetOptions = useMemo(() => {
-    const managerOptions = employees.map((employee) => ({
-      value: targetToValue({ type: 'manager_robot', id: String(employee.id) })!,
-      label: employee.name,
-    }));
-    const manualOptions = manualTargets.map((target) => ({
-      value: targetToValue({ type: 'manual_smcp', id: target.id })!,
-      label: `${target.name} (${target.office_id})`,
-    }));
-    return [
-      {
-        label: 'Manager Robots',
-        options: managerOptions,
-      },
-      {
-        label: 'Manual SMCP',
-        options: manualOptions,
-      },
-    ];
-  }, [employees, manualTargets]);
-
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card
-        size="small"
-        title={
-          <Space>
-            <Tag color={status.connected ? 'success' : 'default'}>
-              {status.connected ? t('connection.connected') : t('connection.disconnected')}
-            </Tag>
-            {t('connection.statusTitle')}
-          </Space>
+      <Alert
+        type="info"
+        showIcon
+        message={t('computer.connectionActions.readOnlyTitle')}
+        description={t('computer.connectionActions.readOnlyDescription')}
+        action={
+          <Button
+            size="small"
+            icon={<ExportOutlined />}
+            onClick={() => onNavigate?.('robot-connections')}
+          >
+            {t('computer.connectionActions.openRobotConnections')}
+          </Button>
         }
-        extra={
-          status.connected ? (
-            <Button
-              danger
-              icon={<DisconnectOutlined />}
-              loading={connectionLoading}
-              onClick={() => handleDisconnect().catch((e) => message.error(String(e)))}
-            >
-              {t('connection.disconnect')}
-            </Button>
-          ) : (
-            <Button icon={<ReloadOutlined />} onClick={() => fetchStatus(instanceId)}>
-              {t('common.refresh')}
-            </Button>
-          )
-        }
-      >
-        {status.connected ? (
-          <Descriptions size="small" column={2}>
-            <Descriptions.Item label="Source">{status.source_type ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="Target">
-              {status.target_name ?? status.profile_name ?? '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.url')}>
-              {status.url}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.office')}>
-              {status.office_id}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.computer')}>
-              {status.computer_name}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.connectedAt')}>
-              {status.connected_at ? new Date(status.connected_at).toLocaleString() : '-'}
-            </Descriptions.Item>
-          </Descriptions>
-        ) : (
-          <Text type="secondary">{t('connection.notConnected')}</Text>
-        )}
-      </Card>
+      />
 
       <Card size="small" title={t('computer.connectionActions.targetTitle')}>
         <Space wrap>
@@ -182,21 +220,6 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
           >
             {t('common.save')}
           </Button>
-          <Button
-            type="primary"
-            icon={<LinkOutlined />}
-            disabled={!canConnect}
-            loading={targetLoading}
-            onClick={() => handleConnect().catch((e) => message.error(String(e)))}
-          >
-            {t('connection.connect')}
-          </Button>
-          {!status.connected && selectedInstance?.status !== 'running' && (
-            <Text type="secondary">{t('computer.connectionActions.requiresRunning')}</Text>
-          )}
-          {!status.connected && selectedInstance?.status === 'running' && !selectedTarget && (
-            <Text type="secondary">{t('computer.connectionActions.requiresTarget')}</Text>
-          )}
         </Space>
       </Card>
 
@@ -206,29 +229,190 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
             key: 'manager',
             label: (
               <>
-                <UserOutlined /> Manager Robots
+                <UserOutlined /> {t('managerAccount.employees.managerRobots')}
               </>
             ),
-            children: <ManagerAccount instanceId={instanceId} />,
+            children: session ? (
+              <Card
+                title={t('managerAccount.employees.title')}
+                extra={
+                  <Button onClick={() => fetchEmployeesIfStale(0)} loading={managerLoading}>
+                    {t('common.refresh')}
+                  </Button>
+                }
+              >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {managerError && (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message={t(`manager.errors.${managerError.kind}`)}
+                    />
+                  )}
+                  {!managerLoading && employees.length === 0 && !managerError ? (
+                    <Empty description={t('managerAccount.employees.empty')} />
+                  ) : (
+                    <List
+                      bordered
+                      loading={managerLoading}
+                      dataSource={employees}
+                      rowKey={(employee) => employee.id}
+                      renderItem={(employee) => (
+                        <List.Item>
+                          <List.Item.Meta
+                            avatar={<RobotOutlined style={{ fontSize: 24 }} />}
+                            title={
+                              <Space size={4} wrap>
+                                <Text strong>{employee.name}</Text>
+                                {employee.status && (
+                                  <Tag color={employeeStatusTagColor(employee.status)}>
+                                    {employee.status}
+                                  </Tag>
+                                )}
+                                {employee.templateDisplayName && (
+                                  <Tag>{employee.templateDisplayName}</Tag>
+                                )}
+                                {employee.templateType && (
+                                  <Tag color="purple">{employee.templateType}</Tag>
+                                )}
+                              </Space>
+                            }
+                            description={
+                              <Descriptions size="small" column={1} colon={false}>
+                                <Descriptions.Item label={t('managerAccount.employees.department')}>
+                                  {employee.departments && employee.departments.length > 0 ? (
+                                    <Space direction="vertical" size={0}>
+                                      {employee.departments.map((dept) => (
+                                        <Text key={dept.id}>{formatDeptBreadcrumb(dept)}</Text>
+                                      ))}
+                                    </Space>
+                                  ) : (
+                                    <Text type="secondary">
+                                      {t('managerAccount.employees.noDepartment')}
+                                    </Text>
+                                  )}
+                                </Descriptions.Item>
+                                {employee.robotId && (
+                                  <Descriptions.Item
+                                    label={t('managerAccount.employees.robotId')}
+                                    contentStyle={{ fontFamily: 'monospace' }}
+                                  >
+                                    {employee.robotId}
+                                  </Descriptions.Item>
+                                )}
+                                {employee.namespace && (
+                                  <Descriptions.Item label={t('managerAccount.employees.namespace')}>
+                                    {employee.namespace}
+                                  </Descriptions.Item>
+                                )}
+                                {employee.clusterName && (
+                                  <Descriptions.Item label={t('managerAccount.employees.cluster')}>
+                                    {employee.clusterName}
+                                  </Descriptions.Item>
+                                )}
+                                {employee.description && (
+                                  <Descriptions.Item label={t('managerAccount.employees.description')}>
+                                    {employee.description}
+                                  </Descriptions.Item>
+                                )}
+                              </Descriptions>
+                            }
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  )}
+                </Space>
+              </Card>
+            ) : (
+              <Card>
+                <Empty
+                  description={t('computer.connectionActions.managerLoginRequired')}
+                >
+                  <Button
+                    type="primary"
+                    icon={<LoginOutlined />}
+                    onClick={() => onNavigate?.('robot-connections')}
+                  >
+                    {t('computer.connectionActions.openRobotConnections')}
+                  </Button>
+                </Empty>
+              </Card>
+            ),
           },
           {
             key: 'manual',
             label: (
               <>
-                <ApiOutlined /> Manual SMCP
+                <ApiOutlined /> {t('connection.manualSmcp')}
               </>
             ),
             children: (
-              <Card size="small">
-                <Space>
-                  <Text type="secondary">{t('computer.connectionActions.manualManagedGlobally')}</Text>
-                  <Button onClick={() => fetchManualTargets()}>{t('common.refresh')}</Button>
+              <Card
+                title={t('computer.connectionActions.manualTargetsTitle')}
+                extra={
+                  <Space>
+                    <Button onClick={() => fetchManualTargets()} loading={targetLoading}>
+                      {t('common.refresh')}
+                    </Button>
+                    <Button
+                      icon={<ExportOutlined />}
+                      onClick={() => onNavigate?.('robot-connections')}
+                    >
+                      {t('computer.connectionActions.configureTargets')}
+                    </Button>
+                  </Space>
+                }
+              >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {targetError && <Alert type="error" showIcon message={targetError} />}
+                  <Table
+                    rowKey="id"
+                    columns={manualColumns}
+                    dataSource={manualTargets}
+                    loading={targetLoading}
+                    pagination={false}
+                    locale={{ emptyText: t('computer.connectionActions.noManualTargets') }}
+                  />
                 </Space>
               </Card>
             ),
           },
         ]}
       />
+
+      <Modal
+        open={Boolean(detailTarget)}
+        title={detailTarget?.name}
+        footer={null}
+        onCancel={() => setDetailTarget(null)}
+        destroyOnHidden
+      >
+        {detailTarget && (
+          <Descriptions size="small" column={1} bordered>
+            <Descriptions.Item label={t('connection.table.name')}>
+              {detailTarget.name}
+            </Descriptions.Item>
+            <Descriptions.Item label={t('connection.table.url')}>
+              {detailTarget.url}
+            </Descriptions.Item>
+            <Descriptions.Item label={t('connection.table.office')}>
+              {detailTarget.office_id}
+            </Descriptions.Item>
+            <Descriptions.Item label={t('connection.table.computer')}>
+              {detailTarget.computer_name}
+            </Descriptions.Item>
+            <Descriptions.Item label={t('connection.form.namespace')}>
+              {detailTarget.namespace}
+            </Descriptions.Item>
+            <Descriptions.Item label={t('connection.form.headers')}>
+              {Object.keys(detailTarget.headers).length > 0
+                ? JSON.stringify(detailTarget.headers)
+                : '-'}
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+      </Modal>
     </Space>
   );
 }
@@ -238,10 +422,47 @@ function targetToValue(target?: ComputerConnectionTarget | null): string | undef
   return `${target.type}:${target.id}`;
 }
 
-function valueToTarget(value?: string): ComputerConnectionTarget | null {
+function formatManagerRobotOption(employee: {
+  name: string;
+  status?: string;
+  templateDisplayName?: string;
+  templateType?: string;
+  namespace?: string;
+}): string {
+  const parts = [
+    employee.status,
+    employee.templateDisplayName,
+    employee.templateType,
+    employee.namespace,
+  ].filter(Boolean);
+  return parts.length > 0 ? `${employee.name} (${parts.join(' / ')})` : employee.name;
+}
+
+function valueToTarget(
+  value: string | undefined,
+  employees: Array<{ id: number; robotAccountId?: number }>,
+  currentTarget?: ComputerConnectionTarget | null,
+): ComputerConnectionTarget | null {
   if (!value) return null;
   const [type, ...idParts] = value.split(':');
   const id = idParts.join(':');
   if (!id || (type !== 'manager_robot' && type !== 'manual_smcp')) return null;
+  if (type === 'manager_robot') {
+    const employee = employees.find((item) => String(item.id) === id);
+    if (currentTarget && targetToValue(currentTarget) === value) {
+      return {
+        ...currentTarget,
+        robotAccountId: employee?.robotAccountId ?? currentTarget.robotAccountId,
+      };
+    }
+    return {
+      type,
+      id,
+      robotAccountId: employee?.robotAccountId,
+    };
+  }
+  if (currentTarget && targetToValue(currentTarget) === value) {
+    return currentTarget;
+  }
   return { type: type as ComputerConnectionTargetType, id };
 }

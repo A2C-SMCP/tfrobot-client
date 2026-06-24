@@ -102,6 +102,33 @@ describe('managerStore', () => {
     });
   });
 
+  describe('restoreSession', () => {
+    it('restores session from persisted Manager credentials', async () => {
+      mockedInvoke.mockResolvedValueOnce({
+        baseUrl: 'https://manager.example.com',
+        user,
+      });
+
+      const ret = await useManagerStore.getState().restoreSession();
+
+      expect(mockedInvoke).toHaveBeenCalledWith('manager_restore_session');
+      expect(ret).toEqual({ baseUrl: 'https://manager.example.com', user });
+      expect(useManagerStore.getState().session).toEqual(user);
+      expect(useManagerStore.getState().baseUrl).toBe('https://manager.example.com');
+      expect(useManagerStore.getState().restoreAttempted).toBe(true);
+    });
+
+    it('marks restore attempted when no persisted session exists', async () => {
+      mockedInvoke.mockResolvedValueOnce(null);
+
+      const ret = await useManagerStore.getState().restoreSession();
+
+      expect(ret).toBeNull();
+      expect(useManagerStore.getState().session).toBeNull();
+      expect(useManagerStore.getState().restoreAttempted).toBe(true);
+    });
+  });
+
   describe('fetchEmployees', () => {
     it('populates the employees list', async () => {
       useManagerStore.setState({ session: user, baseUrl: 'https://mgr.example.com' });

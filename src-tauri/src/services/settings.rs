@@ -8,6 +8,8 @@ pub struct AppSettings {
     pub language: String,
     pub log_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
+    #[serde(default)]
+    pub manager_session: Option<ManagerSessionSettings>,
     /// User-configured PATH override. When set, takes priority over auto-detected PATH.
     #[serde(default)]
     pub custom_path: Option<String>,
@@ -29,6 +31,15 @@ pub struct CustomRuntimePaths {
     pub pnpm: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerSessionSettings {
+    pub base_url: String,
+    pub user_id: u64,
+    pub account_id: u64,
+    pub account_name: String,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -36,6 +47,7 @@ impl Default for AppSettings {
             language: "en".to_string(),
             log_retention_days: 30,
             custom_runtime_paths: CustomRuntimePaths::default(),
+            manager_session: None,
             custom_path: None,
         }
     }
@@ -131,5 +143,25 @@ mod tests {
             loaded.custom_runtime_paths.node.as_deref(),
             Some("/usr/local/bin/node")
         );
+    }
+
+    #[test]
+    fn test_manager_session_roundtrip() {
+        let (svc, _tmp) = setup();
+        let mut settings = svc.load();
+        settings.manager_session = Some(ManagerSessionSettings {
+            base_url: "https://manager.example.com".to_string(),
+            user_id: 7,
+            account_id: 42,
+            account_name: "client_uat".to_string(),
+        });
+        svc.save(&settings).unwrap();
+
+        let loaded = svc.load();
+        let session = loaded.manager_session.unwrap();
+        assert_eq!(session.base_url, "https://manager.example.com");
+        assert_eq!(session.user_id, 7);
+        assert_eq!(session.account_id, 42);
+        assert_eq!(session.account_name, "client_uat");
     }
 }

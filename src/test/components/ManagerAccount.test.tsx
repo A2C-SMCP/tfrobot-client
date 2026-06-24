@@ -16,10 +16,12 @@ type ManagerStoreMock = {
   employees: DigitalEmployeeBrief[];
   selectedEmployeeId: number | null;
   loading: boolean;
+  restoreAttempted: boolean;
   error: ManagerError | null;
   paymentRequired: { message: string; redirectUrl?: string } | null;
   online: boolean;
   setBaseUrl: ReturnType<typeof vi.fn>;
+  restoreSession: ReturnType<typeof vi.fn>;
   login: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
   fetchEmployees: ReturnType<typeof vi.fn>;
@@ -40,10 +42,12 @@ const mockStore: ManagerStoreMock = {
   employees: [],
   selectedEmployeeId: null,
   loading: false,
+  restoreAttempted: true,
   error: null,
   paymentRequired: null,
   online: true,
   setBaseUrl: vi.fn(),
+  restoreSession: vi.fn().mockResolvedValue(null),
   login: vi.fn().mockResolvedValue({ kind: 'authenticated' }),
   selectAccount: vi.fn().mockResolvedValue(undefined),
   fetchEmployees: vi.fn().mockResolvedValue(undefined),

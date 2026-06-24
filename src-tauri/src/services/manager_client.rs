@@ -214,11 +214,11 @@ enum LoginData {
     MultiAccount(MultiAccountPayload),
 }
 
-/// 前端可感知的登录结果（JWT 不透出；存 keychain + 内存 session）。
+/// 前端可感知的登录结果（JWT 不透出；写 keychain 采用 best-effort，内存 session 必须建立）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LoginResult {
-    /// 登录成功，JWT 已存 keychain。
+    /// 登录成功，JWT 已进入内存 session；keychain 持久化失败不阻断当前会话。
     Authenticated { user: UserInfo },
     /// 命中多账户，需要前端让用户挑选账号后调 `manager_select_account`。
     AccountSelectionRequired { accounts: Vec<AccountOption> },
@@ -263,7 +263,11 @@ pub struct DigitalEmployeeBrief {
     /// audience = `robot:<robotAccountId>`（TFRM-183 暴露，**nullable**：历史/未回填实例为 null —
     /// 这类机器人不能做 token-exchange 连接，前端应禁用其连接按钮）。
     /// 注意与 `account_id`（创建人 ID）和 `robot_id`/rid（SMCP 路由串）区分。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "robot_account_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub robot_account_id: Option<u64>,
     /// `running` / `stopped` / `init_failed` / … 完整状态集见 UAT guide。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,12 +465,50 @@ impl ManagerClient {
         format!("{KEYCHAIN_KEY_PREFIX}{}", &hex[..16])
     }
 
+    fn save_manager_jwt_best_effort(base_url: &str, token: &str) {
+        let key = Self::keychain_key(base_url);
+        if let Err(error) = keychain::save_credential(&key, token) {
+            log::warn!(
+                "manager: failed to persist JWT in keychain; continuing with in-memory session: {error}"
+            );
+        }
+    }
+
     async fn require_session(&self) -> Result<Session, ManagerError> {
         self.session
             .read()
             .await
             .clone()
             .ok_or(ManagerError::NoSession)
+    }
+
+    pub async fn current_base_url(&self) -> Option<String> {
+        self.session
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.base_url.clone())
+    }
+
+    pub async fn restore_session(
+        &self,
+        base_url: String,
+        user: UserInfo,
+    ) -> Result<Option<UserInfo>, ManagerError> {
+        let normalized_base_url = strip_trailing_slash(base_url);
+        let key = Self::keychain_key(&normalized_base_url);
+        let Some(jwt) = keychain::get_credential(&key)? else {
+            return Ok(None);
+        };
+        if jwt.trim().is_empty() {
+            return Ok(None);
+        }
+        *self.session.write().await = Some(Session {
+            base_url: normalized_base_url,
+            jwt,
+            pending_session_token: None,
+        });
+        Ok(Some(user))
     }
 
     /// 用当前 session 的 JWT 构造鉴权 header。
@@ -559,9 +601,8 @@ impl ManagerClient {
 
         match envelope.data {
             LoginData::SingleAccount(payload) => {
-                // 写 keychain + 建立内存 session（清空 pending token）
-                let key = Self::keychain_key(&base);
-                keychain::save_credential(&key, &payload.token)?;
+                // keychain 持久化是 best-effort：系统凭据库异常不能阻断当前登录会话。
+                Self::save_manager_jwt_best_effort(&base, &payload.token);
                 *self.session.write().await = Some(Session {
                     base_url: base,
                     jwt: payload.token,
@@ -615,8 +656,7 @@ impl ManagerClient {
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
-        let key = Self::keychain_key(&session.base_url);
-        keychain::save_credential(&key, &envelope.data.token)?;
+        Self::save_manager_jwt_best_effort(&session.base_url, &envelope.data.token);
         *self.session.write().await = Some(Session {
             base_url: session.base_url,
             jwt: envelope.data.token,
@@ -1031,6 +1071,12 @@ mod tests {
         // 与 rid/robot_id 区分：robotId 是路由串，robotAccountId 是数字账号 ID。
         assert_eq!(emp.robot_id.as_deref(), Some("rid-1"));
 
+        // Manager 若返回 snake_case，也必须保留；Tauri 再序列化给前端时会转回 robotAccountId。
+        let snake_case: DigitalEmployeeBrief =
+            serde_json::from_str(r#"{"id": 14, "name": "robot", "robot_account_id": 5252}"#)
+                .unwrap();
+        assert_eq!(snake_case.robot_account_id, Some(5252));
+
         // 缺字段（历史实例）→ None
         let absent: DigitalEmployeeBrief =
             serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
@@ -1245,6 +1291,28 @@ mod tests {
         let c = ManagerClient::new();
         let err = c.require_session().await.unwrap_err();
         assert!(matches!(err, ManagerError::NoSession));
+    }
+
+    #[tokio::test]
+    async fn restore_session_returns_none_without_persisted_jwt() {
+        let c = ManagerClient::new();
+        let user = UserInfo {
+            user_id: 7,
+            account_id: 42,
+            account_name: "client_uat".to_string(),
+        };
+        let base_url = format!("https://missing-{}.example.com", uuid::Uuid::new_v4());
+
+        match c.restore_session(base_url, user).await {
+            Ok(restored) => {
+                assert!(restored.is_none());
+                assert!(!c.has_session().await);
+            }
+            Err(ManagerError::KeychainError { .. }) => {
+                eprintln!("Skipping restore_session test: system keychain not available");
+            }
+            Err(err) => panic!("unexpected restore_session error: {err:?}"),
+        }
     }
 
     #[tokio::test]

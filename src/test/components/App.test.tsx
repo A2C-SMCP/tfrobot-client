@@ -2,11 +2,26 @@ import { act, render, screen, fireEvent, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import App from '@/App';
 
+const managerStoreMock = vi.hoisted(() => ({
+  restoreSession: vi.fn().mockResolvedValue(null),
+  handleAuthExpired: vi.fn(),
+}));
+
 vi.mock('@/stores/themeStore', () => ({
   useThemeStore: vi.fn(() => ({
     resolved: 'light',
     setMode: vi.fn(),
     initFromSettings: vi.fn(),
+  })),
+}));
+
+vi.mock('@/stores/managerStore', () => ({
+  useManagerStore: vi.fn(() => ({
+    session: null,
+    pendingAccountSelection: null,
+    restoreAttempted: false,
+    restoreSession: managerStoreMock.restoreSession,
+    handleAuthExpired: managerStoreMock.handleAuthExpired,
   })),
 }));
 
@@ -35,6 +50,15 @@ vi.mock('@/components/Settings', () => ({
 describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    managerStoreMock.restoreSession.mockResolvedValue(null);
+  });
+
+  it('restores Manager session at app startup', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(managerStoreMock.restoreSession).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {

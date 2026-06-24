@@ -61,7 +61,17 @@
       "selectTarget": "选择 Robot 或手动 SMCP 目标",
       "requiresRunning": "需要先启动这个 Computer 才能连接。",
       "requiresTarget": "需要先选择连接目标。",
-      "manualManagedGlobally": "手动 SMCP 目标是全局资源；在上方选择一个即可绑定到当前 Computer。"
+      "missingRobotAccountId": "缺少 robotAccountId，无法连接这个 Robot。",
+      "robotNotRunning": "Robot 当前未运行，无法连接。",
+      "manualManagedGlobally": "手动 SMCP 目标是全局资源；在上方选择一个即可绑定到当前 Computer。",
+      "readOnlyTitle": "这里展示可用于当前 Computer 的连接资源。",
+      "readOnlyDescription": "连接状态、登录、配置和连接/断开操作统一在 Robot 连接页面管理。",
+      "openRobotConnections": "打开 Robot 连接",
+      "managerLoginRequired": "Manager 账号未登录。请到 Robot 连接页面登录后查看 Robot。",
+      "manualTargetsTitle": "全局 Manual SMCP 配置",
+      "configureTargets": "配置",
+      "openTargetDetails": "详情",
+      "noManualTargets": "暂无 Manual SMCP 配置。请到 Robot 连接页面添加。"
     },
     "form": {
       "name": "名称",
@@ -212,6 +222,7 @@
     }
   },
   "connection": {
+    "manualSmcp": "Manual SMCP",
     "smcpServer": "SMCP 服务器",
     "profiles": "连接配置",
     "addProfile": "添加配置",
@@ -396,6 +407,7 @@
     },
     "employees": {
       "title": "数字员工",
+      "managerRobots": "Manager Robots",
       "signedInAs": "当前登录：{{name}}",
       "empty": "当前账号下没有可用的数字员工。",
       "robotId": "Robot ID",

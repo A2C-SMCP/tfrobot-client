@@ -17,7 +17,7 @@ import {
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
-import { useComputerStore, type ComputerInstance, type ComputerStatus } from '@/stores/computerStore';
+import { useComputerStore, type ComputerConnectionTarget, type ComputerInstance, type ComputerStatus } from '@/stores/computerStore';
 import { McpConfig } from '@/components/McpConfig';
 import { InputVariables } from '@/components/InputVariables';
 import { DesktopResources } from '@/components/DesktopResources';
@@ -37,9 +37,16 @@ const statusColor: Record<ComputerStatus, string> = {
   error: 'error',
 };
 
+function isConnectionTargetConnectable(target?: ComputerConnectionTarget | null): boolean {
+  if (!target) return false;
+  if (target.type === 'manager_robot') return target.robotAccountId != null;
+  return true;
+}
+
 interface ComputerProps {
   initialView?: 'list' | 'detail';
   initialTab?: ComputerDetailTab;
+  onNavigate?: (key: string) => void;
 }
 
 function ComputerCard({
@@ -70,12 +77,16 @@ function ComputerCard({
   const startStopIcon = instance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />;
   const startStopColor = instance.status === 'running' ? '#fa8c16' : '#52c41a';
   const startStopAction = instance.status === 'running' ? onStop : onStart;
-  const connectionTargetSelected = Boolean(instance.connectionPolicy.target);
-  const canConnect = instance.status === 'running' && connectionTargetSelected;
+  const connectionTarget = instance.connectionPolicy.target;
+  const connectionTargetSelected = Boolean(connectionTarget);
+  const connectionTargetConnectable = isConnectionTargetConnectable(connectionTarget);
+  const canConnect = instance.status === 'running' && connectionTargetConnectable;
   const connectDisabledReason = instance.status !== 'running'
     ? t('computer.connectionActions.requiresRunning')
     : !connectionTargetSelected
       ? t('computer.connectionActions.requiresTarget')
+      : !connectionTargetConnectable
+        ? t('computer.connectionActions.missingRobotAccountId')
       : undefined;
 
   return (
@@ -178,7 +189,7 @@ function ComputerCard({
   );
 }
 
-export function Computer({ initialView = 'list', initialTab = 'overview' }: ComputerProps) {
+export function Computer({ initialView = 'list', initialTab = 'overview', onNavigate }: ComputerProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -377,6 +388,19 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
     return <Skeleton active paragraph={{ rows: 4 }} />;
   }
 
+  const selectedConnectionTarget = selectedInstance?.connectionPolicy.target;
+  const selectedConnectionTargetSelected = Boolean(selectedConnectionTarget);
+  const selectedConnectionTargetConnectable = isConnectionTargetConnectable(selectedConnectionTarget);
+  const selectedCanConnect = selectedInstance?.status === 'running'
+    && selectedConnectionTargetConnectable;
+  const selectedConnectDisabledReason = selectedInstance?.status !== 'running'
+    ? t('computer.connectionActions.requiresRunning')
+    : !selectedConnectionTargetSelected
+      ? t('computer.connectionActions.requiresTarget')
+      : !selectedConnectionTargetConnectable
+        ? t('computer.connectionActions.missingRobotAccountId')
+        : undefined;
+
   if (showDetail) {
     return (
       <div>
@@ -421,19 +445,11 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
                   {t('connection.disconnect')}
                 </Button>
               ) : (
-                <Tooltip
-                  title={
-                    selectedInstance.status !== 'running'
-                      ? t('computer.connectionActions.requiresRunning')
-                      : !selectedInstance.connectionPolicy.target
-                        ? t('computer.connectionActions.requiresTarget')
-                        : undefined
-                  }
-                >
+                <Tooltip title={selectedConnectDisabledReason}>
                   <Button
                     type="primary"
                     icon={<LinkOutlined />}
-                    disabled={selectedInstance.status !== 'running' || !selectedInstance.connectionPolicy.target}
+                    disabled={!selectedCanConnect}
                     loading={loading}
                     onClick={() => handleConnect(selectedInstance)}
                   >
@@ -469,7 +485,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview' }: Comp
               { key: 'overview', label: <><DesktopOutlined /> {t('dashboard.overview')}</>, children: <ComputerOverview instanceId={selectedInstance.id} onOpenTab={setActiveTab} /> },
               { key: 'mcp', label: <><ApiOutlined /> {t('mcp.servers')}</>, children: <McpConfig instanceId={selectedInstance.id} /> },
               { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
-              { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} /> },
+              { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} onNavigate={onNavigate} /> },
               { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
               { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
