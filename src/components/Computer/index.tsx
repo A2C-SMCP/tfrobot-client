@@ -23,11 +23,11 @@ import { InputVariables } from '@/components/InputVariables';
 import { DesktopResources } from '@/components/DesktopResources';
 import { DebugPanel } from '@/components/DebugPanel';
 import { LogViewer } from '@/components/LogViewer';
-import { RuntimeSettings } from '@/components/Settings/RuntimeSettings';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
 import { ComputerOverview } from './ComputerOverview';
+import { ComputerRuntimeSettings } from './ComputerRuntimeSettings';
 
 const { Title, Text } = Typography;
 
@@ -489,7 +489,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
               { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
-              { key: 'runtime', label: <><SettingOutlined /> {t('settings.runtime')}</>, children: <RuntimeSettings /> },
+              { key: 'runtime', label: <><SettingOutlined /> {t('settings.runtime')}</>, children: <ComputerRuntimeSettings instance={selectedInstance} /> },
             ]}
           />
         </Space>

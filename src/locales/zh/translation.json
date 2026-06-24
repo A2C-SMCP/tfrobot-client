@@ -56,6 +56,17 @@
       "connected": "已连接",
       "disconnected": "未连接"
     },
+    "runtime": {
+      "policyTitle": "运行时策略",
+      "instance": "Computer",
+      "connectionTarget": "连接目标",
+      "noConnectionTarget": "未选择连接目标",
+      "autoConnectDescription": "启动这个 Computer 时连接到已选择的目标。",
+      "autoConnectRequiresTarget": "启用自动连接前需要先选择连接目标。",
+      "lifecycleTitle": "生命周期",
+      "startBehavior": "启动这个 Computer 只会初始化当前实例的 MCP 服务器和连接策略。",
+      "globalRuntimeHint": "Node.js、Python、uv、pnpm 和 PATH 仍属于系统设置中的应用级配置。"
+    },
     "connectionActions": {
       "targetTitle": "连接目标",
       "selectTarget": "选择 Robot 或手动 SMCP 目标",

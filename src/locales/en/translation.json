@@ -56,6 +56,17 @@
       "connected": "Connected",
       "disconnected": "Disconnected"
     },
+    "runtime": {
+      "policyTitle": "Runtime Policy",
+      "instance": "Computer",
+      "connectionTarget": "Connection target",
+      "noConnectionTarget": "No connection target selected",
+      "autoConnectDescription": "Connect to the selected target when this Computer starts.",
+      "autoConnectRequiresTarget": "Select a connection target before enabling auto connect.",
+      "lifecycleTitle": "Lifecycle",
+      "startBehavior": "Starting this Computer initializes only this instance's MCP servers and connection policy.",
+      "globalRuntimeHint": "Node.js, Python, uv, pnpm, and PATH settings are application-level settings under System Settings."
+    },
     "connectionActions": {
       "targetTitle": "Connection Target",
       "selectTarget": "Select a Robot or Manual SMCP target",

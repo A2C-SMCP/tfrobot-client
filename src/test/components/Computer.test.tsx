@@ -78,8 +78,8 @@ vi.mock('@/components/DebugPanel', () => ({
 vi.mock('@/components/LogViewer', () => ({
   LogViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">LogViewer:{instanceId}</div>,
 }));
-vi.mock('@/components/Settings/RuntimeSettings', () => ({
-  RuntimeSettings: () => <div data-testid="runtime-settings">RuntimeSettings</div>,
+vi.mock('@/components/Computer/ComputerRuntimeSettings', () => ({
+  ComputerRuntimeSettings: ({ instance }: { instance: { id: string } }) => <div data-testid="runtime-settings">RuntimeSettings:{instance.id}</div>,
 }));
 vi.mock('@/components/Computer/ComputerOverview', () => ({
   ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
@@ -178,6 +178,8 @@ describe('Computer', () => {
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByText('Runtime'));
+    expect(screen.getByTestId('runtime-settings')).toHaveTextContent('computer-b');
   }, 20000);
 
   it('can render the detail view directly', async () => {
