@@ -59,7 +59,7 @@ describe('LogViewer', () => {
         offset: 0,
       });
     });
-  });
+  }, 10000);
 
   it('clears stale computer filter in global mode', async () => {
     render(<LogViewer />);

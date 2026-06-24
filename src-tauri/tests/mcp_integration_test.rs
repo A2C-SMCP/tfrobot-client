@@ -5,7 +5,7 @@ mod common;
 
 use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
 use smcp_computer::mcp_clients::MCPServerConfig;
-use tfrobot_client_lib::commands::{config_io, mcp};
+use tfrobot_client_lib::commands::{config_io, inputs, mcp};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
 
@@ -623,6 +623,56 @@ async fn test_input_definitions_crud() {
         .load_inputs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     assert!(after.is_empty());
+}
+
+#[tokio::test]
+async fn test_input_commands_sync_runtime_definitions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "api-key".to_string(),
+            label: "API Key".to_string(),
+            description: Some("Secret API key".to_string()),
+            default: Some("default-key".to_string()),
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    {
+        let runtime_inputs = runtime.inputs.read().await;
+        let input = runtime_inputs
+            .get("api-key")
+            .expect("runtime input definition should be synced");
+        assert!(matches!(
+            input,
+            smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
+                if prompt.description == "Secret API key"
+                    && prompt.default.as_deref() == Some("default-key")
+                    && prompt.password == Some(true)
+        ));
+    }
+
+    inputs::remove_input_core(&state, TEST_INSTANCE_ID, "api-key")
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
 }
 
 #[tokio::test]

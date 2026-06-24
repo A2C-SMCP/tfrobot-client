@@ -598,41 +598,51 @@ Frontend (React) --invoke()--> Tauri Commands ---> smcp-computer / Services
 
 | 命令 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `list_inputs` | — | `Vec<InputDefinition>` | 列出所有变量定义 |
-| `get_input` | `id: String` | `Option<InputDefinition>` | 获取单个变量定义 |
-| `add_or_update_input` | `input: InputDefinition` | `()` | 添加或更新变量定义 |
-| `remove_input` | `id: String` | `()` | 删除变量定义 |
-| `list_input_values` | — | `HashMap<String, Value>` | 列出所有缓存值 |
-| `get_input_value` | `id: String` | `Option<Value>` | 获取缓存值 |
-| `set_input_value` | `id: String, value: Value` | `()` | 设置缓存值 |
-| `remove_input_value` | `id: String` | `()` | 删除缓存值 |
-| `clear_input_values` | — | `()` | 清空所有缓存值 |
-| `import_inputs` | `path: String` | `()` | 从文件导入变量定义 |
+| `list_inputs` | `instance_id: String` | `Vec<InputDefinition>` | 列出指定 Computer 的变量定义 |
+| `get_input` | `instance_id: String, id: String` | `Option<InputDefinition>` | 获取指定 Computer 的单个变量定义 |
+| `add_or_update_input` | `instance_id: String, input: InputDefinition` | `()` | 添加或更新变量定义，并同步到该 Computer 的 SMCP runtime |
+| `remove_input` | `instance_id: String, id: String` | `()` | 删除变量定义和缓存值，并同步到该 Computer 的 SMCP runtime |
+| `list_input_values` | `instance_id: String` | `HashMap<String, Value>` | 列出指定 Computer 的缓存值 |
+| `get_input_value` | `instance_id: String, id: String` | `Option<Value>` | 获取缓存值 |
+| `set_input_value` | `instance_id: String, id: String, value: Value` | `()` | 设置缓存值 |
+| `remove_input_value` | `instance_id: String, id: String` | `()` | 删除缓存值 |
+| `clear_input_values` | `instance_id: String` | `()` | 清空指定 Computer 的缓存值 |
+| `import_inputs` | `instance_id: String, path: String` | `usize` | 从文件导入变量定义，并同步到该 Computer 的 SMCP runtime |
 
 ### 5.3 SMCP 连接管理
 
 | 命令 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `list_profiles` | — | `Vec<ConnectionProfile>` | 列出所有连接 Profile |
-| `save_profile` | `profile: ConnectionProfile` | `()` | 保存 Profile |
-| `delete_profile` | `name: String` | `()` | 删除 Profile |
-| `connect_smcp` | `profile_name: String` | `()` | 使用 Profile 连接（connect + join_office） |
-| `disconnect_smcp` | — | `()` | 断开连接 |
-| `get_connection_status` | — | `ConnectionStatus` | 获取当前连接状态 |
-| `list_room_members` | — | `Vec<SessionInfo>` | 列出当前 Office 成员 |
+| `list_manual_smcp_targets` | — | `Vec<ManualSmcpTarget>` | 列出全局 Manual SMCP 连接目标 |
+| `save_manual_smcp_target` | `target: ManualSmcpTarget, api_key_action` | `ManualSmcpTarget` | 保存全局 Manual SMCP 目标，密钥独立写入 keychain |
+| `delete_manual_smcp_target` | `target_id: String` | `()` | 删除未连接中的 Manual SMCP 目标 |
+| `connect_connection_target` | `instance_id: String, target_id: String` | `()` | 将已运行的 Computer 连接到 Manual SMCP 目标 |
+| `manager_connect_smcp` | `instance_id, employee_id, robot_account_id, ...` | `()` | 通过 Manager token-exchange 将已运行的 Computer 连接到机器人 |
+| `disconnect_smcp` | `instance_id: String` | `()` | 断开指定 Computer 的 SMCP 连接 |
+| `get_connection_status` | `instance_id: String` | `ConnectionStatus` | 获取指定 Computer 的连接状态 |
+
+### 5.3.1 Computer 连接策略
+
+| 命令 | 参数 | 返回 | 说明 |
+|------|------|------|------|
+| `update_computer_connection_policy` | `id, target, auto_connect` | `ComputerInstanceStatus` | 保存 Computer 选中的连接目标和自动连接策略 |
+| `connect_computer_connection_target` | `id: String` | `()` | 按 Computer 当前策略连接，要求 Computer 已运行 |
+| `disconnect_computer_connection_target` | `id: String` | `()` | 断开 Computer 当前连接 |
 
 ### 5.4 桌面资源
 
 | 命令 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `get_desktop` | `size: Option<String>, uri: Option<String>` | `Vec<Window>` | 获取桌面资源 |
+| `get_desktop` | `instance_id: String, uri: Option<String>` | `Vec<Window>` | 获取指定 Computer 的桌面资源 |
 
 ### 5.5 调试
 
 | 命令 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `get_available_tools` | — | `Vec<SMCPTool>` | 获取所有可用工具 |
-| `execute_tool` | `tool_name, params, timeout` | `CallToolResult` | 执行工具调用 |
+| `get_available_tools` | `instance_id: String` | `Vec<SMCPTool>` | 获取指定 Computer 的可用工具 |
+| `get_debug_resources` | `instance_id: String, server_name: String, cursor` | `DebugResourcesResponse` | 浏览指定 Computer 上 MCP server 暴露的资源 |
+| `execute_tool` | `instance_id, tool_name, params, timeout` | `CallToolResult` | 在指定 Computer 上执行工具调用 |
+| `get_tool_history` | `instance_id: String` | `Vec<ToolCallHistoryRecord>` | 获取指定 Computer 的工具调用历史 |
 | `get_tool_history` | — | `Vec<ToolCallRecord>` | 获取调用历史 |
 | `list_resources` | `server: Option<String>` | `Vec<Resource>` | 列出 MCP Resource |
 | `read_resource` | `server: String, uri: String` | `ResourceContent` | 读取 Resource 内容 |

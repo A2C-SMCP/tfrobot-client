@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::services::keychain;
+use crate::services::keychain::{self, SecretStore, SystemSecretStore};
 
 /// 环境变量：TFRSManager Base URL。无内置默认值；未配置且命令未显式传入 → `MissingBaseUrl`。
 pub const BASE_URL_ENV: &str = "TFRS_MANAGER_BASE_URL";
@@ -400,6 +400,7 @@ struct Session {
 pub struct ManagerClient {
     http: reqwest::Client,
     session: Arc<RwLock<Option<Session>>>,
+    secret_store: Arc<dyn SecretStore>,
 }
 
 /// 把 reqwest 错误的 source chain 展平成一行便于前端展示与诊断。
@@ -417,6 +418,10 @@ fn flatten_reqwest_err(e: reqwest::Error) -> String {
 
 impl ManagerClient {
     pub fn new() -> Self {
+        Self::new_with_secret_store(Arc::new(SystemSecretStore))
+    }
+
+    pub fn new_with_secret_store(secret_store: Arc<dyn SecretStore>) -> Self {
         let user_agent = format!(
             "tfrobot-client/{} (Tauri; {})",
             env!("CARGO_PKG_VERSION"),
@@ -434,15 +439,26 @@ impl ManagerClient {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            secret_store,
         }
     }
 
     /// 仅供测试：注入自定义 reqwest::Client（用于 mock server 断言 User-Agent 等）。
-    #[cfg(test)]
     pub fn with_http_client(http: reqwest::Client) -> Self {
+        Self::with_http_client_and_secret_store(
+            http,
+            Arc::new(crate::services::keychain::InMemorySecretStore::default()),
+        )
+    }
+
+    pub fn with_http_client_and_secret_store(
+        http: reqwest::Client,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            secret_store,
         }
     }
 
@@ -465,9 +481,9 @@ impl ManagerClient {
         format!("{KEYCHAIN_KEY_PREFIX}{}", &hex[..16])
     }
 
-    fn save_manager_jwt_best_effort(base_url: &str, token: &str) {
+    fn save_manager_jwt_best_effort(&self, base_url: &str, token: &str) {
         let key = Self::keychain_key(base_url);
-        if let Err(error) = keychain::save_credential(&key, token) {
+        if let Err(error) = self.secret_store.set_secret(&key, token) {
             log::warn!(
                 "manager: failed to persist JWT in keychain; continuing with in-memory session: {error}"
             );
@@ -497,7 +513,7 @@ impl ManagerClient {
     ) -> Result<Option<UserInfo>, ManagerError> {
         let normalized_base_url = strip_trailing_slash(base_url);
         let key = Self::keychain_key(&normalized_base_url);
-        let Some(jwt) = keychain::get_credential(&key)? else {
+        let Some(jwt) = self.secret_store.get_secret(&key)? else {
             return Ok(None);
         };
         if jwt.trim().is_empty() {
@@ -561,7 +577,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            keychain::delete_secret_best_effort(&key);
+            self.secret_store.delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
     }
@@ -602,7 +618,7 @@ impl ManagerClient {
         match envelope.data {
             LoginData::SingleAccount(payload) => {
                 // keychain 持久化是 best-effort：系统凭据库异常不能阻断当前登录会话。
-                Self::save_manager_jwt_best_effort(&base, &payload.token);
+                self.save_manager_jwt_best_effort(&base, &payload.token);
                 *self.session.write().await = Some(Session {
                     base_url: base,
                     jwt: payload.token,
@@ -656,7 +672,7 @@ impl ManagerClient {
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
-        Self::save_manager_jwt_best_effort(&session.base_url, &envelope.data.token);
+        self.save_manager_jwt_best_effort(&session.base_url, &envelope.data.token);
         *self.session.write().await = Some(Session {
             base_url: session.base_url,
             jwt: envelope.data.token,
@@ -806,7 +822,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            keychain::delete_secret_best_effort(&key);
+            self.secret_store.delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
         Ok(())
@@ -890,6 +906,12 @@ fn parse_payment_required(body: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_manager_client() -> ManagerClient {
+        ManagerClient::new_with_secret_store(
+            crate::services::keychain::InMemorySecretStore::shared(),
+        )
+    }
 
     /// `resolve_base_url` 依赖进程全局环境变量，cargo 默认并行测试会互相踩踏。
     /// 合并为一个顺序执行的测试，保证 set/unset 之间不被别的用例插入。
@@ -1288,14 +1310,14 @@ mod tests {
 
     #[tokio::test]
     async fn require_session_errors_when_none() {
-        let c = ManagerClient::new();
+        let c = test_manager_client();
         let err = c.require_session().await.unwrap_err();
         assert!(matches!(err, ManagerError::NoSession));
     }
 
     #[tokio::test]
     async fn restore_session_returns_none_without_persisted_jwt() {
-        let c = ManagerClient::new();
+        let c = test_manager_client();
         let user = UserInfo {
             user_id: 7,
             account_id: 42,
@@ -1303,21 +1325,14 @@ mod tests {
         };
         let base_url = format!("https://missing-{}.example.com", uuid::Uuid::new_v4());
 
-        match c.restore_session(base_url, user).await {
-            Ok(restored) => {
-                assert!(restored.is_none());
-                assert!(!c.has_session().await);
-            }
-            Err(ManagerError::KeychainError { .. }) => {
-                eprintln!("Skipping restore_session test: system keychain not available");
-            }
-            Err(err) => panic!("unexpected restore_session error: {err:?}"),
-        }
+        let restored = c.restore_session(base_url, user).await.unwrap();
+        assert!(restored.is_none());
+        assert!(!c.has_session().await);
     }
 
     #[tokio::test]
     async fn has_session_reflects_state_transitions() {
-        let c = ManagerClient::new();
+        let c = test_manager_client();
         assert!(!c.has_session().await);
         *c.session.write().await = Some(Session {
             base_url: "https://x".into(),

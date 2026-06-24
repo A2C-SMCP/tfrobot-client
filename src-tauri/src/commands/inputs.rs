@@ -83,6 +83,14 @@ pub async fn add_or_update_input(
     instance_id: String,
     input: InputDefinition,
 ) -> Result<(), String> {
+    add_or_update_input_core(&state, &instance_id, input).await
+}
+
+pub async fn add_or_update_input_core(
+    state: &AppState,
+    instance_id: &str,
+    input: InputDefinition,
+) -> Result<(), String> {
     let instance_id = require_instance_id(&instance_id)?;
     let id = input.id().to_string();
     log::info!("Adding/updating input for instance {}: {}", instance_id, id);
@@ -93,10 +101,14 @@ pub async fn add_or_update_input(
         .map_err(|e| e.to_string())?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
-    state
+    let updated_instance = state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
+    state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
 
     Ok(())
 }
@@ -107,6 +119,14 @@ pub async fn remove_input(
     state: State<'_, AppState>,
     instance_id: String,
     id: String,
+) -> Result<(), String> {
+    remove_input_core(&state, &instance_id, &id).await
+}
+
+pub async fn remove_input_core(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(&instance_id)?;
     log::info!("Removing input for instance {}: {}", instance_id, id);
@@ -122,17 +142,21 @@ pub async fn remove_input(
         return Err(format!("Input not found: {}", id));
     }
 
-    state
+    let updated_instance = state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
+    state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
 
     // Also remove cached value
     let mut values = state
         .config
         .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
-    values.remove(&id);
+    values.remove(id);
     state
         .config
         .save_input_values_for_instance(instance_id, &values)
@@ -249,10 +273,14 @@ pub async fn import_inputs(
         inputs.retain(|i| i.id() != id);
         inputs.push(input);
     }
-    state
+    let updated_instance = state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
+    state
+        .computer_registry
+        .update_runtime_instance(updated_instance)
+        .await;
 
     Ok(count)
 }

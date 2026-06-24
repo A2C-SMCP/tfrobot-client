@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use tfrobot_client_lib::services::config::ConfigService;
+use tfrobot_client_lib::services::keychain::InMemorySecretStore;
 use tfrobot_client_lib::services::logger::LogService;
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
@@ -12,7 +13,12 @@ pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
     let log_service = LogService::new(tmp_path).expect("Failed to create LogService");
     let settings_service = SettingsService::new(tmp_path.to_path_buf());
 
-    AppState::new(config, log_service, settings_service)
+    AppState::new_with_secret_store(
+        config,
+        log_service,
+        settings_service,
+        InMemorySecretStore::shared(),
+    )
 }
 
 /// Path to the echo MCP server index.js

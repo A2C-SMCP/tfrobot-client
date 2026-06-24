@@ -228,6 +228,7 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
     let manager = runtime.manager.clone();
     let inputs = runtime.inputs.clone();
@@ -299,10 +300,39 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
 }
 
 #[tokio::test]
+async fn profile_connect_requires_running_computer() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    assert!(!runtime.is_running().await);
+
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "stopped-target".to_string(),
+            name: "stopped-target".to_string(),
+            url: "http://127.0.0.1:9".to_string(),
+            namespace: "/smcp".to_string(),
+            office_id: "stopped-office".to_string(),
+            computer_name: "stopped-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let err = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
+        .await
+        .expect_err("stopped computer should not connect");
+
+    assert_eq!(err, "Computer must be running before connecting");
+    assert!(runtime.connection.read().await.is_none());
+}
+
+#[tokio::test]
 async fn profile_switch_to_different_robot_requires_disconnect() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (old_server_url, old_stats) = start_smcp_socket_server().await;
     let (new_server_url, new_stats) = start_smcp_socket_server().await;
 
@@ -392,7 +422,8 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
 async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
-    create_test_runtime(&state).await;
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
 
     let other_instance_id = "other-computer";
@@ -413,6 +444,7 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
                 .unwrap(),
         )
         .await;
+    other_runtime.start().await.expect("start other runtime");
 
     let other_client = SmcpComputerClient::new(
         &server_url,
@@ -492,6 +524,7 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let target_runtime = create_test_runtime(&state).await;
+    target_runtime.start().await.expect("start target runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
 
     let other_instance_id = "other-computer";
@@ -512,6 +545,7 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
                 .unwrap(),
         )
         .await;
+    other_runtime.start().await.expect("start other runtime");
 
     let target = state
         .config

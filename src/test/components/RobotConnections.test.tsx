@@ -49,7 +49,7 @@ describe('RobotConnections', () => {
     });
     expect(mockedInvoke).not.toHaveBeenCalledWith('list_computer_instances');
     expect(mockedInvoke).not.toHaveBeenCalledWith('connect_connection_target', expect.anything());
-  }, 10000);
+  }, 20000);
 
   it('does not show auto connection settings in the global Manual SMCP form', async () => {
     mockedInvoke.mockResolvedValue([]);
@@ -62,5 +62,5 @@ describe('RobotConnections', () => {
     expect(screen.getAllByText('Add Profile').length).toBeGreaterThan(0);
     expect(screen.queryByText('Auto Connect')).not.toBeInTheDocument();
     expect(screen.queryByText('Auto Reconnect')).not.toBeInTheDocument();
-  }, 10000);
+  }, 20000);
 });

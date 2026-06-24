@@ -1,7 +1,9 @@
 use crate::commands::connection::{close_smcp_connection, ConnectionState};
 use crate::commands::inputs::InputDefinition;
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::model::MCPServerInput;
+use smcp_computer::mcp_clients::model::{
+    CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
+};
 use smcp_computer::mcp_clients::{MCPServerConfig, MCPServerManager};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -127,10 +129,11 @@ impl ComputerInstanceRuntime {
     /// surfaces initialize only the default runtime from persisted MCP server config during app
     /// startup.
     pub fn new(instance: ComputerInstance) -> Self {
+        let inputs = input_definitions_to_mcp_map(&instance.inputs);
         Self {
             instance,
             manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
-            inputs: Arc::new(RwLock::new(HashMap::new())),
+            inputs: Arc::new(RwLock::new(inputs)),
             connection: Arc::new(RwLock::new(None)),
             running: Arc::new(RwLock::new(false)),
         }
@@ -182,6 +185,11 @@ impl ComputerInstanceRuntime {
         *running = false;
     }
 
+    pub async fn sync_runtime_inputs(&self) {
+        let mut inputs = self.inputs.write().await;
+        *inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.connection.read().await.is_some()
     }
@@ -192,6 +200,63 @@ impl ComputerInstanceRuntime {
             .await
             .as_ref()
             .map(ConnectionStateSummary::from)
+    }
+}
+
+fn input_definitions_to_mcp_map(
+    definitions: &[InputDefinition],
+) -> HashMap<String, MCPServerInput> {
+    definitions
+        .iter()
+        .map(|definition| {
+            let input = input_definition_to_mcp(definition);
+            (input.id().to_string(), input)
+        })
+        .collect()
+}
+
+fn input_description(label: &str, description: &Option<String>) -> String {
+    description
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| label.to_string())
+}
+
+fn input_definition_to_mcp(definition: &InputDefinition) -> MCPServerInput {
+    match definition {
+        InputDefinition::PromptString {
+            id,
+            label,
+            description,
+            default,
+            password,
+        } => MCPServerInput::PromptString(PromptStringInput {
+            id: id.clone(),
+            description: input_description(label, description),
+            default: default.clone(),
+            password: *password,
+        }),
+        InputDefinition::PickString {
+            id,
+            label,
+            description,
+            options,
+            default,
+        } => MCPServerInput::PickString(PickStringInput {
+            id: id.clone(),
+            description: input_description(label, description),
+            options: options.iter().map(|option| option.value.clone()).collect(),
+            default: default.clone(),
+        }),
+        InputDefinition::Command {
+            id, label, command, ..
+        } => MCPServerInput::Command(CommandInput {
+            id: id.clone(),
+            description: label.clone(),
+            command: command.clone(),
+            args: None,
+        }),
     }
 }
 
@@ -269,12 +334,16 @@ impl ComputerRegistry {
         &self,
         instance: ComputerInstance,
     ) -> ComputerInstanceRuntime {
-        let mut runtimes = self.runtimes.write().await;
-        let runtime = match runtimes.get(&instance.id) {
-            Some(existing) => existing.with_instance(instance.clone()),
-            None => ComputerInstanceRuntime::new(instance.clone()),
+        let runtime = {
+            let mut runtimes = self.runtimes.write().await;
+            let runtime = match runtimes.get(&instance.id) {
+                Some(existing) => existing.with_instance(instance.clone()),
+                None => ComputerInstanceRuntime::new(instance.clone()),
+            };
+            runtimes.insert(instance.id, runtime.clone());
+            runtime
         };
-        runtimes.insert(instance.id, runtime.clone());
+        runtime.sync_runtime_inputs().await;
         runtime
     }
 
@@ -320,6 +389,18 @@ mod tests {
         ComputerInstance::new(id, name)
     }
 
+    fn instance_with_input(id: &str, label: &str) -> ComputerInstance {
+        let mut instance = ComputerInstance::new(id, "Computer");
+        instance.inputs = vec![InputDefinition::PromptString {
+            id: "api-key".to_string(),
+            label: label.to_string(),
+            description: None,
+            default: Some("default-value".to_string()),
+            password: Some(true),
+        }];
+        instance
+    }
+
     #[test]
     fn computer_instances_config_can_be_empty() {
         let config = ComputerInstancesConfig::default();
@@ -360,6 +441,23 @@ mod tests {
         assert!(!Arc::ptr_eq(&one.manager, &two.manager));
         assert!(!Arc::ptr_eq(&one.inputs, &two.inputs));
         assert!(!Arc::ptr_eq(&one.connection, &two.connection));
+    }
+
+    #[tokio::test]
+    async fn runtime_seeds_smcp_input_definitions_from_instance() {
+        let runtime = ComputerInstanceRuntime::new(instance_with_input("one", "API Key"));
+
+        let inputs = runtime.inputs.read().await;
+        let input = inputs.get("api-key").expect("input should be loaded");
+
+        match input {
+            MCPServerInput::PromptString(prompt) => {
+                assert_eq!(prompt.description, "API Key");
+                assert_eq!(prompt.default.as_deref(), Some("default-value"));
+                assert_eq!(prompt.password, Some(true));
+            }
+            other => panic!("expected PromptString input, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -407,20 +505,26 @@ mod tests {
     async fn update_runtime_instance_preserves_runtime_handles() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
-            instances: vec![instance("one", "One")],
+            instances: vec![instance_with_input("one", "Initial Label")],
         });
 
         let before = registry.runtime("one").await.unwrap();
         registry.start_runtime("one").await.unwrap();
-        let after = registry
-            .update_runtime_instance(instance("one", "Renamed"))
-            .await;
+        let mut updated = instance_with_input("one", "Updated Label");
+        updated.name = "Renamed".to_string();
+        let after = registry.update_runtime_instance(updated).await;
 
         assert_eq!(after.instance.name, "Renamed");
         assert!(after.is_running().await);
         assert!(Arc::ptr_eq(&before.manager, &after.manager));
         assert!(Arc::ptr_eq(&before.inputs, &after.inputs));
         assert!(Arc::ptr_eq(&before.connection, &after.connection));
+        let inputs = after.inputs.read().await;
+        let input = inputs.get("api-key").expect("input should be synced");
+        assert!(matches!(
+            input,
+            MCPServerInput::PromptString(prompt) if prompt.description == "Updated Label"
+        ));
     }
 
     #[tokio::test]

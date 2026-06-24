@@ -129,12 +129,16 @@ pub async fn save_manual_smcp_target(
         ManualSmcpApiKeyAction::Set { value } => {
             let value = value.trim();
             if !value.is_empty() {
-                crate::services::keychain::set_secret(&credential_key, value)
+                state
+                    .secret_store
+                    .set_secret(&credential_key, value)
                     .map_err(|e| e.to_string())?;
             }
         }
         ManualSmcpApiKeyAction::Clear => {
-            crate::services::keychain::delete_secret_best_effort(&credential_key);
+            state
+                .secret_store
+                .delete_secret_best_effort(&credential_key);
         }
     }
 
@@ -161,7 +165,9 @@ pub async fn delete_manual_smcp_target(
         .config
         .delete_manual_smcp_target(&target_id)
         .map_err(|e| e.to_string())?;
-    crate::services::keychain::delete_secret_best_effort(&manual_target_keychain_id(&target_id));
+    state
+        .secret_store
+        .delete_secret_best_effort(&manual_target_keychain_id(&target_id));
     Ok(())
 }
 
@@ -184,13 +190,18 @@ pub async fn connect_connection_target_core(
         .config
         .get_manual_smcp_target(target_id)
         .map_err(|e| e.to_string())?;
-    let api_key = crate::services::keychain::get_secret(&manual_target_keychain_id(&target.id))
+    let api_key = state
+        .secret_store
+        .get_secret(&manual_target_keychain_id(&target.id))
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    if !runtime.is_running().await {
+        return Err("Computer must be running before connecting".to_string());
+    }
 
     let previous_connection = {
         let _guard = state.connection_establish_lock.lock().await;

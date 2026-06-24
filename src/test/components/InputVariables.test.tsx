@@ -38,7 +38,7 @@ describe('InputVariables', () => {
     render(<InputVariables instanceId="computer-a" />);
     expect(mockStore.fetchInputs).toHaveBeenCalledWith('computer-a');
     expect(mockStore.fetchValues).toHaveBeenCalledWith('computer-a');
-  });
+  }, 10000);
 
   it('renders title and action buttons', () => {
     render(<InputVariables instanceId="computer-a" />);

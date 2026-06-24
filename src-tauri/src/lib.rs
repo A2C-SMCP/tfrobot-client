@@ -4,6 +4,7 @@ pub mod tray;
 
 use services::computer::ComputerRegistry;
 use services::config::ConfigService;
+use services::keychain::{SecretStore, SystemSecretStore};
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
 use services::settings::SettingsService;
@@ -19,6 +20,8 @@ pub struct AppState {
     pub config: Arc<ConfigService>,
     /// Runtime registry for all configured Computer instances
     pub computer_registry: Arc<ComputerRegistry>,
+    /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
+    pub secret_store: Arc<dyn SecretStore>,
     /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
     /// happen as one transaction across Computer instances.
     pub connection_establish_lock: Arc<Mutex<()>>,
@@ -36,6 +39,20 @@ impl AppState {
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
+        Self::new_with_secret_store(
+            config,
+            log_service,
+            settings_service,
+            Arc::new(SystemSecretStore),
+        )
+    }
+
+    pub fn new_with_secret_store(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         let instances = config.load_computer_instances().unwrap_or_else(|error| {
             log::error!(
                 "Failed to load ComputerInstance configuration; starting with empty registry: {}",
@@ -48,10 +65,11 @@ impl AppState {
         Self {
             config: Arc::new(config),
             computer_registry: Arc::new(computer_registry),
+            secret_store: secret_store.clone(),
             connection_establish_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
             settings_service: Arc::new(settings_service),
-            manager_client: Arc::new(ManagerClient::new()),
+            manager_client: Arc::new(ManagerClient::new_with_secret_store(secret_store)),
         }
     }
 }
@@ -146,20 +164,7 @@ pub fn run() {
                 .log_service
                 .cleanup(settings.log_retention_days as i64);
 
-            // Initialize every configured Computer runtime with its own persisted MCP config.
-            let computer_registry = state.computer_registry.clone();
-            tauri::async_runtime::spawn(async move {
-                for runtime in computer_registry.list_runtimes().await {
-                    if let Err(e) = runtime.start().await {
-                        log::error!(
-                            "Failed to initialize MCP servers for Computer instance {}: {}",
-                            runtime.instance.id,
-                            e
-                        );
-                    }
-                }
-                log::info!("Configured Computer runtimes initialized");
-            });
+            log::info!("Configured Computer runtimes loaded; instances remain stopped");
 
             app.manage(state);
 
@@ -353,7 +358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_state_loads_configured_computer_runtimes() {
+    async fn app_state_loads_configured_computer_runtimes_stopped() {
         let dir = TempDir::new().unwrap();
         let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
         config
@@ -365,8 +370,6 @@ mod tests {
         let state = AppState::new(config, log_service, settings_service);
         let runtime = state.computer_registry.runtime("one").await.unwrap();
 
-        runtime.start().await.unwrap();
-
-        assert!(runtime.is_running().await);
+        assert!(!runtime.is_running().await);
     }
 }

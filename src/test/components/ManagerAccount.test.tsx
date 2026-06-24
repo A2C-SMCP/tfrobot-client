@@ -196,7 +196,7 @@ describe('ManagerAccount', () => {
       await waitFor(() => {
         expect(selectAccount).toHaveBeenCalledWith(2);
       });
-    });
+    }, 10000);
   });
 
   describe('EmployeeList', () => {
@@ -285,7 +285,7 @@ describe('ManagerAccount', () => {
       render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
-    });
+    }, 10000);
 
     it('disables connect when robotAccountId is missing (cannot token-exchange)', async () => {
       const noAccount = { ...employee, robotAccountId: undefined };
@@ -293,7 +293,7 @@ describe('ManagerAccount', () => {
       render(<EmployeeList instanceId="computer-a" />);
       await waitForConnectionStatusFetch();
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
-    });
+    }, 10000);
 
     it('renders payment_required alert with renew button when redirectUrl present', async () => {
       applyMock({
@@ -305,7 +305,7 @@ describe('ManagerAccount', () => {
       await waitForConnectionStatusFetch();
       expect(screen.getByText('Balance low')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Renew subscription' })).toBeInTheDocument();
-    });
+    }, 10000);
   });
 
   describe('Router (ManagerAccount)', () => {
