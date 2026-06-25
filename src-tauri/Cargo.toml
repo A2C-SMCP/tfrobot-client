@@ -76,6 +76,3 @@ harness = false
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-# Enable TFRM-16 acceptance tests against smcp-computer >= 0.2.2.
-# See docs/proposals/tfrm-16-rust-sdk-handshake-config.md.
-verify-smcp-0-2-2 = []
