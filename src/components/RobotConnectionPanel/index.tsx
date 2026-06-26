@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   App,
@@ -65,6 +65,8 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [detailTarget, setDetailTarget] = useState<ManualSmcpTarget | null>(null);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const hydrationAttemptedFor = useRef<string | null>(null);
   const { instances, updateConnectionPolicy } = useComputerStore();
   const {
     session,
@@ -164,17 +166,80 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     [t],
   );
 
-  const handleSavePolicy = async () => {
-    if (selectedTarget?.type === 'manager_robot' && selectedTarget.robotAccountId == null) {
+  const rollbackPolicyControls = useCallback(() => {
+    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
+  }, [
+    selectedInstance?.connectionPolicy.auto_connect,
+    selectedInstance?.connectionPolicy.target,
+  ]);
+
+  const savePolicy = useCallback(async (
+    target: ComputerConnectionTarget | null,
+    nextAutoConnect: boolean,
+    options: { showSuccess?: boolean } = {},
+  ) => {
+    if (target?.type === 'manager_robot' && target.robotAccountId == null) {
       message.error(t('managerAccount.employees.noRobotAccount'));
+      rollbackPolicyControls();
       return;
     }
-    await updateConnectionPolicy(instanceId, {
-      target: selectedTarget,
-      auto_connect: autoConnect,
-    });
-    message.success(t('common.saved'));
+    setSavingPolicy(true);
+    try {
+      await updateConnectionPolicy(instanceId, {
+        target,
+        auto_connect: nextAutoConnect,
+      });
+      if (options.showSuccess !== false) {
+        message.success(t('common.saved'));
+      }
+    } catch (e) {
+      rollbackPolicyControls();
+      message.error(String(e));
+    } finally {
+      setSavingPolicy(false);
+    }
+  }, [instanceId, message, rollbackPolicyControls, t, updateConnectionPolicy]);
+
+  const handleTargetChange = (value: string | undefined) => {
+    const nextTarget = valueToTarget(
+      value,
+      employees,
+      selectedInstance?.connectionPolicy.target,
+    );
+    setSelectedTargetValue(value);
+    void savePolicy(nextTarget, autoConnect);
   };
+
+  const handleAutoConnectChange = (checked: boolean) => {
+    setAutoConnect(checked);
+    void savePolicy(selectedTarget, checked);
+  };
+
+  useEffect(() => {
+    if (
+      savingPolicy
+      || selectedTarget?.type !== 'manager_robot'
+      || selectedTarget.robotAccountId == null
+      || selectedInstance?.connectionPolicy.target?.type !== 'manager_robot'
+      || selectedInstance.connectionPolicy.target.robotAccountId != null
+      || targetToValue(selectedInstance.connectionPolicy.target) !== targetToValue(selectedTarget)
+    ) {
+      return;
+    }
+    const targetValue = targetToValue(selectedTarget);
+    if (hydrationAttemptedFor.current === targetValue) {
+      return;
+    }
+    hydrationAttemptedFor.current = targetValue ?? null;
+    void savePolicy(selectedTarget, autoConnect, { showSuccess: false });
+  }, [
+    autoConnect,
+    savePolicy,
+    savingPolicy,
+    selectedInstance?.connectionPolicy.target,
+    selectedTarget,
+  ]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -198,28 +263,23 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
         <Space wrap>
           <Select
             allowClear
+            disabled={savingPolicy}
             style={{ minWidth: 360 }}
             value={selectedTargetValue}
             placeholder={t('computer.connectionActions.selectTarget')}
-            onChange={setSelectedTargetValue}
+            onChange={handleTargetChange}
             options={targetOptions}
           />
-          <Button onClick={() => {
+          <Button disabled={savingPolicy} onClick={() => {
             fetchManualTargets();
             if (session) fetchEmployeesIfStale(0);
           }}>
             {t('common.refresh')}
           </Button>
           <Space>
-            <Switch checked={autoConnect} onChange={setAutoConnect} />
+            <Switch checked={autoConnect} loading={savingPolicy} onChange={handleAutoConnectChange} />
             <Text>{t('connection.form.autoConnect')}</Text>
           </Space>
-          <Button
-            disabled={targetLoading}
-            onClick={() => handleSavePolicy().catch((e) => message.error(String(e)))}
-          >
-            {t('common.save')}
-          </Button>
         </Space>
       </Card>
 

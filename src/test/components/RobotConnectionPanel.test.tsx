@@ -110,8 +110,8 @@ describe('RobotConnectionPanel', () => {
     });
   }, 20000);
 
-  it('saves the selected target as Computer connection policy without connecting', async () => {
-    mockedInvoke.mockImplementation(async (cmd) => {
+  it('auto-saves the selected Manual SMCP target without connecting', async () => {
+    mockedInvoke.mockImplementation(async (cmd, args) => {
       if (cmd === 'list_manual_smcp_targets') {
         return [
           {
@@ -126,6 +126,7 @@ describe('RobotConnectionPanel', () => {
         ];
       }
       if (cmd === 'update_computer_connection_policy') {
+        const request = (args as { request: { target: unknown; autoConnect: boolean } }).request;
         return {
           id: 'computer-a',
           name: 'Computer A',
@@ -134,8 +135,8 @@ describe('RobotConnectionPanel', () => {
           mcp_server_count: 0,
           robot_binding: null,
           connection_policy: {
-            target: { type: 'manual_smcp', id: 'target-a' },
-            auto_connect: true,
+            target: request.target,
+            auto_connect: request.autoConnect,
           },
           connection: null,
         };
@@ -147,8 +148,132 @@ describe('RobotConnectionPanel', () => {
 
     fireEvent.mouseDown(await screen.findByRole('combobox'));
     fireEvent.click(await screen.findByText('Target A (office-a)'));
-    fireEvent.click(screen.getByRole('switch'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
+        request: {
+          id: 'computer-a',
+          target: { type: 'manual_smcp', id: 'target-a' },
+          autoConnect: false,
+        },
+      });
+    });
+    expect(mockedInvoke).not.toHaveBeenCalledWith('connect_computer_connection_target', expect.anything());
+  }, 20000);
+
+  it('rolls back the target selector when auto-save fails', async () => {
+    useComputerStore.setState({
+      instances: [
+        {
+          id: 'computer-a',
+          name: 'Computer A',
+          status: 'running',
+          connectionStatus: 'disconnected',
+          connectionPolicy: {
+            target: { type: 'manual_smcp', id: 'target-a' },
+            auto_connect: false,
+          },
+          mcpServerCount: 0,
+        },
+      ],
+      loading: false,
+      error: null,
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_manual_smcp_targets') {
+        return [
+          {
+            id: 'target-a',
+            name: 'Target A',
+            url: 'https://smcp.example.com/a',
+            namespace: '/smcp',
+            office_id: 'office-a',
+            computer_name: 'computer-a',
+            headers: {},
+          },
+          {
+            id: 'target-b',
+            name: 'Target B',
+            url: 'https://smcp.example.com/b',
+            namespace: '/smcp',
+            office_id: 'office-b',
+            computer_name: 'computer-b',
+            headers: {},
+          },
+        ];
+      }
+      if (cmd === 'update_computer_connection_policy') {
+        throw new Error('save failed');
+      }
+      return null;
+    });
+
+    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    fireEvent.click(await screen.findByText('Target B (office-b)'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Target A (office-a)')).toBeInTheDocument();
+    });
+  }, 20000);
+
+  it('auto-saves auto-connect changes for the current target', async () => {
+    useComputerStore.setState({
+      instances: [
+        {
+          id: 'computer-a',
+          name: 'Computer A',
+          status: 'running',
+          connectionStatus: 'disconnected',
+          connectionPolicy: {
+            target: { type: 'manual_smcp', id: 'target-a' },
+            auto_connect: false,
+          },
+          mcpServerCount: 0,
+        },
+      ],
+      loading: false,
+      error: null,
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === 'list_manual_smcp_targets') {
+        return [
+          {
+            id: 'target-a',
+            name: 'Target A',
+            url: 'https://smcp.example.com',
+            namespace: '/smcp',
+            office_id: 'office-a',
+            computer_name: 'computer-a',
+            headers: {},
+          },
+        ];
+      }
+      if (cmd === 'update_computer_connection_policy') {
+        const request = (args as { request: { target: unknown; autoConnect: boolean } }).request;
+        return {
+          id: 'computer-a',
+          name: 'Computer A',
+          running: true,
+          connected: false,
+          mcp_server_count: 0,
+          robot_binding: null,
+          connection_policy: {
+            target: request.target,
+            auto_connect: request.autoConnect,
+          },
+          connection: null,
+        };
+      }
+      return null;
+    });
+
+    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('switch'));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
@@ -213,7 +338,6 @@ describe('RobotConnectionPanel', () => {
       expect(screen.queryByText('Deleted Robot (deleted / UAT / tfrserver / org-a)')).not.toBeInTheDocument();
     });
     fireEvent.click(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
@@ -267,7 +391,6 @@ describe('RobotConnectionPanel', () => {
 
     fireEvent.mouseDown(await screen.findByRole('combobox'));
     fireEvent.click(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
@@ -280,7 +403,7 @@ describe('RobotConnectionPanel', () => {
     });
   }, 20000);
 
-  it('hydrates a saved Manager Robot target missing robotAccountId before saving', async () => {
+  it('auto-hydrates a saved Manager Robot target missing robotAccountId', async () => {
     useComputerStore.setState({
       instances: [
         {
@@ -335,8 +458,6 @@ describe('RobotConnectionPanel', () => {
     });
 
     render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
