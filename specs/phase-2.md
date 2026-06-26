@@ -1,5 +1,9 @@
 # Phase 2: 连接与变量 — 技术执行 Spec
 
+> 历史说明：本文档记录早期 Phase 2 设计与实现状态，包含旧 `MCPServerManager`
+> / `SmcpComputerClient` 主路径描述。SDK Computer 架构对齐后的当前实现以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准。
+
 > **状态**: ✅ 已完成
 > **对应 PRD**: 3.3 输入变量管理, 3.4 SMCP 服务器连接, 3.2.3 配置导入/导出, 2.1 分组侧边栏
 

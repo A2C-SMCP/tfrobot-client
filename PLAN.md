@@ -1,5 +1,9 @@
 # TFRobot Client 技术方案
 
+> 历史说明：本文档是项目早期技术方案，部分关于 `MCPServerManager`、`SmcpComputerClient`
+> 主路径和 `AppState` 架构的描述已经过时。SDK Computer 架构对齐后的当前实现以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准；本文保留作为历史阶段参考。
+
 ## 项目概述
 
 ### 背景

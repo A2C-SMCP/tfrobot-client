@@ -1,5 +1,9 @@
 # Phase 2: 全栈冒烟测试 + 性能基准 + 跨库协作
 
+> 历史说明：本文档记录早期高级测试设想，部分示例仍以 `MCPServerManager` 为扩展点。
+> SDK Computer 架构对齐后的当前测试边界以 `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md`
+> 和现有 `src-tauri/tests/*` 为准。
+
 > **目标**: 补齐 Tauri Driver 全栈 E2E、建立性能基准、推动 smcp-computer 测试基础设施共建。
 >
 > **依赖**: Phase 1（集成测试 + E2E 就绪）

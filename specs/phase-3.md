@@ -1,5 +1,9 @@
 # Phase 3: 调试与资源 — 技术执行 Spec
 
+> 历史说明：本文档包含调试与资源读面的早期设计假设，其中关于通过
+> `MCPServerManager` 扩展 resources/window API 的内容已经过时。当前 SDK Computer
+> 架构和 resources/window API 状态以 `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准。
+
 > **状态**: 待开发
 > **对应 PRD**: 3.5 桌面资源浏览, 3.6 调试面板
 > **前置**: Phase 2 (AppState 已切换为 Computer 实例)
@@ -7,6 +11,10 @@
 ---
 
 ## 1. 目标
+
+> 历史方案入口：以下正文保留早期拆分与验收思路，请勿直接作为当前实现入口。
+> 当前 runtime/SDK 边界、resources/window API 与验证矩阵以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准。
 
 实现工具浏览器、工具调用测试、Resource 浏览/读取测试、调用历史与重放、桌面资源浏览页面。完成后对齐 CLI 的 `tools`、`tc`、`desktop`、`history` 命令能力，并通过 GUI 优势提供 inputSchema 可视化和历史重放。
 

@@ -1,5 +1,9 @@
 # TFRobot Client — 产品需求文档 (PRD)
 
+> 历史说明：本文档保留了项目早期产品和技术假设。涉及 `MCPServerManager` 作为主状态来源的
+> 表述已经被 SDK Computer 架构对齐取代；当前运行时边界以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准。
+
 > **版本**: 1.0
 > **日期**: 2026-02-26
 > **状态**: 待评审
@@ -113,6 +117,9 @@ TFRobot Client 是一个跨平台桌面应用，为 A2C-SMCP（Agent To Computer
 应用首页，用卡片式布局聚合展示系统全局状态。
 
 **信息卡片**：
+
+> 历史方案入口：下表保留早期数据源拆分，其中 `MCPServerManager` 不再是当前生产架构入口。
+> 当前数据源以 `ComputerRegistry` / `ComputerInstanceRuntime` / SDK `Computer` 边界为准。
 
 | 卡片 | 内容 | 数据源 |
 |------|------|--------|
