@@ -1,5 +1,7 @@
+use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
-    ComputerConnectionTarget, ComputerConnectionTargetType, RobotBindingMetadata,
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstanceRuntime,
+    ComputerRuntimeState, RobotBindingMetadata, SmcpReconnectOutcome,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
@@ -8,9 +10,6 @@ use crate::services::manager_client::{
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::mcp_clients::MCPServerManager;
-use smcp_computer::socketio_client::SmcpComputerClient;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -34,7 +33,7 @@ fn next_generation() -> u64 {
 }
 
 /// Manager 驱动连接重建所需的参数（首连 + 预刷新重连共用）。`pub` 供集成测试构造，传给
-/// [`reconnect_with_token`] 验证 build-失败-回滚路径。
+/// [`reconnect_with_token`] 验证成功、失败和 stale generation 路径。
 #[derive(Clone)]
 pub struct ManagerConnectionParams {
     /// Socket.IO 服务端 URL（connection-info.socketBaseURL）。
@@ -55,14 +54,14 @@ pub struct ManagerConnectionParams {
     pub robot_binding: RobotBindingMetadata,
 }
 
-/// 预刷新换连接的结果：要么换上了新连接（持有需关闭的旧 client），要么连接已被换/断
-/// （持有需丢弃的新 client）。用枚举让 `new_client` 在两个分支都被移动，绕开条件移动借用错误。
+/// 预刷新换连接的结果：要么当前 business snapshot 仍属本代并已刷新时间戳，
+/// 要么连接已被用户断开 / 改连，刷新任务应退出。
 /// `pub` 供集成测试验证 generation 守卫。
 pub enum SwapResult {
-    /// 成功原地替换；内含需关闭的旧 client。
-    Replaced(SmcpComputerClient),
-    /// 连接已不属于本代（用户断开 / 改连别的机器人）；内含需丢弃的新 client。
-    Stale(SmcpComputerClient),
+    /// 成功刷新当前连接快照。
+    Replaced,
+    /// 连接已不属于本代（用户断开 / 改连别的机器人）。
+    Stale,
 }
 
 #[derive(Debug)]
@@ -203,7 +202,7 @@ pub async fn connect_connection_target_core(
         return Err("Computer must be running before connecting".to_string());
     }
 
-    let previous_connection = {
+    {
         let _guard = state.connection_establish_lock.lock().await;
         if matches!(
             check_connection_target_allowed(state, instance_id, &target.id, &target.office_id)
@@ -214,27 +213,23 @@ pub async fn connect_connection_target_core(
             return Ok(());
         }
 
+        clear_unhealthy_connection_snapshot(&runtime).await?;
+
         let auth_payload = api_key
             .filter(|k| !k.is_empty())
             .map(|tok| serde_json::json!({ "token": tok }));
-        let client = SmcpComputerClient::new(
-            &target.url,
-            runtime.manager.clone(),
-            target.computer_name.clone(),
-            auth_payload,
-            runtime.inputs.clone(),
-            Some(target.headers.clone()),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-        if let Err(e) = client.join_office(&target.office_id).await {
-            disconnect_smcp_client(client, "after manual target join_office failure").await;
-            return Err(e.to_string());
-        }
+        runtime
+            .connect_smcp_socketio(
+                &target.url,
+                auth_payload,
+                target.headers.clone(),
+                Some(target.namespace.clone()),
+                &target.office_id,
+                &target.computer_name,
+            )
+            .await?;
 
         let new_connection = ConnectionState {
-            client,
             profile_name: target.name.clone(),
             url: target.url.clone(),
             office_id: target.office_id.clone(),
@@ -245,19 +240,24 @@ pub async fn connect_connection_target_core(
             target_name: Some(target.name.clone()),
             employee_id: None,
             generation: next_generation(),
-            refresh_task: None,
         };
 
         let mut runtime_conn = runtime.connection.write().await;
-        runtime_conn.replace(new_connection)
-    };
-
-    if let Some(connection) = previous_connection {
-        close_smcp_connection(connection).await;
+        if runtime_conn.is_some() {
+            return Err(
+                "Computer instance already has a connection snapshot; disconnect before reconnecting"
+                    .to_string(),
+            );
+        }
+        *runtime_conn = Some(new_connection);
     }
-    persist_manual_connection_target(state, instance_id, &target.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    if let Err(error) = persist_manual_connection_target(state, instance_id, &target.id).await {
+        let existing_connection = runtime.connection.write().await.take();
+        if let Some(connection) = existing_connection {
+            let _ = close_smcp_connection(&runtime, connection).await;
+        }
+        return Err(error);
+    }
     let _ = state.log_service.write_for_instance(
         "info",
         "connection",
@@ -272,7 +272,11 @@ async fn persist_manual_connection_target(
     state: &AppState,
     instance_id: &str,
     target_id: &str,
-) -> Result<(), crate::services::config::ConfigError> {
+) -> Result<(), String> {
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
@@ -281,11 +285,9 @@ async fn persist_manual_connection_target(
                 id: target_id.to_string(),
                 robot_account_id: None,
             });
-        })?;
-    state
-        .computer_registry
-        .update_runtime_instance(updated)
-        .await;
+        })
+        .map_err(|error| error.to_string())?;
+    apply_updated_computer_instance(state, previous, updated).await?;
     Ok(())
 }
 
@@ -297,10 +299,14 @@ async fn check_connection_target_allowed(
 ) -> Result<ManagerConnectionDecision, ManagerError> {
     let runtimes = state.computer_registry.list_runtimes().await;
     for runtime in runtimes {
+        let runtime_state = runtime.runtime_state().await;
         let guard = runtime.connection.read().await;
         let Some(connection) = guard.as_ref() else {
             continue;
         };
+        if !connection_snapshot_blocks_target(runtime_state) {
+            continue;
+        }
 
         match manager_connection_decision(
             instance_id,
@@ -319,6 +325,23 @@ async fn check_connection_target_allowed(
     }
 
     Ok(ManagerConnectionDecision::Proceed)
+}
+
+fn connection_snapshot_blocks_target(state: ComputerRuntimeState) -> bool {
+    !matches!(
+        state,
+        ComputerRuntimeState::Created | ComputerRuntimeState::Stopped | ComputerRuntimeState::Error
+    )
+}
+
+async fn clear_unhealthy_connection_snapshot(
+    runtime: &ComputerInstanceRuntime,
+) -> Result<(), String> {
+    let has_snapshot = runtime.connection.read().await.is_some();
+    if has_snapshot && !runtime.is_connected().await {
+        runtime.clear_smcp_connection().await?;
+    }
+    Ok(())
 }
 
 /// Disconnect from SMCP server
@@ -342,12 +365,9 @@ pub(crate) async fn disconnect_smcp_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    let existing_connection = {
-        let mut conn = runtime.connection.write().await;
-        conn.take()
-    };
+    let existing_connection = runtime.connection.read().await.as_ref().cloned();
     if let Some(connection) = existing_connection {
-        close_smcp_connection(connection).await;
+        close_smcp_connection(&runtime, connection).await?;
     }
 
     let _ = state.log_service.write_for_instance(
@@ -360,48 +380,29 @@ pub(crate) async fn disconnect_smcp_core(
     Ok(())
 }
 
-pub async fn close_smcp_connection(connection: ConnectionState) {
-    let ConnectionState {
-        client,
-        office_id,
-        refresh_task,
-        ..
-    } = connection;
-
-    // 先停掉预刷新任务，避免它在我们关闭连接的同时又去重连。
-    if let Some(task) = refresh_task {
-        task.abort();
-    }
-
-    match timeout(
+pub async fn close_smcp_connection(
+    runtime: &ComputerInstanceRuntime,
+    _connection: ConnectionState,
+) -> Result<(), String> {
+    let close_result = timeout(
         SMCP_CONNECTION_CLOSE_TIMEOUT,
-        client.leave_office(&office_id),
+        runtime.clear_smcp_connection(),
     )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log::warn!("Error leaving office: {}", e),
-        Err(_) => log::warn!(
-            "Timed out leaving SMCP office after {:?}",
-            SMCP_CONNECTION_CLOSE_TIMEOUT
-        ),
-    }
-
-    disconnect_smcp_client(client, "from SMCP server").await;
-}
-
-async fn disconnect_smcp_client(
-    client: smcp_computer::socketio_client::SmcpComputerClient,
-    context: &str,
-) {
-    match timeout(SMCP_CONNECTION_CLOSE_TIMEOUT, client.disconnect()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log::warn!("Error disconnecting {}: {}", context, e),
-        Err(_) => log::warn!(
-            "Timed out disconnecting {} after {:?}",
-            context,
-            SMCP_CONNECTION_CLOSE_TIMEOUT,
-        ),
+    .await;
+    match close_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            log::warn!("Error disconnecting SMCP socket: {}", e);
+            Err(e)
+        }
+        Err(_) => {
+            let message = format!(
+                "Timed out disconnecting SMCP socket after {:?}",
+                SMCP_CONNECTION_CLOSE_TIMEOUT,
+            );
+            log::warn!("{}", message);
+            Err(message)
+        }
     }
 }
 
@@ -417,18 +418,18 @@ pub async fn get_connection_status(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let conn = runtime.connection.read().await;
-    match conn.as_ref() {
+    let connection = runtime.connection_status().await;
+    match connection {
         Some(c) => Ok(ConnectionStatusInfo {
-            connected: true,
-            url: Some(c.url.clone()),
-            office_id: Some(c.office_id.clone()),
-            computer_name: Some(c.computer_name.clone()),
-            connected_at: Some(c.connected_at.to_rfc3339()),
-            profile_name: Some(c.profile_name.clone()),
-            source_type: Some(c.source_type.clone()),
-            target_id: c.target_id.clone(),
-            target_name: c.target_name.clone(),
+            connected: runtime.is_connected().await,
+            url: Some(c.url),
+            office_id: Some(c.office_id),
+            computer_name: Some(c.computer_name),
+            connected_at: Some(c.connected_at),
+            profile_name: Some(c.profile_name),
+            source_type: Some(c.source_type),
+            target_id: c.target_id,
+            target_name: c.target_name,
             employee_id: c.employee_id,
         }),
         None => Ok(ConnectionStatusInfo {
@@ -632,32 +633,24 @@ fn validate_manager_robot_account_from_list(
     Ok(employee)
 }
 
-/// 用给定参数 + 短 JWT 构建 [`SmcpComputerClient`] 并 join_office。失败时尽力清理已建客户端。
+/// 用给定参数 + 短 JWT 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
 async fn build_and_join(
-    manager: &Arc<RwLock<Option<MCPServerManager>>>,
-    inputs: &Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     jwt: &str,
-) -> Result<SmcpComputerClient, String> {
+) -> Result<(), String> {
     // 连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`，smcp-computer #86）。
     let auth_payload = serde_json::json!({ "token": jwt });
-
-    let client = SmcpComputerClient::new(
-        &params.url,
-        manager.clone(),
-        params.computer_name.clone(),
-        Some(auth_payload),
-        inputs.clone(),
-        Some(params.routing_headers.clone()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if let Err(e) = client.join_office(&params.office_id).await {
-        disconnect_smcp_client(client, "after manager join_office failure").await;
-        return Err(e.to_string());
-    }
-    Ok(client)
+    runtime
+        .connect_smcp_socketio(
+            &params.url,
+            Some(auth_payload),
+            params.routing_headers.clone(),
+            None,
+            &params.office_id,
+            &params.computer_name,
+        )
+        .await
 }
 
 /// 首连：构建连接、替换 AppState、起预刷新任务、emit 状态变更事件。
@@ -675,7 +668,7 @@ async fn establish_manager_connection(
         .ok_or_else(|| {
             ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}"))
         })?;
-    let previous = {
+    {
         let _guard = state.connection_establish_lock.lock().await;
 
         if matches!(
@@ -692,33 +685,30 @@ async fn establish_manager_connection(
             emit_connection_changed(app);
             return Ok(());
         }
-        // 先把新连接建成功，再替换/关旧——build 失败则保留旧连接（与手动 profile 切换同一不变量）。
+        clear_unhealthy_connection_snapshot(&runtime)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
+        // 先把新连接建成功，再替换快照；不同 Robot 的切换由 guard 要求用户先断开。
         // 用户发起的连接通常切到「不同机器人」（office 不同），不会撞 room；同机器人重连由 UI 阻止
-        // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 leave-first 路径。
-        let client = build_and_join(
-            &runtime.manager,
-            &runtime.inputs,
-            &params,
-            &token.access_token,
-        )
-        .await
-        .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
+        // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 SDK 重连路径。
+        build_and_join(&runtime, &params, &token.access_token)
+            .await
+            .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
 
         let generation = next_generation();
         let refresh_task = spawn_refresh_task(
             app,
             state,
             runtime.connection.clone(),
-            runtime.manager.clone(),
-            runtime.inputs.clone(),
+            runtime.clone(),
             params.clone(),
             instance_id.to_string(),
             generation,
             token.expires_in,
         );
+        runtime.set_refresh_task(refresh_task).await;
 
         let new_connection = ConnectionState {
-            client,
             profile_name: format!("manager:{}", params.employee_id),
             url: params.url.clone(),
             office_id: params.office_id.clone(),
@@ -729,17 +719,25 @@ async fn establish_manager_connection(
             target_name: params.robot_binding.robot_name.clone(),
             employee_id: Some(params.employee_id),
             generation,
-            refresh_task: Some(refresh_task),
         };
 
         let mut runtime_conn = runtime.connection.write().await;
-        runtime_conn.replace(new_connection)
-    };
-    if let Some(previous) = previous {
-        close_smcp_connection(previous).await;
+        if runtime_conn.is_some() {
+            return Err(ManagerError::InvalidResponse(
+                "Computer instance already has a connection snapshot; disconnect before reconnecting"
+                    .to_string(),
+            ));
+        }
+        *runtime_conn = Some(new_connection);
     }
 
-    persist_robot_binding(state, instance_id, &params.robot_binding).await?;
+    if let Err(error) = persist_robot_binding(state, instance_id, &params.robot_binding).await {
+        let existing_connection = runtime.connection.write().await.take();
+        if let Some(connection) = existing_connection {
+            let _ = close_smcp_connection(&runtime, connection).await;
+        }
+        return Err(error);
+    }
 
     let _ = state.log_service.write_for_instance(
         "info",
@@ -760,6 +758,10 @@ async fn persist_robot_binding(
     instance_id: &str,
     robot_binding: &RobotBindingMetadata,
 ) -> Result<(), ManagerError> {
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
@@ -771,10 +773,9 @@ async fn persist_robot_binding(
             });
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
-    state
-        .computer_registry
-        .update_runtime_instance(updated)
-        .await;
+    apply_updated_computer_instance(state, previous, updated)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
     Ok(())
 }
 
@@ -806,18 +807,17 @@ fn manager_connection_decision(
     Ok(ManagerConnectionDecision::Proceed)
 }
 
-/// 后台预刷新重连任务：`expires_in - 60s` 重新 exchange → 原地换新连接 → 关旧连接。
+/// 后台预刷新重连任务：`expires_in - 60s` 重新 exchange → SDK 重连 → 刷新业务快照。
 ///
 /// SMCP 长连接 token 不能热刷新（握手时绑定一次），只能 teardown+reconnect。任务整段生命周期由
-/// [`ConnectionState::refresh_task`] 持有，连接被关闭/替换时 abort。换连接前用 `generation` 确认
-/// 「仍是我这条连接」，避免与用户期间手动断开/改连竞态时误覆盖。
+/// [`ComputerInstanceRuntime`] 持有，连接被关闭/替换时 abort。换连接前用 `generation` 确认「仍是我
+/// 这条连接」，避免与用户期间手动断开/改连竞态时误覆盖。
 #[allow(clippy::too_many_arguments)]
 fn spawn_refresh_task(
     app: &AppHandle,
     state: &AppState,
     connection: Arc<RwLock<Option<ConnectionState>>>,
-    manager: Arc<RwLock<Option<MCPServerManager>>>,
-    inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    runtime: ComputerInstanceRuntime,
     params: ManagerConnectionParams,
     instance_id: String,
     generation: u64,
@@ -840,16 +840,7 @@ fn spawn_refresh_task(
             let wait = refresh_wait_secs(expires_in);
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
-            match refresh_cycle(
-                &manager_client,
-                &connection,
-                &manager,
-                &inputs,
-                &params,
-                generation,
-            )
-            .await
-            {
+            match refresh_cycle(&manager_client, &connection, &runtime, &params, generation).await {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
                     let _ = log_service.write_for_instance(
@@ -870,7 +861,7 @@ fn spawn_refresh_task(
                 }
                 // 连接已被替换/断开，或永久错误 → 本任务退场。
                 RefreshOutcome::Gone | RefreshOutcome::Stop => return,
-                // 暂时性失败（503 / 网络 / build 失败已回滚旧连接）→ 约 RETRY_SECS 后再试，
+                // 暂时性失败（503 / 网络 / build 失败）→ 约 RETRY_SECS 后再试，
                 // 不再重睡整个 lead 窗口（修复僵尸窗口 + 错误的重睡间隔）。
                 RefreshOutcome::Retry => {
                     expires_in = TOKEN_PREREFRESH_LEAD_SECS + TOKEN_REFRESH_RETRY_SECS as i64
@@ -891,7 +882,7 @@ fn refresh_wait_secs(expires_in: i64) -> u64 {
 pub enum RefreshOutcome {
     /// 换上新连接，内含新 token 的 `expires_in`（秒）。
     Renewed(i64),
-    /// 暂时性失败，短退避后重试（旧连接仍在 / 已回滚）。
+    /// 暂时性失败，短退避后重试；runtime 可能已进入 Error，等待后续重连恢复。
     Retry,
     /// 连接已被换/断，任务退场。
     Gone,
@@ -906,8 +897,7 @@ pub enum RefreshOutcome {
 async fn refresh_cycle(
     manager_client: &Arc<ManagerClient>,
     connection: &Arc<RwLock<Option<ConnectionState>>>,
-    manager: &Arc<RwLock<Option<MCPServerManager>>>,
-    inputs: &Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
 ) -> RefreshOutcome {
@@ -927,89 +917,61 @@ async fn refresh_cycle(
             return RefreshOutcome::Stop;
         }
     };
-    reconnect_with_token(connection, manager, inputs, params, generation, &token).await
+    reconnect_with_token(connection, runtime, params, generation, &token).await
 }
 
-/// 用已拿到的短 JWT 重建连接：leave 旧 room → build 新连接 → 成功原地换 / 失败回滚旧连接。
+/// 用已拿到的短 JWT 重建连接：runtime lifecycle lock 内断开旧 SDK Socket.IO → 重连 → 成功刷新快照。
 ///
-/// **不依赖 AppHandle / ManagerClient**（emit/log 留给调用方），便于集成测试 build-失败-回滚路径。
-/// 顺序 **leave-first**：同机器人重连必须先让旧连接离开 room，否则 server 拒绝重复实例
-/// （同 `(office_id, computer_name)`）。**build 失败则回滚**：把旧连接重新 join_office（旧 token 还
-/// 有约 lead 秒有效），避免「已 leave 却仍标记 connected」的僵尸窗口。`generation` 守卫防与用户手动
-/// 断开/改连竞态。`pub` 供集成测试。
+/// **不依赖 AppHandle / ManagerClient**（emit/log 留给调用方），便于集成测试 build 失败路径。
+/// 顺序 **disconnect-first**：同机器人重连必须先释放 room，否则 server 拒绝重复实例
+/// （同 `(office_id, computer_name)`）。build 失败返回 Retry，同时 runtime 进入 Error 状态，
+/// 避免业务层把已断开的 socket 误判为健康连接。`generation` 守卫防与用户手动断开/改连竞态。
+/// `pub` 供集成测试。
 pub async fn reconnect_with_token(
     connection: &Arc<RwLock<Option<ConnectionState>>>,
-    manager: &Arc<RwLock<Option<MCPServerManager>>>,
-    inputs: &Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
     token: &ExchangedToken,
 ) -> RefreshOutcome {
-    // 让旧连接离开 room（&self，read 锁就地调用）。
-    // #5 已知有界折衷：leave_office 的 .await 跨持 read 锁，上限 SMCP_CONNECTION_CLOSE_TIMEOUT (5s)；
-    // 期间用户主动 disconnect（需 write 锁）会被阻塞至多 5s。彻底消除需把 client 改 Arc 共享，范围外。
+    let auth_payload = serde_json::json!({ "token": token.access_token });
+    match runtime
+        .reconnect_smcp_socketio_for_generation(
+            connection,
+            generation,
+            &params.url,
+            Some(auth_payload),
+            params.routing_headers.clone(),
+            None,
+            &params.office_id,
+            &params.computer_name,
+            token.expires_in,
+        )
+        .await
     {
-        let guard = connection.read().await;
-        match guard.as_ref() {
-            Some(cs) if cs.generation == generation => {
-                let _ = timeout(
-                    SMCP_CONNECTION_CLOSE_TIMEOUT,
-                    cs.client.leave_office(&params.office_id),
-                )
-                .await;
-            }
-            _ => return RefreshOutcome::Gone,
-        }
-    }
-
-    // build 新连接（room 槽位已释放）。失败 → 回滚：旧连接重新 join_office（旧 token 仍有效约 lead
-    // 秒），避免僵尸窗口；随后 Retry。
-    let new_client = match build_and_join(manager, inputs, params, &token.access_token).await {
-        Ok(c) => c,
+        Ok(SmcpReconnectOutcome::Reconnected { expires_in }) => RefreshOutcome::Renewed(expires_in),
+        Ok(SmcpReconnectOutcome::Stale) => return RefreshOutcome::Gone,
         Err(e) => {
-            log::warn!("Pre-refresh reconnect failed: {e}; rolling back old connection");
-            let guard = connection.read().await;
-            if let Some(cs) = guard.as_ref() {
-                if cs.generation == generation {
-                    let _ = timeout(
-                        SMCP_CONNECTION_CLOSE_TIMEOUT,
-                        cs.client.join_office(&params.office_id),
-                    )
-                    .await;
-                }
-            }
+            log::warn!("Pre-refresh reconnect failed: {e}");
             return RefreshOutcome::Retry;
-        }
-    };
-
-    // 原地换上新 client —— 仅当仍是我们这一代；旧 client 已 leave_office，直接 disconnect。
-    match try_install_refreshed_client(connection, generation, new_client).await {
-        SwapResult::Replaced(old) => {
-            disconnect_smcp_client(old, "old connection after pre-refresh").await;
-            RefreshOutcome::Renewed(token.expires_in)
-        }
-        SwapResult::Stale(new) => {
-            disconnect_smcp_client(new, "discarded pre-refresh (connection replaced)").await;
-            RefreshOutcome::Gone
         }
     }
 }
 
-/// 把预刷新得到的新 client **原地**装入当前连接——仅当代际匹配（仍是同一条逻辑连接）。
-/// 返回 [`SwapResult::Replaced`]（内含需关闭的旧 client）或 [`SwapResult::Stale`]（连接已被换/断，
-/// 内含需丢弃的新 client）。`pub` 供集成测试验证 generation 守卫。
+/// 仅当代际匹配（仍是同一条逻辑连接）时刷新当前 connection snapshot。
+/// 返回 [`SwapResult::Replaced`] 或 [`SwapResult::Stale`]（连接已被换/断）。
+/// `pub` 供集成测试验证 generation 守卫。
 pub async fn try_install_refreshed_client(
     connection: &Arc<RwLock<Option<ConnectionState>>>,
     generation: u64,
-    new_client: SmcpComputerClient,
 ) -> SwapResult {
     let mut guard = connection.write().await;
     match guard.as_mut() {
         Some(cs) if cs.generation == generation => {
             cs.connected_at = chrono::Utc::now();
-            SwapResult::Replaced(std::mem::replace(&mut cs.client, new_client))
+            SwapResult::Replaced
         }
-        _ => SwapResult::Stale(new_client),
+        _ => SwapResult::Stale,
     }
 }
 
@@ -1047,8 +1009,8 @@ fn manager_target_id(employee_id: u64) -> String {
 }
 
 /// Active connection state held in AppState
+#[derive(Clone)]
 pub struct ConnectionState {
-    pub client: SmcpComputerClient,
     pub profile_name: String,
     pub url: String,
     pub office_id: String,
@@ -1060,9 +1022,6 @@ pub struct ConnectionState {
     pub employee_id: Option<u64>,
     /// 代际号；Manager 驱动连接由预刷新任务用它确认连接归属。手动 profile 连接也分配（不复用）。
     pub generation: u64,
-    /// Manager 驱动连接的预刷新重连后台任务句柄；手动 profile 连接为 `None`。
-    /// 连接被关闭/替换时 abort，停止其挂起的 sleep / 重连。
-    pub refresh_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(test)]

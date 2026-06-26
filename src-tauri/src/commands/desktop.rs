@@ -53,15 +53,12 @@ pub async fn get_desktop(
         .runtime(require_instance_id(&instance_id)?)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
 
     log::info!("get_desktop called with uri filter: {:?}", uri);
 
-    // Call smcp-computer API to list all windows
-    let windows = mgr.list_all_windows(uri.as_deref()).await;
+    // Desktop window discovery is owned by SDK Computer; command handlers stay out of MCP runtime
+    // internals.
+    let windows = runtime.desktop_windows(uri.as_deref()).await?;
 
     log::info!("Found {} window resources", windows.len());
 
@@ -90,10 +87,6 @@ pub async fn get_window_detail(
         .runtime(require_instance_id(&instance_id)?)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
 
     log::info!(
         "get_window_detail called: server={}, uri={}",
@@ -104,8 +97,9 @@ pub async fn get_window_detail(
     // Create a Resource object for the request
     let resource = make_resource(uri.clone(), uri.clone(), None, None);
 
-    let result = mgr
-        .get_window_detail(&server_name, resource)
+    // Window detail reads are owned by SDK Computer for the same reason as window discovery.
+    let result = runtime
+        .window_detail(&server_name, resource)
         .await
         .map_err(|e| format!("Failed to get window detail: {}", e))?;
 

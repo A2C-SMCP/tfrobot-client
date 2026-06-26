@@ -7,7 +7,7 @@ use tfrobot_client_lib::commands::computer::{
     create_computer_instance_core, delete_computer_instance_core, duplicate_computer_instance_core,
     get_computer_instance_status_core, list_computer_instances_core, rename_computer_instance_core,
     start_computer_instance_core, stop_computer_instance_core, CreateComputerInstanceRequest,
-    DuplicateComputerInstanceRequest, RenameComputerInstanceRequest,
+    DuplicateComputerInstanceRequest, DuplicateSkillHomeMode, RenameComputerInstanceRequest,
 };
 use tfrobot_client_lib::commands::inputs::InputDefinition;
 use tfrobot_client_lib::commands::mcp;
@@ -53,12 +53,24 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         .iter()
         .any(|instance| instance.id == created.id && instance.name == "Renamed Computer"));
 
+    let instance_storage_root = state.config.computer_instance_storage_root(&created.id);
+    std::fs::create_dir_all(instance_storage_root.join("skills")).unwrap();
+    std::fs::write(
+        instance_storage_root.join("skills").join("skill.md"),
+        "skill",
+    )
+    .unwrap();
+    std::fs::create_dir_all(instance_storage_root.join("blob")).unwrap();
+    std::fs::write(instance_storage_root.join("blob").join("blob.bin"), "blob").unwrap();
+    assert!(instance_storage_root.exists());
+
     delete_computer_instance_core(&state, created.id.clone())
         .await
         .unwrap();
     let list = list_computer_instances_core(&state).await.unwrap();
     assert!(list.is_empty());
     assert!(state.computer_registry.runtime(&created.id).await.is_none());
+    assert!(!instance_storage_root.exists());
 }
 
 #[tokio::test]
@@ -146,6 +158,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             description: Some("Duplicate description".to_string()),
             copy_robot_binding: true,
             connection_target_id: Some(target.id.clone()),
+            skill_home_mode: DuplicateSkillHomeMode::Empty,
         },
     )
     .await
@@ -189,6 +202,186 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             .is_running()
             .await
     );
+}
+
+#[tokio::test]
+async fn duplicate_uses_own_skill_home_and_can_copy_source_contents() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let source = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Source".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let source_skill_root = state.config.default_local_skills_root(&source.id);
+    std::fs::create_dir_all(source_skill_root.join("nested")).unwrap();
+    std::fs::write(source_skill_root.join("skill.md"), "source skill").unwrap();
+    std::fs::write(source_skill_root.join("nested").join("data.txt"), "nested").unwrap();
+
+    let empty_duplicate = duplicate_computer_instance_core(
+        &state,
+        DuplicateComputerInstanceRequest {
+            source_id: source.id.clone(),
+            name: "Empty Duplicate".to_string(),
+            description: None,
+            copy_robot_binding: false,
+            connection_target_id: None,
+            skill_home_mode: DuplicateSkillHomeMode::Empty,
+        },
+    )
+    .await
+    .unwrap();
+    let empty_config = state
+        .config
+        .get_computer_instance(&empty_duplicate.id)
+        .unwrap();
+    let empty_skill_root = state.config.default_local_skills_root(&empty_duplicate.id);
+    assert!(empty_config.local_skills_root.is_none());
+    assert!(empty_skill_root.exists());
+    assert!(!empty_skill_root.join("skill.md").exists());
+
+    let copy_duplicate = duplicate_computer_instance_core(
+        &state,
+        DuplicateComputerInstanceRequest {
+            source_id: source.id.clone(),
+            name: "Copy Duplicate".to_string(),
+            description: None,
+            copy_robot_binding: false,
+            connection_target_id: None,
+            skill_home_mode: DuplicateSkillHomeMode::Copy,
+        },
+    )
+    .await
+    .unwrap();
+    let copy_config = state
+        .config
+        .get_computer_instance(&copy_duplicate.id)
+        .unwrap();
+    let copy_skill_root = state.config.default_local_skills_root(&copy_duplicate.id);
+    assert!(copy_config.local_skills_root.is_none());
+    assert_ne!(copy_skill_root, source_skill_root);
+    assert_eq!(
+        std::fs::read_to_string(copy_skill_root.join("skill.md")).unwrap(),
+        "source skill"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copy_skill_root.join("nested").join("data.txt")).unwrap(),
+        "nested"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_copy_failure_cleans_destination_and_returns_error() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let source = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Source".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let source_skill_file = dir.path().join("source-skill-file");
+    std::fs::write(&source_skill_file, "not a directory").unwrap();
+    state
+        .config
+        .update_computer_instance(&source.id, |instance| {
+            instance.local_skills_root = Some(source_skill_file.clone());
+        })
+        .unwrap();
+
+    let error = duplicate_computer_instance_core(
+        &state,
+        DuplicateComputerInstanceRequest {
+            source_id: source.id.clone(),
+            name: "Copy Duplicate".to_string(),
+            description: None,
+            copy_robot_binding: false,
+            connection_target_id: None,
+            skill_home_mode: DuplicateSkillHomeMode::Copy,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("Failed to copy skills"));
+    assert!(error.contains("source is not a directory"));
+    assert_eq!(
+        state
+            .config
+            .load_computer_instances()
+            .unwrap()
+            .instances
+            .len(),
+        1
+    );
+    let skill_home_base = state.config.computer_skill_home_base();
+    let remaining_entries = if skill_home_base.exists() {
+        std::fs::read_dir(skill_home_base).unwrap().count()
+    } else {
+        0
+    };
+    assert_eq!(remaining_entries, 0);
+}
+
+#[tokio::test]
+async fn duplicate_rejects_copy_when_destination_would_be_inside_source() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let source = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Source".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let skill_home_base = state.config.computer_skill_home_base();
+    std::fs::create_dir_all(&skill_home_base).unwrap();
+    std::fs::write(skill_home_base.join("root-skill.md"), "root").unwrap();
+    state
+        .config
+        .update_computer_instance(&source.id, |instance| {
+            instance.local_skills_root = Some(skill_home_base.clone());
+        })
+        .unwrap();
+
+    let error = duplicate_computer_instance_core(
+        &state,
+        DuplicateComputerInstanceRequest {
+            source_id: source.id.clone(),
+            name: "Copy Duplicate".to_string(),
+            description: None,
+            copy_robot_binding: false,
+            connection_target_id: None,
+            skill_home_mode: DuplicateSkillHomeMode::Copy,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("destination is inside source directory"));
+    assert_eq!(
+        state
+            .config
+            .load_computer_instances()
+            .unwrap()
+            .instances
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(skill_home_base.join("root-skill.md")).unwrap(),
+        "root"
+    );
+    assert_eq!(std::fs::read_dir(&skill_home_base).unwrap().count(), 1);
 }
 
 #[tokio::test]
@@ -247,6 +440,43 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         .await
         .unwrap();
     assert!(state.computer_registry.runtime(&two.id).await.is_none());
+}
+
+#[tokio::test]
+async fn status_reads_do_not_sync_runtime_inputs() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let created = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Computer".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    state
+        .config
+        .save_inputs_for_instance(
+            &created.id,
+            &[InputDefinition::PromptString {
+                id: "api-key".to_string(),
+                label: "API Key".to_string(),
+                description: None,
+                default: Some("default-key".to_string()),
+                password: Some(true),
+            }],
+        )
+        .unwrap();
+
+    list_computer_instances_core(&state).await.unwrap();
+    get_computer_instance_status_core(&state, created.id.clone())
+        .await
+        .unwrap();
+
+    let runtime = state.computer_registry.runtime(&created.id).await.unwrap();
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
 }
 
 #[tokio::test]

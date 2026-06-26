@@ -1,11 +1,13 @@
 //! Integration tests for MCP server management through AppState.
-//! These tests exercise the full flow: config persistence + MCPServerManager.
+//! These tests exercise the full flow: config persistence + SDK Computer MCP runtime.
 
 mod common;
 
-use common::{create_test_app_state, echo_server_config, stderr_flood_server_config};
+use common::{
+    create_test_app_state, echo_server_config, slow_echo_server_config, stderr_flood_server_config,
+};
 use smcp_computer::mcp_clients::MCPServerConfig;
-use tfrobot_client_lib::commands::{config_io, inputs, mcp};
+use tfrobot_client_lib::commands::{config_io, debug, inputs, mcp};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
 
@@ -160,6 +162,357 @@ async fn test_mcp_commands_are_instance_scoped() {
 }
 
 #[tokio::test]
+async fn test_get_mcp_servers_uses_sdk_computer_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("sdk-status"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].name, "sdk-status");
+    assert!(!statuses[0].running);
+    assert_eq!(statuses[0].status_message, "pending");
+}
+
+#[tokio::test]
+async fn test_stop_all_servers_uses_sdk_computer_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_start_stop_mcp_server_use_sdk_computer_runtime() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("sdk-single"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "sdk-single")
+        .await
+        .unwrap();
+    let started = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(started[0].name, "sdk-single");
+    assert!(started[0].running);
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "sdk-single")
+        .await
+        .unwrap();
+    let stopped = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(stopped[0].name, "sdk-single");
+    assert!(!stopped[0].running);
+}
+
+#[tokio::test]
+async fn test_adding_server_while_running_preserves_active_sdk_server() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("already-running"),
+    )
+    .await
+    .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "already-running")
+        .await
+        .unwrap();
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        slow_echo_server_config("newly-added"),
+    )
+    .await
+    .unwrap();
+
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let active = statuses
+        .iter()
+        .find(|status| status.name == "already-running")
+        .expect("active server status should exist");
+    let added = statuses
+        .iter()
+        .find(|status| status.name == "newly-added")
+        .expect("added server status should exist");
+
+    assert!(active.running, "active server should remain running");
+    assert!(
+        !added.running,
+        "new server should be registered but not auto-started"
+    );
+}
+
+#[tokio::test]
+async fn test_start_all_servers_uses_sdk_computer_runtime() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("sdk-all"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(statuses[0].name, "sdk-all");
+    assert!(statuses[0].running);
+
+    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("remove-me"))
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .synced_sdk_server_names()
+        .await
+        .contains("remove-me"));
+
+    mcp::remove_mcp_server_core(&state, TEST_INSTANCE_ID, "remove-me")
+        .await
+        .unwrap();
+
+    let configs = state
+        .config
+        .load_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    assert!(configs.is_empty());
+    assert!(!runtime
+        .synced_sdk_server_names()
+        .await
+        .contains("remove-me"));
+    assert!(!runtime.sdk_mcp_server_names().await.contains("remove-me"));
+}
+
+#[tokio::test]
+async fn test_debug_get_available_tools_uses_sdk_computer() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("debug-tools"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-tools")
+        .await
+        .unwrap();
+    let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    let echo = tools.iter().find(|tool| tool.name == "echo").unwrap();
+    assert_eq!(echo.server, "debug-tools");
+}
+
+#[tokio::test]
+async fn test_debug_get_available_tools_keeps_unknown_server_for_multiple_running_servers() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("debug-tools-one"),
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        slow_echo_server_config("debug-tools-two"),
+    )
+    .await
+    .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    assert!(tools.iter().any(|tool| tool.name == "echo"));
+    assert!(tools.iter().any(|tool| tool.name == "slow_echo"));
+    assert!(tools.iter().all(|tool| tool.server == "unknown"));
+}
+
+#[tokio::test]
+async fn test_debug_execute_tool_uses_sdk_computer_and_logs_redacted_history() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("debug-exec"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-exec")
+        .await
+        .unwrap();
+    let first = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "echo",
+        serde_json::json!({
+            "message": "hello from sdk computer",
+            "api_key": "secret-key"
+        }),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    let second = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "echo",
+        serde_json::json!({ "message": "second call" }),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+
+    assert!(first.success);
+    assert!(second.success);
+    let history = debug::get_tool_history_core(&state, TEST_INSTANCE_ID).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_ne!(history[0].req_id, history[1].req_id);
+    assert!(history
+        .iter()
+        .any(|record| record.parameters["api_key"] == "[REDACTED]"));
+    assert!(history.iter().all(|record| record.server == "debug-exec"));
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(runtime.sdk_tool_history().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_debug_execute_tool_uses_sdk_timeout_result() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        slow_echo_server_config("debug-timeout"),
+    )
+    .await
+    .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-timeout")
+        .await
+        .unwrap();
+    let response = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "slow_echo",
+        serde_json::json!({ "message": "too slow", "delayMs": 1000 }),
+        Some(0.05),
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.success);
+    let result = response
+        .result
+        .expect("timeout should return an SDK error result");
+    let value = serde_json::to_value(result).unwrap();
+    assert_eq!(value["_meta"]["a2c_timeout"], true);
+    let history = debug::get_tool_history_core(&state, TEST_INSTANCE_ID).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].error.as_deref(),
+        Some("工具调用超时 / Tool call timed out")
+    );
+}
+
+#[tokio::test]
 async fn test_config_io_requires_instance_id() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -228,6 +581,8 @@ async fn test_config_io_import_export_are_instance_scoped() {
         .load_configs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     let second_configs = state.config.load_configs_for_instance("second").unwrap();
+    let second_runtime = state.computer_registry.runtime("second").await.unwrap();
+    let second_sdk_servers = second_runtime.synced_sdk_server_names().await;
     let exported: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(export_path).unwrap()).unwrap();
 
@@ -235,178 +590,268 @@ async fn test_config_io_import_export_are_instance_scoped() {
     assert!(default_configs.is_empty());
     assert_eq!(second_configs.len(), 1);
     assert_eq!(second_configs[0].name(), "imported-second");
+    assert!(second_sdk_servers.contains("imported-second"));
     assert_eq!(exported["servers"].as_array().unwrap().len(), 1);
     assert_eq!(exported["servers"][0]["name"], "imported-second");
 }
 
-// ── MCPServerManager lifecycle (requires Node.js) ──
+#[tokio::test]
+async fn test_cli_native_import_syncs_inputs_before_servers_with_placeholders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let import_path = tmp.path().join("import-with-input.json");
+    let server_path = common::echo_server_path();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": "input-backed-server",
+        "server_parameters": {
+            "command": "${input:node-command}",
+            "args": [server_path.to_str().unwrap()],
+            "env": {}
+        }
+    }))
+    .unwrap();
+    let import_data = serde_json::json!({
+        "servers": [server],
+        "inputs": [{
+            "type": "PromptString",
+            "id": "node-command",
+            "label": "Node command",
+            "default": "node"
+        }]
+    });
+    std::fs::write(
+        &import_path,
+        serde_json::to_string_pretty(&import_data).unwrap(),
+    )
+    .unwrap();
+
+    let import_result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.into(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let imported_inputs = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+
+    assert_eq!(import_result.servers_imported, 1);
+    assert_eq!(import_result.inputs_imported, 1);
+    assert_eq!(imported_inputs[0].id(), "node-command");
+    assert_eq!(
+        runtime.resolve_input_value("node-command").await.unwrap(),
+        serde_json::json!("node")
+    );
+    assert!(runtime
+        .synced_sdk_server_names()
+        .await
+        .contains("input-backed-server"));
+}
+
+// ── SDK Computer MCP lifecycle (requires Node.js) ──
 // Echo server uses newline-delimited JSON framing (MCP spec 2025-03-26).
 
-const MANAGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MCP_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
-async fn test_manager_add_and_start_server() {
+async fn test_sdk_computer_add_and_start_server() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    let config = echo_server_config("lifecycle-test");
-
-    let runtime = state
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("lifecycle-test"),
+    )
+    .await
+    .unwrap();
+    state
         .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+        .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config.clone()).await.unwrap();
 
-    // Start with timeout - may fail if echo server protocol doesn't match rmcp
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("lifecycle-test")).await {
-        Ok(Ok(())) => {
-            // Verify running
-            let statuses = mgr.get_server_status().await;
-            let found = statuses.iter().find(|(n, _, _)| n == "lifecycle-test");
-            assert!(found.is_some());
-            assert!(found.unwrap().1, "Server should be running");
-
-            // Stop
-            let _ = mgr.stop_client("lifecycle-test").await;
-        }
-        Ok(Err(e)) => {
-            panic!("start_client failed: {e}");
-        }
-        Err(_) => {
-            panic!("start_client timed out after {MANAGER_TIMEOUT:?}");
-        }
+    let result = tokio::time::timeout(
+        MCP_RUNTIME_TIMEOUT,
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "lifecycle-test"),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("start_mcp_server failed: {e}"),
+        Err(_) => panic!("start_mcp_server timed out after {MCP_RUNTIME_TIMEOUT:?}"),
     }
+
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let found = statuses
+        .iter()
+        .find(|status| status.name == "lifecycle-test")
+        .expect("server status should exist");
+    assert!(found.running, "Server should be running");
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "lifecycle-test")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
-async fn test_manager_list_tools_after_start() {
+async fn test_sdk_computer_list_tools_after_start() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    let config = echo_server_config("tool-list-test");
-
-    let runtime = state
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("tool-list-test"),
+    )
+    .await
+    .unwrap();
+    state
         .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+        .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("tool-list-test")).await {
-        Ok(Ok(())) => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let tools = mgr.list_available_tools().await;
-            assert!(
-                !tools.is_empty(),
-                "Expected at least one tool from echo server"
-            );
-            let echo_tool = tools.iter().find(|t| t.name == "echo");
-            assert!(echo_tool.is_some(), "Expected 'echo' tool");
-            let _ = mgr.stop_client("tool-list-test").await;
-        }
-        Ok(Err(e)) => panic!("start_client failed: {e}"),
-        Err(_) => panic!("start_client timed out after {MANAGER_TIMEOUT:?}"),
+    let result = tokio::time::timeout(
+        MCP_RUNTIME_TIMEOUT,
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "tool-list-test"),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("start_mcp_server failed: {e}"),
+        Err(_) => panic!("start_mcp_server timed out after {MCP_RUNTIME_TIMEOUT:?}"),
     }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(
+        !tools.is_empty(),
+        "Expected at least one tool from echo server"
+    );
+    assert!(tools.iter().any(|tool| tool.name == "echo"));
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "tool-list-test")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
-async fn test_manager_execute_echo_tool() {
+async fn test_sdk_computer_execute_echo_tool() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    let config = echo_server_config("echo-call-test");
-
-    let runtime = state
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("echo-call-test"),
+    )
+    .await
+    .unwrap();
+    state
         .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+        .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "echo-call-test")
+        .await
+        .unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("echo-call-test")).await {
-        Ok(Ok(())) => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let params = serde_json::json!({"message": "hello from test"});
-            match mgr.execute_tool("echo", params, None).await {
-                Ok(call_result) => {
-                    assert!(
-                        !call_result.is_error.unwrap_or(false),
-                        "Tool call should succeed"
-                    );
-                    assert!(!call_result.content.is_empty(), "Should have content");
-                }
-                Err(e) => panic!("Tool call failed: {e}"),
-            }
-            let _ = mgr.stop_client("echo-call-test").await;
-        }
-        Ok(Err(e)) => panic!("start_client failed: {e}"),
-        Err(_) => panic!("start_client timed out after {MANAGER_TIMEOUT:?}"),
-    }
+    let response = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "echo",
+        serde_json::json!({"message": "hello from test"}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+
+    assert!(response.success);
+    assert!(response.result.is_some());
 }
 
 #[tokio::test]
-async fn test_manager_start_all_stop_all() {
+async fn test_sdk_computer_start_all_stop_all() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-
     // Use a single server to avoid tool name conflicts (all echo servers
     // expose the same "echo" tool, triggering ToolNameDuplicated).
-    let config = echo_server_config("batch-single");
-    mgr.add_or_update_server(config).await.unwrap();
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("batch-single"))
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
 
-    match tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_all()).await {
-        Ok(Ok(())) => {
-            let statuses = mgr.get_server_status().await;
-            let found = statuses.iter().find(|(n, _, _)| n == "batch-single");
-            assert!(found.is_some());
-            assert!(found.unwrap().1, "Server should be running after start_all");
-            let _ = mgr.stop_all().await;
-            // Verify all stopped
-            let after = mgr.get_server_status().await;
-            assert!(
-                after.iter().all(|(_, running, _)| !*running),
-                "All servers should be stopped"
-            );
-        }
-        Ok(Err(e)) => panic!("start_all failed: {e}"),
-        Err(_) => panic!("start_all timed out after {MANAGER_TIMEOUT:?}"),
+    let result = tokio::time::timeout(
+        MCP_RUNTIME_TIMEOUT,
+        mcp::start_all_servers_core(&state, TEST_INSTANCE_ID),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("start_all_servers failed: {e}"),
+        Err(_) => panic!("start_all_servers timed out after {MCP_RUNTIME_TIMEOUT:?}"),
     }
+
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let found = statuses
+        .iter()
+        .find(|status| status.name == "batch-single")
+        .expect("server status should exist");
+    assert!(found.running, "Server should be running after start_all");
+
+    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let after = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(
+        after.iter().all(|status| !status.running),
+        "All servers should be stopped"
+    );
 }
 
 #[tokio::test]
-async fn test_manager_start_nonexistent_fails() {
+async fn test_sdk_computer_start_nonexistent_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-
-    let runtime = state
+    state
         .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+        .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
 
-    let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("ghost-server")).await;
+    let result = tokio::time::timeout(
+        MCP_RUNTIME_TIMEOUT,
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "ghost-server"),
+    )
+    .await;
     match result {
         Ok(r) => assert!(r.is_err()),
         Err(_) => { /* Timeout is acceptable — the server doesn't exist / command is invalid */ }
@@ -414,7 +859,7 @@ async fn test_manager_start_nonexistent_fails() {
 }
 
 #[tokio::test]
-async fn test_manager_invalid_command_fails() {
+async fn test_sdk_computer_invalid_command_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -429,16 +874,20 @@ async fn test_manager_invalid_command_fails() {
     }))
     .unwrap();
 
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, config)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
 
-    let result = tokio::time::timeout(MANAGER_TIMEOUT, mgr.start_client("bad-server")).await;
+    let result = tokio::time::timeout(
+        MCP_RUNTIME_TIMEOUT,
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "bad-server"),
+    )
+    .await;
     match result {
         Ok(r) => assert!(
             r.is_err(),
@@ -663,6 +1112,67 @@ async fn test_input_commands_sync_runtime_definitions() {
         ));
     }
 
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "api-key".to_string(),
+        serde_json::json!("runtime-key"),
+    )
+    .await
+    .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.resolve_input_value("api-key").await.unwrap(),
+        serde_json::json!("runtime-key")
+    );
+
+    inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "api-key")
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.resolve_input_value("api-key").await.unwrap(),
+        serde_json::json!("default-key")
+    );
+
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "api-key".to_string(),
+        serde_json::json!("runtime-key-2"),
+    )
+    .await
+    .unwrap();
+    inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.resolve_input_value("api-key").await.unwrap(),
+        serde_json::json!("default-key")
+    );
+
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "api-key".to_string(),
+        serde_json::json!("stale-runtime-key"),
+    )
+    .await
+    .unwrap();
     inputs::remove_input_core(&state, TEST_INSTANCE_ID, "api-key")
         .await
         .unwrap();
@@ -673,6 +1183,29 @@ async fn test_input_commands_sync_runtime_definitions() {
         .await
         .unwrap();
     assert!(!runtime.inputs.read().await.contains_key("api-key"));
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "api-key".to_string(),
+            label: "API Key".to_string(),
+            description: None,
+            default: Some("default-key".to_string()),
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.resolve_input_value("api-key").await.unwrap(),
+        serde_json::json!("default-key")
+    );
 }
 
 #[tokio::test]
@@ -719,40 +1252,53 @@ async fn test_input_values_crud() {
 const STDERR_FLOOD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test]
-async fn test_manager_stderr_flood_does_not_block() {
+async fn test_sdk_computer_stderr_flood_does_not_block() {
     require_node();
 
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let config = stderr_flood_server_config("stderr-flood-test");
 
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, config)
         .await
         .unwrap();
-    let lock = runtime.manager.read().await;
-    let mgr = lock.as_ref().unwrap();
-    mgr.add_or_update_server(config).await.unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
 
     // Start the server — this itself may hang if stderr blocks during init.
-    match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.start_client("stderr-flood-test")).await {
+    match tokio::time::timeout(
+        STDERR_FLOOD_TIMEOUT,
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "stderr-flood-test"),
+    )
+    .await
+    {
         Ok(Ok(())) => {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
             // Execute a tool call.  The server writes another burst of stderr
             // during this call, so if the pipe is not being drained this will
             // time out.
-            let params = serde_json::json!({"message": "hello through stderr storm"});
-            match tokio::time::timeout(STDERR_FLOOD_TIMEOUT, mgr.execute_tool("echo", params, None))
-                .await
+            match tokio::time::timeout(
+                STDERR_FLOOD_TIMEOUT,
+                debug::execute_tool_core(
+                    &state,
+                    TEST_INSTANCE_ID,
+                    "echo",
+                    serde_json::json!({"message": "hello through stderr storm"}),
+                    Some(25.0),
+                ),
+            )
+            .await
             {
-                Ok(Ok(call_result)) => {
+                Ok(Ok(response)) => {
                     assert!(
-                        !call_result.is_error.unwrap_or(false),
+                        response.success,
                         "Tool call should succeed despite heavy stderr output"
                     );
-                    assert!(!call_result.content.is_empty(), "Should have content");
+                    assert!(response.result.is_some(), "Should have content");
                 }
                 Ok(Err(e)) => panic!("Tool call failed: {e}"),
                 Err(_) => panic!(
@@ -761,11 +1307,11 @@ async fn test_manager_stderr_flood_does_not_block() {
                 ),
             }
 
-            let _ = mgr.stop_client("stderr-flood-test").await;
+            let _ = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "stderr-flood-test").await;
         }
-        Ok(Err(e)) => panic!("start_client failed: {e}"),
+        Ok(Err(e)) => panic!("start_mcp_server failed: {e}"),
         Err(_) => panic!(
-            "start_client timed out after {STDERR_FLOOD_TIMEOUT:?} — \
+            "start_mcp_server timed out after {STDERR_FLOOD_TIMEOUT:?} — \
              stderr pipe is likely blocked during initialization (Issue #19)"
         ),
     }

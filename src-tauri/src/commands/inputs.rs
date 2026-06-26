@@ -1,3 +1,4 @@
+use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -91,9 +92,13 @@ pub async fn add_or_update_input_core(
     instance_id: &str,
     input: InputDefinition,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    let instance_id = require_instance_id(instance_id)?;
     let id = input.id().to_string();
     log::info!("Adding/updating input for instance {}: {}", instance_id, id);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let mut inputs = state
         .config
@@ -105,10 +110,7 @@ pub async fn add_or_update_input_core(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
+    apply_updated_computer_instance(&state, previous, updated_instance).await?;
 
     Ok(())
 }
@@ -128,8 +130,12 @@ pub async fn remove_input_core(
     instance_id: &str,
     id: &str,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    let instance_id = require_instance_id(instance_id)?;
     log::info!("Removing input for instance {}: {}", instance_id, id);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let mut inputs = state
         .config
@@ -144,23 +150,12 @@ pub async fn remove_input_core(
 
     let updated_instance = state
         .config
-        .save_inputs_for_instance(instance_id, &inputs)
+        .update_computer_instance(instance_id, |instance| {
+            instance.inputs = inputs;
+            instance.input_values.remove(id);
+        })
         .map_err(|e| e.to_string())?;
-    state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
-
-    // Also remove cached value
-    let mut values = state
-        .config
-        .load_input_values_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    values.remove(id);
-    state
-        .config
-        .save_input_values_for_instance(instance_id, &values)
-        .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(&state, previous, updated_instance).await?;
 
     Ok(())
 }
@@ -199,18 +194,32 @@ pub async fn set_input_value(
     id: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    set_input_value_core(&state, &instance_id, id, value).await
+}
+
+pub async fn set_input_value_core(
+    state: &AppState,
+    instance_id: &str,
+    id: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
     log::info!("Setting input value: {}", id);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let mut values = state
         .config
         .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     values.insert(id, value);
-    state
+    let updated_instance = state
         .config
         .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(&state, previous, updated_instance).await?;
 
     Ok(())
 }
@@ -222,16 +231,29 @@ pub async fn remove_input_value(
     instance_id: String,
     id: String,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    remove_input_value_core(&state, &instance_id, &id).await
+}
+
+pub async fn remove_input_value_core(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     let mut values = state
         .config
         .load_input_values_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
-    values.remove(&id);
-    state
+    values.remove(id);
+    let updated_instance = state
         .config
         .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
     Ok(())
 }
 
@@ -241,13 +263,20 @@ pub async fn clear_input_values(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<(), String> {
-    state
+    clear_input_values_core(&state, &instance_id).await
+}
+
+pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let previous = state
         .config
-        .save_input_values_for_instance(
-            require_instance_id(&instance_id)?,
-            &std::collections::HashMap::new(),
-        )
+        .get_computer_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    let updated_instance = state
+        .config
+        .save_input_values_for_instance(instance_id, &std::collections::HashMap::new())
+        .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
     Ok(())
 }
 
@@ -259,6 +288,10 @@ pub async fn import_inputs(
     path: String,
 ) -> Result<usize, String> {
     let instance_id = require_instance_id(&instance_id)?;
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let imported: Vec<InputDefinition> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
@@ -277,10 +310,7 @@ pub async fn import_inputs(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
+    apply_updated_computer_instance(&state, previous, updated_instance).await?;
 
     Ok(count)
 }

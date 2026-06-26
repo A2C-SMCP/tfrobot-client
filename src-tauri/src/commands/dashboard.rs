@@ -79,13 +79,14 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
         if running {
             computer_running += 1;
         }
-        let conn = runtime.connection.read().await;
-        let connected = conn.is_some();
+        let connected = runtime.is_connected().await;
         if connected {
             computer_connected += 1;
         }
-        let connection_profile = conn.as_ref().map(|c| c.profile_name.clone());
-        drop(conn);
+        let connection_profile = runtime
+            .connection_status()
+            .await
+            .map(|connection| connection.profile_name);
 
         computers.push(DashboardComputerSummary {
             id: runtime.instance.id.clone(),
@@ -154,23 +155,15 @@ pub async fn get_computer_overview_data_core(
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
     let running = runtime.is_running().await;
-    let conn = runtime.connection.read().await;
-    let connected = conn.is_some();
-    let connection_url = conn.as_ref().map(|c| c.url.clone());
-    let connection_profile = conn.as_ref().map(|c| c.profile_name.clone());
-    drop(conn);
+    let connected = runtime.is_connected().await;
+    let connection = runtime.connection_status().await;
+    let connection_url = connection.as_ref().map(|c| c.url.clone());
+    let connection_profile = connection.as_ref().map(|c| c.profile_name.clone());
 
-    let lock = runtime.manager.read().await;
-    let (mcp_total, mcp_running, tools_count) = match lock.as_ref() {
-        Some(mgr) => {
-            let statuses = mgr.get_server_status().await;
-            let mcp_total = statuses.len();
-            let mcp_running = statuses.iter().filter(|(_, running, _)| *running).count();
-            let tools_count = mgr.list_available_tools().await.len();
-            (mcp_total, mcp_running, tools_count)
-        }
-        None => (runtime.instance.mcp_servers.len(), 0, 0),
-    };
+    let statuses = runtime.mcp_server_statuses().await;
+    let mcp_total = statuses.len();
+    let mcp_running = statuses.iter().filter(|(_, running, _)| *running).count();
+    let tools_count = runtime.available_tools().await.unwrap_or_default().len();
     let mcp_stopped = mcp_total.saturating_sub(mcp_running);
 
     let recent_logs = state

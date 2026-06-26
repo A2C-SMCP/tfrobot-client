@@ -90,7 +90,10 @@
       "description": "描述",
       "copyRobotBinding": "复制 Robot 绑定",
       "connectionTarget": "连接目标",
-      "useOriginalConnectionConfig": "使用原 Computer 连接配置"
+      "useOriginalConnectionConfig": "使用原 Computer 连接配置",
+      "skillHomeMode": "本地 Skills",
+      "skillHomeEmpty": "创建空 Skill 目录",
+      "skillHomeCopy": "复制源实例 Skills"
     },
     "messages": {
       "created": "Computer 已创建",

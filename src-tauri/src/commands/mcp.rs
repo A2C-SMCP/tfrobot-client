@@ -1,7 +1,7 @@
+use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::MCPServerConfig;
-use std::collections::HashMap;
 use tauri::State;
 
 /// Server status returned to frontend
@@ -35,12 +35,8 @@ pub async fn get_mcp_servers_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    let runtime_statuses: HashMap<_, _> = mgr
-        .get_server_status()
+    let runtime_statuses: std::collections::HashMap<_, _> = runtime
+        .mcp_server_statuses()
         .await
         .into_iter()
         .map(|(name, running, status_message)| (name, (running, status_message)))
@@ -106,23 +102,17 @@ pub async fn add_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Adding MCP server for instance {}: {}", instance_id, name);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let updated_instance = state
         .config
         .add_config_for_instance(instance_id, config.clone())
         .map_err(|e| e.to_string())?;
 
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.add_or_update_server(config)
-        .await
-        .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     log::info!("MCP server added for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -151,26 +141,16 @@ pub async fn remove_mcp_server_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Removing MCP server for instance {}: {}", instance_id, name);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let updated_instance = state
         .config
         .remove_config_for_instance(instance_id, name)
         .map_err(|e| e.to_string())?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    if let Err(error) = mgr.remove_server(name).await {
-        log::warn!(
-            "Failed to remove MCP server from runtime for instance {}: {}",
-            instance_id,
-            error
-        );
-    }
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     log::info!("MCP server removed for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -200,23 +180,17 @@ pub async fn update_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Updating MCP server for instance {}: {}", instance_id, name);
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|e| e.to_string())?;
 
     let updated_instance = state
         .config
         .add_config_for_instance(instance_id, config.clone())
         .map_err(|e| e.to_string())?;
 
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(updated_instance)
-        .await;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.add_or_update_server(config)
-        .await
-        .map_err(|e| e.to_string())?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     log::info!("MCP server updated for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -246,20 +220,13 @@ pub async fn start_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Starting MCP server for instance {}: {}", instance_id, name);
 
-    let config = get_mcp_server_config_core(state, instance_id, name)?;
+    let _config = get_mcp_server_config_core(state, instance_id, name)?;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.add_or_update_server(config)
-        .await
-        .map_err(|e| e.to_string())?;
-    mgr.start_client(name).await.map_err(|e| e.to_string())?;
+    runtime.start_mcp_server(name).await?;
 
     log::info!("MCP server started for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -294,11 +261,7 @@ pub async fn stop_mcp_server_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_client(name).await.map_err(|e| e.to_string())?;
+    runtime.stop_mcp_server(name).await?;
 
     log::info!("MCP server stopped for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -329,16 +292,9 @@ pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Resu
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
-        .update_runtime_instance(instance.clone())
-        .await;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.initialize(instance.mcp_servers)
-        .await
-        .map_err(|e| e.to_string())?;
-    mgr.start_all().await.map_err(|e| e.to_string())?;
+        .update_runtime_instance(instance)
+        .await?;
+    runtime.start_all_mcp_servers().await?;
 
     log::info!("All MCP servers started for instance {}", instance_id);
     Ok(())
@@ -361,11 +317,7 @@ pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Resul
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_all().await.map_err(|e| e.to_string())?;
+    runtime.stop_all_mcp_servers().await?;
 
     log::info!("All MCP servers stopped for instance {}", instance_id);
     Ok(())

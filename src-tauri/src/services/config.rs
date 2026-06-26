@@ -26,6 +26,20 @@ impl ConfigService {
         })
     }
 
+    pub fn default_local_skills_root(&self, instance_id: &str) -> PathBuf {
+        self.computer_instance_storage_root(instance_id)
+            .join("skills")
+    }
+
+    pub fn computer_instance_storage_root(&self, instance_id: &str) -> PathBuf {
+        self.computer_skill_home_base()
+            .join(instance_storage_dir_name(instance_id))
+    }
+
+    pub fn computer_skill_home_base(&self) -> PathBuf {
+        self.config_dir.join("computer_instances")
+    }
+
     // --- MCP Server Configs ---
 
     pub fn load_configs_for_instance(
@@ -323,6 +337,38 @@ fn load_json_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resu
     Ok(data)
 }
 
+pub(crate) fn sanitize_path_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "default".to_string()
+    } else {
+        sanitized
+    }
+}
+
+pub(crate) fn instance_storage_dir_name(instance_id: &str) -> String {
+    let sanitized = sanitize_path_component(instance_id);
+    if !instance_id.is_empty()
+        && instance_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return sanitized;
+    }
+
+    let digest = Sha256::digest(instance_id.as_bytes());
+    format!("{}-{}", sanitized, hex::encode(&digest[..4]))
+}
+
 fn save_json_file<T: serde::Serialize + ?Sized>(path: &Path, data: &T) -> Result<(), ConfigError> {
     let content = serde_json::to_string_pretty(data)?;
     fs::write(path, content)?;
@@ -383,6 +429,24 @@ mod tests {
         let instances = svc.load_computer_instances().unwrap();
 
         assert!(instances.instances.is_empty());
+    }
+
+    #[test]
+    fn default_skill_roots_avoid_sanitized_id_collisions() {
+        let (svc, _tmp) = setup_empty();
+
+        assert_eq!(
+            instance_storage_dir_name("computer-a"),
+            "computer-a".to_string()
+        );
+        assert_ne!(
+            svc.default_local_skills_root("instance/one"),
+            svc.default_local_skills_root("instance_one")
+        );
+        assert_ne!(
+            instance_storage_dir_name("instance/one"),
+            instance_storage_dir_name("instance:one")
+        );
     }
 
     #[test]

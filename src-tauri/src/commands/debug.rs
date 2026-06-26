@@ -82,28 +82,26 @@ pub async fn get_available_tools(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<Vec<ToolInfo>, String> {
+    get_available_tools_core(&state, &instance_id).await
+}
+
+pub async fn get_available_tools_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<ToolInfo>, String> {
     let runtime = state
         .computer_registry
-        .runtime(require_instance_id(&instance_id)?)
+        .runtime(require_instance_id(instance_id)?)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    let tools: Vec<Tool> = mgr.list_available_tools().await;
+    let tools: Vec<Tool> = runtime.available_tools().await?;
+    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
 
     let result = tools
         .into_iter()
         .map(|t| {
             // Extract server name from tool meta if available
-            let server = t
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("server_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
+            let server = tool_server(&t, &running_servers);
 
             let a2c_meta = t.meta.as_ref().and_then(|m| m.get("a2c_tool_meta"));
 
@@ -144,15 +142,8 @@ pub async fn get_debug_resources(
         .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
 
-    let (resources, next_cursor) = mgr
-        .list_resources(&server_name, cursor)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (resources, next_cursor) = runtime.resources(&server_name, cursor).await?;
 
     Ok(DebugResourcesResponse {
         resources: resources
@@ -182,7 +173,17 @@ pub async fn execute_tool(
     params: serde_json::Value,
     timeout: Option<f64>,
 ) -> Result<ToolCallResponse, String> {
-    let instance_id = require_instance_id(&instance_id)?.to_string();
+    execute_tool_core(&state, &instance_id, &tool_name, params, timeout).await
+}
+
+pub async fn execute_tool_core(
+    state: &AppState,
+    instance_id: &str,
+    tool_name: &str,
+    params: serde_json::Value,
+    timeout: Option<f64>,
+) -> Result<ToolCallResponse, String> {
+    let instance_id = require_instance_id(instance_id)?.to_string();
     log::info!("Executing tool for instance {}: {}", instance_id, tool_name);
 
     let runtime = state
@@ -190,21 +191,31 @@ pub async fn execute_tool(
         .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let lock = runtime.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
 
     let start = std::time::Instant::now();
-    let duration_timeout = timeout.map(std::time::Duration::from_secs_f64);
-    let server = resolve_tool_server(mgr, &tool_name).await;
     let req_id = uuid::Uuid::new_v4().to_string();
+    let tools = runtime.available_tools().await.unwrap_or_default();
+    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
+    let fallback_server = resolve_tool_server(&tools, &running_servers, tool_name);
     let history_parameters = redact_sensitive_parameters(params.clone());
 
-    let result = mgr
-        .execute_tool(&tool_name, params.clone(), duration_timeout)
+    let result = runtime
+        .execute_tool_cancellable(&req_id, tool_name, params.clone(), timeout)
         .await;
     let duration_ms = start.elapsed().as_millis() as u64;
+    let sdk_record = runtime
+        .sdk_tool_history()
+        .await
+        .ok()
+        .and_then(|history| history.into_iter().find(|record| record.req_id == req_id));
+    let server = sdk_record
+        .as_ref()
+        .map(|record| record.server.clone())
+        .unwrap_or(fallback_server);
+    let history_tool = sdk_record
+        .as_ref()
+        .map(|record| record.tool.clone())
+        .unwrap_or_else(|| tool_name.to_string());
 
     match result {
         Ok(call_result) => {
@@ -218,7 +229,7 @@ pub async fn execute_tool(
                 req_id,
                 computer_instance_id: instance_id.clone(),
                 server,
-                tool: tool_name.clone(),
+                tool: history_tool,
                 parameters: history_parameters,
                 timeout,
                 success,
@@ -246,7 +257,7 @@ pub async fn execute_tool(
                 req_id,
                 computer_instance_id: instance_id.clone(),
                 server,
-                tool: tool_name.clone(),
+                tool: history_tool,
                 parameters: history_parameters,
                 timeout,
                 success: false,
@@ -411,21 +422,28 @@ fn redact_sensitive_line(line: &str) -> String {
     }
 }
 
-async fn resolve_tool_server(
-    mgr: &smcp_computer::mcp_clients::MCPServerManager,
-    tool_name: &str,
-) -> String {
-    mgr.list_available_tools()
-        .await
+fn running_mcp_servers(statuses: Vec<(String, bool, String)>) -> Vec<String> {
+    statuses
         .into_iter()
+        .filter_map(|(name, running, _)| running.then_some(name))
+        .collect()
+}
+
+fn tool_server(tool: &Tool, running_servers: &[String]) -> String {
+    tool.meta
+        .as_ref()
+        .and_then(|m| m.get("server_name"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+        .or_else(|| (running_servers.len() == 1).then(|| running_servers[0].clone()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn resolve_tool_server(tools: &[Tool], running_servers: &[String], tool_name: &str) -> String {
+    tools
+        .iter()
         .find(|tool| tool.name.as_ref() == tool_name)
-        .and_then(|tool| {
-            tool.meta
-                .as_ref()
-                .and_then(|meta| meta.get("server_name"))
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string)
-        })
+        .map(|tool| tool_server(tool, running_servers))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -451,7 +469,14 @@ pub async fn get_tool_history(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<Vec<ToolCallHistoryRecord>, String> {
-    let instance_id = require_instance_id(&instance_id)?.to_string();
+    get_tool_history_core(&state, &instance_id)
+}
+
+pub fn get_tool_history_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<ToolCallHistoryRecord>, String> {
+    let instance_id = require_instance_id(instance_id)?.to_string();
     let logs = state.log_service.query(&LogFilter {
         categories: Some(vec!["tool".to_string()]),
         computer_instance_id: Some(instance_id.clone()),

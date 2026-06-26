@@ -5,18 +5,18 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
-use smcp_computer::mcp_clients::manager::MCPServerManager;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::socketio_client::SmcpComputerClient;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
+use tfrobot_client_lib::commands::computer::{
+    rename_computer_instance_core, RenameComputerInstanceRequest,
+};
 use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_connection_target_core, reconnect_with_token,
     try_install_refreshed_client, ConnectionState, ManagerConnectionParams, RefreshOutcome,
     SwapResult,
 };
 use tfrobot_client_lib::services::computer::{
-    ComputerInstance, ComputerInstanceRuntime, RobotBindingMetadata,
+    ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState, RobotBindingMetadata,
 };
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
@@ -86,6 +86,12 @@ impl SocketStats {
 }
 
 async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
+    start_smcp_socket_server_with_join_delay(Duration::ZERO).await
+}
+
+async fn start_smcp_socket_server_with_join_delay(
+    join_delay: Duration,
+) -> (String, Arc<SocketStats>) {
     let stats = Arc::new(SocketStats::default());
     let (socket_layer, io) = SocketIo::new_layer();
 
@@ -95,8 +101,9 @@ async fn start_smcp_socket_server() -> (String, Arc<SocketStats>) {
         connect_stats.connected.fetch_add(1, Ordering::SeqCst);
 
         let join_stats = connect_stats.clone();
-        socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| {
+        socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| async move {
             join_stats.join_events.fetch_add(1, Ordering::SeqCst);
+            sleep(join_delay).await;
             let _ = ack.send(&(true, Option::<String>::None));
         });
 
@@ -157,36 +164,32 @@ async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
 
 #[tokio::test]
 async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
-    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
-        Arc::new(RwLock::new(HashMap::new()));
 
-    let client = SmcpComputerClient::new(
-        &server_url,
-        manager,
-        "lifecycle-test-computer".to_string(),
-        None,
-        inputs,
-        None,
-    )
-    .await
-    .expect("connect smcp client");
-
-    client
-        .join_office("lifecycle-office")
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "lifecycle-office",
+            "lifecycle-test-computer",
+        )
         .await
-        .expect("join office");
+        .expect("connect smcp socket");
 
     wait_for("server never observed the SMCP socket connection", || {
         stats.active() == 1 && stats.connected() == 1
     })
     .await;
 
-    close_smcp_connection(ConnectionState {
-        client,
+    let connection = ConnectionState {
         profile_name: "lifecycle-profile".to_string(),
-        url: server_url,
+        url: server_url.clone(),
         office_id: "lifecycle-office".to_string(),
         computer_name: "lifecycle-test-computer".to_string(),
         connected_at: chrono::Utc::now(),
@@ -195,9 +198,17 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
         target_name: Some("lifecycle-profile".to_string()),
         employee_id: None,
         generation: 0,
-        refresh_task: None,
-    })
-    .await;
+    };
+    *runtime.connection.write().await = Some(connection.clone());
+    assert!(runtime.is_connected().await);
+
+    close_smcp_connection(&runtime, connection)
+        .await
+        .expect("close smcp socket");
+
+    assert!(runtime.connection.read().await.is_none());
+    assert!(!runtime.is_connected().await);
+    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Booted);
 
     wait_for("server never observed the leave_office event", || {
         stats.leave_events() == 1
@@ -224,30 +235,153 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
 }
 
 #[tokio::test]
+async fn failed_close_preserves_connection_snapshot_when_socket_is_still_shared() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "shared-office",
+            "shared-test-computer",
+        )
+        .await
+        .expect("connect smcp socket");
+    wait_for("server never observed the SMCP socket connection", || {
+        stats.active() == 1 && stats.connected() == 1
+    })
+    .await;
+
+    let held_socket = runtime
+        .clone_sdk_socketio_client_for_test()
+        .await
+        .expect("socket should be present");
+    let connection = ConnectionState {
+        profile_name: "shared-profile".to_string(),
+        url: server_url.clone(),
+        office_id: "shared-office".to_string(),
+        computer_name: "shared-test-computer".to_string(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manual_smcp".to_string(),
+        target_id: Some("shared-target".to_string()),
+        target_name: Some("shared-profile".to_string()),
+        employee_id: None,
+        generation: 0,
+    };
+    *runtime.connection.write().await = Some(connection.clone());
+
+    let error = close_smcp_connection(&runtime, connection.clone())
+        .await
+        .expect_err("close should fail while another socket reference is held");
+
+    assert!(error.contains("still has shared references"));
+    assert!(
+        runtime.connection.read().await.is_some(),
+        "failed close must preserve the business connection snapshot"
+    );
+    assert!(
+        runtime.is_connected().await,
+        "failed close must not report the instance as disconnected"
+    );
+    assert_eq!(stats.active(), 1);
+
+    drop(held_socket);
+    close_smcp_connection(&runtime, connection)
+        .await
+        .expect("close should succeed after releasing shared socket reference");
+    assert!(runtime.connection.read().await.is_none());
+    wait_for("SMCP socket should be disconnected after retry", || {
+        stats.active() == 0 && stats.disconnected() == 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_rebuild_clears_smcp_connection_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "rebuild-office",
+            "rebuild-computer",
+        )
+        .await
+        .expect("connect smcp socket");
+
+    wait_for("server never observed the SMCP socket connection", || {
+        stats.active() == 1 && stats.connected() == 1
+    })
+    .await;
+
+    *runtime.connection.write().await = Some(ConnectionState {
+        profile_name: "rebuild-profile".to_string(),
+        url: server_url,
+        office_id: "rebuild-office".to_string(),
+        computer_name: "rebuild-computer".to_string(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manual_smcp".to_string(),
+        target_id: Some("rebuild-target".to_string()),
+        target_name: Some("rebuild-profile".to_string()),
+        employee_id: None,
+        generation: 0,
+    });
+    assert!(runtime.is_connected().await);
+
+    let status = rename_computer_instance_core(
+        &state,
+        RenameComputerInstanceRequest {
+            id: TEST_INSTANCE_ID.to_string(),
+            name: "Renamed Test Computer".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .expect("rename should rebuild runtime");
+
+    assert!(!status.connected);
+    assert!(runtime.connection.read().await.is_none());
+    assert!(!runtime.is_connected().await);
+    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Booted);
+
+    wait_for(
+        "runtime rebuild did not close the underlying Socket.IO connection",
+        || stats.active() == 0 && stats.disconnected() == 1,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn failed_profile_switch_keeps_existing_smcp_connection() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
     runtime.start().await.expect("start runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = runtime.manager.clone();
-    let inputs = runtime.inputs.clone();
-
-    let client = SmcpComputerClient::new(
-        &server_url,
-        manager,
-        "existing-computer".to_string(),
-        None,
-        inputs,
-        None,
-    )
-    .await
-    .expect("connect existing smcp client");
-
-    client
-        .join_office("existing-office")
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "existing-office",
+            "existing-computer",
+        )
         .await
-        .expect("join existing office");
+        .expect("connect existing smcp socket");
 
     wait_for("server never observed the existing SMCP socket", || {
         stats.active() == 1 && stats.connected() == 1
@@ -257,7 +391,6 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
     {
         let mut conn = runtime.connection.write().await;
         *conn = Some(ConnectionState {
-            client,
             profile_name: "existing-profile".to_string(),
             url: server_url,
             office_id: "existing-office".to_string(),
@@ -268,7 +401,6 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
             target_name: Some("existing-profile".to_string()),
             employee_id: None,
             generation: 0,
-            refresh_task: None,
         });
     }
 
@@ -295,7 +427,9 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
         conn.take()
     };
     if let Some(connection) = existing_connection {
-        close_smcp_connection(connection).await;
+        close_smcp_connection(&runtime, connection)
+            .await
+            .expect("close existing socket");
     }
 }
 
@@ -328,6 +462,116 @@ async fn profile_connect_requires_running_computer() {
 }
 
 #[tokio::test]
+async fn stale_snapshot_after_reconnect_failure_does_not_block_manual_reconnect() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "stale-office",
+            "stale-computer",
+        )
+        .await
+        .expect("connect old socket");
+
+    wait_for("server never observed the original SMCP socket", || {
+        stats.active() == 1 && stats.connected() == 1 && stats.join_events() == 1
+    })
+    .await;
+
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "stale-target".to_string(),
+            name: "stale-target".to_string(),
+            url: server_url.clone(),
+            namespace: "/smcp".to_string(),
+            office_id: "stale-office".to_string(),
+            computer_name: "stale-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    {
+        let mut conn = runtime.connection.write().await;
+        *conn = Some(ConnectionState {
+            profile_name: "stale-target".to_string(),
+            url: server_url.clone(),
+            office_id: "stale-office".to_string(),
+            computer_name: "stale-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manual_smcp".to_string(),
+            target_id: Some(target.id.clone()),
+            target_name: Some("stale-target".to_string()),
+            employee_id: None,
+            generation: 5,
+        });
+    }
+
+    let dead_url = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{}", addr)
+    };
+    let params = ManagerConnectionParams {
+        url: dead_url,
+        computer_name: "stale-computer".to_string(),
+        office_id: "stale-office".to_string(),
+        routing_headers: HashMap::new(),
+        employee_id: 1,
+        robot_account_id: 42,
+        scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: 1,
+            robot_id: Some("stale-office".to_string()),
+            robot_account_id: Some(42),
+            namespace: Some("tfrobotserver".to_string()),
+            robot_name: Some("Robot".to_string()),
+        },
+    };
+    let token = ExchangedToken {
+        access_token: "new-jwt".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 300,
+        scope: None,
+    };
+
+    let outcome = reconnect_with_token(&runtime.connection, &runtime, &params, 5, &token).await;
+    assert!(matches!(outcome, RefreshOutcome::Retry));
+    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Error);
+    assert!(!runtime.is_connected().await);
+    wait_for("old socket should be closed after failed reconnect", || {
+        stats.active() == 0 && stats.disconnected() == 1
+    })
+    .await;
+
+    connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
+        .await
+        .expect("manual reconnect should rebuild socket despite stale snapshot");
+
+    wait_for("manual reconnect should open a fresh socket", || {
+        stats.active() == 1 && stats.connected() == 2 && stats.join_events() == 2
+    })
+    .await;
+    assert!(runtime.is_connected().await);
+
+    let final_connection = runtime.connection.write().await.take();
+    if let Some(connection) = final_connection {
+        close_smcp_connection(&runtime, connection)
+            .await
+            .expect("close final socket");
+    }
+}
+
+#[tokio::test]
 async fn profile_switch_to_different_robot_requires_disconnect() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
@@ -336,21 +580,17 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
     let (old_server_url, old_stats) = start_smcp_socket_server().await;
     let (new_server_url, new_stats) = start_smcp_socket_server().await;
 
-    let old_client = SmcpComputerClient::new(
-        &old_server_url,
-        runtime.manager.clone(),
-        "old-computer".to_string(),
-        None,
-        runtime.inputs.clone(),
-        None,
-    )
-    .await
-    .expect("connect old smcp client");
-
-    old_client
-        .join_office("old-office")
+    runtime
+        .connect_smcp_socketio(
+            &old_server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "old-office",
+            "old-computer",
+        )
         .await
-        .expect("join old office");
+        .expect("connect old smcp socket");
 
     wait_for("server never observed the old SMCP socket", || {
         old_stats.active() == 1 && old_stats.connected() == 1
@@ -360,7 +600,6 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
     {
         let mut conn = runtime.connection.write().await;
         *conn = Some(ConnectionState {
-            client: old_client,
             profile_name: "old-profile".to_string(),
             url: old_server_url,
             office_id: "old-office".to_string(),
@@ -371,7 +610,6 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
             target_name: Some("old-profile".to_string()),
             employee_id: None,
             generation: 0,
-            refresh_task: None,
         });
     }
 
@@ -414,7 +652,9 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
         conn.take()
     };
     if let Some(connection) = old_connection {
-        close_smcp_connection(connection).await;
+        close_smcp_connection(&runtime, connection)
+            .await
+            .expect("close old socket");
     }
 }
 
@@ -446,20 +686,17 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
         .await;
     other_runtime.start().await.expect("start other runtime");
 
-    let other_client = SmcpComputerClient::new(
-        &server_url,
-        other_runtime.manager.clone(),
-        "other-computer".to_string(),
-        None,
-        other_runtime.inputs.clone(),
-        None,
-    )
-    .await
-    .expect("connect other smcp client");
-    other_client
-        .join_office("shared-office")
+    other_runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "shared-office",
+            "other-computer",
+        )
         .await
-        .expect("join shared office");
+        .expect("connect other smcp socket");
     wait_for("server never observed the other SMCP socket", || {
         stats.active() == 1 && stats.connected() == 1
     })
@@ -468,7 +705,6 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
     {
         let mut conn = other_runtime.connection.write().await;
         *conn = Some(ConnectionState {
-            client: other_client,
             profile_name: "other-profile".to_string(),
             url: server_url.clone(),
             office_id: "shared-office".to_string(),
@@ -479,7 +715,6 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
             target_name: Some("other-profile".to_string()),
             employee_id: None,
             generation: 0,
-            refresh_task: None,
         });
     }
 
@@ -515,7 +750,163 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
         conn.take()
     };
     if let Some(connection) = existing_connection {
-        close_smcp_connection(connection).await;
+        close_smcp_connection(&other_runtime, connection)
+            .await
+            .expect("close other socket");
+    }
+}
+
+#[tokio::test]
+async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let owner_runtime = create_test_runtime(&state).await;
+    owner_runtime.start().await.expect("start owner runtime");
+    let (old_server_url, old_stats) = start_smcp_socket_server().await;
+    let (refresh_server_url, refresh_stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+
+    owner_runtime
+        .connect_smcp_socketio(
+            &old_server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "refreshing-office",
+            "owner-computer",
+        )
+        .await
+        .expect("connect owner socket");
+    wait_for("server never observed owner socket", || {
+        old_stats.active() == 1 && old_stats.connected() == 1
+    })
+    .await;
+
+    let target_id = "refreshing-target";
+    {
+        let mut conn = owner_runtime.connection.write().await;
+        *conn = Some(ConnectionState {
+            profile_name: "owner-profile".to_string(),
+            url: old_server_url,
+            office_id: "refreshing-office".to_string(),
+            computer_name: "owner-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manual_smcp".to_string(),
+            target_id: Some(target_id.to_string()),
+            target_name: Some("owner-profile".to_string()),
+            employee_id: None,
+            generation: 77,
+        });
+    }
+
+    let params = ManagerConnectionParams {
+        url: refresh_server_url.clone(),
+        computer_name: "owner-computer".to_string(),
+        office_id: "refreshing-office".to_string(),
+        routing_headers: HashMap::new(),
+        employee_id: 1,
+        robot_account_id: 42,
+        scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: 1,
+            robot_id: Some("refreshing-office".to_string()),
+            robot_account_id: Some(42),
+            namespace: Some("tfrobotserver".to_string()),
+            robot_name: Some("Robot".to_string()),
+        },
+    };
+    let token = ExchangedToken {
+        access_token: "new-jwt".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 300,
+        scope: None,
+    };
+    let owner_connection = owner_runtime.connection.clone();
+    let owner_runtime_for_refresh = owner_runtime.clone();
+    let refresh_task = tokio::spawn(async move {
+        reconnect_with_token(
+            &owner_connection,
+            &owner_runtime_for_refresh,
+            &params,
+            77,
+            &token,
+        )
+        .await
+    });
+
+    for _ in 0..40 {
+        if refresh_stats.connected() == 1
+            && refresh_stats.join_events() == 1
+            && owner_runtime.runtime_state().await == ComputerRuntimeState::Connected
+        {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        owner_runtime.runtime_state().await,
+        ComputerRuntimeState::Connected,
+        "owner runtime never entered refresh join window"
+    );
+
+    let challenger_instance_id = "challenger-computer";
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: challenger_instance_id.to_string(),
+            name: "Challenger Computer".to_string(),
+            ..ComputerInstance::new("", "")
+        })
+        .unwrap();
+    let challenger_runtime = state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(challenger_instance_id)
+                .unwrap(),
+        )
+        .await;
+    challenger_runtime
+        .start()
+        .await
+        .expect("start challenger runtime");
+
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: target_id.to_string(),
+            name: "refreshing-target".to_string(),
+            url: refresh_server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "refreshing-office".to_string(),
+            computer_name: "challenger-computer".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let err = connect_connection_target_core(&state, challenger_instance_id, &target.id)
+        .await
+        .expect_err("refreshing owner should still block another instance");
+    assert!(
+        err.contains("Test Computer"),
+        "error should identify the refreshing owner, got: {err}"
+    );
+
+    assert_eq!(
+        refresh_stats.connected(),
+        1,
+        "rejected challenger must not open another socket"
+    );
+
+    let outcome = refresh_task.await.expect("refresh task should complete");
+    assert!(matches!(outcome, RefreshOutcome::Renewed(300)));
+
+    let owner_connection = owner_runtime.connection.write().await.take();
+    if let Some(connection) = owner_connection {
+        close_smcp_connection(&owner_runtime, connection)
+            .await
+            .expect("close owner socket");
     }
 }
 
@@ -587,48 +978,22 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
             conn.take()
         };
         if let Some(connection) = existing_connection {
-            close_smcp_connection(connection).await;
+            close_smcp_connection(&runtime, connection)
+                .await
+                .expect("close concurrent socket");
         }
     }
 }
 
 // ───────────────────── 预刷新重连：generation 守卫 + abort（TFRC-11 / C1） ─────────────────────
 
-async fn connect_client(
-    url: &str,
-    manager: &Arc<RwLock<Option<MCPServerManager>>>,
-    inputs: &Arc<RwLock<HashMap<String, MCPServerInput>>>,
-    name: &str,
-    office: &str,
-) -> SmcpComputerClient {
-    let c = SmcpComputerClient::new(
-        url,
-        manager.clone(),
-        name.to_string(),
-        None,
-        inputs.clone(),
-        None,
-    )
-    .await
-    .expect("client connect");
-    c.join_office(office).await.expect("join office");
-    c
-}
-
 /// generation 守卫：换连接仅在代际匹配时生效；用户期间断开/改连（代际不符）时旧刷新任务
 /// 走 Stale 分支、不覆盖新连接。
 #[tokio::test]
 async fn try_install_refreshed_client_respects_generation_guard() {
-    let (server_url, _stats) = start_smcp_socket_server().await;
-    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
-    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let client_a = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
     let connection = Arc::new(RwLock::new(Some(ConnectionState {
-        client: client_a,
         profile_name: "p".to_string(),
-        url: server_url.clone(),
+        url: "http://127.0.0.1:1".to_string(),
         office_id: "office".to_string(),
         computer_name: "gen-test".to_string(),
         connected_at: chrono::Utc::now(),
@@ -637,27 +1002,18 @@ async fn try_install_refreshed_client_respects_generation_guard() {
         target_name: Some("Robot".to_string()),
         employee_id: Some(1),
         generation: 7,
-        refresh_task: None,
     })));
 
-    // 代际匹配 → Replaced（拿回旧 client A 关闭）。
-    let client_b = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
-    match try_install_refreshed_client(&connection, 7, client_b).await {
-        SwapResult::Replaced(old) => {
-            old.leave_office("office").await.ok();
-            old.disconnect().await.ok();
-        }
-        SwapResult::Stale(_) => panic!("expected Replaced on matching generation"),
+    // 代际匹配 → Replaced（更新业务 snapshot 时间戳）。
+    match try_install_refreshed_client(&connection, 7).await {
+        SwapResult::Replaced => {}
+        SwapResult::Stale => panic!("expected Replaced on matching generation"),
     }
 
-    // 代际不符（模拟用户已改连别的机器人）→ Stale（新 client C 被交还、不覆盖现连接）。
-    let client_c = connect_client(&server_url, &manager, &inputs, "gen-test", "office").await;
-    match try_install_refreshed_client(&connection, 999, client_c).await {
-        SwapResult::Stale(new) => {
-            new.leave_office("office").await.ok();
-            new.disconnect().await.ok();
-        }
-        SwapResult::Replaced(_) => panic!("expected Stale on non-matching generation"),
+    // 代际不符（模拟用户已改连别的机器人）→ Stale（不覆盖现连接）。
+    match try_install_refreshed_client(&connection, 999).await {
+        SwapResult::Stale => {}
+        SwapResult::Replaced => panic!("expected Stale on non-matching generation"),
     }
 
     // 现连接仍是代际 7（client B）。
@@ -665,41 +1021,46 @@ async fn try_install_refreshed_client_respects_generation_guard() {
         let guard = connection.read().await;
         assert_eq!(guard.as_ref().map(|c| c.generation), Some(7));
     }
-    let final_conn = {
-        let mut conn = connection.write().await;
-        conn.take()
-    };
-    if let Some(cs) = final_conn {
-        close_smcp_connection(cs).await;
-    }
 }
 
-/// build_and_join 失败时，预刷新必须**回滚**（把旧连接重新 join_office）、返回 `Retry`，
-/// 不留「已 leave 却仍标记 connected」的僵尸——旧连接仍在、仍属同一代际。
+/// TFRC-51 gives failed token pre-refresh a clear runtime state: reconnect failure returns `Retry`,
+/// leaves the business snapshot guarded by generation, and marks the runtime as `Error`.
 #[tokio::test]
-async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
+async fn reconnect_with_token_marks_runtime_error_on_sdk_build_failure() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (server_url, stats) = start_smcp_socket_server().await;
-    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
-    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
-        Arc::new(RwLock::new(HashMap::new()));
 
     // 旧连接连到「好」server（initial join → join_events = 1）。
-    let old_client =
-        connect_client(&server_url, &manager, &inputs, "rollback-test", "office").await;
-    let connection = Arc::new(RwLock::new(Some(ConnectionState {
-        client: old_client,
-        profile_name: "p".to_string(),
-        url: server_url.clone(),
-        office_id: "office".to_string(),
-        computer_name: "rollback-test".to_string(),
-        connected_at: chrono::Utc::now(),
-        source_type: "manager_robot".to_string(),
-        target_id: Some("manager:1".to_string()),
-        target_name: Some("Robot".to_string()),
-        employee_id: Some(1),
-        generation: 5,
-        refresh_task: None,
-    })));
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "office",
+            "rollback-test",
+        )
+        .await
+        .expect("connect old socket");
+    {
+        let mut guard = runtime.connection.write().await;
+        *guard = Some(ConnectionState {
+            profile_name: "p".to_string(),
+            url: server_url.clone(),
+            office_id: "office".to_string(),
+            computer_name: "rollback-test".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:1".to_string()),
+            target_name: Some("Robot".to_string()),
+            employee_id: Some(1),
+            generation: 5,
+        });
+    }
+    let connection = runtime.connection.clone();
 
     // 预刷新参数指向一个「死」地址 → build_and_join 必失败。
     let dead_url = {
@@ -731,26 +1092,30 @@ async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
         scope: None,
     };
 
-    let outcome = reconnect_with_token(&connection, &manager, &inputs, &params, 5, &token).await;
+    let outcome = reconnect_with_token(&connection, &runtime, &params, 5, &token).await;
 
-    // build 失败 → Retry（不替换连接）。
+    // build 失败 → Retry（不替换连接），runtime 进入 Error，避免继续呈现健康 socket。
     assert!(
         matches!(outcome, RefreshOutcome::Retry),
         "expected Retry on build failure"
     );
-
-    // 发生过一次 leave（step 2 腾 room）+ 一次回滚 re-join；连同 initial join 共 2 次 join。
-    wait_for("expected rollback re-join (join_events == 2)", || {
-        stats.join_events() == 2
-    })
-    .await;
-    assert_eq!(stats.leave_events(), 1, "exactly one leave before rollback");
-    // 旧连接从未断开（leave_office 不断 socket），回滚后仍在 room。
-    assert_eq!(
-        stats.active(),
-        1,
-        "old connection must stay connected (rolled back)"
+    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Error);
+    assert!(!runtime.is_connected().await);
+    assert!(
+        runtime.connection_status().await.is_none(),
+        "Error runtime must not expose a healthy connection status"
     );
+
+    wait_for(
+        "expected old socket to leave before reconnect retry",
+        || stats.leave_events() == 1,
+    )
+    .await;
+    wait_for(
+        "expected old socket to disconnect after reconnect failure",
+        || stats.active() == 0 && stats.disconnected() == 1,
+    )
+    .await;
 
     // 现连接仍是同一代际、未变僵尸 None。
     {
@@ -767,18 +1132,228 @@ async fn reconnect_with_token_rolls_back_old_connection_on_build_failure() {
         conn.take()
     };
     if let Some(cs) = final_conn {
-        close_smcp_connection(cs).await;
+        close_smcp_connection(&runtime, cs)
+            .await
+            .expect("close reconnect socket");
+    }
+}
+
+#[tokio::test]
+async fn reconnect_with_token_reconnects_socket_and_refreshes_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (old_server_url, old_stats) = start_smcp_socket_server().await;
+    let (new_server_url, new_stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &old_server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "office",
+            "refresh-test",
+        )
+        .await
+        .expect("connect old socket");
+    wait_for("server never observed the old SMCP socket", || {
+        old_stats.active() == 1 && old_stats.connected() == 1
+    })
+    .await;
+
+    let connected_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+    {
+        let mut guard = runtime.connection.write().await;
+        *guard = Some(ConnectionState {
+            profile_name: "p".to_string(),
+            url: old_server_url,
+            office_id: "office".to_string(),
+            computer_name: "refresh-test".to_string(),
+            connected_at,
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:1".to_string()),
+            target_name: Some("Robot".to_string()),
+            employee_id: Some(1),
+            generation: 8,
+        });
+    }
+    let connection = runtime.connection.clone();
+    let params = ManagerConnectionParams {
+        url: new_server_url.clone(),
+        computer_name: "refresh-test".to_string(),
+        office_id: "office".to_string(),
+        routing_headers: HashMap::new(),
+        employee_id: 1,
+        robot_account_id: 42,
+        scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: 1,
+            robot_id: Some("office".to_string()),
+            robot_account_id: Some(42),
+            namespace: Some("tfrobotserver".to_string()),
+            robot_name: Some("Robot".to_string()),
+        },
+    };
+    let token = ExchangedToken {
+        access_token: "new-jwt".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 300,
+        scope: None,
+    };
+
+    let outcome = reconnect_with_token(&connection, &runtime, &params, 8, &token).await;
+    assert!(
+        matches!(outcome, RefreshOutcome::Renewed(300)),
+        "expected successful renewal"
+    );
+    assert_eq!(
+        runtime.runtime_state().await,
+        ComputerRuntimeState::JoinedOffice
+    );
+    assert!(runtime.is_connected().await);
+    assert!(
+        runtime.connection_status().await.is_some(),
+        "successful refresh should expose healthy connection status"
+    );
+
+    wait_for("old socket should be closed during refresh", || {
+        old_stats.leave_events() == 1 && old_stats.active() == 0 && old_stats.disconnected() == 1
+    })
+    .await;
+    wait_for("new socket should be connected and joined", || {
+        new_stats.active() == 1 && new_stats.connected() == 1 && new_stats.join_events() == 1
+    })
+    .await;
+
+    {
+        let guard = connection.read().await;
+        let snapshot = guard.as_ref().expect("connection snapshot should remain");
+        assert_eq!(snapshot.generation, 8);
+        assert!(
+            snapshot.connected_at > connected_at,
+            "successful refresh should update connected_at"
+        );
+    }
+
+    let final_conn = {
+        let mut conn = connection.write().await;
+        conn.take()
+    };
+    if let Some(cs) = final_conn {
+        close_smcp_connection(&runtime, cs)
+            .await
+            .expect("close refreshed socket");
+    }
+}
+
+#[tokio::test]
+async fn reconnect_with_token_stale_generation_does_not_touch_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "office",
+            "stale-test",
+        )
+        .await
+        .expect("connect socket");
+    wait_for("server never observed the SMCP socket", || {
+        stats.active() == 1 && stats.connected() == 1
+    })
+    .await;
+
+    {
+        let mut guard = runtime.connection.write().await;
+        *guard = Some(ConnectionState {
+            profile_name: "p".to_string(),
+            url: server_url.clone(),
+            office_id: "office".to_string(),
+            computer_name: "stale-test".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:1".to_string()),
+            target_name: Some("Robot".to_string()),
+            employee_id: Some(1),
+            generation: 99,
+        });
+    }
+    let connection = runtime.connection.clone();
+    let params = ManagerConnectionParams {
+        url: server_url.clone(),
+        computer_name: "stale-test".to_string(),
+        office_id: "office".to_string(),
+        routing_headers: HashMap::new(),
+        employee_id: 1,
+        robot_account_id: 42,
+        scope: None,
+        robot_binding: RobotBindingMetadata {
+            employee_id: 1,
+            robot_id: Some("office".to_string()),
+            robot_account_id: Some(42),
+            namespace: Some("tfrobotserver".to_string()),
+            robot_name: Some("Robot".to_string()),
+        },
+    };
+    let token = ExchangedToken {
+        access_token: "new-jwt".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 300,
+        scope: None,
+    };
+
+    let outcome = reconnect_with_token(&connection, &runtime, &params, 5, &token).await;
+    assert!(
+        matches!(outcome, RefreshOutcome::Gone),
+        "stale refresh task should exit"
+    );
+    assert_eq!(
+        runtime.runtime_state().await,
+        ComputerRuntimeState::JoinedOffice
+    );
+    assert_eq!(stats.active(), 1);
+    assert_eq!(stats.leave_events(), 0);
+    assert_eq!(stats.disconnected(), 0);
+
+    let final_conn = {
+        let mut conn = connection.write().await;
+        conn.take()
+    };
+    if let Some(cs) = final_conn {
+        close_smcp_connection(&runtime, cs)
+            .await
+            .expect("close stale socket");
     }
 }
 
 /// `close_smcp_connection` 必须 abort 预刷新任务——断开后不得有后台任务继续 revive 连接。
 #[tokio::test]
 async fn close_smcp_connection_aborts_refresh_task() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
     let (server_url, _stats) = start_smcp_socket_server().await;
-    let manager = Arc::new(RwLock::new(Some(MCPServerManager::new())));
-    let inputs: Arc<RwLock<HashMap<String, MCPServerInput>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-    let client = connect_client(&server_url, &manager, &inputs, "abort-test", "office").await;
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "office",
+            "abort-test",
+        )
+        .await
+        .expect("connect socket");
 
     // 代表预刷新任务的长驻后台循环；abort 后计数应停止增长。
     let counter = Arc::new(AtomicUsize::new(0));
@@ -789,9 +1364,9 @@ async fn close_smcp_connection_aborts_refresh_task() {
             sleep(Duration::from_millis(10)).await;
         }
     });
+    runtime.set_refresh_task(task).await;
 
     let cs = ConnectionState {
-        client,
         profile_name: "p".to_string(),
         url: server_url,
         office_id: "office".to_string(),
@@ -802,10 +1377,11 @@ async fn close_smcp_connection_aborts_refresh_task() {
         target_name: Some("Robot".to_string()),
         employee_id: Some(1),
         generation: 1,
-        refresh_task: Some(task),
     };
 
-    close_smcp_connection(cs).await;
+    close_smcp_connection(&runtime, cs)
+        .await
+        .expect("close socket and abort refresh task");
 
     let snapshot = counter.load(Ordering::SeqCst);
     sleep(Duration::from_millis(150)).await;

@@ -1,12 +1,15 @@
 use crate::commands::connection::{
     connect_connection_target_core, connect_manager_robot_target_core, disconnect_smcp_core,
 };
+use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
     ComputerInstance, ComputerInstanceId, ConnectionStateSummary, RobotBindingMetadata,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +48,16 @@ pub struct DuplicateComputerInstanceRequest {
     pub description: Option<String>,
     pub copy_robot_binding: bool,
     pub connection_target_id: Option<String>,
+    #[serde(default)]
+    pub skill_home_mode: DuplicateSkillHomeMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateSkillHomeMode {
+    #[default]
+    Empty,
+    Copy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,12 +86,7 @@ pub async fn list_computer_instances_core(
 
     for instance in config.instances {
         let runtime = match state.computer_registry.runtime(&instance.id).await {
-            Some(_) => {
-                state
-                    .computer_registry
-                    .update_runtime_instance(instance.clone())
-                    .await
-            }
+            Some(runtime) => runtime,
             None => {
                 state
                     .computer_registry
@@ -113,10 +121,15 @@ pub async fn get_computer_instance_status_core(
         .into_iter()
         .find(|instance| instance.id == id)
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(instance.clone())
-        .await;
+    let runtime = match state.computer_registry.runtime(&instance.id).await {
+        Some(runtime) => runtime,
+        None => {
+            state
+                .computer_registry
+                .upsert_runtime(instance.clone())
+                .await
+        }
+    };
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -141,6 +154,7 @@ pub async fn create_computer_instance_core(
         mcp_servers: Vec::new(),
         inputs: Vec::new(),
         input_values: Default::default(),
+        local_skills_root: None,
         connection_policy: ComputerConnectionPolicy::default(),
         robot_binding: None,
     };
@@ -170,6 +184,10 @@ pub async fn rename_computer_instance_core(
     request: RenameComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
     let name = normalize_name(&request.name)?;
+    let previous = state
+        .config
+        .get_computer_instance(&request.id)
+        .map_err(|error| error.to_string())?;
     let updated = state
         .config
         .update_computer_instance(&request.id, |instance| {
@@ -177,10 +195,7 @@ pub async fn rename_computer_instance_core(
             instance.description = normalize_optional_text(request.description);
         })
         .map_err(|error| error.to_string())?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(updated.clone())
-        .await;
+    let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
 
     Ok(status_from_instance(&updated, &runtime).await)
 }
@@ -202,9 +217,16 @@ pub async fn duplicate_computer_instance_core(
         .config
         .get_computer_instance(&request.source_id)
         .map_err(|error| error.to_string())?;
+    let source_id = instance.id.clone();
+    let source_skill_root = instance
+        .local_skills_root
+        .clone()
+        .unwrap_or_else(|| state.config.default_local_skills_root(&source_id));
     instance.id = generate_instance_id();
     instance.name = name;
     instance.description = normalize_optional_text(request.description);
+    instance.local_skills_root = None;
+    let destination_skill_root = state.config.default_local_skills_root(&instance.id);
     if !request.copy_robot_binding {
         instance.robot_binding = None;
     }
@@ -219,11 +241,46 @@ pub async fn duplicate_computer_instance_core(
             robot_account_id: None,
         });
     }
-
     state
         .config
         .add_computer_instance(instance.clone())
         .map_err(|error| error.to_string())?;
+    if let Err(error) = prepare_duplicate_skill_home(
+        &source_skill_root,
+        &destination_skill_root,
+        request.skill_home_mode,
+    )
+    .await
+    {
+        let rollback_config_result = state
+            .config
+            .remove_computer_instance(&instance.id)
+            .map_err(|rollback_error| rollback_error.to_string());
+        let cleanup_result =
+            cleanup_duplicate_skill_home_after_config_failure(&destination_skill_root).await;
+
+        match (rollback_config_result, cleanup_result) {
+            (Ok(_), Ok(())) => {}
+            (Err(rollback_error), Ok(())) => {
+                return Err(format!(
+                    "Failed to duplicate Computer instance: {error}; additionally failed to rollback persisted config: {rollback_error}"
+                ));
+            }
+            (Ok(_), Err(cleanup_error)) => {
+                return Err(format!(
+                    "Failed to duplicate Computer instance: {error}; additionally failed to clean duplicate skill directory {}: {cleanup_error}",
+                    destination_skill_root.display()
+                ));
+            }
+            (Err(rollback_error), Err(cleanup_error)) => {
+                return Err(format!(
+                    "Failed to duplicate Computer instance: {error}; additionally failed to rollback persisted config: {rollback_error}; additionally failed to clean duplicate skill directory {}: {cleanup_error}",
+                    destination_skill_root.display()
+                ));
+            }
+        }
+        return Err(error);
+    }
     let runtime = state
         .computer_registry
         .upsert_runtime(instance.clone())
@@ -244,6 +301,7 @@ pub async fn delete_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
+    let instance_storage_root = state.config.computer_instance_storage_root(&id);
     state
         .config
         .remove_computer_instance(&id)
@@ -252,6 +310,7 @@ pub async fn delete_computer_instance_core(
     if let Some(runtime) = state.computer_registry.remove_runtime(&id).await {
         runtime.shutdown().await;
     }
+    cleanup_computer_instance_storage(&instance_storage_root).await?;
 
     Ok(())
 }
@@ -277,7 +336,7 @@ pub async fn start_computer_instance_core(
     let runtime = state
         .computer_registry
         .update_runtime_instance(instance.clone())
-        .await;
+        .await?;
     runtime.start().await?;
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -337,6 +396,10 @@ pub async fn update_computer_connection_policy_core(
     request: UpdateComputerConnectionPolicyRequest,
 ) -> Result<ComputerInstanceStatus, String> {
     validate_connection_target_reference(state, request.target.as_ref())?;
+    let previous = state
+        .config
+        .get_computer_instance(&request.id)
+        .map_err(|error| error.to_string())?;
 
     let updated = state
         .config
@@ -347,10 +410,7 @@ pub async fn update_computer_connection_policy_core(
             };
         })
         .map_err(|error| error.to_string())?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(updated.clone())
-        .await;
+    let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
 
     Ok(status_from_instance(&updated, &runtime).await)
 }
@@ -495,4 +555,167 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 fn generate_instance_id() -> ComputerInstanceId {
     format!("computer-{}", uuid::Uuid::new_v4())
+}
+
+async fn prepare_duplicate_skill_home(
+    source: &Path,
+    destination: &Path,
+    mode: DuplicateSkillHomeMode,
+) -> Result<(), String> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if mode == DuplicateSkillHomeMode::Copy && source.exists() {
+            validate_duplicate_skill_copy(&source, &destination)?;
+        }
+
+        fs::create_dir_all(&destination).map_err(|error| {
+            format!(
+                "Failed to create duplicate skill directory {}: {}",
+                destination.display(),
+                error
+            )
+        })?;
+
+        if mode == DuplicateSkillHomeMode::Copy && source.exists() {
+            if let Err(error) = copy_directory_contents(&source, &destination) {
+                if let Err(cleanup_error) = cleanup_duplicate_skill_destination(&destination) {
+                    return Err(format!(
+                        "Failed to copy skills from {} to {}: {}; cleanup failed: {}",
+                        source.display(),
+                        destination.display(),
+                        error,
+                        cleanup_error
+                    ));
+                }
+                return Err(format!(
+                    "Failed to copy skills from {} to {}: {}; created directory was cleaned up",
+                    source.display(),
+                    destination.display(),
+                    error
+                ));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Failed to prepare duplicate skill directory: {error}"))?
+}
+
+async fn cleanup_computer_instance_storage(path: &Path) -> Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || match fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to delete computer instance storage {}: {}",
+            path.display(),
+            error
+        )),
+    })
+    .await
+    .map_err(|error| format!("Failed to delete computer instance storage: {error}"))?
+}
+
+async fn cleanup_duplicate_skill_home_after_config_failure(path: &Path) -> Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        cleanup_duplicate_skill_destination(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Failed to clean duplicate skill directory: {error}"))?
+}
+
+fn validate_duplicate_skill_copy(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Err(format!(
+            "Failed to copy skills from {} to {}: source is not a directory",
+            source.display(),
+            destination.display()
+        ));
+    }
+
+    let source = fs::canonicalize(source).map_err(|error| {
+        format!(
+            "Failed to resolve source skill directory {}: {}",
+            source.display(),
+            error
+        )
+    })?;
+    let destination = absolute_destination_path(destination)?;
+
+    if destination == source || destination.starts_with(&source) {
+        return Err(format!(
+            "Cannot copy skills from {} to {}: destination is inside source directory",
+            source.display(),
+            destination.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn absolute_destination_path(path: &Path) -> Result<std::path::PathBuf, String> {
+    let mut missing_components = Vec::new();
+    let mut cursor = path;
+
+    while !cursor.exists() {
+        let name = cursor.file_name().ok_or_else(|| {
+            format!(
+                "Failed to resolve duplicate skill destination {}: no existing ancestor",
+                path.display()
+            )
+        })?;
+        missing_components.push(name.to_os_string());
+        cursor = cursor.parent().ok_or_else(|| {
+            format!(
+                "Failed to resolve duplicate skill destination {}: no parent directory",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut absolute = fs::canonicalize(cursor).map_err(|error| {
+        format!(
+            "Failed to resolve duplicate skill destination ancestor {}: {}",
+            cursor.display(),
+            error
+        )
+    })?;
+    for component in missing_components.iter().rev() {
+        absolute.push(component);
+    }
+    Ok(absolute)
+}
+
+fn cleanup_duplicate_skill_destination(destination: &Path) -> Result<(), std::io::Error> {
+    if destination.exists() {
+        fs::remove_dir_all(destination)?;
+    }
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(parent)?;
+        if entries.next().is_none() {
+            fs::remove_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path).map_err(|error| error.to_string())?;
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }

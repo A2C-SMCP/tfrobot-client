@@ -8,4 +8,5 @@ pub mod inputs;
 pub mod logs;
 pub mod manager;
 pub mod mcp;
+pub mod runtime_sync;
 pub mod settings;

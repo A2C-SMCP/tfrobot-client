@@ -4,27 +4,58 @@
 
 use smcp_computer::mcp_clients::model::*;
 use smcp_computer::mcp_clients::MCPServerConfig;
-use smcp_computer::mcp_clients::MCPServerManager;
+use smcp_computer::{
+    computer::{Computer, Session},
+    errors::ComputerResult,
+};
+use std::collections::HashMap;
+
+struct ContractSession;
+
+#[async_trait::async_trait]
+impl Session for ContractSession {
+    async fn resolve_input(&self, _input: &MCPServerInput) -> ComputerResult<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn session_id(&self) -> &str {
+        "contract-session"
+    }
+}
 
 // ── API Existence Contracts ──
 // If these fail to compile, the smcp-computer API has changed.
 
 #[test]
-fn contract_manager_constructible() {
-    let _manager = MCPServerManager::new();
+fn contract_computer_constructible() {
+    let _computer = Computer::new(
+        "contract-computer",
+        ContractSession,
+        Some(HashMap::new()),
+        Some(HashMap::new()),
+        false,
+        true,
+    );
 }
 
 #[tokio::test]
-async fn contract_manager_api_surface() {
-    let manager = MCPServerManager::new();
+async fn contract_computer_mcp_api_surface() {
+    let computer = Computer::new(
+        "contract-computer",
+        ContractSession,
+        Some(HashMap::new()),
+        Some(HashMap::new()),
+        false,
+        true,
+    );
 
     // These calls verify the API exists with expected signatures.
     // We don't assert behavior, just compilation.
-    let _statuses = manager.get_server_status().await;
-    let _tools = manager.list_available_tools().await;
-
-    // start_all/stop_all should exist
-    let _ = manager.stop_all().await;
+    let _statuses = computer.get_server_status().await;
+    let _tools = computer.get_available_tools().await;
+    let _ = computer.start_mcp_client("all").await;
+    let _ = computer.stop_mcp_client("all").await;
+    let _ = computer.shutdown().await;
 }
 
 #[test]

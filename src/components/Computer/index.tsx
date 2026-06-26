@@ -217,6 +217,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     description?: string;
     copyRobotBinding?: boolean;
     connectionTargetId?: string;
+    skillHomeMode?: 'empty' | 'copy';
   }>();
 
   useEffect(() => {
@@ -252,6 +253,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
       description: instance.description,
       copyRobotBinding: true,
       connectionTargetId: undefined,
+      skillHomeMode: 'empty',
     });
   };
 
@@ -277,6 +279,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
           description: values.description,
           copyRobotBinding: values.copyRobotBinding ?? true,
           connectionTargetId: values.connectionTargetId,
+          skillHomeMode: values.skillHomeMode ?? 'empty',
         });
         message.success(t('computer.messages.duplicated'));
       }
@@ -376,6 +379,14 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                   value: target.id,
                   label: `${target.name} (${target.office_id})`,
                 }))}
+              />
+            </Form.Item>
+            <Form.Item name="skillHomeMode" label={t('computer.form.skillHomeMode')}>
+              <Select
+                options={[
+                  { value: 'empty', label: t('computer.form.skillHomeEmpty') },
+                  { value: 'copy', label: t('computer.form.skillHomeCopy') },
+                ]}
               />
             </Form.Item>
           </>

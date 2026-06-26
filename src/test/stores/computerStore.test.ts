@@ -78,6 +78,7 @@ describe('computerStore', () => {
       description: 'Copy',
       copyRobotBinding: true,
       connectionTargetId: 'target-a',
+      skillHomeMode: 'copy',
     });
 
     expect(mockedInvoke).toHaveBeenCalledWith('duplicate_computer_instance', {
@@ -87,6 +88,7 @@ describe('computerStore', () => {
         description: 'Copy',
         copyRobotBinding: true,
         connectionTargetId: 'target-a',
+        skillHomeMode: 'copy',
       },
     });
     expect(useComputerStore.getState().selectedInstanceId).toBe('computer-copy');

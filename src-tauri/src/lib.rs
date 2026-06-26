@@ -60,7 +60,10 @@ impl AppState {
             );
             Default::default()
         });
-        let computer_registry = ComputerRegistry::from_config(instances);
+        let computer_registry = ComputerRegistry::from_config_with_skill_home_base(
+            instances,
+            config.computer_skill_home_base(),
+        );
 
         Self {
             config: Arc::new(config),

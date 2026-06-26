@@ -62,3 +62,23 @@ pub fn stderr_flood_server_config(name: &str) -> smcp_computer::mcp_clients::MCP
     }))
     .expect("Failed to build stderr-flood server config")
 }
+
+/// Path to the slow echo MCP server used for timeout assertions.
+pub fn slow_echo_server_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-slow.js")
+}
+
+/// Build an MCPServerConfig for the slow echo server.
+pub fn slow_echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
+    let server_path = slow_echo_server_path();
+    serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": name,
+        "server_parameters": {
+            "command": "node",
+            "args": [server_path.to_str().unwrap()],
+            "env": {}
+        }
+    }))
+    .expect("Failed to build slow echo server config")
+}

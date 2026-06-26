@@ -1,3 +1,4 @@
+use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::MCPServerConfig;
@@ -109,28 +110,15 @@ async fn import_cli_native(
 
     let mut servers_imported = 0;
     let servers_skipped = Vec::new();
-
-    // Import servers
-    for server in &config.servers {
-        let updated_instance = state
-            .config
-            .add_config_for_instance(instance_id, server.clone())
-            .map_err(|e| e.to_string())?;
-        let runtime = state
-            .computer_registry
-            .update_runtime_instance(updated_instance)
-            .await;
-        let lock = runtime.manager.read().await;
-        let mgr = lock
-            .as_ref()
-            .ok_or("MCP manager not initialized".to_string())?;
-        let _ = mgr.add_or_update_server(server.clone()).await;
-        servers_imported += 1;
-    }
-
-    // Import inputs
     let inputs_imported = config.inputs.len();
+
+    // Import inputs before servers so SDK Computer can render ${input:...}
+    // placeholders while each imported server is synchronized into runtime.
     if !config.inputs.is_empty() {
+        let previous = state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|e| e.to_string())?;
         let mut existing = state
             .config
             .load_inputs_for_instance(instance_id)
@@ -140,10 +128,24 @@ async fn import_cli_native(
             existing.retain(|i| i.id() != id);
             existing.push(input);
         }
-        state
+        let updated_instance = state
             .config
             .save_inputs_for_instance(instance_id, &existing)
             .map_err(|e| e.to_string())?;
+        apply_updated_computer_instance(state, previous, updated_instance).await?;
+    }
+
+    for server in &config.servers {
+        let previous = state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|e| e.to_string())?;
+        let updated_instance = state
+            .config
+            .add_config_for_instance(instance_id, server.clone())
+            .map_err(|e| e.to_string())?;
+        apply_updated_computer_instance(state, previous, updated_instance).await?;
+        servers_imported += 1;
     }
 
     Ok(ImportResult {
@@ -164,20 +166,16 @@ async fn import_claude_desktop(
     let servers_skipped = Vec::new();
 
     for (name, server) in config.mcp_servers {
+        let previous = state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|e| e.to_string())?;
         let mcp_config = build_stdio_config(&name, &server);
         let updated_instance = state
             .config
             .add_config_for_instance(instance_id, mcp_config.clone())
             .map_err(|e| e.to_string())?;
-        let runtime = state
-            .computer_registry
-            .update_runtime_instance(updated_instance)
-            .await;
-        let lock = runtime.manager.read().await;
-        let mgr = lock
-            .as_ref()
-            .ok_or("MCP manager not initialized".to_string())?;
-        let _ = mgr.add_or_update_server(mcp_config).await;
+        apply_updated_computer_instance(state, previous, updated_instance).await?;
         servers_imported += 1;
     }
 

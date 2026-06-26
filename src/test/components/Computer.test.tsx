@@ -353,6 +353,7 @@ describe('Computer', () => {
         description: 'Updated description',
         copyRobotBinding: true,
         connectionTargetId: 'target-a',
+        skillHomeMode: 'empty',
       },
     });
 

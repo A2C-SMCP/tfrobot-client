@@ -90,7 +90,10 @@
       "description": "Description",
       "copyRobotBinding": "Copy Robot binding",
       "connectionTarget": "Connection target",
-      "useOriginalConnectionConfig": "Use original connection config"
+      "useOriginalConnectionConfig": "Use original connection config",
+      "skillHomeMode": "Local skills",
+      "skillHomeEmpty": "Create empty skill directory",
+      "skillHomeCopy": "Copy source skills"
     },
     "messages": {
       "created": "Computer created",
