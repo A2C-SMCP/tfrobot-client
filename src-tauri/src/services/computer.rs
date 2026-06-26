@@ -403,7 +403,9 @@ impl ComputerInstanceRuntime {
             .await
             .start_mcp_client(name)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.emit_sdk_tool_list_update_if_connected().await;
+        Ok(())
     }
 
     pub async fn stop_mcp_server(&self, name: &str) -> Result<(), String> {
@@ -413,7 +415,9 @@ impl ComputerInstanceRuntime {
             .await
             .stop_mcp_client(name)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.emit_sdk_tool_list_update_if_connected().await;
+        Ok(())
     }
 
     pub async fn start_all_mcp_servers(&self) -> Result<(), String> {
@@ -637,6 +641,20 @@ impl ComputerInstanceRuntime {
             .await
             .is_mcp_manager_initialized()
             .await
+    }
+
+    async fn emit_sdk_tool_list_update_if_connected(&self) {
+        let socketio_ref = self.computer.read().await.get_socketio_client();
+        let client = socketio_ref.read().await.clone();
+        if let Some(client) = client {
+            if let Err(error) = client.emit_update_tool_list().await {
+                log::warn!(
+                    "Failed to emit MCP tool list update for instance {}: {}",
+                    self.instance.id,
+                    error
+                );
+            }
+        }
     }
 
     #[cfg(debug_assertions)]

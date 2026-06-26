@@ -82,3 +82,31 @@ pub fn slow_echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPSer
     }))
     .expect("Failed to build slow echo server config")
 }
+
+/// Build an MCPServerConfig for the official server-everything package.
+pub fn everything_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
+    everything_server_config_with_forbidden_tools(name, &[])
+}
+
+/// Build an MCPServerConfig for server-everything with metadata changes.
+pub fn everything_server_config_with_forbidden_tools(
+    name: &str,
+    forbidden_tools: &[&str],
+) -> smcp_computer::mcp_clients::MCPServerConfig {
+    let forbidden_tools: Vec<String> = forbidden_tools
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect();
+
+    serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": name,
+        "forbidden_tools": forbidden_tools,
+        "server_parameters": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"],
+            "env": {}
+        }
+    }))
+    .expect("Failed to build server-everything config")
+}

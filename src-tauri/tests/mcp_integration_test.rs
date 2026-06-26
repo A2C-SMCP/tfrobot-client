@@ -4,14 +4,34 @@
 mod common;
 
 use common::{
-    create_test_app_state, echo_server_config, slow_echo_server_config, stderr_flood_server_config,
+    create_test_app_state, echo_server_config, everything_server_config,
+    everything_server_config_with_forbidden_tools, slow_echo_server_config,
+    stderr_flood_server_config,
 };
+use http_body_util::Full;
+use hyper::body::Bytes;
 use smcp_computer::mcp_clients::MCPServerConfig;
+use socketioxide::extract::{AckSender, SocketRef};
+use socketioxide::SocketIo;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::{config_io, debug, inputs, mcp};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
+use tokio::net::TcpListener;
+use tokio::time::{sleep, Duration};
+use tower::service_fn;
+use tower::Layer;
 
 const TEST_INSTANCE_ID: &str = "computer-a";
+const TEST_COMPUTER_NAME: &str = "Computer A";
+const TEST_OFFICE_ID: &str = "office-mcp-sync";
+const SERVER_JOIN_OFFICE: &str = "server:join_office";
+const SERVER_UPDATE_CONFIG: &str = "server:update_config";
+const SERVER_UPDATE_TOOL_LIST: &str = "server:update_tool_list";
 
 async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
@@ -45,6 +65,130 @@ fn require_node() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     assert!(available, "Node.js is required for MCP integration tests. CI has it configured (test.yml:87-88). If running locally without Node.js, use `cargo test --lib` to skip integration tests.");
+}
+
+#[derive(Default)]
+struct SmcpSyncStats {
+    join_events: AtomicUsize,
+    update_config_events: AtomicUsize,
+    update_tool_list_events: AtomicUsize,
+}
+
+impl SmcpSyncStats {
+    fn join_events(&self) -> usize {
+        self.join_events.load(Ordering::SeqCst)
+    }
+
+    fn update_config_events(&self) -> usize {
+        self.update_config_events.load(Ordering::SeqCst)
+    }
+
+    fn update_tool_list_events(&self) -> usize {
+        self.update_tool_list_events.load(Ordering::SeqCst)
+    }
+}
+
+async fn start_sync_capture_smcp_server() -> (String, Arc<SmcpSyncStats>) {
+    let stats = Arc::new(SmcpSyncStats::default());
+    let (socket_layer, io) = SocketIo::new_layer();
+
+    let connect_stats = stats.clone();
+    io.ns("/smcp", move |socket: SocketRef| {
+        let join_stats = connect_stats.clone();
+        socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| async move {
+            join_stats.join_events.fetch_add(1, Ordering::SeqCst);
+            let _ = ack.send(&(true, Option::<String>::None));
+        });
+
+        let config_stats = connect_stats.clone();
+        socket.on(SERVER_UPDATE_CONFIG, move || {
+            config_stats
+                .update_config_events
+                .fetch_add(1, Ordering::SeqCst);
+        });
+
+        let tool_stats = connect_stats.clone();
+        socket.on(SERVER_UPDATE_TOOL_LIST, move || {
+            tool_stats
+                .update_tool_list_events
+                .fetch_add(1, Ordering::SeqCst);
+        });
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+
+    tokio::spawn(async move {
+        let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(
+                hyper::Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("not found"))
+                    .unwrap(),
+            )
+        });
+        let service = socket_layer.layer(fallback);
+
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let service = service.clone();
+            tokio::spawn(async move {
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    (url, stats)
+}
+
+async fn wait_for_sync_event(timeout_message: &str, predicate: impl Fn() -> bool) {
+    for _ in 0..120 {
+        if predicate() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{timeout_message}");
+}
+
+async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("runtime should exist");
+    runtime.start().await.expect("start runtime");
+    runtime
+        .connect_smcp_socketio(
+            server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            TEST_OFFICE_ID,
+            TEST_COMPUTER_NAME,
+        )
+        .await
+        .expect("connect mock robot");
+
+    *runtime.connection.write().await = Some(ConnectionState {
+        profile_name: "mock-robot".to_string(),
+        url: server_url.to_string(),
+        office_id: TEST_OFFICE_ID.to_string(),
+        computer_name: TEST_COMPUTER_NAME.to_string(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manual_smcp".to_string(),
+        target_id: Some("mock-robot".to_string()),
+        target_name: Some("Mock Robot".to_string()),
+        employee_id: None,
+        generation: 0,
+    });
 }
 
 // ── Config CRUD via AppState ──
@@ -278,6 +422,68 @@ async fn test_adding_server_while_running_preserves_active_sdk_server() {
         !added.running,
         "new server should be registered but not auto-started"
     );
+}
+
+#[tokio::test]
+async fn test_connected_computer_syncs_mcp_changes_to_robot_via_sdk() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let (server_url, stats) = start_sync_capture_smcp_server().await;
+
+    connect_runtime_to_mock_robot(&state, &server_url).await;
+    wait_for_sync_event("mock robot never observed the SMCP join event", || {
+        stats.join_events() == 1
+    })
+    .await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        everything_server_config("everything-sync"),
+    )
+    .await
+    .unwrap();
+    wait_for_sync_event("add should emit server:update_config to robot", || {
+        stats.update_config_events() >= 1
+    })
+    .await;
+
+    mcp::update_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        everything_server_config_with_forbidden_tools("everything-sync", &["echo"]),
+    )
+    .await
+    .unwrap();
+    wait_for_sync_event("update should emit server:update_config to robot", || {
+        stats.update_config_events() >= 2
+    })
+    .await;
+
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
+        .await
+        .unwrap();
+    wait_for_sync_event("start should emit server:update_tool_list to robot", || {
+        stats.update_tool_list_events() >= 1
+    })
+    .await;
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
+        .await
+        .unwrap();
+    wait_for_sync_event("stop should emit server:update_tool_list to robot", || {
+        stats.update_tool_list_events() >= 2
+    })
+    .await;
+
+    mcp::remove_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
+        .await
+        .unwrap();
+    wait_for_sync_event("remove should emit server:update_config to robot", || {
+        stats.update_config_events() >= 3
+    })
+    .await;
 }
 
 #[tokio::test]
