@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use futures_util::FutureExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use serde_json::{json, Value};
-use smcp::{events, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
+use smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use smcp_server_core::{DefaultAuthenticationProvider, SmcpServerBuilder};
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
@@ -405,14 +406,67 @@ async fn wait_for_agent_skill(
     panic!("{skill_name} did not appear in Agent skills, last response: {last}");
 }
 
-fn write_user_skill(skill_home: &std::path::Path, name: &str, description: &str, body: &str) {
-    let skill_dir = skill_home.join("user").join(name);
+fn write_skill(skill_dir: &Path, name: &str, description: &str, body: &str) {
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
         skill_dir.join("SKILL.md"),
         format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),
     )
     .unwrap();
+}
+
+fn write_user_skill(skill_home: &Path, name: &str, description: &str, body: &str) {
+    write_skill(&skill_home.join("user").join(name), name, description, body);
+}
+
+fn find_skill<'a>(listed: &'a [Value], name: &str) -> &'a Value {
+    listed
+        .iter()
+        .find(|skill| skill["name"] == json!(name))
+        .unwrap_or_else(|| panic!("{name} should be visible, got: {listed:?}"))
+}
+
+fn skill_ref(name: &str, source: &str, description: &str, path: &Path) -> A2CSkillRef {
+    A2CSkillRef {
+        name: name.to_string(),
+        source: source.to_string(),
+        uri: None,
+        path: path.to_string_lossy().into_owned(),
+        description: description.to_string(),
+        license: None,
+        compatibility: None,
+        allowed_tools: None,
+        version: None,
+        skill_metadata: None,
+    }
+}
+
+async fn agent_get_skill_body(
+    client: &Client,
+    req_id: &str,
+    computer_name: &str,
+    name: &str,
+) -> String {
+    let skill = emit_agent_call(
+        client,
+        events::CLIENT_GET_SKILL,
+        json!(GetSkillReq {
+            base: AgentCallData {
+                agent: TEST_AGENT_NAME.to_string(),
+                req_id: ReqId(req_id.to_string()),
+            },
+            computer: computer_name.to_string(),
+            name: name.to_string(),
+            rel_path: None,
+        }),
+    )
+    .await;
+    assert!(
+        skill.get("code").is_none(),
+        "client:get_skill returned protocol error: {skill}"
+    );
+    assert!(skill["blob_handle"].is_null());
+    skill["body"].as_str().unwrap_or_default().to_string()
 }
 
 #[tokio::test]
@@ -427,7 +481,44 @@ async fn agent_get_skills_and_get_skill_use_connected_instance_sdk_registry() {
         "Agent visible helper",
         "AGENT-HELPER-BODY",
     );
+    let marketplace_skill_dir = skill_home
+        .join("marketplace")
+        .join("tf-market")
+        .join("desktop-tools")
+        .join("market-skill");
+    write_skill(
+        &marketplace_skill_dir,
+        "market-skill",
+        "Marketplace visible helper",
+        "MARKETPLACE-BODY",
+    );
+    let mcp_skill_dir = skill_home
+        .join("mcp")
+        .join("tfrobot-tools")
+        .join("mcp-skill");
+    write_skill(
+        &mcp_skill_dir,
+        "mcp-skill",
+        "MCP visible helper",
+        "MCP-BODY",
+    );
     runtime.start().await.expect("start runtime");
+    runtime
+        .register_sdk_skill_ref_for_test(skill_ref(
+            "desktop-tools:market-skill",
+            "marketplace:tf-market",
+            "Marketplace visible helper",
+            &marketplace_skill_dir,
+        ))
+        .await;
+    runtime
+        .register_sdk_skill_ref_for_test(skill_ref(
+            "mcp:tfrobot-tools:mcp-skill",
+            "mcp:tfrobot-tools",
+            "MCP visible helper",
+            &mcp_skill_dir,
+        ))
+        .await;
 
     let relay = RelayServer::start().await;
     runtime
@@ -451,38 +542,56 @@ async fn agent_get_skills_and_get_skill_use_connected_instance_sdk_registry() {
         "client:get_skills returned protocol error: {skills}"
     );
     let listed = skills["skills"].as_array().cloned().unwrap_or_default();
-    let helper = listed
-        .iter()
-        .find(|skill| skill["name"] == json!("agent-helper"))
-        .unwrap_or_else(|| panic!("agent-helper should be visible, got: {listed:?}"));
+    let helper = find_skill(&listed, "agent-helper");
     assert_eq!(helper["source"], json!("user"));
     assert_eq!(helper["description"], json!("Agent visible helper"));
 
-    let skill = emit_agent_call(
-        &agent,
-        events::CLIENT_GET_SKILL,
-        json!(GetSkillReq {
-            base: AgentCallData {
-                agent: TEST_AGENT_NAME.to_string(),
-                req_id: ReqId("skill-1".to_string()),
-            },
-            computer: "Test Computer".to_string(),
-            name: "agent-helper".to_string(),
-            rel_path: None,
-        }),
-    )
-    .await;
-    assert!(
-        skill.get("code").is_none(),
-        "client:get_skill returned protocol error: {skill}"
+    let market_helper = find_skill(&listed, "desktop-tools:market-skill");
+    assert_eq!(market_helper["source"], json!("marketplace:tf-market"));
+    assert_eq!(
+        market_helper["description"],
+        json!("Marketplace visible helper")
     );
-    let body = skill["body"].as_str().unwrap_or_default();
+    let mcp_helper = find_skill(&listed, "mcp:tfrobot-tools:mcp-skill");
+    assert_eq!(mcp_helper["source"], json!("mcp:tfrobot-tools"));
+    assert_eq!(mcp_helper["description"], json!("MCP visible helper"));
+    assert!(
+        listed.iter().all(|skill| {
+            let name = skill["name"].as_str().unwrap_or_default();
+            let source = skill["source"].as_str().unwrap_or_default();
+            !name.contains("tf-market_desktop-tools")
+                && !name.contains("mcp_tfrobot-tools")
+                && !source.contains("tf-market_desktop-tools")
+                && !source.contains("mcp_tfrobot-tools")
+        }),
+        "Agent skills must keep SDK/SMCP native names and sources: {listed:?}"
+    );
+
+    let body = agent_get_skill_body(&agent, "skill-1", "Test Computer", "agent-helper").await;
     assert!(body.contains("AGENT-HELPER-BODY"), "body was: {body}");
     assert!(
         !body.contains("name: agent-helper"),
         "SDK should strip SKILL.md frontmatter, got: {body}"
     );
-    assert!(skill["blob_handle"].is_null());
+    let marketplace_body = agent_get_skill_body(
+        &agent,
+        "skill-marketplace",
+        "Test Computer",
+        "desktop-tools:market-skill",
+    )
+    .await;
+    assert!(
+        marketplace_body.contains("MARKETPLACE-BODY"),
+        "body was: {marketplace_body}"
+    );
+    let mcp_body = agent_get_skill_body(
+        &agent,
+        "skill-mcp",
+        "Test Computer",
+        "mcp:tfrobot-tools:mcp-skill",
+    )
+    .await;
+    assert!(mcp_body.contains("MCP-BODY"), "body was: {mcp_body}");
 
     agent.disconnect().await.unwrap();
     runtime.clear_smcp_connection().await.unwrap();

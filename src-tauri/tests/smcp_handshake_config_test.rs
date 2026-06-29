@@ -365,8 +365,8 @@ async fn test_backward_compat_new_uses_access_token_default() {
     let (url, capture) = spawn_capture_server().await;
     let (manager, inputs) = empty_manager_and_inputs();
 
-    // 走老的 `SmcpComputerClient::new()` 入口（tfrobot-client 当前的调用形态）。
-    // 升级到 0.2.2 后，此入口应内部委托给 Builder，默认 header 为 access_token。
+    // 走老的 `SmcpComputerClient::new()` 入口，保留 SDK backward-compat contract。
+    // tfrobot-client 生产连接链路已迁移到 SDK Computer::connect_socketio。
     let result = SmcpComputerClient::new(
         &url,
         manager,

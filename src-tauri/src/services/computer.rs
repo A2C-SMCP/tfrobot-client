@@ -734,6 +734,13 @@ impl ComputerInstanceRuntime {
         client
     }
 
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn register_sdk_skill_ref_for_test(&self, skill_ref: A2CSkillRef) {
+        let registry = self.computer.read().await.skill_registry_arc();
+        registry.write().await.register(skill_ref);
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.runtime_state().await == ComputerRuntimeState::JoinedOffice
             && self.connection.read().await.is_some()
