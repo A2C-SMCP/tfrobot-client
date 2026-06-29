@@ -27,8 +27,35 @@ import { useMcpStore } from '@/stores/mcpStore';
 const mockUseMcpStore = vi.mocked(useMcpStore);
 
 const mockServers = [
-  { name: 'test-stdio', running: true, status_message: 'Running', disabled: false },
-  { name: 'test-http', running: false, status_message: 'Stopped', disabled: false },
+  {
+    name: 'test-stdio',
+    running: true,
+    status_message: 'Running',
+    disabled: false,
+    managedBy: { type: 'user' },
+  },
+  {
+    name: 'test-http',
+    running: false,
+    status_message: 'Stopped',
+    disabled: false,
+    managedBy: { type: 'user' },
+  },
+];
+
+const mockPluginServers = [
+  {
+    name: 'plugin-tools',
+    running: false,
+    status_message: 'Stopped',
+    disabled: false,
+    managedBy: {
+      type: 'plugin',
+      marketplace: 'tf-market',
+      plugin: 'desktop-tools',
+      pluginId: 'plugin-1',
+    },
+  },
 ];
 
 describe('McpConfig', () => {
@@ -65,5 +92,18 @@ describe('McpConfig', () => {
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('test-stdio')).toBeInTheDocument();
     expect(screen.getByText('test-http')).toBeInTheDocument();
+    expect(screen.getAllByText('User').length).toBeGreaterThan(0);
+  });
+
+  it('shows plugin source and disables plugin-managed row actions', () => {
+    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockPluginServers } as any);
+
+    render(<McpConfig instanceId={instanceId} />);
+
+    expect(screen.getByText('plugin-tools')).toBeInTheDocument();
+    expect(screen.getByText('desktop-tools@tf-market')).toBeInTheDocument();
+    expect(screen.getByTitle('Start')).toBeDisabled();
+    expect(screen.getByTitle('Edit')).toBeDisabled();
+    expect(screen.getByTitle('Remove')).toBeDisabled();
   });
 });

@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::{config_io, debug, inputs, mcp};
-use tfrobot_client_lib::services::computer::ComputerInstance;
+use tfrobot_client_lib::services::computer::{
+    ComputerInstance, ManagedMcpServer, McpServerManagedBy,
+};
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
@@ -257,6 +259,155 @@ async fn test_update_server_config_replaces() {
         .load_configs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     assert_eq!(loaded.len(), 1);
+}
+
+#[tokio::test]
+async fn test_plugin_owned_mcp_server_reports_owner_and_blocks_user_lifecycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_managed_config_for_instance(
+            TEST_INSTANCE_ID,
+            ManagedMcpServer {
+                config: echo_server_config("plugin-owned"),
+                managed_by: McpServerManagedBy::Plugin {
+                    marketplace: "tf-market".to_string(),
+                    plugin: "desktop-tools".to_string(),
+                    plugin_id: Some("plugin-1".to_string()),
+                },
+            },
+        )
+        .unwrap();
+
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].name, "plugin-owned");
+    assert!(matches!(
+        &statuses[0].managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+
+    let update_err =
+        mcp::update_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("plugin-owned"))
+            .await
+            .unwrap_err();
+    let remove_err = mcp::remove_mcp_server_core(&state, TEST_INSTANCE_ID, "plugin-owned")
+        .await
+        .unwrap_err();
+    let start_err = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "plugin-owned")
+        .await
+        .unwrap_err();
+    let stop_err = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "plugin-owned")
+        .await
+        .unwrap_err();
+
+    for err in [update_err, remove_err, start_err, stop_err] {
+        assert!(
+            err.contains("Marketplace plugin"),
+            "expected plugin lifecycle guard, got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_user_add_and_import_cannot_replace_plugin_owned_mcp_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_managed_config_for_instance(
+            TEST_INSTANCE_ID,
+            ManagedMcpServer {
+                config: echo_server_config("plugin-owned"),
+                managed_by: McpServerManagedBy::Plugin {
+                    marketplace: "tf-market".to_string(),
+                    plugin: "desktop-tools".to_string(),
+                    plugin_id: Some("plugin-1".to_string()),
+                },
+            },
+        )
+        .unwrap();
+
+    let add_err =
+        mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("plugin-owned"))
+            .await
+            .unwrap_err();
+    assert!(add_err.contains("Marketplace plugin"));
+
+    let cli_path = tmp.path().join("cli-native.json");
+    let cli_config = serde_json::json!({
+        "servers": [echo_server_config("plugin-owned")],
+        "inputs": []
+    });
+    std::fs::write(&cli_path, serde_json::to_string(&cli_config).unwrap()).unwrap();
+    let cli_result = config_io::import_config_core(
+        &state,
+        cli_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        Some(config_io::ConfigFormat::CliNative),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cli_result.servers_imported, 0);
+    assert_eq!(cli_result.servers_skipped, vec!["plugin-owned"]);
+
+    let claude_path = tmp.path().join("claude-desktop.json");
+    let claude_config = serde_json::json!({
+        "mcpServers": {
+            "plugin-owned": {
+                "command": "node",
+                "args": ["replacement.js"],
+                "env": {}
+            }
+        }
+    });
+    std::fs::write(&claude_path, serde_json::to_string(&claude_config).unwrap()).unwrap();
+    let claude_result = config_io::import_config_core(
+        &state,
+        claude_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        Some(config_io::ConfigFormat::ClaudeDesktop),
+    )
+    .await
+    .unwrap();
+    assert_eq!(claude_result.servers_imported, 0);
+    assert_eq!(claude_result.servers_skipped, vec!["plugin-owned"]);
+
+    let managed = state
+        .config
+        .get_managed_config_for_instance(TEST_INSTANCE_ID, "plugin-owned")
+        .unwrap();
+    assert!(managed.is_plugin_owned());
+}
+
+#[tokio::test]
+async fn test_start_all_and_stop_all_skip_plugin_owned_mcp_servers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_managed_config_for_instance(
+            TEST_INSTANCE_ID,
+            ManagedMcpServer {
+                config: echo_server_config("plugin-owned"),
+                managed_by: McpServerManagedBy::Plugin {
+                    marketplace: "tf-market".to_string(),
+                    plugin: "desktop-tools".to_string(),
+                    plugin_id: None,
+                },
+            },
+        )
+        .unwrap();
+
+    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

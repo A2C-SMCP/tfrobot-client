@@ -142,10 +142,15 @@
     },
     "table": {
       "name": "Name",
+      "source": "Source",
       "status": "Status",
       "message": "Message",
       "actions": "Actions"
     },
+    "source": {
+      "user": "User"
+    },
+    "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
     "actions": {
       "start": "Start",
       "stop": "Stop",

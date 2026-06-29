@@ -48,7 +48,15 @@ describe('mcpStore', () => {
 
   describe('fetchServers', () => {
     it('populates servers list', async () => {
-      const mockServers = [{ name: 'srv', running: false, status_message: '', disabled: false }];
+      const mockServers = [
+        {
+          name: 'srv',
+          running: false,
+          status_message: '',
+          disabled: false,
+          managedBy: { type: 'user' },
+        },
+      ];
       mockedInvoke.mockResolvedValueOnce(mockServers);
 
       await useMcpStore.getState().fetchServers(instanceId);
@@ -56,6 +64,28 @@ describe('mcpStore', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers', { instanceId });
       expect(useMcpStore.getState().servers).toEqual(mockServers);
       expect(useMcpStore.getState().loading).toBe(false);
+    });
+
+    it('preserves plugin ownership metadata from backend status', async () => {
+      const mockServers = [
+        {
+          name: 'plugin-srv',
+          running: false,
+          status_message: '',
+          disabled: false,
+          managedBy: {
+            type: 'plugin',
+            marketplace: 'tf-market',
+            plugin: 'desktop-tools',
+            pluginId: 'plugin-1',
+          },
+        },
+      ];
+      mockedInvoke.mockResolvedValueOnce(mockServers);
+
+      await useMcpStore.getState().fetchServers(instanceId);
+
+      expect(useMcpStore.getState().servers).toEqual(mockServers);
     });
 
     it('sets error on failure', async () => {
@@ -67,10 +97,42 @@ describe('mcpStore', () => {
     });
 
     it('ignores stale server responses from a previous computer instance', async () => {
-      const first = deferred<Array<{ name: string; running: boolean; status_message: string; disabled: boolean }>>();
-      const second = deferred<Array<{ name: string; running: boolean; status_message: string; disabled: boolean }>>();
-      const serversA = [{ name: 'a-only', running: true, status_message: 'Running', disabled: false }];
-      const serversB = [{ name: 'b-only', running: true, status_message: 'Running', disabled: false }];
+      const first = deferred<
+        Array<{
+          name: string;
+          running: boolean;
+          status_message: string;
+          disabled: boolean;
+          managedBy: { type: 'user' };
+        }>
+      >();
+      const second = deferred<
+        Array<{
+          name: string;
+          running: boolean;
+          status_message: string;
+          disabled: boolean;
+          managedBy: { type: 'user' };
+        }>
+      >();
+      const serversA = [
+        {
+          name: 'a-only',
+          running: true,
+          status_message: 'Running',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
+      const serversB = [
+        {
+          name: 'b-only',
+          running: true,
+          status_message: 'Running',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
       mockedInvoke.mockReturnValueOnce(first.promise as any);
       mockedInvoke.mockReturnValueOnce(second.promise as any);
 

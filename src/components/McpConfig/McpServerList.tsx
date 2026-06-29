@@ -1,4 +1,4 @@
-import { App, Table, Button, Space, Popconfirm } from 'antd';
+import { App, Table, Button, Space, Popconfirm, Tag, Tooltip } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
@@ -56,7 +56,35 @@ export function McpServerList({
     }
   };
 
+  const isPluginOwned = (record: McpServerStatus) => record.managedBy.type === 'plugin';
+
+  const pluginLifecycleMessage = (record: McpServerStatus) => {
+    if (record.managedBy.type !== 'plugin') {
+      return undefined;
+    }
+    return t('mcp.pluginManagedHint', {
+      plugin: record.managedBy.plugin,
+      marketplace: record.managedBy.marketplace,
+    });
+  };
+
+  const sourceLabel = (record: McpServerStatus) => {
+    if (record.managedBy.type === 'plugin') {
+      return `${record.managedBy.plugin}@${record.managedBy.marketplace}`;
+    }
+    return t('mcp.source.user');
+  };
+
   const columns = [
+    {
+      title: t('mcp.table.source'),
+      key: 'source',
+      render: (_: unknown, record: McpServerStatus) => (
+        <Tag color={isPluginOwned(record) ? 'purple' : 'default'}>
+          {sourceLabel(record)}
+        </Tag>
+      ),
+    },
     {
       title: t('mcp.table.name'),
       dataIndex: 'name',
@@ -84,38 +112,59 @@ export function McpServerList({
       render: (_: unknown, record: McpServerStatus) => (
         <Space size="small">
           {record.running ? (
-            <Button
-              type="text"
-              icon={<PauseCircleOutlined />}
-              onClick={() => handleStop(record.name)}
-              title={t('mcp.actions.stop')}
-            />
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  icon={<PauseCircleOutlined />}
+                  onClick={() => handleStop(record.name)}
+                  title={t('mcp.actions.stop')}
+                  disabled={isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
           ) : (
-            <Button
-              type="text"
-              icon={<PlayCircleOutlined />}
-              onClick={() => handleStart(record.name)}
-              title={t('mcp.actions.start')}
-            />
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  icon={<PlayCircleOutlined />}
+                  onClick={() => handleStart(record.name)}
+                  title={t('mcp.actions.start')}
+                  disabled={isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
           )}
-          <Button
-            type="text"
-            icon={<EditOutlined />}
-            onClick={() => onEdit(record.name)}
-            title={t('mcp.actions.edit')}
-          />
+          <Tooltip title={pluginLifecycleMessage(record)}>
+            <span>
+              <Button
+                type="text"
+                icon={<EditOutlined />}
+                onClick={() => onEdit(record.name)}
+                title={t('mcp.actions.edit')}
+                disabled={isPluginOwned(record)}
+              />
+            </span>
+          </Tooltip>
           <Popconfirm
             title={t('mcp.confirmRemove')}
             onConfirm={() => handleRemove(record.name)}
             okText={t('common.yes')}
             cancelText={t('common.no')}
+            disabled={isPluginOwned(record)}
           >
-            <Button
-              type="text"
-              danger
-              icon={<DeleteOutlined />}
-              title={t('mcp.actions.remove')}
-            />
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  danger
+                  icon={<DeleteOutlined />}
+                  title={t('mcp.actions.remove')}
+                  disabled={isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
           </Popconfirm>
         </Space>
       ),

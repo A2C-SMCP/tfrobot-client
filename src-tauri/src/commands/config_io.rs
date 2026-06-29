@@ -109,7 +109,7 @@ async fn import_cli_native(
     let config: CliNativeConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
 
     let mut servers_imported = 0;
-    let servers_skipped = Vec::new();
+    let mut servers_skipped = Vec::new();
     let inputs_imported = config.inputs.len();
 
     // Import inputs before servers so SDK Computer can render ${input:...}
@@ -136,6 +136,11 @@ async fn import_cli_native(
     }
 
     for server in &config.servers {
+        if is_plugin_owned_server(state, instance_id, server.name())? {
+            servers_skipped.push(server.name().to_string());
+            continue;
+        }
+
         let previous = state
             .config
             .get_computer_instance(instance_id)
@@ -163,9 +168,14 @@ async fn import_claude_desktop(
     let config: ClaudeDesktopConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
 
     let mut servers_imported = 0;
-    let servers_skipped = Vec::new();
+    let mut servers_skipped = Vec::new();
 
     for (name, server) in config.mcp_servers {
+        if is_plugin_owned_server(state, instance_id, &name)? {
+            servers_skipped.push(name);
+            continue;
+        }
+
         let previous = state
             .config
             .get_computer_instance(instance_id)
@@ -204,6 +214,17 @@ fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConf
             cwd: None,
         },
     })
+}
+
+fn is_plugin_owned_server(state: &AppState, instance_id: &str, name: &str) -> Result<bool, String> {
+    match state
+        .config
+        .get_managed_config_for_instance(instance_id, name)
+    {
+        Ok(server) => Ok(server.is_plugin_owned()),
+        Err(crate::services::config::ConfigError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Export configuration to file

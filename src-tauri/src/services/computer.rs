@@ -63,13 +63,55 @@ pub struct ComputerConnectionPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerManagedBy {
+    User,
+    Plugin {
+        marketplace: String,
+        plugin: String,
+        #[serde(rename = "pluginId", default, skip_serializing_if = "Option::is_none")]
+        plugin_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedMcpServer {
+    pub config: MCPServerConfig,
+    #[serde(rename = "managedBy")]
+    pub managed_by: McpServerManagedBy,
+}
+
+impl ManagedMcpServer {
+    pub fn user(config: MCPServerConfig) -> Self {
+        Self {
+            config,
+            managed_by: McpServerManagedBy::User,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.config.name()
+    }
+
+    pub fn is_plugin_owned(&self) -> bool {
+        matches!(self.managed_by, McpServerManagedBy::Plugin { .. })
+    }
+}
+
+impl From<MCPServerConfig> for ManagedMcpServer {
+    fn from(config: MCPServerConfig) -> Self {
+        Self::user(config)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputerInstance {
     pub id: ComputerInstanceId,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
-    pub mcp_servers: Vec<MCPServerConfig>,
+    pub mcp_servers: Vec<ManagedMcpServer>,
     #[serde(default)]
     pub inputs: Vec<InputDefinition>,
     #[serde(default)]
@@ -332,7 +374,7 @@ impl ComputerInstanceRuntime {
         let was_running = *self.running.read().await;
 
         let current_server_configs = self.sdk_mcp_server_config_map().await;
-        let desired_server_configs = mcp_servers_to_map(&self.instance.mcp_servers);
+        let desired_server_configs = managed_mcp_servers_to_map(&self.instance.mcp_servers);
         let mcp_servers_changed = current_server_configs != desired_server_configs;
 
         let rebuilt = if self.sdk_requires_rebuild().await {
@@ -943,7 +985,7 @@ fn build_sdk_computer(
         instance.name.clone(),
         session,
         Some(inputs.clone()),
-        Some(mcp_servers_to_map(&instance.mcp_servers)),
+        Some(managed_mcp_servers_to_map(&instance.mcp_servers)),
         instance.connection_policy.auto_connect,
         true,
     );
@@ -965,14 +1007,14 @@ fn default_local_skills_root(skill_home_base: &Path, instance_id: &str) -> PathB
         .join("skill_home")
 }
 
-fn mcp_servers_to_map(servers: &[MCPServerConfig]) -> HashMap<String, MCPServerConfig> {
+fn managed_mcp_servers_to_map(servers: &[ManagedMcpServer]) -> HashMap<String, MCPServerConfig> {
     servers
         .iter()
-        .map(|server| (server.name().to_string(), server.clone()))
+        .map(|server| (server.name().to_string(), server.config.clone()))
         .collect()
 }
 
-fn mcp_server_names(servers: &[MCPServerConfig]) -> HashSet<String> {
+fn mcp_server_names(servers: &[ManagedMcpServer]) -> HashSet<String> {
     servers
         .iter()
         .map(|server| server.name().to_string())
@@ -1569,7 +1611,7 @@ mod tests {
         assert!(before.sdk_mcp_server_names().await.is_empty());
 
         let mut updated = instance("one", "Updated");
-        updated.mcp_servers = vec![server_config("updated-server")];
+        updated.mcp_servers = vec![server_config("updated-server").into()];
         updated.connection_policy.auto_connect = true;
         let after = registry.update_runtime_instance(updated).await.unwrap();
 

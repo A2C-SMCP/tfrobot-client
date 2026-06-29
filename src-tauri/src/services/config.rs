@@ -1,5 +1,5 @@
 use crate::commands::inputs::InputDefinition;
-use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
+use crate::services::computer::{ComputerInstance, ComputerInstancesConfig, ManagedMcpServer};
 use crate::services::connection_targets::{ConnectionTargetsConfig, ManualSmcpTarget};
 use sha2::{Digest, Sha256};
 use smcp_computer::mcp_clients::MCPServerConfig;
@@ -46,6 +46,17 @@ impl ConfigService {
         &self,
         instance_id: &str,
     ) -> Result<Vec<MCPServerConfig>, ConfigError> {
+        Ok(self
+            .load_managed_configs_for_instance(instance_id)?
+            .into_iter()
+            .map(|server| server.config)
+            .collect())
+    }
+
+    pub fn load_managed_configs_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<ManagedMcpServer>, ConfigError> {
         let instances = self.load_computer_instances()?;
         instances
             .instances
@@ -60,6 +71,27 @@ impl ConfigService {
         instance_id: &str,
         configs: &[MCPServerConfig],
     ) -> Result<ComputerInstance, ConfigError> {
+        if let Some(plugin_owned) = self
+            .load_managed_configs_for_instance(instance_id)?
+            .iter()
+            .find(|server| server.is_plugin_owned())
+        {
+            return Err(plugin_managed_mcp_error(plugin_owned.name()));
+        }
+
+        let managed_configs: Vec<_> = configs
+            .iter()
+            .cloned()
+            .map(ManagedMcpServer::user)
+            .collect();
+        self.save_managed_configs_for_instance(instance_id, &managed_configs)
+    }
+
+    pub fn save_managed_configs_for_instance(
+        &self,
+        instance_id: &str,
+        configs: &[ManagedMcpServer],
+    ) -> Result<ComputerInstance, ConfigError> {
         self.update_computer_instance(instance_id, |instance| {
             instance.mcp_servers = configs.to_vec();
         })
@@ -70,11 +102,36 @@ impl ConfigService {
         instance_id: &str,
         config: MCPServerConfig,
     ) -> Result<ComputerInstance, ConfigError> {
-        let mut configs = self.load_configs_for_instance(instance_id)?;
-        let name = config.name().to_string();
+        if let Ok(existing) = self.get_managed_config_for_instance(instance_id, config.name()) {
+            if existing.is_plugin_owned() {
+                return Err(plugin_managed_mcp_error(existing.name()));
+            }
+        }
+
+        self.add_managed_config_for_instance(instance_id, ManagedMcpServer::user(config))
+    }
+
+    pub fn add_managed_config_for_instance(
+        &self,
+        instance_id: &str,
+        server: ManagedMcpServer,
+    ) -> Result<ComputerInstance, ConfigError> {
+        let mut configs = self.load_managed_configs_for_instance(instance_id)?;
+        let name = server.name().to_string();
         configs.retain(|c| c.name() != name);
-        configs.push(config);
-        self.save_configs_for_instance(instance_id, &configs)
+        configs.push(server);
+        self.save_managed_configs_for_instance(instance_id, &configs)
+    }
+
+    pub fn get_managed_config_for_instance(
+        &self,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<ManagedMcpServer, ConfigError> {
+        self.load_managed_configs_for_instance(instance_id)?
+            .into_iter()
+            .find(|server| server.name() == name)
+            .ok_or_else(|| ConfigError::NotFound(name.to_string()))
     }
 
     pub fn remove_config_for_instance(
@@ -82,13 +139,13 @@ impl ConfigService {
         instance_id: &str,
         name: &str,
     ) -> Result<ComputerInstance, ConfigError> {
-        let mut configs = self.load_configs_for_instance(instance_id)?;
+        let mut configs = self.load_managed_configs_for_instance(instance_id)?;
         let original_len = configs.len();
         configs.retain(|c| c.name() != name);
         if configs.len() == original_len {
             return Err(ConfigError::NotFound(name.to_string()));
         }
-        self.save_configs_for_instance(instance_id, &configs)
+        self.save_managed_configs_for_instance(instance_id, &configs)
     }
 
     // --- Input Definitions ---
@@ -278,6 +335,13 @@ impl ConfigService {
     }
 }
 
+fn plugin_managed_mcp_error(name: &str) -> ConfigError {
+    ConfigError::InvalidOperation(format!(
+        "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+        name
+    ))
+}
+
 pub fn normalize_manual_smcp_target(mut target: ManualSmcpTarget) -> ManualSmcpTarget {
     target.id = stable_or_existing_manual_target_id(&target.id, &target);
     target
@@ -396,6 +460,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::computer::McpServerManagedBy;
     use tempfile::tempdir;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
@@ -471,6 +536,54 @@ mod tests {
     }
 
     #[test]
+    fn test_managed_mcp_server_wrapper_roundtrip_preserves_plugin_owner() {
+        let (svc, _tmp) = setup();
+        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "Stdio",
+            "name": "plugin-owned",
+            "server_parameters": {
+                "command": "node",
+                "args": ["server.js"],
+                "env": {}
+            }
+        }))
+        .unwrap();
+        let server = ManagedMcpServer {
+            config,
+            managed_by: McpServerManagedBy::Plugin {
+                marketplace: "tf-market".to_string(),
+                plugin: "desktop-tools".to_string(),
+                plugin_id: Some("plugin-1".to_string()),
+            },
+        };
+
+        svc.save_managed_configs_for_instance(TEST_INSTANCE_ID, &[server])
+            .unwrap();
+
+        let managed = svc
+            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+            .unwrap();
+        let sdk_configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
+
+        assert_eq!(managed.len(), 1);
+        assert!(managed[0].is_plugin_owned());
+        match &managed[0].managed_by {
+            McpServerManagedBy::Plugin {
+                marketplace,
+                plugin,
+                plugin_id,
+            } => {
+                assert_eq!(marketplace, "tf-market");
+                assert_eq!(plugin, "desktop-tools");
+                assert_eq!(plugin_id.as_deref(), Some("plugin-1"));
+            }
+            McpServerManagedBy::User => panic!("expected plugin owner"),
+        }
+        assert_eq!(sdk_configs.len(), 1);
+        assert_eq!(sdk_configs[0].name(), "plugin-owned");
+    }
+
+    #[test]
     fn test_legacy_config_files_are_ignored() {
         let (svc, tmp) = setup_empty();
         let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
@@ -531,13 +644,13 @@ mod tests {
                 ComputerInstance {
                     id: "first".to_string(),
                     name: "First".to_string(),
-                    mcp_servers: vec![first_config],
+                    mcp_servers: vec![first_config.into()],
                     ..ComputerInstance::new("", "")
                 },
                 ComputerInstance {
                     id: "second".to_string(),
                     name: "Second".to_string(),
-                    mcp_servers: vec![second_config],
+                    mcp_servers: vec![second_config.into()],
                     ..ComputerInstance::new("", "")
                 },
             ],

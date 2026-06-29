@@ -1,4 +1,5 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
+use crate::services::computer::McpServerManagedBy;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use smcp_computer::mcp_clients::MCPServerConfig;
@@ -11,6 +12,8 @@ pub struct McpServerStatus {
     pub running: bool,
     pub status_message: String,
     pub disabled: bool,
+    #[serde(rename = "managedBy")]
+    pub managed_by: McpServerManagedBy,
 }
 
 #[tauri::command]
@@ -28,7 +31,7 @@ pub async fn get_mcp_servers_core(
     let instance_id = require_instance_id(instance_id)?;
     let configs = state
         .config
-        .load_configs_for_instance(instance_id)
+        .load_managed_configs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
@@ -44,7 +47,8 @@ pub async fn get_mcp_servers_core(
 
     Ok(configs
         .into_iter()
-        .map(|config| {
+        .map(|server| {
+            let config = server.config;
             let name = config.name().to_string();
             let (running, status_message) = runtime_statuses
                 .get(&name)
@@ -55,6 +59,7 @@ pub async fn get_mcp_servers_core(
                 running,
                 status_message,
                 disabled: config.disabled(),
+                managed_by: server.managed_by,
             }
         })
         .collect())
@@ -145,6 +150,7 @@ pub async fn remove_mcp_server_core(
         .config
         .get_computer_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    ensure_user_managed_server(state, instance_id, name)?;
 
     let updated_instance = state
         .config
@@ -184,6 +190,7 @@ pub async fn update_mcp_server_core(
         .config
         .get_computer_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    ensure_user_managed_server(state, instance_id, &name)?;
 
     let updated_instance = state
         .config
@@ -221,6 +228,7 @@ pub async fn start_mcp_server_core(
     log::info!("Starting MCP server for instance {}: {}", instance_id, name);
 
     let _config = get_mcp_server_config_core(state, instance_id, name)?;
+    ensure_user_managed_server(state, instance_id, name)?;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -255,6 +263,7 @@ pub async fn stop_mcp_server_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Stopping MCP server for instance {}: {}", instance_id, name);
+    ensure_user_managed_server(state, instance_id, name)?;
 
     let runtime = state
         .computer_registry
@@ -294,7 +303,9 @@ pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Resu
         .computer_registry
         .update_runtime_instance(instance)
         .await?;
-    runtime.start_all_mcp_servers().await?;
+    for server in user_managed_servers(state, instance_id)? {
+        runtime.start_mcp_server(server.name()).await?;
+    }
 
     log::info!("All MCP servers started for instance {}", instance_id);
     Ok(())
@@ -317,7 +328,9 @@ pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Resul
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    runtime.stop_all_mcp_servers().await?;
+    for server in user_managed_servers(state, instance_id)? {
+        runtime.stop_mcp_server(server.name()).await?;
+    }
 
     log::info!("All MCP servers stopped for instance {}", instance_id);
     Ok(())
@@ -329,6 +342,37 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
         return Err("instance_id is required".to_string());
     }
     Ok(instance_id)
+}
+
+fn ensure_user_managed_server(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let server = state
+        .config
+        .get_managed_config_for_instance(instance_id, name)
+        .map_err(|e| e.to_string())?;
+    if server.is_plugin_owned() {
+        return Err(format!(
+            "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+            name
+        ));
+    }
+    Ok(())
+}
+
+fn user_managed_servers(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<crate::services::computer::ManagedMcpServer>, String> {
+    Ok(state
+        .config
+        .load_managed_configs_for_instance(instance_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|server| !server.is_plugin_owned())
+        .collect())
 }
 
 #[cfg(test)]

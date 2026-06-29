@@ -16,7 +16,12 @@ export interface McpServerStatus {
   running: boolean;
   status_message: string;
   disabled: boolean;
+  managedBy: McpServerManagedBy;
 }
+
+export type McpServerManagedBy =
+  | { type: 'user' }
+  | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
 
 // server_parameters sub-types
 export interface StdioServerParameters {
