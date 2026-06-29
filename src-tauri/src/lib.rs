@@ -203,6 +203,16 @@ pub fn run() {
             commands::mcp::stop_mcp_server,
             commands::mcp::start_all_servers,
             commands::mcp::stop_all_servers,
+            // Skills marketplace governance
+            commands::marketplace::get_marketplace_capabilities,
+            commands::marketplace::add_marketplace,
+            commands::marketplace::refresh_marketplace,
+            commands::marketplace::remove_marketplace,
+            commands::marketplace::install_plugin,
+            commands::marketplace::enable_plugin,
+            commands::marketplace::disable_plugin,
+            commands::marketplace::uninstall_plugin,
+            commands::marketplace::reconcile_governance,
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,
