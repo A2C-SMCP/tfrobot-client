@@ -3,6 +3,7 @@ use crate::commands::inputs::InputDefinition;
 use crate::services::config::instance_storage_dir_name;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use smcp::A2CSkillRef;
 use smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use smcp_computer::errors::{ComputerError, ComputerResult};
 use smcp_computer::inputs::run_command;
@@ -11,6 +12,7 @@ use smcp_computer::mcp_clients::model::{
     ReadResourceResult, Resource, Tool,
 };
 use smcp_computer::mcp_clients::MCPServerConfig;
+use smcp_computer::skills::{SkillResourceView, SkillSandboxError};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -635,6 +637,29 @@ impl ComputerInstanceRuntime {
         self.computer.read().await.skill_home()
     }
 
+    pub async fn sdk_skills(&self) -> Vec<A2CSkillRef> {
+        self.computer.read().await.get_skills().await
+    }
+
+    pub async fn sdk_skill_ref(&self, name: &str) -> Option<A2CSkillRef> {
+        self.computer.read().await.get_skill_ref(name).await
+    }
+
+    pub async fn sdk_read_skill_resource(
+        &self,
+        skill_ref: &A2CSkillRef,
+        rel_path: Option<&str>,
+    ) -> Result<SkillResourceView, SkillSandboxError> {
+        self.computer
+            .read()
+            .await
+            .read_skill_resource(skill_ref, rel_path)
+    }
+
+    pub async fn mark_sdk_skills_dirty(&self) {
+        self.computer.read().await.mark_skills_dirty();
+    }
+
     pub async fn sdk_is_mcp_manager_initialized(&self) -> bool {
         self.computer
             .read()
@@ -937,7 +962,7 @@ fn build_sdk_computer(
 fn default_local_skills_root(skill_home_base: &Path, instance_id: &str) -> PathBuf {
     skill_home_base
         .join(instance_storage_dir_name(instance_id))
-        .join("skills")
+        .join("skill_home")
 }
 
 fn mcp_servers_to_map(servers: &[MCPServerConfig]) -> HashMap<String, MCPServerConfig> {
@@ -1464,8 +1489,72 @@ mod tests {
         );
         assert_eq!(
             after.sdk_skill_home().await,
-            after.skill_home_base.join("one").join("skills")
+            after.skill_home_base.join("one").join("skill_home")
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_rebuild_restores_default_skill_home_when_override_is_cleared() {
+        let registry = ComputerRegistry::from_config_with_skill_home_base(
+            ComputerInstancesConfig {
+                schema_version: 1,
+                instances: vec![{
+                    let mut instance = instance("one", "One");
+                    instance.local_skills_root = Some(PathBuf::from("/tmp/custom-skill-home"));
+                    instance
+                }],
+            },
+            std::env::temp_dir().join("tfrobot-client-test-skill-home-clear"),
+        );
+
+        let mut updated = instance("one", "One");
+        updated.local_skills_root = None;
+        let runtime = registry.update_runtime_instance(updated).await.unwrap();
+
+        assert_eq!(
+            runtime.sdk_skill_home().await,
+            runtime.skill_home_base.join("one").join("skill_home")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_exposes_sdk_skill_registry_and_resource_access() {
+        let skill_home_base = tempfile::TempDir::new().unwrap();
+        let runtime =
+            ComputerInstanceRuntime::new(instance("one", "One"), skill_home_base.path().into());
+        let skill_home = runtime.sdk_skill_home().await;
+        let skill_dir = skill_home.join("user").join("example-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: example-skill\ndescription: Example skill\n---\nBody\n",
+        )
+        .unwrap();
+
+        runtime.start().await.unwrap();
+
+        let skills = runtime.sdk_skills().await;
+        let skill_ref = skills
+            .iter()
+            .find(|skill| skill.name == "example-skill")
+            .cloned()
+            .expect("example skill should be staged by SDK Computer");
+        assert_eq!(skill_ref.source, "user");
+        assert_eq!(
+            runtime.sdk_skill_ref("example-skill").await,
+            Some(skill_ref.clone())
+        );
+        let view = runtime
+            .sdk_read_skill_resource(&skill_ref, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(view.read_all().unwrap()).unwrap(),
+            "Body\n"
+        );
+
+        runtime.mark_sdk_skills_dirty().await;
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

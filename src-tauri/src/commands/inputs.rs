@@ -110,7 +110,7 @@ pub async fn add_or_update_input_core(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(&state, previous, updated_instance).await?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     Ok(())
 }
@@ -155,7 +155,7 @@ pub async fn remove_input_core(
             instance.input_values.remove(id);
         })
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(&state, previous, updated_instance).await?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     Ok(())
 }
@@ -219,7 +219,7 @@ pub async fn set_input_value_core(
         .config
         .save_input_values_for_instance(instance_id, &values)
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(&state, previous, updated_instance).await?;
+    apply_updated_computer_instance(state, previous, updated_instance).await?;
 
     Ok(())
 }

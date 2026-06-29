@@ -28,7 +28,7 @@ impl ConfigService {
 
     pub fn default_local_skills_root(&self, instance_id: &str) -> PathBuf {
         self.computer_instance_storage_root(instance_id)
-            .join("skills")
+            .join("skill_home")
     }
 
     pub fn computer_instance_storage_root(&self, instance_id: &str) -> PathBuf {

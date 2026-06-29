@@ -950,10 +950,10 @@ pub async fn reconnect_with_token(
         .await
     {
         Ok(SmcpReconnectOutcome::Reconnected { expires_in }) => RefreshOutcome::Renewed(expires_in),
-        Ok(SmcpReconnectOutcome::Stale) => return RefreshOutcome::Gone,
+        Ok(SmcpReconnectOutcome::Stale) => RefreshOutcome::Gone,
         Err(e) => {
             log::warn!("Pre-refresh reconnect failed: {e}");
-            return RefreshOutcome::Retry;
+            RefreshOutcome::Retry
         }
     }
 }

@@ -54,9 +54,9 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         .any(|instance| instance.id == created.id && instance.name == "Renamed Computer"));
 
     let instance_storage_root = state.config.computer_instance_storage_root(&created.id);
-    std::fs::create_dir_all(instance_storage_root.join("skills")).unwrap();
+    std::fs::create_dir_all(instance_storage_root.join("skill_home")).unwrap();
     std::fs::write(
-        instance_storage_root.join("skills").join("skill.md"),
+        instance_storage_root.join("skill_home").join("skill.md"),
         "skill",
     )
     .unwrap();
