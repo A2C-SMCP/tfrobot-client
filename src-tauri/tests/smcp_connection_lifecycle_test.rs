@@ -1,12 +1,20 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
+use serde_json::{json, Value};
+use smcp::{events, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
+use smcp_server_core::{DefaultAuthenticationProvider, SmcpServerBuilder};
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
+use tf_rust_socketio::asynchronous::{Client, ClientBuilder};
+use tf_rust_socketio::{Payload, TransportType};
 use tfrobot_client_lib::commands::computer::{
     rename_computer_instance_core, RenameComputerInstanceRequest,
 };
@@ -22,7 +30,7 @@ use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use tower::service_fn;
 use tower::Layer;
@@ -33,6 +41,9 @@ mod common;
 const SERVER_JOIN_OFFICE: &str = "server:join_office";
 const SERVER_LEAVE_OFFICE: &str = "server:leave_office";
 const TEST_INSTANCE_ID: &str = "test-computer";
+const TEST_OFFICE_ID: &str = "skills-office";
+const TEST_AGENT_NAME: &str = "skills-agent";
+const TEST_RELAY_TOKEN: &str = "skills-relay-token";
 
 async fn create_test_runtime(state: &AppState) -> ComputerInstanceRuntime {
     state
@@ -160,6 +171,482 @@ async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
         sleep(Duration::from_millis(50)).await;
     }
     panic!("{timeout_message}");
+}
+
+struct RelayServer {
+    url: String,
+    shutdown_tx: oneshot::Sender<()>,
+}
+
+impl RelayServer {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+        let layer = SmcpServerBuilder::new()
+            .with_auth_provider(Arc::new(DefaultAuthenticationProvider::new(
+                Some(TEST_RELAY_TOKEN.to_string()),
+                None,
+            )))
+            .build_layer()
+            .expect("build SMCP relay layer");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::new())))
+        });
+        let service = layer.layer.layer(fallback);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = listener.accept() => {
+                        if let Ok((stream, _)) = result {
+                            let stream = hyper_util::rt::TokioIo::new(stream);
+                            let service = hyper_util::service::TowerToHyperService::new(service.clone());
+                            tokio::spawn(async move {
+                                let _ = hyper::server::conn::http1::Builder::new()
+                                    .serve_connection(stream, service)
+                                    .with_upgrades()
+                                    .await;
+                            });
+                        }
+                    }
+                    _ = &mut shutdown_rx => break,
+                }
+            }
+        });
+
+        sleep(Duration::from_millis(150)).await;
+        Self { url, shutdown_tx }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
+async fn agent_client(server_url: &str) -> Client {
+    let client = ClientBuilder::new(server_url.to_string())
+        .transport_type(TransportType::Websocket)
+        .namespace("smcp")
+        .auth(json!({ "token": TEST_RELAY_TOKEN }))
+        .connect()
+        .await
+        .expect("agent connect");
+    sleep(Duration::from_millis(200)).await;
+    client
+}
+
+async fn agent_client_with_skill_update_listener(
+    server_url: &str,
+) -> (Client, oneshot::Receiver<Value>) {
+    let (tx, rx) = oneshot::channel::<Value>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let client = ClientBuilder::new(server_url.to_string())
+        .transport_type(TransportType::Websocket)
+        .namespace("smcp")
+        .auth(json!({ "token": TEST_RELAY_TOKEN }))
+        .on(
+            events::NOTIFY_UPDATE_SKILLS,
+            move |payload: Payload, _client| {
+                let tx = tx.clone();
+                async move {
+                    let value = match payload {
+                        Payload::Text(values, _) => {
+                            values.into_iter().next().unwrap_or(Value::Null)
+                        }
+                        _ => Value::Null,
+                    };
+                    if let Some(tx) = tx.lock().await.take() {
+                        let _ = tx.send(value);
+                    }
+                }
+                .boxed()
+            },
+        )
+        .connect()
+        .await
+        .expect("agent connect");
+    sleep(Duration::from_millis(200)).await;
+    (client, rx)
+}
+
+fn ack_cb(
+    tx: oneshot::Sender<Value>,
+) -> impl FnMut(Payload, Client) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync {
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    move |payload: Payload, _client: Client| {
+        let tx = tx.clone();
+        async move {
+            let value = match payload {
+                Payload::Text(mut values, _) => values.pop().unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
+            if let Some(tx) = tx.lock().await.take() {
+                let _ = tx.send(flat_ack(value));
+            }
+        }
+        .boxed()
+    }
+}
+
+fn flat_ack(value: Value) -> Value {
+    match value {
+        Value::Array(mut values) if values.len() == 1 => values.pop().unwrap_or(Value::Null),
+        other => other,
+    }
+}
+
+async fn join_agent(client: &Client, office_id: &str, agent_name: &str) {
+    let (tx, rx) = oneshot::channel::<Value>();
+    client
+        .emit_with_ack(
+            SERVER_JOIN_OFFICE,
+            json!({
+                "role": Role::Agent.to_string(),
+                "office_id": office_id,
+                "name": agent_name,
+            }),
+            Duration::from_secs(10),
+            ack_cb(tx),
+        )
+        .await
+        .expect("agent join emit");
+    let ack = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("agent join ack timeout")
+        .expect("agent join ack channel");
+    let ok = ack
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(ok, "agent join failed: {ack}");
+}
+
+async fn emit_agent_call(client: &Client, event: &str, payload: Value) -> Value {
+    let (tx, rx) = oneshot::channel::<Value>();
+    client
+        .emit_with_ack(event, payload, Duration::from_secs(15), ack_cb(tx))
+        .await
+        .expect("agent emit_with_ack");
+    tokio::time::timeout(Duration::from_secs(15), rx)
+        .await
+        .expect("agent call ack timeout")
+        .expect("agent call ack channel")
+}
+
+async fn agent_get_skills(client: &Client, req_id: &str, computer_name: &str) -> Value {
+    emit_agent_call(
+        client,
+        events::CLIENT_GET_SKILLS,
+        json!(GetSkillsReq {
+            base: AgentCallData {
+                agent: TEST_AGENT_NAME.to_string(),
+                req_id: ReqId(req_id.to_string()),
+            },
+            computer: computer_name.to_string(),
+        }),
+    )
+    .await
+}
+
+async fn wait_for_skill_update_notification(
+    rx: oneshot::Receiver<Value>,
+    expected_computer: &str,
+) -> Value {
+    let notification = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("notify:update_skills timeout")
+        .expect("notify:update_skills channel");
+    assert_eq!(
+        notification["computer"],
+        json!(expected_computer),
+        "notify:update_skills should identify the refreshed Computer"
+    );
+    notification
+}
+
+fn skill_names(skills: &Value) -> Vec<&str> {
+    skills["skills"]
+        .as_array()
+        .map(|skills| {
+            skills
+                .iter()
+                .filter_map(|skill| skill["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn wait_for_agent_skill(
+    client: &Client,
+    computer_name: &str,
+    skill_name: &str,
+    req_id_prefix: &str,
+) -> Value {
+    let mut last = Value::Null;
+    for attempt in 0..20 {
+        let skills =
+            agent_get_skills(client, &format!("{req_id_prefix}-{attempt}"), computer_name).await;
+        assert!(
+            skills.get("code").is_none(),
+            "client:get_skills returned protocol error: {skills}"
+        );
+        if skill_names(&skills).contains(&skill_name) {
+            return skills;
+        }
+        last = skills;
+        sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{skill_name} did not appear in Agent skills, last response: {last}");
+}
+
+fn write_user_skill(skill_home: &std::path::Path, name: &str, description: &str, body: &str) {
+    let skill_dir = skill_home.join("user").join(name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn agent_get_skills_and_get_skill_use_connected_instance_sdk_registry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    let skill_home = runtime.sdk_skill_home().await;
+    write_user_skill(
+        &skill_home,
+        "agent-helper",
+        "Agent visible helper",
+        "AGENT-HELPER-BODY",
+    );
+    runtime.start().await.expect("start runtime");
+
+    let relay = RelayServer::start().await;
+    runtime
+        .connect_smcp_socketio(
+            relay.url(),
+            Some(json!({ "token": TEST_RELAY_TOKEN })),
+            HashMap::new(),
+            Some("smcp".to_string()),
+            TEST_OFFICE_ID,
+            "Test Computer",
+        )
+        .await
+        .expect("connect SDK Computer to relay");
+
+    let agent = agent_client(relay.url()).await;
+    join_agent(&agent, TEST_OFFICE_ID, TEST_AGENT_NAME).await;
+
+    let skills = agent_get_skills(&agent, "skills-1", "Test Computer").await;
+    assert!(
+        skills.get("code").is_none(),
+        "client:get_skills returned protocol error: {skills}"
+    );
+    let listed = skills["skills"].as_array().cloned().unwrap_or_default();
+    let helper = listed
+        .iter()
+        .find(|skill| skill["name"] == json!("agent-helper"))
+        .unwrap_or_else(|| panic!("agent-helper should be visible, got: {listed:?}"));
+    assert_eq!(helper["source"], json!("user"));
+    assert_eq!(helper["description"], json!("Agent visible helper"));
+
+    let skill = emit_agent_call(
+        &agent,
+        events::CLIENT_GET_SKILL,
+        json!(GetSkillReq {
+            base: AgentCallData {
+                agent: TEST_AGENT_NAME.to_string(),
+                req_id: ReqId("skill-1".to_string()),
+            },
+            computer: "Test Computer".to_string(),
+            name: "agent-helper".to_string(),
+            rel_path: None,
+        }),
+    )
+    .await;
+    assert!(
+        skill.get("code").is_none(),
+        "client:get_skill returned protocol error: {skill}"
+    );
+    let body = skill["body"].as_str().unwrap_or_default();
+    assert!(body.contains("AGENT-HELPER-BODY"), "body was: {body}");
+    assert!(
+        !body.contains("name: agent-helper"),
+        "SDK should strip SKILL.md frontmatter, got: {body}"
+    );
+    assert!(skill["blob_handle"].is_null());
+
+    agent.disconnect().await.unwrap();
+    runtime.clear_smcp_connection().await.unwrap();
+    runtime.shutdown().await;
+    relay.shutdown();
+}
+
+#[tokio::test]
+async fn agent_get_skills_is_scoped_to_connected_computer_instance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime_one = create_test_runtime(&state).await;
+    write_user_skill(
+        &runtime_one.sdk_skill_home().await,
+        "one-only",
+        "Only visible from instance one",
+        "ONE-BODY",
+    );
+    state
+        .config
+        .add_computer_instance(ComputerInstance {
+            id: "second-computer".to_string(),
+            name: "Second Computer".to_string(),
+            ..ComputerInstance::new("", "")
+        })
+        .unwrap();
+    let runtime_two = state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance("second-computer")
+                .unwrap(),
+        )
+        .await;
+    write_user_skill(
+        &runtime_two.sdk_skill_home().await,
+        "two-only",
+        "Only visible from instance two",
+        "TWO-BODY",
+    );
+    runtime_one.start().await.expect("start first runtime");
+    runtime_two.start().await.expect("start second runtime");
+
+    let relay = RelayServer::start().await;
+    runtime_one
+        .connect_smcp_socketio(
+            relay.url(),
+            Some(json!({ "token": TEST_RELAY_TOKEN })),
+            HashMap::new(),
+            Some("smcp".to_string()),
+            TEST_OFFICE_ID,
+            "Test Computer",
+        )
+        .await
+        .expect("connect first SDK Computer to relay");
+
+    let agent = agent_client(relay.url()).await;
+    join_agent(&agent, TEST_OFFICE_ID, TEST_AGENT_NAME).await;
+    let skills = agent_get_skills(&agent, "skills-scope", "Test Computer").await;
+    assert!(
+        skills.get("code").is_none(),
+        "client:get_skills returned protocol error: {skills}"
+    );
+    let names = skill_names(&skills);
+    assert!(names.contains(&"one-only"), "skills were: {names:?}");
+    assert!(
+        !names.contains(&"two-only"),
+        "unconnected instance skill leaked into Agent protocol: {names:?}"
+    );
+
+    agent.disconnect().await.unwrap();
+    runtime_one.clear_smcp_connection().await.unwrap();
+    runtime_one.shutdown().await;
+    runtime_two.shutdown().await;
+    relay.shutdown();
+}
+
+#[tokio::test]
+async fn agent_get_skills_reflects_connected_instance_skill_registry_refresh() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    let skill_home = runtime.sdk_skill_home().await;
+    write_user_skill(
+        &skill_home,
+        "initial-helper",
+        "Initially visible helper",
+        "INITIAL-BODY",
+    );
+    runtime.start().await.expect("start runtime");
+
+    let relay = RelayServer::start().await;
+    runtime
+        .connect_smcp_socketio(
+            relay.url(),
+            Some(json!({ "token": TEST_RELAY_TOKEN })),
+            HashMap::new(),
+            Some("smcp".to_string()),
+            TEST_OFFICE_ID,
+            "Test Computer",
+        )
+        .await
+        .expect("connect SDK Computer to relay");
+
+    let (agent, skill_update_rx) = agent_client_with_skill_update_listener(relay.url()).await;
+    join_agent(&agent, TEST_OFFICE_ID, TEST_AGENT_NAME).await;
+
+    let initial = wait_for_agent_skill(&agent, "Test Computer", "initial-helper", "initial").await;
+    assert!(
+        !skill_names(&initial).contains(&"runtime-added-helper"),
+        "runtime-added-helper should not be visible before refresh: {initial}"
+    );
+
+    write_user_skill(
+        &skill_home,
+        "runtime-added-helper",
+        "Visible after connected registry refresh",
+        "RUNTIME-ADDED-BODY",
+    );
+    runtime.mark_sdk_skills_dirty().await;
+    wait_for_skill_update_notification(skill_update_rx, "Test Computer").await;
+
+    let refreshed =
+        wait_for_agent_skill(&agent, "Test Computer", "runtime-added-helper", "refreshed").await;
+    let added = refreshed["skills"]
+        .as_array()
+        .and_then(|skills| {
+            skills
+                .iter()
+                .find(|skill| skill["name"] == json!("runtime-added-helper"))
+        })
+        .unwrap_or_else(|| panic!("runtime-added-helper missing after refresh: {refreshed}"));
+    assert_eq!(added["source"], json!("user"));
+    assert_eq!(
+        added["description"],
+        json!("Visible after connected registry refresh")
+    );
+
+    let skill = emit_agent_call(
+        &agent,
+        events::CLIENT_GET_SKILL,
+        json!(GetSkillReq {
+            base: AgentCallData {
+                agent: TEST_AGENT_NAME.to_string(),
+                req_id: ReqId("runtime-added-skill".to_string()),
+            },
+            computer: "Test Computer".to_string(),
+            name: "runtime-added-helper".to_string(),
+            rel_path: None,
+        }),
+    )
+    .await;
+    assert!(
+        skill.get("code").is_none(),
+        "client:get_skill returned protocol error: {skill}"
+    );
+    let body = skill["body"].as_str().unwrap_or_default();
+    assert!(body.contains("RUNTIME-ADDED-BODY"), "body was: {body}");
+
+    agent.disconnect().await.unwrap();
+    runtime.clear_smcp_connection().await.unwrap();
+    runtime.shutdown().await;
+    relay.shutdown();
 }
 
 #[tokio::test]

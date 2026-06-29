@@ -6394,6 +6394,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "smcp-server-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8c56195379a1b7f62f1be6c3bd222d942d06bce9c01feb2cb4c11162137349"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "futures-util",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "smcp",
+ "socketioxide",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "snafu"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7298,6 +7318,7 @@ dependencies = [
  "criterion",
  "dirs",
  "filetime",
+ "futures-util",
  "hex",
  "http-body-util",
  "hyper 1.8.1",
@@ -7311,6 +7332,7 @@ dependencies = [
  "sha2",
  "smcp",
  "smcp-computer",
+ "smcp-server-core",
  "socketioxide",
  "tauri",
  "tauri-build",
@@ -7320,6 +7342,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tempfile",
+ "tf-rust-socketio",
  "thiserror 2.0.18",
  "tokio",
  "tower",

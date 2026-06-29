@@ -66,10 +66,13 @@ hex = "0.4"
 tempfile = "3"
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
+futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
+smcp-server-core = "0.2.3"
 socketioxide = { version = "0.16.3", features = ["state"] }
+tf-rust-socketio = "0.8.1"
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
