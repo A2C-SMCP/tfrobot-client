@@ -113,6 +113,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -213,6 +214,11 @@ pub fn run() {
             commands::marketplace::disable_plugin,
             commands::marketplace::uninstall_plugin,
             commands::marketplace::reconcile_governance,
+            // Skills inventory and content
+            commands::skills::list_skills,
+            commands::skills::get_skill,
+            commands::skills::refresh_skills,
+            commands::skills::open_local_skills_root,
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,

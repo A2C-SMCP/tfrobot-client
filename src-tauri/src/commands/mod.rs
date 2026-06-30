@@ -11,3 +11,4 @@ pub mod marketplace;
 pub mod mcp;
 pub mod runtime_sync;
 pub mod settings;
+pub mod skills;
