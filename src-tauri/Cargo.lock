@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "a2c-smcp"
+version = "0.2.4-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?tag=v0.2.4-dev.0#ff843c93e7899998e6ff5701562713d1fd9d50ab"
+dependencies = [
+ "serde",
+ "serde_json",
+ "smcp 0.2.4-dev.0",
+ "smcp-computer",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6334,13 +6348,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "smcp"
+version = "0.2.4-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?tag=v0.2.4-dev.0#ff843c93e7899998e6ff5701562713d1fd9d50ab"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "smcp-client-transport"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "887b84ceff4eb69f69e6c61349fa451165643ecd3f73af1c57a359fbc53969b1"
+version = "0.2.4-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?tag=v0.2.4-dev.0#ff843c93e7899998e6ff5701562713d1fd9d50ab"
 dependencies = [
  "serde_json",
- "smcp",
+ "smcp 0.2.4-dev.0",
  "tf-rust-engineio",
  "tf-rust-socketio",
  "tracing",
@@ -6348,9 +6376,8 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e56c9f6810133a7f4658838402068a37f9b19f6a94e71d170405333156692e96"
+version = "0.2.4-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?tag=v0.2.4-dev.0#ff843c93e7899998e6ff5701562713d1fd9d50ab"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -6378,7 +6405,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "smcp",
+ "smcp 0.2.4-dev.0",
  "smcp-client-transport",
  "tar",
  "tf-rust-socketio",
@@ -6405,7 +6432,7 @@ dependencies = [
  "http 1.4.0",
  "serde",
  "serde_json",
- "smcp",
+ "smcp 0.2.3",
  "socketioxide",
  "thiserror 2.0.18",
  "tokio",
@@ -7334,6 +7361,7 @@ dependencies = [
 name = "tfrobot-client"
 version = "0.1.3"
 dependencies = [
+ "a2c-smcp",
  "anyhow",
  "async-trait",
  "chrono",
@@ -7352,8 +7380,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smcp",
- "smcp-computer",
  "smcp-server-core",
  "socketioxide",
  "tauri",

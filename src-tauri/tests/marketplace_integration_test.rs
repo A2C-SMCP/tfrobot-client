@@ -1,23 +1,29 @@
 //! Integration tests for the Skills Marketplace governance boundary.
 //!
-//! The current smcp-computer version does not expose Computer-level
-//! marketplace/plugin lifecycle APIs. tfrobot-client must fail clearly instead
-//! of creating its own SDK governance ledger.
+//! tfrobot-client drives marketplace/plugin lifecycle through SDK Computer-level
+//! APIs and does not create its own governance ledger.
 
 mod common;
 
-use common::create_test_app_state;
-use tfrobot_client_lib::commands::marketplace::{
-    add_marketplace_core, disable_plugin_core, enable_plugin_core,
-    get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
-    reconcile_governance_core, refresh_marketplace_core, remove_marketplace_core,
-    uninstall_plugin_core,
-    AddMarketplaceRequest, PluginLifecycleRequest,
+use common::{create_test_app_state, echo_server_config, echo_server_path};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use tfrobot_client_lib::commands::{
+    computer::start_computer_instance_core,
+    marketplace::{
+        add_marketplace_core, disable_plugin_core, enable_plugin_core,
+        get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
+        refresh_marketplace_core, remove_marketplace_core, uninstall_plugin_core,
+        AddMarketplaceRequest, PluginLifecycleRequest,
+    },
+    mcp,
 };
-use tfrobot_client_lib::services::computer::ComputerInstance;
+use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
 use tfrobot_client_lib::AppState;
 
 const TEST_INSTANCE_ID: &str = "computer-a";
+const TEST_SECOND_INSTANCE_ID: &str = "computer-b";
 
 async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
@@ -38,7 +44,7 @@ async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
 }
 
 #[tokio::test]
-async fn capabilities_report_sdk_governance_lifecycle_unavailable() {
+async fn capabilities_report_sdk_governance_lifecycle_available() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
 
@@ -46,12 +52,20 @@ async fn capabilities_report_sdk_governance_lifecycle_unavailable() {
         .await
         .unwrap();
 
-    assert!(!capabilities.computer_lifecycle_api_available);
-    assert!(capabilities.supported_operations.is_empty());
+    assert!(capabilities.computer_lifecycle_api_available);
+    assert!(capabilities
+        .supported_operations
+        .contains(&"install_plugin".to_string()));
     assert!(capabilities
         .required_sdk_apis
         .contains(&"Computer::install_plugin".to_string()));
-    assert!(capabilities.reason.contains("will not emulate"));
+    assert!(!capabilities
+        .supported_operations
+        .contains(&"reconcile_governance".to_string()));
+    assert!(!capabilities
+        .required_sdk_apis
+        .contains(&"Computer::reconcile_governance".to_string()));
+    assert!(capabilities.reason.contains("available"));
 }
 
 #[tokio::test]
@@ -63,14 +77,14 @@ async fn governance_report_has_stable_empty_sdk_owned_ledger_shape() {
         .await
         .unwrap();
 
-    assert!(!governance.capabilities.computer_lifecycle_api_available);
+    assert!(governance.capabilities.computer_lifecycle_api_available);
     assert!(governance.marketplaces.is_empty());
     assert!(governance.plugins.is_empty());
-    assert!(governance.capabilities.reason.contains("will not emulate"));
+    assert!(governance.capabilities.reason.contains("available"));
 }
 
 #[tokio::test]
-async fn marketplace_lifecycle_commands_fail_without_creating_client_ledgers() {
+async fn marketplace_lifecycle_commands_use_sdk_errors_without_client_ledgers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
 
@@ -79,28 +93,28 @@ async fn marketplace_lifecycle_commands_fail_without_creating_client_ledgers() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "tf-market".to_string(),
-            git_url: "https://example.invalid/market.git".to_string(),
+            git_url: "not a git url".to_string(),
         },
     )
     .await
     .unwrap_err();
-    assert!(error.contains("does not expose Computer-level"));
+    assert!(error.contains("not a well-formed git url"));
 
     let error = refresh_marketplace_core(&state, TEST_INSTANCE_ID, "tf-market")
         .await
         .unwrap_err();
-    assert!(error.contains("does not expose Computer-level"));
+    assert!(error.contains("unknown marketplace"));
 
     let error = remove_marketplace_core(&state, TEST_INSTANCE_ID, "tf-market")
         .await
         .unwrap_err();
-    assert!(error.contains("does not expose Computer-level"));
+    assert!(error.contains("unknown marketplace"));
 
     assert_no_client_governance_ledgers(&state);
 }
 
 #[tokio::test]
-async fn plugin_lifecycle_commands_fail_without_creating_client_ledgers() {
+async fn plugin_lifecycle_commands_use_sdk_errors_without_client_ledgers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let request = PluginLifecycleRequest {
@@ -108,37 +122,363 @@ async fn plugin_lifecycle_commands_fail_without_creating_client_ledgers() {
         plugin: "desktop-tools".to_string(),
     };
 
-    for error in [
-        install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
-            .await
-            .unwrap_err(),
-        enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
-            .await
-            .unwrap_err(),
-        disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
-            .await
-            .unwrap_err(),
-        uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
-            .await
-            .unwrap_err(),
-    ] {
-        assert!(error.contains("will not emulate"));
-    }
+    let install_error = install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap_err();
+    assert!(install_error.contains("not added"));
+
+    let enable_error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap_err();
+    assert!(enable_error.contains("not installed") || enable_error.contains("not found"));
+
+    // SDK disable/uninstall are intentionally idempotent around absent runtime materialization.
+    let _ = disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone()).await;
+    uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
 
     assert_no_client_governance_ledgers(&state);
 }
 
 #[tokio::test]
-async fn reconcile_governance_fails_without_creating_client_ledgers() {
+async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
 
-    let error = reconcile_governance_core(&state, TEST_INSTANCE_ID)
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert_eq!(governance.marketplaces[0].name, "acme");
+    assert_eq!(governance.plugins.len(), 1);
+    assert_eq!(
+        governance.plugins[0].plugin_id.as_deref(),
+        Some("audit@acme")
+    );
+    assert!(governance.plugins[0].enabled);
+    assert_eq!(governance.plugins[0].status, "enabled");
+    assert_eq!(
+        governance.plugins[0].bundled_mcp_servers,
+        vec!["audit-mcp".to_string()]
+    );
+    assert!(governance.plugins[0]
+        .bundled_skills
+        .contains(&"audit:code-review".to_string()));
+
+    let managed = state
+        .config
+        .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert!(managed.iter().all(|server| server.name() != "audit-mcp"));
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit_server = servers
+        .iter()
+        .find(|server| server.name == "audit-mcp")
+        .expect("plugin MCP server should be visible to frontend");
+    assert!(matches!(
+        audit_server.managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+
+    let injected = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert!(injected
+        .iter()
+        .any(|input| input.id() == "audit@acme/api_token"));
+
+    let remove_error = remove_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
         .await
         .unwrap_err();
-    assert!(error.contains("does not expose Computer-level"));
+    assert!(remove_error.contains("uninstall plugins before removing"));
 
-    assert_no_client_governance_ledgers(&state);
+    uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let managed = state
+        .config
+        .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert!(managed.iter().all(|server| server.name() != "audit-mcp"));
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers.iter().all(|server| server.name != "audit-mcp"));
+
+    remove_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance.marketplaces.is_empty());
+    assert!(governance.plugins.is_empty());
+}
+
+#[tokio::test]
+async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let add_error =
+        mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
+            .await
+            .unwrap_err();
+    assert!(add_error.contains("Marketplace plugin"));
+
+    disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
+        .await
+        .unwrap();
+
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit_rows: Vec<_> = servers
+        .iter()
+        .filter(|server| server.name == "audit-mcp")
+        .collect();
+    assert_eq!(audit_rows.len(), 1);
+    assert!(matches!(audit_rows[0].managed_by, McpServerManagedBy::User));
+
+    uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let managed = state
+        .config
+        .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert!(managed.iter().any(|server| server.name() == "audit-mcp"));
+}
+
+#[tokio::test]
+async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let before_boot = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit_before_boot = before_boot
+        .iter()
+        .find(|server| server.name == "audit-mcp")
+        .expect("plugin MCP server should be visible before boot");
+    assert!(!audit_before_boot.running);
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let audit_after_boot = wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
+        .await
+        .expect("plugin MCP server should remain visible after boot");
+    assert!(
+        !audit_after_boot.running,
+        "enabled plugin MCP server should remain stopped after Computer bootup; status: {}",
+        audit_after_boot.status_message
+    );
+}
+
+async fn wait_for_mcp_server_running(
+    instance_id: &str,
+    state: &AppState,
+    name: &str,
+) -> Option<mcp::McpServerStatus> {
+    for _ in 0..120 {
+        let servers = mcp::get_mcp_servers_core(state, instance_id).await.ok()?;
+        let server = servers.into_iter().find(|server| server.name == name)?;
+        if server.running {
+            return Some(server);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    mcp::get_mcp_servers_core(state, instance_id)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|server| server.name == name)
+}
+
+#[tokio::test]
+async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = remove_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("has installed plugins"));
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert_eq!(governance.plugins.len(), 1);
+}
+
+#[tokio::test]
+async fn plugin_enable_state_is_isolated_per_computer_instance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_SECOND_INSTANCE_ID, "Computer B"))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(TEST_SECOND_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+    let git_url = format!("file://{}", repo.display());
+
+    for instance_id in [TEST_INSTANCE_ID, TEST_SECOND_INSTANCE_ID] {
+        add_marketplace_core(
+            &state,
+            instance_id,
+            AddMarketplaceRequest {
+                name: "acme".to_string(),
+                git_url: git_url.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        install_plugin_core(
+            &state,
+            instance_id,
+            PluginLifecycleRequest {
+                marketplace: "acme".to_string(),
+                plugin: "audit".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    disable_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let first = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let second = get_marketplace_governance_core(&state, TEST_SECOND_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    assert!(!first.plugins[0].enabled);
+    assert_eq!(first.plugins[0].status, "disabled");
+    assert!(second.plugins[0].enabled);
+    assert_eq!(second.plugins[0].status, "enabled");
 }
 
 #[tokio::test]
@@ -158,6 +498,66 @@ async fn lifecycle_commands_validate_instance_before_reporting_capability() {
     .unwrap_err();
 
     assert_eq!(error, "Computer instance not found: missing-instance");
+}
+
+fn build_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"audit","source":"./plugins/audit"}]}"#,
+    )
+    .unwrap();
+    let skill = repo.join("plugins/audit/skills/code-review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: code-review\ndescription: review code\n---\nbody",
+    )
+    .unwrap();
+    let servers = repo.join("plugins/audit/mcp-servers");
+    fs::create_dir_all(&servers).unwrap();
+    let server_path = echo_server_path();
+    fs::write(
+        servers.join("audit-mcp.json"),
+        format!(
+            r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
+            server_path.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        servers.join("inputs.json"),
+        r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
+    )
+    .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn assert_no_client_governance_ledgers(state: &AppState) {

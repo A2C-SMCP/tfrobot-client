@@ -6,11 +6,11 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use a2c_smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use futures_util::FutureExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use serde_json::{json, Value};
-use smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use smcp_server_core::{DefaultAuthenticationProvider, SmcpServerBuilder};
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;

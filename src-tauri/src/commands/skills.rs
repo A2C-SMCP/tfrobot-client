@@ -1,7 +1,7 @@
 use crate::AppState;
+use a2c_smcp::smcp_computer::skills::SkillResourceView;
+use a2c_smcp::A2CSkillRef;
 use serde::{Deserialize, Serialize};
-use smcp::A2CSkillRef;
-use smcp_computer::skills::SkillResourceView;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;

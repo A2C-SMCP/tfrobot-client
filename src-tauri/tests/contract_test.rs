@@ -2,9 +2,9 @@
 //! These verify that tfrobot-client's assumptions about smcp-computer's public API hold.
 //! When smcp-computer upgrades, these tests should fail first, providing clear guidance.
 
-use smcp_computer::mcp_clients::model::*;
-use smcp_computer::mcp_clients::MCPServerConfig;
-use smcp_computer::{
+use a2c_smcp::smcp_computer::mcp_clients::model::*;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::{
     computer::{Computer, Session},
     errors::ComputerResult,
 };
@@ -60,7 +60,7 @@ async fn contract_computer_mcp_api_surface() {
 
 #[test]
 fn contract_version_exists() {
-    let version = smcp_computer::VERSION;
+    let version = a2c_smcp::smcp_computer::VERSION;
     assert!(!version.is_empty());
     assert!(
         version.contains('.'),
@@ -249,7 +249,7 @@ fn contract_mcp_server_input_variants() {
 
 #[test]
 fn contract_computer_error_variants_exist() {
-    use smcp_computer::errors::ComputerError;
+    use a2c_smcp::smcp_computer::errors::ComputerError;
 
     // Verify key variants that tfrobot-client depends on can be constructed.
     // If smcp-computer removes/renames these, this test will fail at compile time.
@@ -274,7 +274,7 @@ fn contract_computer_error_variants_exist() {
 
 #[test]
 fn contract_computer_error_implements_std_error() {
-    use smcp_computer::errors::ComputerError;
+    use a2c_smcp::smcp_computer::errors::ComputerError;
     let e = ComputerError::InvalidConfiguration("test".into());
     // Must implement std::error::Error (Display + Debug)
     let _display = format!("{e}");

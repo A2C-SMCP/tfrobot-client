@@ -1,5 +1,5 @@
+use a2c_smcp::smcp_computer::mcp_clients::model::{make_resource, ResourceContents};
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::model::{make_resource, ResourceContents};
 use tauri::State;
 
 use crate::AppState;

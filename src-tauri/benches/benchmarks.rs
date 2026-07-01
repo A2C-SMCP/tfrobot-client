@@ -1,5 +1,5 @@
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use smcp_computer::mcp_clients::MCPServerConfig;
 use tempfile::tempdir;
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::config::ConfigService;

@@ -3,6 +3,7 @@
 
 mod common;
 
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use common::{
     create_test_app_state, echo_server_config, everything_server_config,
     everything_server_config_with_forbidden_tools, slow_echo_server_config,
@@ -10,7 +11,6 @@ use common::{
 };
 use http_body_util::Full;
 use hyper::body::Bytes;
-use smcp_computer::mcp_clients::MCPServerConfig;
 use socketioxide::extract::{AckSender, SocketRef};
 use socketioxide::SocketIo;
 use std::collections::HashMap;
@@ -1462,7 +1462,7 @@ async fn test_input_commands_sync_runtime_definitions() {
             .expect("runtime input definition should be synced");
         assert!(matches!(
             input,
-            smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
+            a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
                 if prompt.description == "Secret API key"
                     && prompt.default.as_deref() == Some("default-key")
                     && prompt.password == Some(true)

@@ -214,7 +214,6 @@ pub fn run() {
             commands::marketplace::enable_plugin,
             commands::marketplace::disable_plugin,
             commands::marketplace::uninstall_plugin,
-            commands::marketplace::reconcile_governance,
             // Skills inventory and content
             commands::skills::list_skills,
             commands::skills::get_skill,

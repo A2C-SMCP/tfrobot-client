@@ -34,9 +34,9 @@ use std::time::Duration;
 // This feature-gated file validates the historical SDK builder contract for smcp-computer 0.2.2.
 // The manager argument here belongs to that upstream builder API and is not a tfrobot-client
 // runtime MCPServerManager path.
-use smcp_computer::mcp_clients::manager::MCPServerManager;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::socketio_client::{SmcpComputerClient, SmcpComputerClientBuilder};
+use a2c_smcp::smcp_computer::mcp_clients::manager::MCPServerManager;
+use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
+use a2c_smcp::smcp_computer::socketio_client::{SmcpComputerClient, SmcpComputerClientBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;

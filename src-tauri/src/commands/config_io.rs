@@ -1,7 +1,7 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::MCPServerConfig;
 use std::collections::HashMap;
 use tauri::State;
 
@@ -197,7 +197,7 @@ async fn import_claude_desktop(
 }
 
 fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConfig {
-    use smcp_computer::mcp_clients::model::{StdioServerConfig, StdioServerParameters};
+    use a2c_smcp::smcp_computer::mcp_clients::model::{StdioServerConfig, StdioServerParameters};
 
     MCPServerConfig::Stdio(StdioServerConfig {
         name: name.to_string(),

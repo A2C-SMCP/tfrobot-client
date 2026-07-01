@@ -1,8 +1,8 @@
 use crate::commands::inputs::InputDefinition;
 use crate::services::computer::{ComputerInstance, ComputerInstancesConfig, ManagedMcpServer};
 use crate::services::connection_targets::{ConnectionTargetsConfig, ManualSmcpTarget};
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use sha2::{Digest, Sha256};
-use smcp_computer::mcp_clients::MCPServerConfig;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

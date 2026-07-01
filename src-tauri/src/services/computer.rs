@@ -1,18 +1,24 @@
 use crate::commands::connection::ConnectionState;
 use crate::commands::inputs::InputDefinition;
 use crate::services::config::instance_storage_dir_name;
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use smcp::A2CSkillRef;
-use smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
-use smcp_computer::errors::{ComputerError, ComputerResult};
-use smcp_computer::inputs::run_command;
-use smcp_computer::mcp_clients::model::{
+use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
+use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
+use a2c_smcp::smcp_computer::inputs::run_command;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
     CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
     ReadResourceResult, Resource, Tool,
 };
-use smcp_computer::mcp_clients::MCPServerConfig;
-use smcp_computer::skills::{SkillResourceView, SkillSandboxError};
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::settings::{
+    AddMarketplaceParams, DisableOptions, EnableOptions, InstallOptions, MarketplaceRefreshRow,
+    MarketplaceRemoveOutcome, McpInstallHooks, PluginInstallError, RemoveMarketplaceParams,
+    UninstallOptions,
+};
+use a2c_smcp::smcp_computer::settings::{GovernanceError, MarketplaceAddOutcome};
+use a2c_smcp::smcp_computer::skills::{SkillResourceView, SkillSandboxError};
+use a2c_smcp::A2CSkillRef;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -263,6 +269,7 @@ pub struct ComputerInstanceRuntime {
     skill_home_base: PathBuf,
     sdk_auto_connect: Arc<RwLock<bool>>,
     sdk_server_names: Arc<RwLock<HashSet<String>>>,
+    plugin_mcp_server_owners: Arc<RwLock<HashMap<String, McpServerManagedBy>>>,
     pub connection: Arc<RwLock<Option<ConnectionState>>>,
     state: Arc<RwLock<ComputerRuntimeState>>,
     lifecycle_lock: Arc<Mutex<()>>,
@@ -287,6 +294,7 @@ impl ComputerInstanceRuntime {
             skill_home_base,
             sdk_auto_connect: Arc::new(RwLock::new(auto_connect)),
             sdk_server_names: Arc::new(RwLock::new(sdk_server_names)),
+            plugin_mcp_server_owners: Arc::new(RwLock::new(HashMap::new())),
             connection: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(ComputerRuntimeState::Created)),
             lifecycle_lock: Arc::new(Mutex::new(())),
@@ -304,6 +312,7 @@ impl ComputerInstanceRuntime {
             skill_home_base: self.skill_home_base.clone(),
             sdk_auto_connect: self.sdk_auto_connect.clone(),
             sdk_server_names: self.sdk_server_names.clone(),
+            plugin_mcp_server_owners: self.plugin_mcp_server_owners.clone(),
             connection: self.connection.clone(),
             state: self.state.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
@@ -373,7 +382,7 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         let was_running = *self.running.read().await;
 
-        let current_server_configs = self.sdk_mcp_server_config_map().await;
+        let current_server_configs = self.sdk_user_mcp_server_config_map().await;
         let desired_server_configs = managed_mcp_servers_to_map(&self.instance.mcp_servers);
         let mcp_servers_changed = current_server_configs != desired_server_configs;
 
@@ -423,6 +432,27 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    pub async fn add_or_update_plugin_server(
+        &self,
+        server: MCPServerConfig,
+        managed_by: McpServerManagedBy,
+    ) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let name = server.name().to_string();
+        self.computer
+            .read()
+            .await
+            .add_or_update_server(server)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.plugin_mcp_server_owners
+            .write()
+            .await
+            .insert(name.clone(), managed_by);
+        self.sdk_server_names.write().await.insert(name);
+        Ok(())
+    }
+
     pub async fn remove_server(&self, name: &str) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.computer
@@ -435,9 +465,40 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    pub async fn remove_plugin_server(&self, name: &str) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let owned = self.plugin_mcp_server_owners.write().await.remove(name);
+        if owned.is_none() {
+            return Ok(());
+        }
+        if let Err(error) = self.computer.read().await.remove_server(name).await {
+            if let Some(owner) = owned {
+                self.plugin_mcp_server_owners
+                    .write()
+                    .await
+                    .insert(name.to_string(), owner);
+            }
+            return Err(error.to_string());
+        }
+        self.sdk_server_names.write().await.remove(name);
+        Ok(())
+    }
+
     pub async fn mcp_server_statuses(&self) -> Vec<(String, bool, String)> {
         let _guard = self.lifecycle_lock.lock().await;
         self.computer.read().await.get_server_status().await
+    }
+
+    pub async fn plugin_mcp_server_owners(&self) -> HashMap<String, McpServerManagedBy> {
+        self.plugin_mcp_server_owners.read().await.clone()
+    }
+
+    pub async fn plugin_mcp_server_owner(&self, name: &str) -> Option<McpServerManagedBy> {
+        self.plugin_mcp_server_owners
+            .read()
+            .await
+            .get(name)
+            .cloned()
     }
 
     pub async fn start_mcp_server(&self, name: &str) -> Result<(), String> {
@@ -667,6 +728,18 @@ impl ComputerInstanceRuntime {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn add_or_update_input(&self, input: MCPServerInput) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let input_id = input.id().to_string();
+        self.inputs.write().await.insert(input_id, input.clone());
+        self.computer
+            .read()
+            .await
+            .add_or_update_input(input)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn synced_sdk_server_names(&self) -> HashSet<String> {
         self.sdk_server_names.read().await.clone()
     }
@@ -675,8 +748,20 @@ impl ComputerInstanceRuntime {
         self.sdk_mcp_server_config_map().await.into_keys().collect()
     }
 
+    pub async fn sdk_mcp_server_configs(&self) -> HashMap<String, MCPServerConfig> {
+        self.sdk_mcp_server_config_map().await
+    }
+
     pub async fn sdk_skill_home(&self) -> PathBuf {
         self.computer.read().await.skill_home()
+    }
+
+    pub async fn sdk_registered_workdirs(&self) -> Vec<PathBuf> {
+        self.computer.read().await.registered_workdirs()
+    }
+
+    pub async fn sdk_active_workdir(&self) -> Option<PathBuf> {
+        self.computer.read().await.active_workdir()
     }
 
     pub async fn sdk_skills(&self) -> Vec<A2CSkillRef> {
@@ -700,6 +785,86 @@ impl ComputerInstanceRuntime {
 
     pub async fn mark_sdk_skills_dirty(&self) {
         self.computer.read().await.mark_skills_dirty();
+    }
+
+    pub async fn sdk_add_marketplace(
+        &self,
+        git_url: &str,
+        params: AddMarketplaceParams<'_>,
+    ) -> Result<MarketplaceAddOutcome, GovernanceError> {
+        self.computer
+            .read()
+            .await
+            .add_marketplace(git_url, params)
+            .await
+    }
+
+    pub async fn sdk_refresh_marketplace(&self, target: &str) -> Vec<MarketplaceRefreshRow> {
+        self.computer.read().await.refresh_marketplace(target).await
+    }
+
+    pub async fn sdk_remove_marketplace(
+        &self,
+        name: &str,
+        params: RemoveMarketplaceParams<'_>,
+    ) -> Result<MarketplaceRemoveOutcome, GovernanceError> {
+        self.computer
+            .read()
+            .await
+            .remove_marketplace(name, params)
+            .await
+    }
+
+    pub async fn sdk_install_plugin(
+        &self,
+        plugin_id: &str,
+        options: InstallOptions<'_>,
+        hooks: Option<&dyn McpInstallHooks>,
+    ) -> Result<a2c_smcp::smcp_computer::settings::InstalledPluginRecord, PluginInstallError> {
+        self.computer
+            .read()
+            .await
+            .install_plugin(plugin_id, options, hooks)
+            .await
+    }
+
+    pub async fn sdk_enable_plugin(
+        &self,
+        plugin_id: &str,
+        options: EnableOptions<'_>,
+        hooks: Option<&dyn McpInstallHooks>,
+    ) -> Result<(), PluginInstallError> {
+        self.computer
+            .read()
+            .await
+            .enable_plugin(plugin_id, options, hooks)
+            .await
+    }
+
+    pub async fn sdk_disable_plugin(
+        &self,
+        plugin_id: &str,
+        options: DisableOptions<'_>,
+        hooks: Option<&dyn McpInstallHooks>,
+    ) -> Result<(), PluginInstallError> {
+        self.computer
+            .read()
+            .await
+            .disable_plugin(plugin_id, options, hooks)
+            .await
+    }
+
+    pub async fn sdk_uninstall_plugin(
+        &self,
+        plugin_id: &str,
+        options: UninstallOptions<'_>,
+        hooks: Option<&dyn McpInstallHooks>,
+    ) -> Result<bool, PluginInstallError> {
+        self.computer
+            .read()
+            .await
+            .uninstall_plugin(plugin_id, options, hooks)
+            .await
     }
 
     pub async fn sdk_is_mcp_manager_initialized(&self) -> bool {
@@ -728,7 +893,7 @@ impl ComputerInstanceRuntime {
     #[doc(hidden)]
     pub async fn clone_sdk_socketio_client_for_test(
         &self,
-    ) -> Option<Arc<smcp_computer::socketio_client::SmcpComputerClient>> {
+    ) -> Option<Arc<a2c_smcp::smcp_computer::socketio_client::SmcpComputerClient>> {
         let socketio_ref = self.computer.read().await.get_socketio_client();
         let client = socketio_ref.read().await.clone();
         client
@@ -891,6 +1056,21 @@ impl ComputerInstanceRuntime {
             .await
             .iter()
             .map(|server| (server.name().to_string(), server.clone()))
+            .collect()
+    }
+
+    async fn sdk_user_mcp_server_config_map(&self) -> HashMap<String, MCPServerConfig> {
+        let plugin_names: HashSet<String> = self
+            .plugin_mcp_server_owners
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        self.sdk_mcp_server_config_map()
+            .await
+            .into_iter()
+            .filter(|(name, _)| !plugin_names.contains(name))
             .collect()
     }
 

@@ -1,7 +1,9 @@
 use crate::services::logger::{LogEntry, LogFilter};
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    CallToolResult, Content, RawContent, Resource, Tool,
+};
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::model::{CallToolResult, Content, RawContent, Resource, Tool};
 use tauri::State;
 
 const MAX_ERROR_SUMMARY_CHARS: usize = 500;
@@ -546,7 +548,7 @@ mod tests {
 
     #[test]
     fn maps_mcp_resource_to_debug_resource_info() {
-        let resource = smcp_computer::mcp_clients::model::make_resource(
+        let resource = a2c_smcp::smcp_computer::mcp_clients::model::make_resource(
             "file://readme",
             "README.md",
             Some("Project readme".to_string()),
