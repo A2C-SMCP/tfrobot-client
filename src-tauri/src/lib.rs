@@ -206,6 +206,7 @@ pub fn run() {
             commands::mcp::stop_all_servers,
             // Skills marketplace governance
             commands::marketplace::get_marketplace_capabilities,
+            commands::marketplace::get_marketplace_governance,
             commands::marketplace::add_marketplace,
             commands::marketplace::refresh_marketplace,
             commands::marketplace::remove_marketplace,
@@ -248,6 +249,7 @@ pub fn run() {
             commands::computer::start_computer_instance,
             commands::computer::stop_computer_instance,
             commands::computer::update_computer_connection_policy,
+            commands::computer::update_computer_skill_home,
             commands::computer::connect_computer_connection_target,
             commands::computer::disconnect_computer_connection_target,
             // Config import/export

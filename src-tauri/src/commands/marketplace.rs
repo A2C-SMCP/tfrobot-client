@@ -26,6 +26,37 @@ pub struct MarketplaceCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct MarketplaceSummary {
+    pub name: String,
+    pub git_url: Option<String>,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSummary {
+    pub marketplace: String,
+    pub plugin: String,
+    pub plugin_id: Option<String>,
+    pub version: Option<String>,
+    pub enabled: bool,
+    pub status: String,
+    pub bundled_mcp_servers: Vec<String>,
+    pub bundled_skills: Vec<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceGovernance {
+    pub capabilities: MarketplaceCapabilities,
+    pub marketplaces: Vec<MarketplaceSummary>,
+    pub plugins: Vec<PluginSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AddMarketplaceRequest {
     pub name: String,
     pub git_url: String,
@@ -52,6 +83,22 @@ pub async fn get_marketplace_capabilities_core(
 ) -> Result<MarketplaceCapabilities, String> {
     ensure_runtime(state, instance_id).await?;
     Ok(unsupported_capabilities())
+}
+
+#[tauri::command]
+pub async fn get_marketplace_governance(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<MarketplaceGovernance, String> {
+    get_marketplace_governance_core(&state, &instance_id).await
+}
+
+pub async fn get_marketplace_governance_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<MarketplaceGovernance, String> {
+    ensure_runtime(state, instance_id).await?;
+    Ok(unsupported_governance())
 }
 
 #[tauri::command]
@@ -234,6 +281,14 @@ fn unsupported_capabilities() -> MarketplaceCapabilities {
             .map(|api| (*api).to_string())
             .collect(),
         reason: SDK_GOVERNANCE_UNSUPPORTED.to_string(),
+    }
+}
+
+fn unsupported_governance() -> MarketplaceGovernance {
+    MarketplaceGovernance {
+        capabilities: unsupported_capabilities(),
+        marketplaces: Vec::new(),
+        plugins: Vec::new(),
     }
 }
 

@@ -9,7 +9,7 @@ use crate::services::computer::{
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +17,8 @@ pub struct ComputerInstanceStatus {
     pub id: ComputerInstanceId,
     pub name: String,
     pub description: Option<String>,
+    pub local_skills_root: Option<PathBuf>,
+    pub effective_skill_home: PathBuf,
     pub running: bool,
     pub connected: bool,
     pub mcp_server_count: usize,
@@ -66,6 +68,13 @@ pub struct UpdateComputerConnectionPolicyRequest {
     pub id: ComputerInstanceId,
     pub target: Option<ComputerConnectionTarget>,
     pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateComputerSkillHomeRequest {
+    pub id: ComputerInstanceId,
+    pub local_skills_root: Option<String>,
 }
 
 #[tauri::command]
@@ -416,6 +425,35 @@ pub async fn update_computer_connection_policy_core(
 }
 
 #[tauri::command]
+pub async fn update_computer_skill_home(
+    state: State<'_, AppState>,
+    request: UpdateComputerSkillHomeRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    update_computer_skill_home_core(&state, request).await
+}
+
+pub async fn update_computer_skill_home_core(
+    state: &AppState,
+    request: UpdateComputerSkillHomeRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    let previous = state
+        .config
+        .get_computer_instance(&request.id)
+        .map_err(|error| error.to_string())?;
+    let root = normalize_optional_text(request.local_skills_root).map(PathBuf::from);
+
+    let updated = state
+        .config
+        .update_computer_instance(&request.id, |instance| {
+            instance.local_skills_root = root;
+        })
+        .map_err(|error| error.to_string())?;
+    let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
+
+    Ok(status_from_instance(&updated, &runtime).await)
+}
+
+#[tauri::command]
 pub async fn connect_computer_connection_target(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -525,6 +563,8 @@ async fn status_from_instance(
         id: instance.id.clone(),
         name: instance.name.clone(),
         description: instance.description.clone(),
+        local_skills_root: instance.local_skills_root.clone(),
+        effective_skill_home: runtime.sdk_skill_home().await,
         running: runtime.is_running().await,
         connected: runtime.is_connected().await,
         mcp_server_count: instance.mcp_servers.len(),
@@ -718,4 +758,59 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::config::ConfigService;
+    use crate::services::logger::LogService;
+    use crate::services::settings::SettingsService;
+    use tempfile::TempDir;
+
+    fn test_state() -> (AppState, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
+            .unwrap();
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+        (AppState::new(config, log_service, settings_service), dir)
+    }
+
+    #[tokio::test]
+    async fn update_computer_skill_home_updates_runtime_and_can_restore_default() {
+        let (state, dir) = test_state();
+        let custom_root = dir.path().join("custom-skill-home");
+
+        let updated = update_computer_skill_home_core(
+            &state,
+            UpdateComputerSkillHomeRequest {
+                id: "computer-a".to_string(),
+                local_skills_root: Some(custom_root.to_string_lossy().to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.local_skills_root, Some(custom_root.clone()));
+        assert_eq!(updated.effective_skill_home, custom_root);
+
+        let restored = update_computer_skill_home_core(
+            &state,
+            UpdateComputerSkillHomeRequest {
+                id: "computer-a".to_string(),
+                local_skills_root: Some("   ".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(restored.local_skills_root, None);
+        assert_eq!(
+            restored.effective_skill_home,
+            state.config.default_local_skills_root("computer-a")
+        );
+    }
 }

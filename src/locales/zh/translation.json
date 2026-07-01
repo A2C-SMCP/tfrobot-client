@@ -65,7 +65,14 @@
       "autoConnectRequiresTarget": "启用自动连接前需要先选择连接目标。",
       "lifecycleTitle": "生命周期",
       "startBehavior": "启动这个 Computer 只会初始化当前实例的 MCP 服务器和连接策略。",
-      "globalRuntimeHint": "Node.js、Python、uv、pnpm 和 PATH 仍属于系统设置中的应用级配置。"
+      "globalRuntimeHint": "Node.js、Python、uv、pnpm 和 PATH 仍属于系统设置中的应用级配置。",
+      "skillHomeTitle": "Skill Home",
+      "effectiveSkillHome": "当前生效 Skill Home",
+      "localSkillsRoot": "实例 Skill Home",
+      "defaultSkillHome": "默认实例 skill_home/",
+      "chooseSkillHome": "选择 Skill Home",
+      "resetSkillHome": "使用默认值",
+      "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。"
     },
     "connectionActions": {
       "targetTitle": "连接目标",
@@ -102,6 +109,62 @@
       "deleted": "Computer 已删除",
       "started": "Computer 已启动",
       "stopped": "Computer 已停止"
+    }
+  },
+  "skills": {
+    "title": "Skills",
+    "empty": "暂无 active skills",
+    "emptySelection": "选择一个 skill 预览 SKILL.md",
+    "openLocalRoot": "打开本地目录",
+    "openMcpSource": "打开 MCP 服务器 {{server}}",
+    "resourceUnavailable": "SKILL.md 不可用",
+    "missingSkillMd": "所选 skill 未返回 SKILL.md 资源。",
+    "emptySkillMd": "SKILL.md 没有可预览内容",
+    "emptySkillMdDescription": "资源以文本返回，但正文为空。",
+    "nonTextSkillMd": "资源未以内联文本返回。",
+    "messages": {
+      "refreshed": "Skills 已刷新"
+    }
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "supported": "SDK marketplace 生命周期能力可用",
+    "unsupported": "SDK marketplace 生命周期能力不可用",
+    "scope": "安装范围",
+    "requiredApis": "所需 SDK API",
+    "marketplacesTitle": "Marketplaces",
+    "pluginsTitle": "Plugins",
+    "emptyMarketplaces": "SDK 未返回 Marketplaces",
+    "emptyPlugins": "SDK 未返回 Plugins",
+    "sdkOwnedState": "状态由 SDK governance API 管理。",
+    "bundledSkills": "内置 Skills：{{skills}}",
+    "bundledMcpServers": "内置 MCP servers：{{servers}}",
+    "form": {
+      "name": "名称",
+      "nameRequired": "请输入 Marketplace 名称",
+      "gitUrl": "Git URL",
+      "gitUrlRequired": "请输入 Git URL",
+      "marketplace": "Marketplace",
+      "marketplaceRequired": "请输入 Marketplace",
+      "plugin": "Plugin",
+      "pluginRequired": "请输入 Plugin"
+    },
+    "actions": {
+      "refreshMarketplace": "刷新 Marketplace",
+      "removeMarketplace": "删除 Marketplace",
+      "installPlugin": "安装 Plugin",
+      "enablePlugin": "启用 Plugin",
+      "disablePlugin": "禁用 Plugin",
+      "uninstallPlugin": "卸载 Plugin"
+    },
+    "messages": {
+      "added": "Marketplace 已添加",
+      "refreshed": "Marketplace 已刷新",
+      "removed": "Marketplace 已删除",
+      "install": "Plugin 已安装",
+      "enable": "Plugin 已启用",
+      "disable": "Plugin 已禁用",
+      "uninstall": "Plugin 已卸载"
     }
   },
   "dashboard": {

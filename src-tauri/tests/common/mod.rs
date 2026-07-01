@@ -22,11 +22,13 @@ pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
 }
 
 /// Path to the echo MCP server index.js
+#[allow(dead_code)]
 pub fn echo_server_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index.js")
 }
 
 /// Build an MCPServerConfig for the echo server
+#[allow(dead_code)]
 pub fn echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
     let server_path = echo_server_path();
     serde_json::from_value(serde_json::json!({
@@ -42,6 +44,7 @@ pub fn echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerCo
 }
 
 /// Path to the stderr-flood echo MCP server (Issue #19 regression)
+#[allow(dead_code)]
 pub fn stderr_flood_server_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-stderr-flood.js")
 }
@@ -49,6 +52,7 @@ pub fn stderr_flood_server_path() -> PathBuf {
 /// Build an MCPServerConfig for the stderr-flood echo server.
 /// This server writes >64 KB to stderr on startup and on each tool call,
 /// reproducing the pipe-buffer deadlock from Issue #19.
+#[allow(dead_code)]
 pub fn stderr_flood_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
     let server_path = stderr_flood_server_path();
     serde_json::from_value(serde_json::json!({
@@ -64,11 +68,13 @@ pub fn stderr_flood_server_config(name: &str) -> smcp_computer::mcp_clients::MCP
 }
 
 /// Path to the slow echo MCP server used for timeout assertions.
+#[allow(dead_code)]
 pub fn slow_echo_server_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-slow.js")
 }
 
 /// Build an MCPServerConfig for the slow echo server.
+#[allow(dead_code)]
 pub fn slow_echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
     let server_path = slow_echo_server_path();
     serde_json::from_value(serde_json::json!({
@@ -84,11 +90,13 @@ pub fn slow_echo_server_config(name: &str) -> smcp_computer::mcp_clients::MCPSer
 }
 
 /// Build an MCPServerConfig for the official server-everything package.
+#[allow(dead_code)]
 pub fn everything_server_config(name: &str) -> smcp_computer::mcp_clients::MCPServerConfig {
     everything_server_config_with_forbidden_tools(name, &[])
 }
 
 /// Build an MCPServerConfig for server-everything with metadata changes.
+#[allow(dead_code)]
 pub fn everything_server_config_with_forbidden_tools(
     name: &str,
     forbidden_tools: &[&str],

@@ -1,4 +1,4 @@
-export const COMPUTER_DETAIL_TABS = ['overview', 'mcp', 'inputs', 'connection', 'resources', 'debug', 'logs', 'runtime'] as const;
+export const COMPUTER_DETAIL_TABS = ['overview', 'mcp', 'skills', 'marketplace', 'inputs', 'connection', 'resources', 'debug', 'logs', 'runtime'] as const;
 
 export type ComputerDetailTab = (typeof COMPUTER_DETAIL_TABS)[number];
 

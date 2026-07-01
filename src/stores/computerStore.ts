@@ -37,6 +37,8 @@ export interface ComputerInstanceStatus {
   id: string;
   name: string;
   description?: string;
+  local_skills_root?: string | null;
+  effective_skill_home?: string;
   running: boolean;
   connected: boolean;
   mcp_server_count: number;
@@ -54,6 +56,8 @@ export interface ComputerInstance {
   connectionProfile?: string;
   robotName?: string;
   robotBinding?: RobotBindingMetadata | null;
+  localSkillsRoot?: string | null;
+  effectiveSkillHome?: string;
   connectionPolicy: ComputerConnectionPolicy;
   mcpServerCount: number;
 }
@@ -88,6 +92,7 @@ interface ComputerState {
     id: string,
     policy: ComputerConnectionPolicy,
   ) => Promise<ComputerInstance>;
+  updateSkillHome: (id: string, localSkillsRoot?: string | null) => Promise<ComputerInstance>;
   connectSelectedTarget: (id: string) => Promise<void>;
   disconnectConnection: (id: string) => Promise<void>;
   selectInstance: (id: string) => void;
@@ -111,6 +116,8 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     connectionProfile: status.connection?.profile_name,
     robotName: status.robot_binding?.robot_name,
     robotBinding: status.robot_binding,
+    localSkillsRoot: status.local_skills_root ?? null,
+    effectiveSkillHome: status.effective_skill_home,
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     mcpServerCount: status.mcp_server_count,
   };
@@ -272,6 +279,27 @@ export const useComputerStore = create<ComputerState>((set) => ({
           id,
           target: policy.target ?? null,
           autoConnect: policy.auto_connect,
+        },
+      }));
+      set((state) => ({
+        instances: upsertInstance(state.instances, updated),
+        selectedInstanceId: state.selectedInstanceId,
+        loading: false,
+      }));
+      return updated;
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  updateSkillHome: async (id, localSkillsRoot) => {
+    set({ loading: true, error: null });
+    try {
+      const updated = toComputerInstance(await invoke<ComputerInstanceStatus>('update_computer_skill_home', {
+        request: {
+          id,
+          localSkillsRoot: localSkillsRoot || null,
         },
       }));
       set((state) => ({

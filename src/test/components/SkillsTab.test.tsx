@@ -1,0 +1,70 @@
+import { invoke } from '@tauri-apps/api/core';
+import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { SkillsTab } from '@/components/Computer/SkillsTab';
+import { useSkillStore } from '@/stores/skillStore';
+
+const mockedInvoke = vi.mocked(invoke);
+
+describe('SkillsTab', () => {
+  beforeEach(() => {
+    useSkillStore.getState().reset();
+    mockedInvoke.mockReset();
+  });
+
+  it('groups SDK skill refs and previews SKILL.md through backend resource API', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce([
+        { name: 'local-helper', source: 'user', path: '/skills/user/local-helper', description: 'Local helper' },
+        { name: 'remote-helper', source: 'mcp:browser', path: 'skill://browser/remote-helper', description: 'Remote helper' },
+      ])
+      .mockResolvedValueOnce({
+        name: 'local-helper',
+        relPath: 'SKILL.md',
+        mimeType: 'text/markdown',
+        totalSize: 12,
+        sha256: 'abc',
+        isEntry: true,
+        isText: true,
+        body: '# Local Helper\n\nUse it carefully.',
+      });
+
+    render(<SkillsTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('local-helper')).toBeInTheDocument();
+    expect(screen.getByText('mcp:browser')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('local-helper'));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('get_skill', {
+        instanceId: 'computer-a',
+        name: 'local-helper',
+        relPath: null,
+      });
+    });
+    expect(await screen.findByRole('heading', { name: 'Local Helper' })).toBeInTheDocument();
+  });
+
+  it('shows clear states for missing and empty SKILL.md content', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce([
+        { name: 'empty-helper', source: 'user', path: '/skills/user/empty-helper', description: 'Empty helper' },
+      ])
+      .mockResolvedValueOnce({
+        name: 'empty-helper',
+        relPath: 'SKILL.md',
+        mimeType: 'text/markdown',
+        totalSize: 0,
+        sha256: 'empty',
+        isEntry: true,
+        isText: true,
+        body: '',
+      });
+
+    render(<SkillsTab instanceId="computer-a" />);
+
+    fireEvent.click(await screen.findByText('empty-helper'));
+
+    expect(await screen.findByText('SKILL.md has no preview content')).toBeInTheDocument();
+  });
+});

@@ -1,0 +1,187 @@
+import { useEffect, useMemo } from 'react';
+import { App, Alert, Button, Empty, List, Skeleton, Space, Tag, Typography } from 'antd';
+import { FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
+import { useSkillStore, type SkillRef } from '@/stores/skillStore';
+
+const { Text, Title, Paragraph } = Typography;
+
+interface SkillsTabProps {
+  instanceId: string;
+  onOpenMcpTab?: () => void;
+}
+
+function groupBySource(skills: SkillRef[]) {
+  return skills.reduce<Record<string, SkillRef[]>>((groups, skill) => {
+    groups[skill.source] = groups[skill.source] ?? [];
+    groups[skill.source].push(skill);
+    return groups;
+  }, {});
+}
+
+function renderMarkdown(markdown: string) {
+  const blocks = markdown.split(/\n{2,}/);
+
+  return blocks.map((block, index) => {
+    const trimmed = block.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('```')) {
+      return (
+        <pre key={index} style={{ overflow: 'auto', background: '#f5f5f5', padding: 12, borderRadius: 6 }}>
+          {trimmed.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '')}
+        </pre>
+      );
+    }
+    if (trimmed.startsWith('# ')) {
+      return <Title key={index} level={4}>{trimmed.replace(/^# /, '')}</Title>;
+    }
+    if (trimmed.startsWith('## ')) {
+      return <Title key={index} level={5}>{trimmed.replace(/^## /, '')}</Title>;
+    }
+    if (/^[-*] /m.test(trimmed)) {
+      return (
+        <ul key={index} style={{ paddingLeft: 20 }}>
+          {trimmed.split('\n').map((line) => (
+            <li key={line}>{line.replace(/^[-*] /, '')}</li>
+          ))}
+        </ul>
+      );
+    }
+    return <Paragraph key={index} style={{ whiteSpace: 'pre-wrap' }}>{trimmed}</Paragraph>;
+  });
+}
+
+export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
+  const { t } = useTranslation();
+  const { message } = App.useApp();
+  const {
+    skills,
+    selectedSkillName,
+    selectedSkill,
+    loadingSkills,
+    loadingSkill,
+    error,
+    skillError,
+    fetchSkills,
+    refreshSkills,
+    selectSkill,
+    openLocalSkillsRoot,
+  } = useSkillStore();
+
+  useEffect(() => {
+    fetchSkills(instanceId);
+  }, [fetchSkills, instanceId]);
+
+  const grouped = useMemo(() => groupBySource(skills), [skills]);
+
+  const handleRefresh = async () => {
+    try {
+      await refreshSkills(instanceId);
+      message.success(t('skills.messages.refreshed'));
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const handleOpenRoot = async () => {
+    try {
+      await openLocalSkillsRoot(instanceId);
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const renderSkillDetail = () => {
+    if (!selectedSkillName) {
+      return <Empty description={t('skills.emptySelection')} />;
+    }
+    if (loadingSkill) {
+      return <Skeleton active paragraph={{ rows: 8 }} />;
+    }
+    if (skillError) {
+      return <Alert type="warning" showIcon message={t('skills.resourceUnavailable')} description={skillError} />;
+    }
+    if (!selectedSkill) {
+      return <Alert type="warning" showIcon message={t('skills.resourceUnavailable')} description={t('skills.missingSkillMd')} />;
+    }
+    if (!selectedSkill.body) {
+      return (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('skills.emptySkillMd')}
+          description={selectedSkill.isText ? t('skills.emptySkillMdDescription') : t('skills.nonTextSkillMd')}
+        />
+      );
+    }
+
+    return (
+      <div style={{ maxHeight: 520, overflow: 'auto', paddingRight: 8 }}>
+        {renderMarkdown(selectedSkill.body)}
+      </div>
+    );
+  };
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+        <Title level={4} style={{ margin: 0 }}>{t('skills.title')}</Title>
+        <Space wrap>
+          <Button icon={<ReloadOutlined />} loading={loadingSkills} onClick={handleRefresh}>
+            {t('common.refresh')}
+          </Button>
+          <Button icon={<FolderOpenOutlined />} disabled={loadingSkills} onClick={handleOpenRoot}>
+            {t('skills.openLocalRoot')}
+          </Button>
+        </Space>
+      </div>
+
+      {error && <Alert type="error" showIcon message={t('common.error')} description={error} />}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 36%) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
+        <div style={{ minWidth: 0 }}>
+          {loadingSkills ? (
+            <Skeleton active paragraph={{ rows: 8 }} />
+          ) : skills.length === 0 ? (
+            <Empty description={t('skills.empty')} />
+          ) : (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              {Object.entries(grouped).map(([source, sourceSkills]) => (
+                <List
+                  key={source}
+                  size="small"
+                  header={<Tag color={source === 'user' ? 'green' : source.startsWith('mcp:') ? 'blue' : 'purple'}>{source}</Tag>}
+                  bordered
+                  dataSource={sourceSkills}
+                  renderItem={(skill) => (
+                    <List.Item
+                      style={{ cursor: 'pointer', background: selectedSkillName === skill.name ? '#f6ffed' : undefined }}
+                      onClick={() => selectSkill(instanceId, skill.name)}
+                    >
+                      <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
+                        <Text strong ellipsis>{skill.name}</Text>
+                        <Text type="secondary" ellipsis>{skill.description}</Text>
+                        {skill.source.startsWith('mcp:') && (
+                          <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenMcpTab?.();
+                          }}>
+                            {t('skills.openMcpSource', { server: skill.source.replace(/^mcp:/, '') })}
+                          </Button>
+                        )}
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              ))}
+            </Space>
+          )}
+        </div>
+
+        <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 16, minHeight: 360, minWidth: 0 }}>
+          {renderSkillDetail()}
+        </div>
+      </div>
+    </Space>
+  );
+}

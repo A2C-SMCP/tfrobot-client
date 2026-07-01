@@ -9,8 +9,9 @@ mod common;
 use common::create_test_app_state;
 use tfrobot_client_lib::commands::marketplace::{
     add_marketplace_core, disable_plugin_core, enable_plugin_core,
-    get_marketplace_capabilities_core, install_plugin_core, reconcile_governance_core,
-    refresh_marketplace_core, remove_marketplace_core, uninstall_plugin_core,
+    get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
+    reconcile_governance_core, refresh_marketplace_core, remove_marketplace_core,
+    uninstall_plugin_core,
     AddMarketplaceRequest, PluginLifecycleRequest,
 };
 use tfrobot_client_lib::services::computer::ComputerInstance;
@@ -51,6 +52,21 @@ async fn capabilities_report_sdk_governance_lifecycle_unavailable() {
         .required_sdk_apis
         .contains(&"Computer::install_plugin".to_string()));
     assert!(capabilities.reason.contains("will not emulate"));
+}
+
+#[tokio::test]
+async fn governance_report_has_stable_empty_sdk_owned_ledger_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    assert!(!governance.capabilities.computer_lifecycle_api_available);
+    assert!(governance.marketplaces.is_empty());
+    assert!(governance.plugins.is_empty());
+    assert!(governance.capabilities.reason.contains("will not emulate"));
 }
 
 #[tokio::test]

@@ -65,7 +65,14 @@
       "autoConnectRequiresTarget": "Select a connection target before enabling auto connect.",
       "lifecycleTitle": "Lifecycle",
       "startBehavior": "Starting this Computer initializes only this instance's MCP servers and connection policy.",
-      "globalRuntimeHint": "Node.js, Python, uv, pnpm, and PATH settings are application-level settings under System Settings."
+      "globalRuntimeHint": "Node.js, Python, uv, pnpm, and PATH settings are application-level settings under System Settings.",
+      "skillHomeTitle": "Skill Home",
+      "effectiveSkillHome": "Effective Skill Home",
+      "localSkillsRoot": "Instance Skill Home",
+      "defaultSkillHome": "Default instance skill_home/",
+      "chooseSkillHome": "Choose Skill Home",
+      "resetSkillHome": "Use Default",
+      "skillHomeDescription": "This directory is the instance capability governance root. Clearing it restores the default instance skill_home/."
     },
     "connectionActions": {
       "targetTitle": "Connection Target",
@@ -102,6 +109,62 @@
       "deleted": "Computer deleted",
       "started": "Computer started",
       "stopped": "Computer stopped"
+    }
+  },
+  "skills": {
+    "title": "Skills",
+    "empty": "No active skills",
+    "emptySelection": "Select a skill to preview SKILL.md",
+    "openLocalRoot": "Open Local Root",
+    "openMcpSource": "Open MCP server {{server}}",
+    "resourceUnavailable": "SKILL.md unavailable",
+    "missingSkillMd": "The selected skill did not return a SKILL.md resource.",
+    "emptySkillMd": "SKILL.md has no preview content",
+    "emptySkillMdDescription": "The resource was returned as text but its body is empty.",
+    "nonTextSkillMd": "The resource is not returned as inline text.",
+    "messages": {
+      "refreshed": "Skills refreshed"
+    }
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "supported": "SDK marketplace lifecycle is available",
+    "unsupported": "SDK marketplace lifecycle is unavailable",
+    "scope": "Install scope",
+    "requiredApis": "Required SDK APIs",
+    "marketplacesTitle": "Marketplaces",
+    "pluginsTitle": "Plugins",
+    "emptyMarketplaces": "No SDK marketplaces returned",
+    "emptyPlugins": "No SDK plugins returned",
+    "sdkOwnedState": "State is owned by SDK governance APIs.",
+    "bundledSkills": "Bundled skills: {{skills}}",
+    "bundledMcpServers": "Bundled MCP servers: {{servers}}",
+    "form": {
+      "name": "Name",
+      "nameRequired": "Marketplace name is required",
+      "gitUrl": "Git URL",
+      "gitUrlRequired": "Git URL is required",
+      "marketplace": "Marketplace",
+      "marketplaceRequired": "Marketplace is required",
+      "plugin": "Plugin",
+      "pluginRequired": "Plugin is required"
+    },
+    "actions": {
+      "refreshMarketplace": "Refresh Marketplace",
+      "removeMarketplace": "Remove Marketplace",
+      "installPlugin": "Install Plugin",
+      "enablePlugin": "Enable Plugin",
+      "disablePlugin": "Disable Plugin",
+      "uninstallPlugin": "Uninstall Plugin"
+    },
+    "messages": {
+      "added": "Marketplace added",
+      "refreshed": "Marketplace refreshed",
+      "removed": "Marketplace removed",
+      "install": "Plugin installed",
+      "enable": "Plugin enabled",
+      "disable": "Plugin disabled",
+      "uninstall": "Plugin uninstalled"
     }
   },
   "dashboard": {

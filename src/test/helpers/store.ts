@@ -9,6 +9,7 @@ import { useThemeStore } from '@/stores/themeStore';
 import { useDesktopStore } from '@/stores/desktopStore';
 import { useManagerStore } from '@/stores/managerStore';
 import { useComputerStore } from '@/stores/computerStore';
+import { useSkillStore } from '@/stores/skillStore';
 
 /**
  * Reset all Zustand stores to their initial state.
@@ -27,6 +28,7 @@ export function resetAllStores() {
     useDesktopStore,
     useManagerStore,
     useComputerStore,
+    useSkillStore,
   ];
 
   for (const store of stores) {

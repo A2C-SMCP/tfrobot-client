@@ -407,7 +407,7 @@ async fn wait_for_agent_skill(
 }
 
 fn write_skill(skill_dir: &Path, name: &str, description: &str, body: &str) {
-    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::create_dir_all(skill_dir).unwrap();
     std::fs::write(
         skill_dir.join("SKILL.md"),
         format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),

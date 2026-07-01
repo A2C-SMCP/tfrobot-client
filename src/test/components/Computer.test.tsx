@@ -84,6 +84,12 @@ vi.mock('@/components/Computer/ComputerRuntimeSettings', () => ({
 vi.mock('@/components/Computer/ComputerOverview', () => ({
   ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
 }));
+vi.mock('@/components/Computer/SkillsTab', () => ({
+  SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
+}));
+vi.mock('@/components/Computer/MarketplaceTab', () => ({
+  MarketplaceTab: ({ instanceId }: { instanceId: string }) => <div data-testid="marketplace-tab">MarketplaceTab:{instanceId}</div>,
+}));
 
 const { mockFetchManualTargets } = vi.hoisted(() => ({
   mockFetchManualTargets: vi.fn(),
@@ -156,6 +162,8 @@ describe('Computer', () => {
 
     expect(screen.getByText('Overview')).toBeInTheDocument();
     expect(screen.getByText('MCP Servers')).toBeInTheDocument();
+    expect(screen.getByText('Skills')).toBeInTheDocument();
+    expect(screen.getByText('Marketplace')).toBeInTheDocument();
     expect(screen.getByText('Input Variables')).toBeInTheDocument();
     expect(screen.getByText('Robot Connection')).toBeInTheDocument();
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
@@ -176,6 +184,10 @@ describe('Computer', () => {
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('MCP Servers'));
     expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByText('Skills'));
+    expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByText('Marketplace'));
+    expect(screen.getByTestId('marketplace-tab')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Runtime'));
