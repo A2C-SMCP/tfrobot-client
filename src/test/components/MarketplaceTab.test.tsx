@@ -68,6 +68,7 @@ describe('MarketplaceTab', () => {
       marketplaces: [],
       plugins: [],
     });
+    mockedInvoke.mockResolvedValueOnce([]);
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
@@ -95,4 +96,40 @@ describe('MarketplaceTab', () => {
       });
     });
   }, 10000);
+
+  it('enables only operations exposed by SDK capabilities', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: {
+        computerLifecycleApiAvailable: true,
+        supportedOperations: ['enable_plugin'],
+        requiredSdkApis: [],
+        reason: 'partial support',
+      },
+      marketplaces: [
+        { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'tf-market',
+          plugin: 'desktop-tools',
+          pluginId: 'plugin-1',
+          version: '1.0.0',
+          enabled: false,
+          status: 'installed',
+          bundledMcpServers: [],
+          bundledSkills: [],
+          message: null,
+        },
+      ],
+    });
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect((await screen.findAllByText('tf-market')).length).toBeGreaterThan(0);
+    expect(screen.getByText('Enable Plugin').closest('button')).toBeEnabled();
+    expect(screen.getByText('Refresh Marketplace').closest('button')).toBeDisabled();
+    expect(screen.getByText('Remove Marketplace').closest('button')).toBeDisabled();
+    expect(screen.getByText('Add').closest('button')).toBeDisabled();
+    expect(screen.getByText('Install Plugin').closest('button')).toBeDisabled();
+  });
 });

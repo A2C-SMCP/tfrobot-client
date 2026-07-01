@@ -135,6 +135,7 @@ describe('skillStore', () => {
 
     mockedInvoke.mockResolvedValueOnce(undefined);
     mockedInvoke.mockResolvedValueOnce(useSkillStore.getState().governance);
+    mockedInvoke.mockResolvedValueOnce([]);
     await useSkillStore.getState().addMarketplace('computer-a', {
       name: 'tf',
       gitUrl: 'https://example.com/tf.git',
@@ -143,6 +144,9 @@ describe('skillStore', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
       instanceId: 'computer-a',
       request: { name: 'tf', gitUrl: 'https://example.com/tf.git' },
+    });
+    expect(mockedInvoke).toHaveBeenCalledWith('list_skills', {
+      instanceId: 'computer-a',
     });
   });
 
@@ -199,6 +203,9 @@ describe('skillStore', () => {
 
     expect(useSkillStore.getState().activeInstanceId).toBe('computer-b');
     expect(useSkillStore.getState().capabilities?.reason).toBe('supported');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('list_skills', {
+      instanceId: 'computer-a',
+    });
   });
 
   it('keeps instance records isolated when switching back to a previous instance', async () => {

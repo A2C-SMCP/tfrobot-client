@@ -46,6 +46,10 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   }, [fetchMarketplaceGovernance, instanceId]);
 
   const supported = capabilities?.computerLifecycleApiAvailable ?? false;
+  const canRunOperation = (operation: string) => {
+    if (!supported) return false;
+    return capabilities?.supportedOperations.includes(operation) ?? false;
+  };
 
   const handleAddMarketplace = async () => {
     const values = await marketplaceForm.validateFields();
@@ -121,10 +125,10 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               renderItem={(marketplace) => (
                 <List.Item
                   actions={[
-                    <Button key="refresh" size="small" icon={<ReloadOutlined />} disabled={!supported} loading={loadingMarketplace} onClick={() => refreshMarketplace(instanceId, marketplace.name)}>
+                    <Button key="refresh" size="small" icon={<ReloadOutlined />} disabled={!canRunOperation('refresh_marketplace')} loading={loadingMarketplace} onClick={() => refreshMarketplace(instanceId, marketplace.name)}>
                       {t('marketplace.actions.refreshMarketplace')}
                     </Button>,
-                    <Button key="remove" size="small" danger icon={<DeleteOutlined />} disabled={!supported} loading={loadingMarketplace} onClick={() => removeMarketplace(instanceId, marketplace.name)}>
+                    <Button key="remove" size="small" danger icon={<DeleteOutlined />} disabled={!canRunOperation('remove_marketplace')} loading={loadingMarketplace} onClick={() => removeMarketplace(instanceId, marketplace.name)}>
                       {t('marketplace.actions.removeMarketplace')}
                     </Button>,
                   ]}
@@ -143,16 +147,16 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               label={t('marketplace.form.name')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.nameRequired') }]}
             >
-              <Input disabled={!supported} />
+              <Input disabled={!canRunOperation('add_marketplace')} />
             </Form.Item>
             <Form.Item
               name="gitUrl"
               label={t('marketplace.form.gitUrl')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') }]}
             >
-              <Input disabled={!supported} />
+              <Input disabled={!canRunOperation('add_marketplace')} />
             </Form.Item>
-            <Button type="primary" icon={<PlusOutlined />} disabled={!supported} loading={loadingMarketplace} onClick={handleAddMarketplace}>
+            <Button type="primary" icon={<PlusOutlined />} disabled={!canRunOperation('add_marketplace')} loading={loadingMarketplace} onClick={handleAddMarketplace}>
               {t('common.add')}
             </Button>
           </Form>
@@ -170,13 +174,13 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               renderItem={(plugin) => (
                 <List.Item
                   actions={[
-                    <Button key="enable" size="small" icon={<PlayCircleOutlined />} disabled={!supported || plugin.enabled} loading={loadingMarketplace} onClick={() => enablePlugin(instanceId, plugin)}>
+                    <Button key="enable" size="small" icon={<PlayCircleOutlined />} disabled={!canRunOperation('enable_plugin') || plugin.enabled} loading={loadingMarketplace} onClick={() => enablePlugin(instanceId, plugin)}>
                       {t('marketplace.actions.enablePlugin')}
                     </Button>,
-                    <Button key="disable" size="small" icon={<PauseCircleOutlined />} disabled={!supported || !plugin.enabled} loading={loadingMarketplace} onClick={() => disablePlugin(instanceId, plugin)}>
+                    <Button key="disable" size="small" icon={<PauseCircleOutlined />} disabled={!canRunOperation('disable_plugin') || !plugin.enabled} loading={loadingMarketplace} onClick={() => disablePlugin(instanceId, plugin)}>
                       {t('marketplace.actions.disablePlugin')}
                     </Button>,
-                    <Button key="uninstall" size="small" danger icon={<DeleteOutlined />} disabled={!supported} loading={loadingMarketplace} onClick={() => uninstallPlugin(instanceId, plugin)}>
+                    <Button key="uninstall" size="small" danger icon={<DeleteOutlined />} disabled={!canRunOperation('uninstall_plugin')} loading={loadingMarketplace} onClick={() => uninstallPlugin(instanceId, plugin)}>
                       {t('marketplace.actions.uninstallPlugin')}
                     </Button>,
                   ]}
@@ -207,16 +211,16 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               label={t('marketplace.form.marketplace')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.marketplaceRequired') }]}
             >
-              <Input disabled={!supported} />
+              <Input disabled={!canRunOperation('install_plugin')} />
             </Form.Item>
             <Form.Item
               name="plugin"
               label={t('marketplace.form.plugin')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.pluginRequired') }]}
             >
-              <Input disabled={!supported} />
+              <Input disabled={!canRunOperation('install_plugin')} />
             </Form.Item>
-            <Button type="primary" icon={<CloudDownloadOutlined />} disabled={!supported} loading={loadingMarketplace} onClick={() => handlePluginAction('install')}>
+            <Button type="primary" icon={<CloudDownloadOutlined />} disabled={!canRunOperation('install_plugin')} loading={loadingMarketplace} onClick={() => handlePluginAction('install')}>
               {t('marketplace.actions.installPlugin')}
             </Button>
           </Form>

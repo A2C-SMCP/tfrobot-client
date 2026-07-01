@@ -388,6 +388,9 @@ async function runMarketplaceLifecycle(
     await action();
     if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
     await get().fetchMarketplaceGovernance(instanceId);
+    if (get().activeInstanceId === instanceId) {
+      await get().fetchSkills(instanceId);
+    }
   } catch (e) {
     if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
     setInstanceRecord(set, instanceId, (record) => ({
