@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { App, Alert, Button, Card, Descriptions, Empty, Form, Input, List, Space, Tag, Typography } from 'antd';
 import { CloudDownloadOutlined, DeleteOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useSkillStore } from '@/stores/skillStore';
+import { formatInvokeError, useSkillStore } from '@/stores/skillStore';
 
 const { Text, Title } = Typography;
 
@@ -60,7 +60,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       marketplaceForm.resetFields();
       message.success(t('marketplace.messages.added'));
     } catch (e) {
-      message.error(String(e));
+      message.error(formatInvokeError(e));
     }
   };
 
@@ -75,7 +75,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       if (action === 'uninstall') await uninstallPlugin(instanceId, request);
       message.success(t(`marketplace.messages.${action}`));
     } catch (e) {
-      message.error(String(e));
+      message.error(formatInvokeError(e));
     }
   };
 

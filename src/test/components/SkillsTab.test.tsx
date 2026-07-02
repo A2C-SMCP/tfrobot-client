@@ -68,6 +68,27 @@ describe('SkillsTab', () => {
     expect(await screen.findByText('SKILL.md has no preview content')).toBeInTheDocument();
   });
 
+  it('renders structured backend resource errors with a readable message', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce([
+        { name: 'broken-helper', source: 'user', path: '/skills/user/broken-helper', description: 'Broken helper' },
+      ])
+      .mockRejectedValueOnce({
+        code: 'resourceNotAccessible',
+        relPath: 'SKILL.md',
+        reason: 'missing',
+        message: 'Skill resource not accessible: reason=missing, rel_path=SKILL.md',
+      });
+
+    render(<SkillsTab instanceId="computer-a" />);
+
+    fireEvent.click(await screen.findByText('broken-helper'));
+
+    expect(await screen.findByText('SKILL.md unavailable')).toBeInTheDocument();
+    expect(await screen.findByText('Skill resource not accessible: reason=missing, rel_path=SKILL.md')).toBeInTheDocument();
+    expect(screen.queryByText('[object Object]')).not.toBeInTheDocument();
+  });
+
   it('does not render stale skills from a different active instance', () => {
     mockedInvoke.mockReturnValue(new Promise(() => undefined) as any);
     useSkillStore.setState((state) => ({

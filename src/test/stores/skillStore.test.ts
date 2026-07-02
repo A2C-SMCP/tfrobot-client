@@ -150,6 +150,29 @@ describe('skillStore', () => {
     });
   });
 
+  it('stores readable marketplace lifecycle errors from structured backend failures', async () => {
+    mockedInvoke.mockRejectedValueOnce({
+      message: "MCP server 'audit-mcp' already exists as a user-managed MCP server",
+    });
+
+    await expect(useSkillStore.getState().installPlugin('computer-a', {
+      marketplace: 'acme',
+      plugin: 'audit',
+    })).rejects.toEqual({
+      message: "MCP server 'audit-mcp' already exists as a user-managed MCP server",
+    });
+
+    expect(mockedInvoke).toHaveBeenCalledWith('install_plugin', {
+      instanceId: 'computer-a',
+      request: {
+        marketplace: 'acme',
+        plugin: 'audit',
+      },
+    });
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceError)
+      .toBe("MCP server 'audit-mcp' already exists as a user-managed MCP server");
+  });
+
   it('ignores stale marketplace lifecycle responses from a previous instance', async () => {
     const addA = deferred<void>();
     const fetchB = deferred<{

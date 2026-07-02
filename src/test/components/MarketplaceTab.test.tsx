@@ -133,6 +133,33 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Install Plugin').closest('button')).toBeDisabled();
   });
 
+  it('renders structured lifecycle errors with a readable message', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['install_plugin'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockRejectedValueOnce({
+        message: "MCP server 'audit-mcp' already exists as a user-managed MCP server",
+      });
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('SDK marketplace lifecycle is available')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Marketplace'), { target: { value: 'acme' } });
+    fireEvent.change(screen.getByLabelText('Plugin'), { target: { value: 'audit' } });
+    fireEvent.click(screen.getByText('Install Plugin').closest('button')!);
+
+    expect(await screen.findByText("MCP server 'audit-mcp' already exists as a user-managed MCP server")).toBeInTheDocument();
+    expect(screen.queryByText('[object Object]')).not.toBeInTheDocument();
+  });
+
   it('does not render stale marketplace governance from a different active instance', () => {
     mockedInvoke.mockReturnValue(new Promise(() => undefined) as any);
     useSkillStore.setState((state) => ({

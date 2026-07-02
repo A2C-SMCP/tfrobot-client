@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { App, Alert, Button, Empty, List, Skeleton, Space, Tag, Typography } from 'antd';
 import { FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useSkillStore, type SkillRef } from '@/stores/skillStore';
+import { formatInvokeError, useSkillStore, type SkillRef } from '@/stores/skillStore';
 
 const { Text, Title, Paragraph } = Typography;
 const EMPTY_SKILLS: SkillRef[] = [];
@@ -82,7 +82,7 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
       await refreshSkills(instanceId);
       message.success(t('skills.messages.refreshed'));
     } catch (e) {
-      message.error(String(e));
+      message.error(formatInvokeError(e));
     }
   };
 
@@ -90,7 +90,7 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
     try {
       await openLocalSkillsRoot(instanceId);
     } catch (e) {
-      message.error(String(e));
+      message.error(formatInvokeError(e));
     }
   };
 

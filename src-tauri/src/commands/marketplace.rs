@@ -1,14 +1,14 @@
+use crate::AppState;
 use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::services::computer::McpServerManagedBy;
-use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
-use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
 use a2c_smcp::smcp_computer::settings::{
-    load_installed_plugins, load_known_marketplaces, resolve_policy_settings, resolve_settings,
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
     McpInstallHooks, RemoveMarketplaceParams, ResolveSettingsArgs, UninstallOptions,
-    XDG_CONFIG_HOME_ENV,
+    XDG_CONFIG_HOME_ENV, load_installed_plugins, load_known_marketplaces, resolve_policy_settings,
+    resolve_settings,
 };
 use a2c_smcp::smcp_computer::skills::{MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR};
 use async_trait::async_trait;
@@ -601,7 +601,12 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             .get_managed_config_for_instance(&self.instance_id, cfg.name())
         {
             if !existing.is_plugin_owned() {
-                return Ok(());
+                return Err(McpHookError(format!(
+                    "MCP server '{}' already exists as a user-managed MCP server; rename or remove it before installing plugin '{}@{}'",
+                    cfg.name(),
+                    self.plugin,
+                    self.marketplace,
+                )));
             }
         }
         let managed_by = McpServerManagedBy::Plugin {
@@ -784,14 +789,45 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error
-            .0
-            .contains("Computer instance not found while registering"));
+        assert!(
+            error
+                .0
+                .contains("Computer instance not found while registering")
+        );
         let managed = state
             .config
             .load_managed_configs_for_instance(TEST_INSTANCE_ID)
             .unwrap();
         assert!(managed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_register_rejects_user_owned_server_name_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state_without_runtime(tmp.path());
+        state
+            .config
+            .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
+            .unwrap();
+        let hooks = MarketplaceMcpHooks::for_plugin(&state, TEST_INSTANCE_ID, "acme", "audit");
+
+        let error = hooks
+            .register_server(server_config("audit-mcp"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .0
+                .contains("already exists as a user-managed MCP server")
+        );
+        let managed = state
+            .config
+            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+            .unwrap();
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0].name(), "audit-mcp");
+        assert!(!managed[0].is_plugin_owned());
     }
 
     #[tokio::test]
@@ -806,9 +842,11 @@ mod tests {
 
         let error = hooks.remove_server("audit-mcp").await.unwrap_err();
 
-        assert!(error
-            .0
-            .contains("Computer instance not found while removing"));
+        assert!(
+            error
+                .0
+                .contains("Computer instance not found while removing")
+        );
         let managed = state
             .config
             .load_managed_configs_for_instance(TEST_INSTANCE_ID)

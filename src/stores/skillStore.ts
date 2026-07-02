@@ -217,6 +217,21 @@ async function invokeMarketplace<T>(
   return await invoke<T>(command, { instanceId, ...args });
 }
 
+export function formatInvokeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object') {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return Object.prototype.toString.call(error);
+    }
+  }
+  return String(error);
+}
+
 export const useSkillStore = create<SkillState>((set, get) => ({
   ...initialState,
 
@@ -244,7 +259,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
       if (!isCurrentRequest(get(), instanceId, requestId, 'skillsRequestId')) return;
       setInstanceRecord(set, instanceId, (record) => ({
         ...record,
-        error: String(e),
+        error: formatInvokeError(e),
         loadingSkills: false,
       }));
     }
@@ -266,7 +281,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
       if (!isCurrentRequest(get(), instanceId, requestId, 'skillsRequestId')) return;
       setInstanceRecord(set, instanceId, (record) => ({
         ...record,
-        error: String(e),
+        error: formatInvokeError(e),
         loadingSkills: false,
       }));
       throw e;
@@ -299,7 +314,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
       if (!isCurrentRequest(get(), instanceId, requestId, 'skillRequestId')) return;
       setInstanceRecord(set, instanceId, (record) => ({
         ...record,
-        skillError: String(e),
+        skillError: formatInvokeError(e),
         loadingSkill: false,
       }));
     }
@@ -334,7 +349,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
       if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
       setInstanceRecord(set, instanceId, (record) => ({
         ...record,
-        marketplaceError: String(e),
+        marketplaceError: formatInvokeError(e),
         loadingMarketplace: false,
       }));
     }
@@ -395,7 +410,7 @@ async function runMarketplaceLifecycle(
     if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
-      marketplaceError: String(e),
+      marketplaceError: formatInvokeError(e),
       loadingMarketplace: false,
     }));
     throw e;
