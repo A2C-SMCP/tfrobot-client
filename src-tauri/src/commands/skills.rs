@@ -257,6 +257,16 @@ mod tests {
         (AppState::new(config, log_service, settings_service), dir)
     }
 
+    fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
+        let skill_dir = root.join("user").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn list_skills_returns_sdk_refs_without_source_remap() {
         let (state, _dir) = test_state();
@@ -274,6 +284,55 @@ mod tests {
 
         assert_eq!(skill.source, "user");
         assert!(skill.path.ends_with("example-skill"));
+    }
+
+    #[tokio::test]
+    async fn list_and_get_skills_are_scoped_to_each_instance_skill_home() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        let custom_a = dir.path().join("custom-a-skill-home");
+        let custom_b = dir.path().join("custom-b-skill-home");
+        let mut computer_a = ComputerInstance::new("computer-a", "Computer A");
+        computer_a.local_skills_root = Some(custom_a.clone());
+        let mut computer_b = ComputerInstance::new("computer-b", "Computer B");
+        computer_b.local_skills_root = Some(custom_b.clone());
+        config.add_computer_instance(computer_a).unwrap();
+        config.add_computer_instance(computer_b).unwrap();
+        write_skill(&custom_a, "a-only", "A helper", "A body");
+        write_skill(&custom_b, "b-only", "B helper", "B body");
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+        let state = AppState::new(config, log_service, settings_service);
+        state
+            .computer_registry
+            .start_runtime("computer-a")
+            .await
+            .unwrap();
+        state
+            .computer_registry
+            .start_runtime("computer-b")
+            .await
+            .unwrap();
+
+        let skills_a = list_skills_core(&state, "computer-a").await.unwrap();
+        let skills_b = list_skills_core(&state, "computer-b").await.unwrap();
+
+        assert!(skills_a.iter().any(|skill| skill.name == "a-only"));
+        assert!(skills_a.iter().all(|skill| skill.name != "b-only"));
+        assert!(skills_b.iter().any(|skill| skill.name == "b-only"));
+        assert!(skills_b.iter().all(|skill| skill.name != "a-only"));
+        let body_a = get_skill_core(&state, "computer-a", "a-only", None)
+            .await
+            .unwrap();
+        let body_b = get_skill_core(&state, "computer-b", "b-only", None)
+            .await
+            .unwrap();
+        assert_eq!(body_a.body.as_deref(), Some("A body\n"));
+        assert_eq!(body_b.body.as_deref(), Some("B body\n"));
+        assert!(matches!(
+            get_skill_core(&state, "computer-a", "b-only", None).await,
+            Err(SkillCommandError::SkillNotFound { .. })
+        ));
     }
 
     #[tokio::test]

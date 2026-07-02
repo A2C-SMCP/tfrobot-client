@@ -17,7 +17,7 @@ use tfrobot_client_lib::commands::{
         refresh_marketplace_core, remove_marketplace_core, uninstall_plugin_core,
         AddMarketplaceRequest, PluginLifecycleRequest,
     },
-    mcp,
+    mcp, skills,
 };
 use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
 use tfrobot_client_lib::AppState;
@@ -490,6 +490,98 @@ async fn plugin_enable_state_is_isolated_per_computer_instance() {
 }
 
 #[tokio::test]
+async fn plugin_install_materializes_mcp_and_skills_only_for_current_instance() {
+    const FIRST_INSTANCE_ID: &str = "tf45-computer-a";
+    const SECOND_INSTANCE_ID: &str = "tf45-computer-b";
+    const MARKETPLACE: &str = "tf45-acme";
+    const PLUGIN: &str = "tf45-audit";
+    const SERVER: &str = "tf45-audit-mcp";
+    const SKILL: &str = "tf45-audit:scope-review";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(FIRST_INSTANCE_ID, "TF45 Computer A"))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(FIRST_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await;
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(SECOND_INSTANCE_ID, "TF45 Computer B"))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(SECOND_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_tf45_isolation_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        FIRST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: MARKETPLACE.to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        FIRST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: MARKETPLACE.to_string(),
+            plugin: PLUGIN.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let first_governance = get_marketplace_governance_core(&state, FIRST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let second_governance = get_marketplace_governance_core(&state, SECOND_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(first_governance.plugins.len(), 1);
+    assert!(second_governance.marketplaces.is_empty());
+    assert!(second_governance.plugins.is_empty());
+
+    let first_servers = mcp::get_mcp_servers_core(&state, FIRST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let second_servers = mcp::get_mcp_servers_core(&state, SECOND_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(first_servers.iter().any(|server| server.name == SERVER));
+    assert!(second_servers.iter().all(|server| server.name != SERVER));
+
+    let first_skills = skills::list_skills_core(&state, FIRST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let second_skills = skills::list_skills_core(&state, SECOND_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(first_skills.iter().any(|skill| {
+        skill.name == SKILL && skill.source == format!("marketplace:{MARKETPLACE}")
+    }));
+    assert!(second_skills.iter().all(|skill| skill.name != SKILL));
+}
+
+#[tokio::test]
 async fn lifecycle_commands_validate_instance_before_reporting_capability() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
@@ -536,6 +628,48 @@ fn build_marketplace_repo(repo: &Path) {
     fs::write(
         servers.join("inputs.json"),
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
+    )
+    .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn build_tf45_isolation_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"tf45-audit","source":"./plugins/tf45-audit"}]}"#,
+    )
+    .unwrap();
+    let skill = repo.join("plugins/tf45-audit/skills/scope-review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: scope-review\ndescription: scoped review\n---\nbody",
+    )
+    .unwrap();
+    let servers = repo.join("plugins/tf45-audit/mcp-servers");
+    fs::create_dir_all(&servers).unwrap();
+    let server_path = echo_server_path();
+    fs::write(
+        servers.join("tf45-audit-mcp.json"),
+        format!(
+            r#"{{"type":"stdio","name":"tf45-audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
+            server_path.display()
+        ),
     )
     .unwrap();
 

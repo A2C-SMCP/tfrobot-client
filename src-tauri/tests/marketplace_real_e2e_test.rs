@@ -229,10 +229,7 @@ async fn assert_bootup_does_not_start_plugin_mcp_server(state: &AppState) {
     );
 }
 
-async fn wait_for_mcp_server_running(
-    state: &AppState,
-    name: &str,
-) -> Option<mcp::McpServerStatus> {
+async fn wait_for_mcp_server_running(state: &AppState, name: &str) -> Option<mcp::McpServerStatus> {
     for _ in 0..120 {
         let servers = mcp::get_mcp_servers_core(state, INSTANCE_ID).await.ok()?;
         let server = servers.into_iter().find(|server| server.name == name)?;

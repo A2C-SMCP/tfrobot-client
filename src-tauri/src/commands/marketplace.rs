@@ -1,14 +1,14 @@
-use crate::AppState;
 use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::services::computer::McpServerManagedBy;
+use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
-use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
+    load_installed_plugins, load_known_marketplaces, resolve_policy_settings, resolve_settings,
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
     McpInstallHooks, RemoveMarketplaceParams, ResolveSettingsArgs, UninstallOptions,
-    XDG_CONFIG_HOME_ENV, load_installed_plugins, load_known_marketplaces, resolve_policy_settings,
-    resolve_settings,
+    XDG_CONFIG_HOME_ENV,
 };
 use a2c_smcp::smcp_computer::skills::{MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR};
 use async_trait::async_trait;
@@ -246,8 +246,13 @@ pub async fn install_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
-    let hooks =
-        MarketplaceMcpHooks::for_plugin(state, instance_id, &request.marketplace, &request.plugin);
+    let hooks = MarketplaceMcpHooks::for_plugin(
+        state,
+        instance_id,
+        &request.marketplace,
+        &request.plugin,
+        UserMcpConflictPolicy::Reject,
+    );
     runtime
         .sdk_install_plugin(
             &plugin_id,
@@ -281,8 +286,13 @@ pub async fn enable_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
-    let hooks =
-        MarketplaceMcpHooks::for_plugin(state, instance_id, &request.marketplace, &request.plugin);
+    let hooks = MarketplaceMcpHooks::for_plugin(
+        state,
+        instance_id,
+        &request.marketplace,
+        &request.plugin,
+        UserMcpConflictPolicy::KeepUserServer,
+    );
     runtime
         .sdk_enable_plugin(
             &plugin_id,
@@ -315,8 +325,13 @@ pub async fn disable_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
-    let hooks =
-        MarketplaceMcpHooks::for_plugin(state, instance_id, &request.marketplace, &request.plugin);
+    let hooks = MarketplaceMcpHooks::for_plugin(
+        state,
+        instance_id,
+        &request.marketplace,
+        &request.plugin,
+        UserMcpConflictPolicy::Reject,
+    );
     runtime
         .sdk_disable_plugin(
             &plugin_id,
@@ -349,8 +364,13 @@ pub async fn uninstall_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
-    let hooks =
-        MarketplaceMcpHooks::for_plugin(state, instance_id, &request.marketplace, &request.plugin);
+    let hooks = MarketplaceMcpHooks::for_plugin(
+        state,
+        instance_id,
+        &request.marketplace,
+        &request.plugin,
+        UserMcpConflictPolicy::Reject,
+    );
     runtime
         .sdk_uninstall_plugin(
             &plugin_id,
@@ -564,10 +584,17 @@ struct MarketplaceMcpHooks {
     marketplace: String,
     plugin: String,
     plugin_id: String,
+    user_conflict_policy: UserMcpConflictPolicy,
 }
 
 impl MarketplaceMcpHooks {
-    fn for_plugin(state: &AppState, instance_id: &str, marketplace: &str, plugin: &str) -> Self {
+    fn for_plugin(
+        state: &AppState,
+        instance_id: &str,
+        marketplace: &str,
+        plugin: &str,
+        user_conflict_policy: UserMcpConflictPolicy,
+    ) -> Self {
         debug_assert!(!marketplace.trim().is_empty());
         debug_assert!(!plugin.trim().is_empty());
         Self {
@@ -577,8 +604,15 @@ impl MarketplaceMcpHooks {
             marketplace: marketplace.to_string(),
             plugin: plugin.to_string(),
             plugin_id: format!("{plugin}@{marketplace}"),
+            user_conflict_policy,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum UserMcpConflictPolicy {
+    Reject,
+    KeepUserServer,
 }
 
 #[async_trait]
@@ -589,6 +623,10 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             .map(|servers| {
                 servers
                     .into_iter()
+                    .filter(|server| {
+                        server.is_plugin_owned()
+                            || matches!(self.user_conflict_policy, UserMcpConflictPolicy::Reject)
+                    })
                     .map(|server| server.name().to_string())
                     .collect()
             })
@@ -601,6 +639,12 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             .get_managed_config_for_instance(&self.instance_id, cfg.name())
         {
             if !existing.is_plugin_owned() {
+                if matches!(
+                    self.user_conflict_policy,
+                    UserMcpConflictPolicy::KeepUserServer
+                ) {
+                    return Ok(());
+                }
                 return Err(McpHookError(format!(
                     "MCP server '{}' already exists as a user-managed MCP server; rename or remove it before installing plugin '{}@{}'",
                     cfg.name(),
@@ -782,18 +826,22 @@ mod tests {
     async fn hook_register_does_not_persist_plugin_server_to_config() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_without_runtime(tmp.path());
-        let hooks = MarketplaceMcpHooks::for_plugin(&state, TEST_INSTANCE_ID, "acme", "audit");
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            &state,
+            TEST_INSTANCE_ID,
+            "acme",
+            "audit",
+            UserMcpConflictPolicy::Reject,
+        );
 
         let error = hooks
             .register_server(server_config("audit-mcp"))
             .await
             .unwrap_err();
 
-        assert!(
-            error
-                .0
-                .contains("Computer instance not found while registering")
-        );
+        assert!(error
+            .0
+            .contains("Computer instance not found while registering"));
         let managed = state
             .config
             .load_managed_configs_for_instance(TEST_INSTANCE_ID)
@@ -809,18 +857,22 @@ mod tests {
             .config
             .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
             .unwrap();
-        let hooks = MarketplaceMcpHooks::for_plugin(&state, TEST_INSTANCE_ID, "acme", "audit");
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            &state,
+            TEST_INSTANCE_ID,
+            "acme",
+            "audit",
+            UserMcpConflictPolicy::Reject,
+        );
 
         let error = hooks
             .register_server(server_config("audit-mcp"))
             .await
             .unwrap_err();
 
-        assert!(
-            error
-                .0
-                .contains("already exists as a user-managed MCP server")
-        );
+        assert!(error
+            .0
+            .contains("already exists as a user-managed MCP server"));
         let managed = state
             .config
             .load_managed_configs_for_instance(TEST_INSTANCE_ID)
@@ -838,15 +890,50 @@ mod tests {
             .config
             .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
             .unwrap();
-        let hooks = MarketplaceMcpHooks::for_plugin(&state, TEST_INSTANCE_ID, "acme", "audit");
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            &state,
+            TEST_INSTANCE_ID,
+            "acme",
+            "audit",
+            UserMcpConflictPolicy::Reject,
+        );
 
         let error = hooks.remove_server("audit-mcp").await.unwrap_err();
 
-        assert!(
-            error
-                .0
-                .contains("Computer instance not found while removing")
+        assert!(error
+            .0
+            .contains("Computer instance not found while removing"));
+        let managed = state
+            .config
+            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
+            .unwrap();
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0].name(), "audit-mcp");
+        assert!(!managed[0].is_plugin_owned());
+    }
+
+    #[tokio::test]
+    async fn hook_register_keeps_user_server_when_policy_allows_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state_without_runtime(tmp.path());
+        state
+            .config
+            .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
+            .unwrap();
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            &state,
+            TEST_INSTANCE_ID,
+            "acme",
+            "audit",
+            UserMcpConflictPolicy::KeepUserServer,
         );
+
+        assert!(!hooks.existing_server_names().contains("audit-mcp"));
+        hooks
+            .register_server(server_config("audit-mcp"))
+            .await
+            .unwrap();
+
         let managed = state
             .config
             .load_managed_configs_for_instance(TEST_INSTANCE_ID)

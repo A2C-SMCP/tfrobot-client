@@ -97,6 +97,53 @@ describe('MarketplaceTab', () => {
     });
   }, 10000);
 
+  it('adds a marketplace directly without secondary trust confirmation', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['add_marketplace'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['add_marketplace'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [
+          { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        ],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('SDK marketplace lifecycle is available')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'tf-market' } });
+    fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/tf.git' } });
+    fireEvent.click(screen.getByText('Add').closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
+        instanceId: 'computer-a',
+        request: {
+          name: 'tf-market',
+          gitUrl: 'https://example.com/tf.git',
+        },
+      });
+    });
+    expect(screen.queryByText(/trust/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/confirm/i)).not.toBeInTheDocument();
+  });
+
   it('enables only operations exposed by SDK capabilities', async () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: {
@@ -131,6 +178,53 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Remove Marketplace').closest('button')).toBeDisabled();
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
     expect(screen.getByText('Install Plugin').closest('button')).toBeDisabled();
+  });
+
+  it('fixes plugin install to the current Computer without exposing SDK scope selection', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['install_plugin'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['install_plugin'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-b" />);
+
+    expect(await screen.findByText('computer-b')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Marketplace'), { target: { value: 'tf-market' } });
+    fireEvent.change(screen.getByLabelText('Plugin'), { target: { value: 'desktop-tools' } });
+    fireEvent.click(screen.getByText('Install Plugin').closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('install_plugin', {
+        instanceId: 'computer-b',
+        request: {
+          marketplace: 'tf-market',
+          plugin: 'desktop-tools',
+        },
+      });
+    });
+    expect(screen.queryByLabelText(/scope/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('user')).not.toBeInTheDocument();
+    expect(screen.queryByText('project')).not.toBeInTheDocument();
+    expect(screen.queryByText('local')).not.toBeInTheDocument();
   });
 
   it('renders structured lifecycle errors with a readable message', async () => {
