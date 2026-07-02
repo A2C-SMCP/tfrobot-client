@@ -26,11 +26,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   const [marketplaceForm] = Form.useForm<MarketplaceFormValues>();
   const [pluginForm] = Form.useForm<PluginFormValues>();
   const {
-    capabilities,
-    marketplaces,
-    plugins,
-    loadingMarketplace,
-    marketplaceError,
+    recordsByInstanceId,
     fetchMarketplaceGovernance,
     addMarketplace,
     refreshMarketplace,
@@ -40,6 +36,12 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
     disablePlugin,
     uninstallPlugin,
   } = useSkillStore();
+  const governance = recordsByInstanceId[instanceId]?.governance ?? null;
+  const capabilities = governance?.capabilities ?? null;
+  const marketplaces = governance?.marketplaces ?? [];
+  const plugins = governance?.plugins ?? [];
+  const loadingMarketplace = recordsByInstanceId[instanceId]?.loadingMarketplace ?? false;
+  const marketplaceError = recordsByInstanceId[instanceId]?.marketplaceError ?? null;
 
   useEffect(() => {
     fetchMarketplaceGovernance(instanceId);

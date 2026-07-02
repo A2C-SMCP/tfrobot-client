@@ -67,4 +67,39 @@ describe('SkillsTab', () => {
 
     expect(await screen.findByText('SKILL.md has no preview content')).toBeInTheDocument();
   });
+
+  it('does not render stale skills from a different active instance', () => {
+    mockedInvoke.mockReturnValue(new Promise(() => undefined) as any);
+    useSkillStore.setState((state) => ({
+      ...state,
+      activeInstanceId: 'computer-a',
+      skills: [
+        { name: 'stale-helper', source: 'user', path: '/skills/user/stale-helper', description: 'A only' },
+      ],
+      recordsByInstanceId: {
+        'computer-a': {
+          skills: [
+            { name: 'stale-helper', source: 'user', path: '/skills/user/stale-helper', description: 'A only' },
+          ],
+          selectedSkillName: null,
+          selectedSkill: null,
+          governance: null,
+          loadingSkills: false,
+          loadingSkill: false,
+          loadingMarketplace: false,
+          error: null,
+          skillError: null,
+          marketplaceError: null,
+          skillsRequestId: 1,
+          skillRequestId: 0,
+          marketplaceRequestId: 0,
+        },
+      },
+    }));
+
+    render(<SkillsTab instanceId="computer-b" />);
+
+    expect(screen.queryByText('stale-helper')).not.toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledWith('list_skills', { instanceId: 'computer-b' });
+  });
 });

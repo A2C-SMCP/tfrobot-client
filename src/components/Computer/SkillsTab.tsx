@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useSkillStore, type SkillRef } from '@/stores/skillStore';
 
 const { Text, Title, Paragraph } = Typography;
+const EMPTY_SKILLS: SkillRef[] = [];
 
 interface SkillsTabProps {
   instanceId: string;
@@ -55,18 +56,20 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
-    skills,
-    selectedSkillName,
-    selectedSkill,
-    loadingSkills,
-    loadingSkill,
-    error,
-    skillError,
+    recordsByInstanceId,
     fetchSkills,
     refreshSkills,
     selectSkill,
     openLocalSkillsRoot,
   } = useSkillStore();
+  const record = recordsByInstanceId[instanceId];
+  const skills = record?.skills ?? EMPTY_SKILLS;
+  const selectedSkillName = record?.selectedSkillName ?? null;
+  const selectedSkill = record?.selectedSkill ?? null;
+  const loadingSkills = record?.loadingSkills ?? false;
+  const loadingSkill = record?.loadingSkill ?? false;
+  const error = record?.error ?? null;
+  const skillError = record?.skillError ?? null;
 
   useEffect(() => {
     fetchSkills(instanceId);

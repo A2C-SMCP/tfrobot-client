@@ -132,4 +132,82 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
     expect(screen.getByText('Install Plugin').closest('button')).toBeDisabled();
   });
+
+  it('does not render stale marketplace governance from a different active instance', () => {
+    mockedInvoke.mockReturnValue(new Promise(() => undefined) as any);
+    useSkillStore.setState((state) => ({
+      ...state,
+      activeInstanceId: 'computer-a',
+      capabilities: {
+        computerLifecycleApiAvailable: true,
+        supportedOperations: ['enable_plugin'],
+        requiredSdkApis: [],
+        reason: 'supported',
+      },
+      marketplaces: [
+        { name: 'stale-market', gitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'stale-market',
+          plugin: 'stale-plugin',
+          pluginId: 'plugin-1',
+          version: '1.0.0',
+          enabled: false,
+          status: 'installed',
+          bundledMcpServers: [],
+          bundledSkills: [],
+          message: null,
+        },
+      ],
+      recordsByInstanceId: {
+        'computer-a': {
+          skills: [],
+          selectedSkillName: null,
+          selectedSkill: null,
+          governance: {
+            capabilities: {
+              computerLifecycleApiAvailable: true,
+              supportedOperations: ['enable_plugin'],
+              requiredSdkApis: [],
+              reason: 'supported',
+            },
+            marketplaces: [
+              { name: 'stale-market', gitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+            ],
+            plugins: [
+              {
+                marketplace: 'stale-market',
+                plugin: 'stale-plugin',
+                pluginId: 'plugin-1',
+                version: '1.0.0',
+                enabled: false,
+                status: 'installed',
+                bundledMcpServers: [],
+                bundledSkills: [],
+                message: null,
+              },
+            ],
+          },
+          loadingSkills: false,
+          loadingSkill: false,
+          loadingMarketplace: false,
+          error: null,
+          skillError: null,
+          marketplaceError: null,
+          skillsRequestId: 0,
+          skillRequestId: 0,
+          marketplaceRequestId: 1,
+        },
+      },
+    }));
+
+    render(<MarketplaceTab instanceId="computer-b" />);
+
+    expect(screen.queryByText('stale-market')).not.toBeInTheDocument();
+    expect(screen.queryByText('stale-plugin')).not.toBeInTheDocument();
+    expect(screen.getByText('No SDK marketplaces returned')).toBeInTheDocument();
+    expect(screen.getByText('No SDK plugins returned')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledWith('get_marketplace_governance', { instanceId: 'computer-b' });
+  });
 });
