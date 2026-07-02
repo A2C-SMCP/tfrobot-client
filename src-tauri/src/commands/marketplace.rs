@@ -39,6 +39,12 @@ const AVAILABLE_SDK_APIS: &[&str] = &[
     "Computer::uninstall_plugin",
 ];
 
+// Intentionally do not expose Computer::reconcile_governance as a client
+// operation yet. Current SDK recovery does not provide the full instance-scoped
+// governance contract tfrobot-client needs for cold-start MCP remount/settings
+// parity. The client should wait for that SDK capability instead of rebuilding
+// SDK ledgers or recovery logic locally.
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceCapabilities {
@@ -427,6 +433,10 @@ async fn marketplace_governance_snapshot(
     let installed = load_installed_plugins(Some(&skill_home), Some(env));
     let registered_workdirs = runtime.sdk_registered_workdirs().await;
     let active_workdir = runtime.sdk_active_workdir().await;
+    // Keep the read model constrained to a snapshot. Cold-start recovery,
+    // env-aware settings merge, and bundled MCP remount remain SDK-owned
+    // lifecycle responsibilities; tfrobot-client must not compensate by
+    // mutating SDK governance state from this view.
     let policy = resolve_policy_settings(Some(env), None, None);
     let declared = resolve_settings(ResolveSettingsArgs {
         registered_workdirs: &registered_workdirs,

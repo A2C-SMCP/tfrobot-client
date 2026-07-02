@@ -59,6 +59,10 @@ async fn capabilities_report_sdk_governance_lifecycle_available() {
     assert!(capabilities
         .required_sdk_apis
         .contains(&"Computer::install_plugin".to_string()));
+    // Cold-start governance recovery/remount is intentionally not advertised as
+    // a client capability until SDK exposes the complete instance-scoped
+    // contract. The client must not fill that gap by reconstructing SDK
+    // lifecycle state from ledgers.
     assert!(!capabilities
         .supported_operations
         .contains(&"reconcile_governance".to_string()));
@@ -329,6 +333,10 @@ async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
     .await
     .unwrap();
 
+    // SDK currently owns boot/recovery semantics. tfrobot-client verifies that
+    // plugin servers stay visible in the current runtime, but it does not
+    // synthesize cold-start remount behavior or start bundled MCP servers during
+    // Computer bootup.
     let before_boot = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
