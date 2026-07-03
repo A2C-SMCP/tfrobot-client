@@ -36,7 +36,7 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: {
         computerLifecycleApiAvailable: true,
-        supportedOperations: ['refresh_marketplace', 'enable_plugin'],
+        supportedOperations: ['refresh_marketplace', 'update_marketplace', 'enable_plugin'],
         requiredSdkApis: [],
         reason: 'supported',
       },
@@ -85,17 +85,111 @@ describe('MarketplaceTab', () => {
         request: {
           marketplace: 'tf-market',
           plugin: 'desktop-tools',
-          pluginId: 'plugin-1',
-          version: '1.0.0',
-          enabled: false,
-          status: 'installed',
-          bundledMcpServers: ['browser'],
-          bundledSkills: ['summarizer'],
-          message: null,
         },
       });
     });
   }, 10000);
+
+  it('renders available plugins and installs them directly from the list', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['install_plugin'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [
+          { name: 'tf-mkt', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        ],
+        plugins: [
+          {
+            marketplace: 'tf-mkt',
+            plugin: 'turingfocus-toolkit',
+            pluginId: 'turingfocus-toolkit@tf-mkt',
+            version: null,
+            enabled: false,
+            status: 'available',
+            bundledMcpServers: ['everything'],
+            bundledSkills: ['turingfocus-toolkit:add-feature'],
+            message: 'TuringFocus toolkit',
+          },
+        ],
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['install_plugin'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('turingfocus-toolkit')).toBeInTheDocument();
+    expect(screen.getByText('available')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByText('Install Plugin')[0].closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('install_plugin', {
+        instanceId: 'computer-a',
+        request: {
+          marketplace: 'tf-mkt',
+          plugin: 'turingfocus-toolkit',
+        },
+      });
+    });
+  });
+
+  it('updates an existing marketplace URL from the marketplace form', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['add_marketplace', 'update_marketplace'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [
+          { name: 'tf-mkt', gitUrl: 'https://example.com/old.git', status: 'known', message: null },
+        ],
+        plugins: [],
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: {
+          computerLifecycleApiAvailable: true,
+          supportedOperations: ['add_marketplace', 'update_marketplace'],
+          requiredSdkApis: [],
+          reason: 'supported',
+        },
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('tf-mkt')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Edit').closest('button')!);
+    fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/new.git' } });
+    fireEvent.click(screen.getByText('Update').closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('update_marketplace', {
+        instanceId: 'computer-a',
+        request: {
+          name: 'tf-mkt',
+          gitUrl: 'https://example.com/new.git',
+        },
+      });
+    });
+  });
 
   it('adds a marketplace directly without secondary trust confirmation', async () => {
     mockedInvoke

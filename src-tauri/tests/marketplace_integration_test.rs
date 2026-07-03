@@ -15,7 +15,8 @@ use tfrobot_client_lib::commands::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
         get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
         refresh_marketplace_core, remove_marketplace_core, uninstall_plugin_core,
-        AddMarketplaceRequest, PluginLifecycleRequest,
+        update_marketplace_core, AddMarketplaceRequest, PluginLifecycleRequest,
+        UpdateMarketplaceRequest,
     },
     mcp, skills,
 };
@@ -167,6 +168,20 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         marketplace: "acme".to_string(),
         plugin: "audit".to_string(),
     };
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.plugins.len(), 1);
+    assert_eq!(governance.plugins[0].plugin, "audit");
+    assert_eq!(governance.plugins[0].status, "available");
+    assert_eq!(
+        governance.plugins[0].bundled_mcp_servers,
+        vec!["audit-mcp".to_string()]
+    );
+    assert!(governance.plugins[0]
+        .bundled_skills
+        .contains(&"audit:code-review".to_string()));
+
     install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap();
@@ -360,6 +375,97 @@ async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
     );
 }
 
+#[tokio::test]
+async fn plugin_install_and_enable_start_mcp_when_computer_is_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let installed_server = wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
+        .await
+        .expect("plugin install should start bundled MCP server when Computer is running");
+    assert!(installed_server.running);
+
+    disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let enabled_server = wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
+        .await
+        .expect("plugin enable should start bundled MCP server when Computer is running");
+    assert!(enabled_server.running);
+}
+
+#[tokio::test]
+async fn enabled_plugin_mcp_remounts_from_ledger_after_app_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let restarted = create_test_app_state(tmp.path());
+    let servers = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit = servers
+        .iter()
+        .find(|server| server.name == "audit-mcp")
+        .expect("enabled plugin MCP should remount from installed plugin ledger");
+
+    assert!(!audit.running);
+    assert!(matches!(
+        audit.managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+}
+
 async fn wait_for_mcp_server_running(
     instance_id: &str,
     state: &AppState,
@@ -419,6 +525,94 @@ async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
         .unwrap();
     assert_eq!(governance.marketplaces.len(), 1);
     assert_eq!(governance.plugins.len(), 1);
+}
+
+#[tokio::test]
+async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let first_repo = tmp.path().join("first-marketplace-repo");
+    let second_repo = tmp.path().join("second-marketplace-repo");
+    build_marketplace_repo(&first_repo);
+    build_tf45_isolation_marketplace_repo(&second_repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", first_repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+
+    update_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        UpdateMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", second_repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert_eq!(
+        governance.marketplaces[0].git_url.as_deref(),
+        Some(format!("file://{}", second_repo.display()).as_str())
+    );
+    assert_eq!(governance.plugins.len(), 1);
+    assert_eq!(governance.plugins[0].plugin, "tf45-audit");
+    assert_eq!(governance.plugins[0].status, "available");
+}
+
+#[tokio::test]
+async fn marketplace_update_requires_plugins_to_be_uninstalled_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let first_repo = tmp.path().join("first-marketplace-repo");
+    let second_repo = tmp.path().join("second-marketplace-repo");
+    build_marketplace_repo(&first_repo);
+    build_tf45_isolation_marketplace_repo(&second_repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", first_repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = update_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        UpdateMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", second_repo.display()),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("uninstall plugins before updating"));
 }
 
 #[tokio::test]

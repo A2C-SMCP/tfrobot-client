@@ -9,6 +9,7 @@
     "cancel": "Cancel",
     "delete": "Delete",
     "edit": "Edit",
+    "update": "Update",
     "refresh": "Refresh",
     "yes": "Yes",
     "no": "No",
@@ -114,7 +115,9 @@
   "skills": {
     "title": "Skills",
     "empty": "No active skills",
+    "emptySearch": "No skills match the search",
     "emptySelection": "Select a skill to preview SKILL.md",
+    "searchPlaceholder": "Search skills",
     "openLocalRoot": "Open Local Root",
     "openMcpSource": "Open MCP server {{server}}",
     "resourceUnavailable": "SKILL.md unavailable",
@@ -152,6 +155,7 @@
     "actions": {
       "refreshMarketplace": "Refresh Marketplace",
       "removeMarketplace": "Remove Marketplace",
+      "updateMarketplace": "Update Marketplace",
       "installPlugin": "Install Plugin",
       "enablePlugin": "Enable Plugin",
       "disablePlugin": "Disable Plugin",
@@ -161,6 +165,7 @@
       "added": "Marketplace added",
       "refreshed": "Marketplace refreshed",
       "removed": "Marketplace removed",
+      "updated": "Marketplace updated",
       "install": "Plugin installed",
       "enable": "Plugin enabled",
       "disable": "Plugin disabled",

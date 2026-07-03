@@ -584,6 +584,49 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_inline_mcp_servers_load_as_user_managed() {
+        let (svc, tmp) = setup_empty();
+        std::fs::write(
+            tmp.path().join("computer_instances.json"),
+            r#"{
+              "schema_version": 1,
+              "instances": [
+                {
+                  "id": "legacy",
+                  "name": "Legacy",
+                  "mcp_servers": [
+                    {
+                      "type": "Stdio",
+                      "name": "legacy-inline",
+                      "server_parameters": {
+                        "command": "node",
+                        "args": ["server.js"],
+                        "env": {}
+                      }
+                    }
+                  ],
+                  "inputs": [],
+                  "input_values": {},
+                  "connection_policy": {
+                    "target": null,
+                    "auto_connect": false
+                  }
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let instances = svc.load_computer_instances().unwrap();
+
+        assert_eq!(instances.instances.len(), 1);
+        let server = &instances.instances[0].mcp_servers[0];
+        assert_eq!(server.name(), "legacy-inline");
+        assert!(!server.is_plugin_owned());
+        assert!(matches!(server.managed_by, McpServerManagedBy::User));
+    }
+
+    #[test]
     fn test_legacy_config_files_are_ignored() {
         let (svc, tmp) = setup_empty();
         let config: MCPServerConfig = serde_json::from_value(serde_json::json!({

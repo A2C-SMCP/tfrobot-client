@@ -1,6 +1,6 @@
-import { useEffect, useMemo } from 'react';
-import { App, Alert, Button, Empty, List, Skeleton, Space, Tag, Typography } from 'antd';
-import { FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useEffect, useMemo, useState } from 'react';
+import { App, Alert, Button, Empty, Input, List, Skeleton, Space, Tag, Typography } from 'antd';
+import { FolderOpenOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { formatInvokeError, useSkillStore, type SkillRef } from '@/stores/skillStore';
 
@@ -55,6 +55,7 @@ function renderMarkdown(markdown: string) {
 export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  const [search, setSearch] = useState('');
   const {
     recordsByInstanceId,
     fetchSkills,
@@ -75,7 +76,15 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
     fetchSkills(instanceId);
   }, [fetchSkills, instanceId]);
 
-  const grouped = useMemo(() => groupBySource(skills), [skills]);
+  const filteredSkills = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return skills;
+    return skills.filter((skill) => {
+      return [skill.name, skill.description, skill.source]
+        .some((value) => value.toLowerCase().includes(query));
+    });
+  }, [search, skills]);
+  const grouped = useMemo(() => groupBySource(filteredSkills), [filteredSkills]);
 
   const handleRefresh = async () => {
     try {
@@ -118,11 +127,7 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
       );
     }
 
-    return (
-      <div style={{ maxHeight: 520, overflow: 'auto', paddingRight: 8 }}>
-        {renderMarkdown(selectedSkill.body)}
-      </div>
-    );
+    return renderMarkdown(selectedSkill.body);
   };
 
   return (
@@ -141,14 +146,32 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
 
       {error && <Alert type="error" showIcon message={t('common.error')} description={error} />}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 36%) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
-        <div style={{ minWidth: 0 }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(300px, 36%) minmax(0, 1fr)',
+          gap: 16,
+          alignItems: 'stretch',
+          height: 'clamp(420px, calc(100vh - 360px), 760px)',
+          minHeight: 420,
+        }}
+      >
+        <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder={t('skills.searchPlaceholder')}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
           {loadingSkills ? (
             <Skeleton active paragraph={{ rows: 8 }} />
           ) : skills.length === 0 ? (
             <Empty description={t('skills.empty')} />
+          ) : filteredSkills.length === 0 ? (
+            <Empty description={t('skills.emptySearch')} />
           ) : (
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space direction="vertical" size={12} style={{ width: '100%', minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
               {Object.entries(grouped).map(([source, sourceSkills]) => (
                 <List
                   key={source}
@@ -181,7 +204,16 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
           )}
         </div>
 
-        <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 16, minHeight: 360, minWidth: 0 }}>
+        <div
+          style={{
+            border: '1px solid #f0f0f0',
+            borderRadius: 6,
+            padding: 16,
+            minHeight: 0,
+            minWidth: 0,
+            overflowY: 'auto',
+          }}
+        >
           {renderSkillDetail()}
         </div>
       </div>

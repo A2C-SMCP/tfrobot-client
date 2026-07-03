@@ -96,6 +96,7 @@ interface SkillState extends InstanceSkillRecord {
   fetchMarketplaceCapabilities: (instanceId: string) => Promise<void>;
   fetchMarketplaceGovernance: (instanceId: string) => Promise<void>;
   addMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
+  updateMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
   refreshMarketplace: (instanceId: string, marketplace: string) => Promise<void>;
   removeMarketplace: (instanceId: string, marketplace: string) => Promise<void>;
   installPlugin: (instanceId: string, request: PluginLifecycleRequest) => Promise<void>;
@@ -357,6 +358,10 @@ export const useSkillStore = create<SkillState>((set, get) => ({
 
   addMarketplace: async (instanceId, request) => {
     await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('add_marketplace', instanceId, { request }));
+  },
+
+  updateMarketplace: async (instanceId, request) => {
+    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('update_marketplace', instanceId, { request }));
   },
 
   refreshMarketplace: async (instanceId, marketplace) => {

@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { App, Alert, Button, Card, Descriptions, Empty, Form, Input, List, Space, Tag, Typography } from 'antd';
-import { CloudDownloadOutlined, DeleteOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CloudDownloadOutlined, DeleteOutlined, EditOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { formatInvokeError, useSkillStore } from '@/stores/skillStore';
 
@@ -25,10 +25,12 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   const { message } = App.useApp();
   const [marketplaceForm] = Form.useForm<MarketplaceFormValues>();
   const [pluginForm] = Form.useForm<PluginFormValues>();
+  const [editingMarketplace, setEditingMarketplace] = useState<string | null>(null);
   const {
     recordsByInstanceId,
     fetchMarketplaceGovernance,
     addMarketplace,
+    updateMarketplace,
     refreshMarketplace,
     removeMarketplace,
     installPlugin,
@@ -56,13 +58,33 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   const handleAddMarketplace = async () => {
     const values = await marketplaceForm.validateFields();
     try {
-      await addMarketplace(instanceId, values);
+      if (editingMarketplace) {
+        await updateMarketplace(instanceId, { ...values, name: editingMarketplace });
+      } else {
+        await addMarketplace(instanceId, values);
+      }
       marketplaceForm.resetFields();
-      message.success(t('marketplace.messages.added'));
+      setEditingMarketplace(null);
+      message.success(t(editingMarketplace ? 'marketplace.messages.updated' : 'marketplace.messages.added'));
     } catch (e) {
       message.error(formatInvokeError(e));
     }
   };
+
+  const handleEditMarketplace = (marketplace: MarketplaceFormValues) => {
+    setEditingMarketplace(marketplace.name);
+    marketplaceForm.setFieldsValue(marketplace);
+  };
+
+  const handleCancelEditMarketplace = () => {
+    setEditingMarketplace(null);
+    marketplaceForm.resetFields();
+  };
+
+  const pluginRequest = (plugin: PluginFormValues) => ({
+    marketplace: plugin.marketplace,
+    plugin: plugin.plugin,
+  });
 
   const handlePluginAction = async (
     action: 'install' | 'enable' | 'disable' | 'uninstall',
@@ -127,6 +149,9 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               renderItem={(marketplace) => (
                 <List.Item
                   actions={[
+                    <Button key="edit" size="small" icon={<EditOutlined />} disabled={!canRunOperation('update_marketplace')} loading={loadingMarketplace} onClick={() => handleEditMarketplace({ name: marketplace.name, gitUrl: marketplace.gitUrl ?? '' })}>
+                      {t('common.edit')}
+                    </Button>,
                     <Button key="refresh" size="small" icon={<ReloadOutlined />} disabled={!canRunOperation('refresh_marketplace')} loading={loadingMarketplace} onClick={() => refreshMarketplace(instanceId, marketplace.name)}>
                       {t('marketplace.actions.refreshMarketplace')}
                     </Button>,
@@ -149,18 +174,31 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               label={t('marketplace.form.name')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.nameRequired') }]}
             >
-              <Input disabled={!canRunOperation('add_marketplace')} />
+              <Input disabled={!!editingMarketplace || !canRunOperation('add_marketplace')} />
             </Form.Item>
             <Form.Item
               name="gitUrl"
               label={t('marketplace.form.gitUrl')}
               rules={[{ required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') }]}
             >
-              <Input disabled={!canRunOperation('add_marketplace')} />
+              <Input disabled={!(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
             </Form.Item>
-            <Button type="primary" icon={<PlusOutlined />} disabled={!canRunOperation('add_marketplace')} loading={loadingMarketplace} onClick={handleAddMarketplace}>
-              {t('common.add')}
-            </Button>
+            <Space>
+              <Button
+                type="primary"
+                icon={editingMarketplace ? <EditOutlined /> : <PlusOutlined />}
+                disabled={!(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))}
+                loading={loadingMarketplace}
+                onClick={handleAddMarketplace}
+              >
+                {editingMarketplace ? t('common.update') : t('common.add')}
+              </Button>
+              {editingMarketplace && (
+                <Button onClick={handleCancelEditMarketplace}>
+                  {t('common.cancel')}
+                </Button>
+              )}
+            </Space>
           </Form>
         </Space>
       </Card>
@@ -176,15 +214,25 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
               renderItem={(plugin) => (
                 <List.Item
                   actions={[
-                    <Button key="enable" size="small" icon={<PlayCircleOutlined />} disabled={!canRunOperation('enable_plugin') || plugin.enabled} loading={loadingMarketplace} onClick={() => enablePlugin(instanceId, plugin)}>
-                      {t('marketplace.actions.enablePlugin')}
-                    </Button>,
-                    <Button key="disable" size="small" icon={<PauseCircleOutlined />} disabled={!canRunOperation('disable_plugin') || !plugin.enabled} loading={loadingMarketplace} onClick={() => disablePlugin(instanceId, plugin)}>
-                      {t('marketplace.actions.disablePlugin')}
-                    </Button>,
-                    <Button key="uninstall" size="small" danger icon={<DeleteOutlined />} disabled={!canRunOperation('uninstall_plugin')} loading={loadingMarketplace} onClick={() => uninstallPlugin(instanceId, plugin)}>
-                      {t('marketplace.actions.uninstallPlugin')}
-                    </Button>,
+                    plugin.status === 'available' ? (
+                      <Button key="install" size="small" icon={<CloudDownloadOutlined />} disabled={!canRunOperation('install_plugin')} loading={loadingMarketplace} onClick={() => installPlugin(instanceId, pluginRequest(plugin))}>
+                        {t('marketplace.actions.installPlugin')}
+                      </Button>
+                    ) : (
+                      <Button key="enable" size="small" icon={<PlayCircleOutlined />} disabled={!canRunOperation('enable_plugin') || plugin.enabled} loading={loadingMarketplace} onClick={() => enablePlugin(instanceId, pluginRequest(plugin))}>
+                        {t('marketplace.actions.enablePlugin')}
+                      </Button>
+                    ),
+                    plugin.status !== 'available' && (
+                      <Button key="disable" size="small" icon={<PauseCircleOutlined />} disabled={!canRunOperation('disable_plugin') || !plugin.enabled} loading={loadingMarketplace} onClick={() => disablePlugin(instanceId, pluginRequest(plugin))}>
+                        {t('marketplace.actions.disablePlugin')}
+                      </Button>
+                    ),
+                    plugin.status !== 'available' && (
+                      <Button key="uninstall" size="small" danger icon={<DeleteOutlined />} disabled={!canRunOperation('uninstall_plugin')} loading={loadingMarketplace} onClick={() => uninstallPlugin(instanceId, pluginRequest(plugin))}>
+                        {t('marketplace.actions.uninstallPlugin')}
+                      </Button>
+                    ),
                   ]}
                 >
                   <List.Item.Meta

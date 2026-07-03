@@ -100,7 +100,25 @@ describe('SkillsTab', () => {
     fireEvent.click(await screen.findByText('long-helper'));
 
     const heading = await screen.findByRole('heading', { name: 'Long Helper' });
-    expect(heading.parentElement).toHaveStyle({ maxHeight: '520px', overflow: 'auto' });
+    expect(heading.closest('[style*="overflow-y: auto"]')).toBeInTheDocument();
+  });
+
+  it('filters skills without hiding the preview pane behind the list scroll', async () => {
+    mockedInvoke.mockResolvedValueOnce([
+      { name: 'alpha-helper', source: 'user', path: '/skills/user/alpha-helper', description: 'Alpha helper' },
+      { name: 'beta-helper', source: 'marketplace:tf-market', path: 'skill://marketplace/tf-market/beta-helper', description: 'Beta helper' },
+    ]);
+
+    render(<SkillsTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('alpha-helper')).toBeInTheDocument();
+    expect(screen.getByText('beta-helper')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('Search skills'), { target: { value: 'beta' } });
+
+    expect(screen.queryByText('alpha-helper')).not.toBeInTheDocument();
+    expect(screen.getByText('beta-helper')).toBeInTheDocument();
+    expect(screen.getByText('Select a skill to preview SKILL.md').closest('[style*="overflow-y: auto"]')).toBeInTheDocument();
   });
 
   it('shows clear states for missing and empty SKILL.md content', async () => {

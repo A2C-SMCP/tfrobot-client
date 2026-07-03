@@ -210,6 +210,7 @@ pub fn run() {
             commands::marketplace::add_marketplace,
             commands::marketplace::refresh_marketplace,
             commands::marketplace::remove_marketplace,
+            commands::marketplace::update_marketplace,
             commands::marketplace::install_plugin,
             commands::marketplace::enable_plugin,
             commands::marketplace::disable_plugin,

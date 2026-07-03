@@ -38,6 +38,7 @@ pub async fn get_mcp_servers_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    runtime.remount_enabled_plugin_servers().await?;
     let runtime_statuses: std::collections::HashMap<_, _> = runtime
         .mcp_server_statuses()
         .await

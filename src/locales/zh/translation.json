@@ -9,6 +9,7 @@
     "cancel": "取消",
     "delete": "删除",
     "edit": "编辑",
+    "update": "更新",
     "refresh": "刷新",
     "yes": "是",
     "no": "否",
@@ -114,7 +115,9 @@
   "skills": {
     "title": "Skills",
     "empty": "暂无 active skills",
+    "emptySearch": "没有匹配的 skills",
     "emptySelection": "选择一个 skill 预览 SKILL.md",
+    "searchPlaceholder": "搜索 skills",
     "openLocalRoot": "打开本地目录",
     "openMcpSource": "打开 MCP 服务器 {{server}}",
     "resourceUnavailable": "SKILL.md 不可用",
@@ -152,6 +155,7 @@
     "actions": {
       "refreshMarketplace": "刷新 Marketplace",
       "removeMarketplace": "删除 Marketplace",
+      "updateMarketplace": "更新 Marketplace",
       "installPlugin": "安装 Plugin",
       "enablePlugin": "启用 Plugin",
       "disablePlugin": "禁用 Plugin",
@@ -161,6 +165,7 @@
       "added": "Marketplace 已添加",
       "refreshed": "Marketplace 已刷新",
       "removed": "Marketplace 已删除",
+      "updated": "Marketplace 已更新",
       "install": "Plugin 已安装",
       "enable": "Plugin 已启用",
       "disable": "Plugin 已禁用",

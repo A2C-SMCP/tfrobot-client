@@ -10,12 +10,13 @@ use a2c_smcp::smcp_computer::mcp_clients::model::{
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
-    AddMarketplaceParams, DisableOptions, EnableOptions, InstallOptions, MarketplaceRefreshRow,
+    load_installed_plugins, resolve_policy_settings, resolve_settings, AddMarketplaceParams,
+    DisableOptions, EnableOptions, EnvMap, InstallOptions, MarketplaceRefreshRow,
     MarketplaceRemoveOutcome, McpInstallHooks, PluginInstallError, RemoveMarketplaceParams,
-    UninstallOptions,
+    ResolveSettingsArgs, UninstallOptions, XDG_CONFIG_HOME_ENV,
 };
 use a2c_smcp::smcp_computer::settings::{GovernanceError, MarketplaceAddOutcome};
-use a2c_smcp::smcp_computer::skills::{SkillResourceView, SkillSandboxError};
+use a2c_smcp::smcp_computer::skills::{load_bundled_servers, SkillResourceView, SkillSandboxError};
 use a2c_smcp::A2CSkillRef;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -68,7 +69,7 @@ pub struct ComputerConnectionPolicy {
     pub auto_connect: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpServerManagedBy {
     User,
@@ -80,11 +81,34 @@ pub enum McpServerManagedBy {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ManagedMcpServer {
     pub config: MCPServerConfig,
     #[serde(rename = "managedBy")]
     pub managed_by: McpServerManagedBy,
+}
+
+impl<'de> Deserialize<'de> for ManagedMcpServer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ManagedMcpServerWire {
+            Managed {
+                config: MCPServerConfig,
+                #[serde(rename = "managedBy")]
+                managed_by: McpServerManagedBy,
+            },
+            Legacy(MCPServerConfig),
+        }
+
+        match ManagedMcpServerWire::deserialize(deserializer)? {
+            ManagedMcpServerWire::Managed { config, managed_by } => Ok(Self { config, managed_by }),
+            ManagedMcpServerWire::Legacy(config) => Ok(Self::user(config)),
+        }
+    }
 }
 
 impl ManagedMcpServer {
@@ -324,6 +348,7 @@ impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.set_state(ComputerRuntimeState::Booting).await;
+        self.remount_enabled_plugin_servers_inner().await?;
 
         if let Err(error) = self.computer.read().await.boot_up().await {
             self.set_state(ComputerRuntimeState::Error).await;
@@ -416,6 +441,7 @@ impl ComputerInstanceRuntime {
             }
             *self.sdk_server_names.write().await = desired_server_configs.keys().cloned().collect();
         }
+        self.remount_enabled_plugin_servers_inner().await?;
         Ok(())
     }
 
@@ -523,6 +549,11 @@ impl ComputerInstanceRuntime {
             .map_err(|error| error.to_string())?;
         self.emit_sdk_tool_list_update_if_connected().await;
         Ok(())
+    }
+
+    pub async fn remount_enabled_plugin_servers(&self) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.remount_enabled_plugin_servers_inner().await
     }
 
     pub async fn start_all_mcp_servers(&self) -> Result<(), String> {
@@ -1111,6 +1142,48 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    async fn remount_enabled_plugin_servers_inner(&self) -> Result<(), String> {
+        let user_server_names: HashSet<String> = self
+            .instance
+            .mcp_servers
+            .iter()
+            .filter(|server| !server.is_plugin_owned())
+            .map(|server| server.name().to_string())
+            .collect();
+        let skill_home = self.computer.read().await.skill_home();
+        let env = sdk_settings_env(&self.skill_home_base, &self.instance.id);
+        let servers = enabled_plugin_mcp_servers(&skill_home, &env, &user_server_names);
+        if servers.is_empty() {
+            return Ok(());
+        }
+
+        let mut owners = self.plugin_mcp_server_owners.write().await;
+        let mut sdk_names = self.sdk_server_names.write().await;
+        for (config, managed_by) in servers {
+            let name = config.name().to_string();
+            if let Some(existing) = owners.get(&name) {
+                if existing != &managed_by {
+                    log::warn!(
+                        "Skipping Marketplace MCP server '{}' for instance '{}': already owned by another plugin",
+                        name,
+                        self.instance.id
+                    );
+                    continue;
+                }
+            }
+            self.computer
+                .read()
+                .await
+                .add_or_update_server(config)
+                .await
+                .map_err(|error| error.to_string())?;
+            owners.insert(name.clone(), managed_by);
+            sdk_names.insert(name);
+        }
+
+        Ok(())
+    }
+
     async fn replace_sdk_computer(&self, was_running: bool) -> Result<(), String> {
         let inputs = input_definitions_to_mcp_map(&self.instance.inputs);
         let new_computer = build_sdk_computer(
@@ -1186,6 +1259,112 @@ fn build_sdk_computer(
             .join(instance_storage_dir_name(&instance.id))
             .join("blob"),
     )
+}
+
+fn enabled_plugin_mcp_servers(
+    skill_home: &Path,
+    env: &EnvMap,
+    user_server_names: &HashSet<String>,
+) -> Vec<(MCPServerConfig, McpServerManagedBy)> {
+    let installed = load_installed_plugins(Some(skill_home), Some(env))
+        .account
+        .plugins;
+    if installed.is_empty() {
+        return Vec::new();
+    }
+
+    let policy = resolve_policy_settings(Some(env), None, None);
+    let registered_workdirs: Vec<PathBuf> = Vec::new();
+    let declared = resolve_settings(ResolveSettingsArgs {
+        registered_workdirs: &registered_workdirs,
+        active_workdir: None,
+        env: Some(env),
+        flag_settings_path: None,
+        policy_settings: Some(&policy),
+    })
+    .settings;
+
+    let mut result = Vec::new();
+    let mut plugin_server_names = HashSet::new();
+    for (plugin_id, records) in installed {
+        if !plugin_enabled(&declared, &plugin_id) {
+            continue;
+        }
+        let (plugin, marketplace) = split_plugin_id(&plugin_id);
+        for record in records {
+            let Some(install_path) = record.install_path.as_deref() else {
+                continue;
+            };
+            let declared_server_names: HashSet<_> =
+                record.bundled_mcp_servers.iter().cloned().collect();
+            let servers = match load_bundled_servers(Path::new(install_path)) {
+                Ok(servers) => servers,
+                Err(error) => {
+                    log::warn!(
+                        "Failed to load bundled MCP servers for Marketplace plugin '{}': {}",
+                        plugin_id,
+                        error
+                    );
+                    continue;
+                }
+            };
+            for server in servers {
+                let name = server.name().to_string();
+                if !declared_server_names.is_empty() && !declared_server_names.contains(&name) {
+                    continue;
+                }
+                if user_server_names.contains(&name) {
+                    continue;
+                }
+                if !plugin_server_names.insert(name.clone()) {
+                    log::warn!(
+                        "Skipping duplicate bundled MCP server '{}' while remounting Marketplace plugins",
+                        name
+                    );
+                    continue;
+                }
+                result.push((
+                    server,
+                    McpServerManagedBy::Plugin {
+                        marketplace: marketplace.clone(),
+                        plugin: plugin.clone(),
+                        plugin_id: Some(plugin_id.clone()),
+                    },
+                ));
+            }
+        }
+    }
+
+    result
+}
+
+fn sdk_settings_env(skill_home_base: &Path, instance_id: &str) -> EnvMap {
+    let mut env = HashMap::new();
+    env.insert(
+        XDG_CONFIG_HOME_ENV.to_string(),
+        skill_home_base
+            .join(instance_storage_dir_name(instance_id))
+            .join("sdk_config")
+            .to_string_lossy()
+            .to_string(),
+    );
+    env
+}
+
+fn plugin_enabled(declared: &serde_json::Map<String, serde_json::Value>, plugin_id: &str) -> bool {
+    declared
+        .get("enabledPlugins")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|plugins| plugins.get(plugin_id))
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+}
+
+fn split_plugin_id(plugin_id: &str) -> (String, String) {
+    plugin_id
+        .split_once('@')
+        .map(|(plugin, marketplace)| (plugin.to_string(), marketplace.to_string()))
+        .unwrap_or_else(|| (plugin_id.to_string(), String::new()))
 }
 
 fn default_local_skills_root(skill_home_base: &Path, instance_id: &str) -> PathBuf {
