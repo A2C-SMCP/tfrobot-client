@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { App, Button, Card, Descriptions, Form, Input, Space, Switch, Typography } from 'antd';
+import { useEffect, useState } from 'react';
+import { App, Button, Card, Descriptions, Form, Input, Modal, Space, Switch, Typography } from 'antd';
 import { FolderOpenOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useComputerStore, type ComputerInstance } from '@/stores/computerStore';
@@ -14,6 +14,7 @@ export function ComputerRuntimeSettings({ instance }: ComputerRuntimeSettingsPro
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [form] = Form.useForm<{ localSkillsRoot?: string }>();
+  const [pendingSkillHomeRoot, setPendingSkillHomeRoot] = useState<string | null | undefined>(undefined);
   const { loading, updateConnectionPolicy, updateSkillHome } = useComputerStore();
   const target = instance.connectionPolicy.target;
   const autoConnect = instance.connectionPolicy.auto_connect;
@@ -46,17 +47,28 @@ export function ComputerRuntimeSettings({ instance }: ComputerRuntimeSettingsPro
     }
   };
 
-  const handleSaveSkillHome = async () => {
-    const values = await form.validateFields();
+  const applySkillHomeChange = async () => {
+    if (pendingSkillHomeRoot === undefined) return;
     try {
-      await updateSkillHome(instance.id, values.localSkillsRoot?.trim() || null);
+      await updateSkillHome(instance.id, pendingSkillHomeRoot);
+      setPendingSkillHomeRoot(undefined);
       message.success(t('common.saved'));
     } catch (e) {
       message.error(String(e));
     }
   };
 
+  const confirmSkillHomeChange = (localSkillsRoot: string | null) => {
+    setPendingSkillHomeRoot(localSkillsRoot);
+  };
+
+  const handleSaveSkillHome = async () => {
+    const values = await form.validateFields();
+    confirmSkillHomeChange(values.localSkillsRoot?.trim() || null);
+  };
+
   return (
+    <>
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card size="small" title={t('computer.runtime.policyTitle')}>
         <Descriptions column={1} size="small">
@@ -93,16 +105,6 @@ export function ComputerRuntimeSettings({ instance }: ComputerRuntimeSettingsPro
         </Descriptions>
       </Card>
 
-      <Card size="small" title={t('computer.runtime.lifecycleTitle')}>
-        <Space direction="vertical" size={8}>
-          <Text>{t('computer.runtime.startBehavior')}</Text>
-          <Text type="secondary">{t('computer.runtime.globalRuntimeHint')}</Text>
-          <Button onClick={() => useComputerStore.getState().startInstance(instance.id)} loading={loading}>
-            {t('computer.start')}
-          </Button>
-        </Space>
-      </Card>
-
       <Card size="small" title={t('computer.runtime.skillHomeTitle')}>
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Descriptions column={1} size="small">
@@ -134,12 +136,7 @@ export function ComputerRuntimeSettings({ instance }: ComputerRuntimeSettingsPro
                 loading={loading}
                 onClick={async () => {
                   form.setFieldsValue({ localSkillsRoot: '' });
-                  try {
-                    await updateSkillHome(instance.id, null);
-                    message.success(t('common.saved'));
-                  } catch (e) {
-                    message.error(String(e));
-                  }
+                  confirmSkillHomeChange(null);
                 }}
               >
                 {t('computer.runtime.resetSkillHome')}
@@ -150,6 +147,28 @@ export function ComputerRuntimeSettings({ instance }: ComputerRuntimeSettingsPro
         </Space>
       </Card>
     </Space>
+      <Modal
+        title={t('computer.runtime.skillHomeConfirmTitle')}
+        open={pendingSkillHomeRoot !== undefined}
+        okText={t('computer.runtime.skillHomeConfirmOk')}
+        cancelText={t('common.cancel')}
+        confirmLoading={loading}
+        onOk={applySkillHomeChange}
+        onCancel={() => setPendingSkillHomeRoot(undefined)}
+      >
+        <Space direction="vertical" size={12}>
+          <Text>{t('computer.runtime.skillHomeConfirmDescription')}</Text>
+          <Descriptions column={1} size="small">
+            <Descriptions.Item label={t('computer.runtime.effectiveSkillHome')}>
+              <Text code>{instance.effectiveSkillHome ?? t('computer.runtime.defaultSkillHome')}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label={t('computer.runtime.nextSkillHome')}>
+              <Text code>{pendingSkillHomeRoot || t('computer.runtime.defaultSkillHome')}</Text>
+            </Descriptions.Item>
+          </Descriptions>
+        </Space>
+      </Modal>
+    </>
   );
 }
 

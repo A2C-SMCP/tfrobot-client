@@ -46,6 +46,10 @@ describe('ComputerRuntimeSettings', () => {
       target: { value: '/next/skill-home' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Rebuild this Computer?')).toBeInTheDocument();
+    expect(screen.getByText(/Changing Skill Home saves a new capability governance root/)).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('update_computer_skill_home', {
@@ -80,6 +84,8 @@ describe('ComputerRuntimeSettings', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Use Default' }));
+    expect(await screen.findByText('Rebuild this Computer?')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('update_computer_skill_home', {

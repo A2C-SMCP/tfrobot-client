@@ -58,7 +58,7 @@
       "disconnected": "未连接"
     },
     "runtime": {
-      "policyTitle": "运行时策略",
+      "policyTitle": "连接策略",
       "instance": "Computer",
       "connectionTarget": "连接目标",
       "noConnectionTarget": "未选择连接目标",
@@ -73,7 +73,11 @@
       "defaultSkillHome": "默认实例 skill_home/",
       "chooseSkillHome": "选择 Skill Home",
       "resetSkillHome": "使用默认值",
-      "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。"
+      "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。",
+      "nextSkillHome": "目标 Skill Home",
+      "skillHomeConfirmTitle": "确认重建 Computer？",
+      "skillHomeConfirmDescription": "修改 Skill Home 会保存新的能力治理根目录，并重建当前 Computer runtime。Marketplace、Plugin、MCP Server 和 Skill 会按新的 Skill Home 重新解析；当前连接和运行态可能被刷新。",
+      "skillHomeConfirmOk": "确认重建"
     },
     "connectionActions": {
       "targetTitle": "连接目标",
@@ -137,11 +141,27 @@
     "requiredApis": "所需 SDK API",
     "marketplacesTitle": "Marketplaces",
     "pluginsTitle": "Plugins",
+    "pluginsForMarketplace": "{{marketplace}} 中的 Plugins",
+    "lastUpdated": "最近更新：{{time}}",
     "emptyMarketplaces": "SDK 未返回 Marketplaces",
     "emptyPlugins": "SDK 未返回 Plugins",
+    "emptyMarketplaceSelection": "选择一个 Marketplace 后管理 Plugins",
     "sdkOwnedState": "状态由 SDK governance API 管理。",
     "bundledSkills": "内置 Skills：{{skills}}",
     "bundledMcpServers": "内置 MCP servers：{{servers}}",
+    "details": {
+      "title": "Plugin 内容",
+      "emptyPlugin": "选择一个 Plugin 查看内容",
+      "mcpServers": "MCP Servers",
+      "skills": "Skills",
+      "emptyMcpServers": "无内置 MCP servers",
+      "emptySkills": "无内置 Skills",
+      "emptyDescription": "暂无描述",
+      "mcpServerDescription": "内置 MCP server",
+      "selectSkill": "选择一个内置 Skill 预览 SKILL.md",
+      "skillUnavailable": "Skill 预览不可用",
+      "skillPreviewUnavailable": "当前 Computer 无法以内联预览方式读取这个 Skill。"
+    },
     "form": {
       "name": "名称",
       "nameRequired": "请输入 Marketplace 名称",
@@ -153,6 +173,7 @@
       "pluginRequired": "请输入 Plugin"
     },
     "actions": {
+      "addMarketplace": "添加 Marketplace",
       "refreshMarketplace": "刷新 Marketplace",
       "removeMarketplace": "删除 Marketplace",
       "updateMarketplace": "更新 Marketplace",

@@ -58,7 +58,7 @@
       "disconnected": "Disconnected"
     },
     "runtime": {
-      "policyTitle": "Runtime Policy",
+      "policyTitle": "Connection Policy",
       "instance": "Computer",
       "connectionTarget": "Connection target",
       "noConnectionTarget": "No connection target selected",
@@ -73,7 +73,11 @@
       "defaultSkillHome": "Default instance skill_home/",
       "chooseSkillHome": "Choose Skill Home",
       "resetSkillHome": "Use Default",
-      "skillHomeDescription": "This directory is the instance capability governance root. Clearing it restores the default instance skill_home/."
+      "skillHomeDescription": "This directory is the instance capability governance root. Clearing it restores the default instance skill_home/.",
+      "nextSkillHome": "Next Skill Home",
+      "skillHomeConfirmTitle": "Rebuild this Computer?",
+      "skillHomeConfirmDescription": "Changing Skill Home saves a new capability governance root and rebuilds the current Computer runtime. Marketplace, plugin, MCP server, and skill views will be resolved from the new Skill Home; current connection and runtime state may refresh.",
+      "skillHomeConfirmOk": "Rebuild"
     },
     "connectionActions": {
       "targetTitle": "Connection Target",
@@ -137,11 +141,27 @@
     "requiredApis": "Required SDK APIs",
     "marketplacesTitle": "Marketplaces",
     "pluginsTitle": "Plugins",
+    "pluginsForMarketplace": "Plugins in {{marketplace}}",
+    "lastUpdated": "Last updated: {{time}}",
     "emptyMarketplaces": "No SDK marketplaces returned",
     "emptyPlugins": "No SDK plugins returned",
+    "emptyMarketplaceSelection": "Select a marketplace to manage plugins",
     "sdkOwnedState": "State is owned by SDK governance APIs.",
     "bundledSkills": "Bundled skills: {{skills}}",
     "bundledMcpServers": "Bundled MCP servers: {{servers}}",
+    "details": {
+      "title": "Plugin Contents",
+      "emptyPlugin": "Select a plugin to inspect its contents",
+      "mcpServers": "MCP Servers",
+      "skills": "Skills",
+      "emptyMcpServers": "No bundled MCP servers",
+      "emptySkills": "No bundled skills",
+      "emptyDescription": "No description available",
+      "mcpServerDescription": "Bundled MCP server",
+      "selectSkill": "Select a bundled skill to preview SKILL.md",
+      "skillUnavailable": "Skill preview unavailable",
+      "skillPreviewUnavailable": "This skill is not available as inline preview content for the current Computer."
+    },
     "form": {
       "name": "Name",
       "nameRequired": "Marketplace name is required",
@@ -153,6 +173,7 @@
       "pluginRequired": "Plugin is required"
     },
     "actions": {
+      "addMarketplace": "Add Marketplace",
       "refreshMarketplace": "Refresh Marketplace",
       "removeMarketplace": "Remove Marketplace",
       "updateMarketplace": "Update Marketplace",
