@@ -31,6 +31,7 @@ const SUPPORTED_OPERATIONS: &[&str] = &[
     "enable_plugin",
     "disable_plugin",
     "uninstall_plugin",
+    "reconcile_governance",
 ];
 
 const AVAILABLE_SDK_APIS: &[&str] = &[
@@ -41,13 +42,9 @@ const AVAILABLE_SDK_APIS: &[&str] = &[
     "Computer::enable_plugin",
     "Computer::disable_plugin",
     "Computer::uninstall_plugin",
+    "Computer::reconcile_governance",
+    "Computer::list_mcp_servers_with_metadata",
 ];
-
-// Intentionally do not expose Computer::reconcile_governance as a client
-// operation yet. Current SDK recovery does not provide the full instance-scoped
-// governance contract tfrobot-client needs for cold-start MCP remount/settings
-// parity. The client should wait for that SDK capability instead of rebuilding
-// SDK ledgers or recovery logic locally.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -528,16 +525,14 @@ async fn marketplace_governance_snapshot(
     // API without spreading SDK store schema knowledge through command handlers.
     let known = load_known_marketplaces(Some(&skill_home), Some(env));
     let installed = load_installed_plugins(Some(&skill_home), Some(env));
-    let registered_workdirs = runtime.sdk_registered_workdirs().await;
-    let active_workdir = runtime.sdk_active_workdir().await;
     // Keep the read model constrained to a snapshot. Cold-start recovery,
     // env-aware settings merge, and bundled MCP remount remain SDK-owned
     // lifecycle responsibilities; tfrobot-client must not compensate by
     // mutating SDK governance state from this view.
     let policy = resolve_policy_settings(Some(env), None, None);
+    let cwd = state_like_instance_cwd_from_skill_home(&skill_home);
     let declared = resolve_settings(ResolveSettingsArgs {
-        registered_workdirs: &registered_workdirs,
-        active_workdir: active_workdir.as_deref(),
+        cwd: cwd.as_deref(),
         env: Some(env),
         flag_settings_path: None,
         policy_settings: Some(&policy),
@@ -625,6 +620,10 @@ async fn marketplace_governance_snapshot(
         marketplaces,
         plugins,
     }
+}
+
+fn state_like_instance_cwd_from_skill_home(skill_home: &Path) -> Option<std::path::PathBuf> {
+    skill_home.parent().map(Path::to_path_buf)
 }
 
 fn available_plugin_summaries(
@@ -834,6 +833,24 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         };
         match self.registry.runtime(&self.instance_id).await {
             Some(runtime) => {
+                if runtime.sdk_mcp_server_names().await.contains(&name) {
+                    if let Some(owner) = runtime.plugin_mcp_server_owner(&name).await {
+                        if same_plugin_owner(&owner, &managed_by) {
+                            self.registered_server_names.lock().await.push(name);
+                            return Ok(());
+                        }
+                        return Err(McpHookError(format!(
+                            "MCP server '{}' is already managed by another Marketplace plugin",
+                            name
+                        )));
+                    }
+                    return Err(McpHookError(format!(
+                        "MCP server '{}' already exists in the active SDK Computer; rename or remove it before installing plugin '{}@{}'",
+                        name,
+                        self.plugin,
+                        self.marketplace,
+                    )));
+                }
                 if let Some(owner) = runtime.plugin_mcp_server_owner(&name).await {
                     if !same_plugin_owner(&owner, &managed_by) {
                         return Err(McpHookError(format!(

@@ -136,7 +136,7 @@ async fn import_cli_native(
     }
 
     for server in &config.servers {
-        if is_plugin_owned_server(state, instance_id, server.name())? {
+        if is_plugin_owned_server(state, instance_id, server.name()).await? {
             servers_skipped.push(server.name().to_string());
             continue;
         }
@@ -171,7 +171,7 @@ async fn import_claude_desktop(
     let mut servers_skipped = Vec::new();
 
     for (name, server) in config.mcp_servers {
-        if is_plugin_owned_server(state, instance_id, &name)? {
+        if is_plugin_owned_server(state, instance_id, &name).await? {
             servers_skipped.push(name);
             continue;
         }
@@ -216,15 +216,23 @@ fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConf
     })
 }
 
-fn is_plugin_owned_server(state: &AppState, instance_id: &str, name: &str) -> Result<bool, String> {
+async fn is_plugin_owned_server(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<bool, String> {
     match state
         .config
         .get_managed_config_for_instance(instance_id, name)
     {
-        Ok(server) => Ok(server.is_plugin_owned()),
-        Err(crate::services::config::ConfigError::NotFound(_)) => Ok(false),
-        Err(error) => Err(error.to_string()),
+        Ok(server) if server.is_plugin_owned() => return Ok(true),
+        Ok(_) | Err(crate::services::config::ConfigError::NotFound(_)) => {}
+        Err(error) => return Err(error.to_string()),
     }
+    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
+        return Ok(runtime.plugin_mcp_server_owner(name).await.is_some());
+    }
+    Ok(false)
 }
 
 /// Export configuration to file

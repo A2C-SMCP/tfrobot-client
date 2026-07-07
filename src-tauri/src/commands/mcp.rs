@@ -38,57 +38,78 @@ pub async fn get_mcp_servers_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    runtime.remount_enabled_plugin_servers().await?;
     let runtime_statuses: std::collections::HashMap<_, _> = runtime
         .mcp_server_statuses()
         .await
         .into_iter()
         .map(|(name, running, status_message)| (name, (running, status_message)))
         .collect();
+    let sdk_ownership = runtime.sdk_mcp_server_ownership().await;
+    let sdk_managed_by: std::collections::HashMap<_, _> = sdk_ownership
+        .iter()
+        .filter_map(|entry| {
+            crate::services::computer::sdk_managed_by_to_client(entry.managed_by.clone())
+                .map(|managed_by| (entry.name.clone(), managed_by))
+        })
+        .collect();
+    let sdk_disabled: std::collections::HashMap<_, _> = sdk_ownership
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.disabled))
+        .collect();
 
     let mut statuses: Vec<_> = configs
         .into_iter()
         .map(|server| {
+            let persisted_plugin_owned = server.is_plugin_owned();
             let config = server.config;
             let name = config.name().to_string();
             let (running, status_message) = runtime_statuses
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| (false, "Stopped".to_string()));
+            let managed_by = if persisted_plugin_owned {
+                sdk_managed_by
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(server.managed_by)
+            } else {
+                McpServerManagedBy::User
+            };
             McpServerStatus {
-                name,
+                disabled: sdk_disabled
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(config.disabled()),
+                name: name.clone(),
                 running,
                 status_message,
-                disabled: config.disabled(),
-                managed_by: server.managed_by,
+                managed_by,
             }
         })
         .collect();
 
     let configured_names: std::collections::HashSet<_> =
         statuses.iter().map(|status| status.name.clone()).collect();
-    let plugin_owners = runtime.plugin_mcp_server_owners().await;
-    if !plugin_owners.is_empty() {
-        let runtime_configs = runtime.sdk_mcp_server_configs().await;
-        for (name, managed_by) in plugin_owners {
-            if configured_names.contains(&name) {
-                continue;
-            }
-            let Some(config) = runtime_configs.get(&name) else {
-                continue;
-            };
-            let (running, status_message) = runtime_statuses
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| (false, "Stopped".to_string()));
-            statuses.push(McpServerStatus {
-                name,
-                running,
-                status_message,
-                disabled: config.disabled(),
-                managed_by,
-            });
+    for entry in sdk_ownership {
+        if configured_names.contains(&entry.name) {
+            continue;
         }
+        let Some(managed_by) =
+            crate::services::computer::sdk_managed_by_to_client(entry.managed_by)
+        else {
+            continue;
+        };
+        let (running, status_message) = runtime_statuses
+            .get(&entry.name)
+            .cloned()
+            .unwrap_or_else(|| (false, "Stopped".to_string()));
+        statuses.push(McpServerStatus {
+            name: entry.name,
+            running,
+            status_message,
+            disabled: entry.disabled,
+            managed_by,
+        });
     }
 
     Ok(statuses)
@@ -267,6 +288,7 @@ pub async fn start_mcp_server_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    ensure_computer_started(&runtime).await?;
     runtime.start_mcp_server(name).await?;
 
     log::info!("MCP server started for instance {}: {}", instance_id, name);
@@ -304,6 +326,7 @@ pub async fn stop_mcp_server_core(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    ensure_computer_started(&runtime).await?;
     runtime.stop_mcp_server(name).await?;
 
     log::info!("MCP server stopped for instance {}: {}", instance_id, name);
@@ -337,6 +360,7 @@ pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Resu
         .computer_registry
         .update_runtime_instance(instance)
         .await?;
+    ensure_computer_started(&runtime).await?;
     for server in user_managed_servers(state, instance_id)? {
         runtime.start_mcp_server(server.name()).await?;
     }
@@ -362,6 +386,7 @@ pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Resul
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    ensure_computer_started(&runtime).await?;
     for server in user_managed_servers(state, instance_id)? {
         runtime.stop_mcp_server(server.name()).await?;
     }
@@ -376,6 +401,16 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
         return Err("instance_id is required".to_string());
     }
     Ok(instance_id)
+}
+
+async fn ensure_computer_started(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Result<(), String> {
+    if runtime.is_running().await {
+        Ok(())
+    } else {
+        Err("请先启动 Computer".to_string())
+    }
 }
 
 fn ensure_user_managed_server(

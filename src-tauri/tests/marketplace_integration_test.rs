@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use tfrobot_client_lib::commands::{
     computer::start_computer_instance_core,
+    config_io,
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
         get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
@@ -60,16 +61,15 @@ async fn capabilities_report_sdk_governance_lifecycle_available() {
     assert!(capabilities
         .required_sdk_apis
         .contains(&"Computer::install_plugin".to_string()));
-    // Cold-start governance recovery/remount is intentionally not advertised as
-    // a client capability until SDK exposes the complete instance-scoped
-    // contract. The client must not fill that gap by reconstructing SDK
-    // lifecycle state from ledgers.
-    assert!(!capabilities
+    assert!(capabilities
         .supported_operations
         .contains(&"reconcile_governance".to_string()));
-    assert!(!capabilities
+    assert!(capabilities
         .required_sdk_apis
         .contains(&"Computer::reconcile_governance".to_string()));
+    assert!(capabilities
+        .required_sdk_apis
+        .contains(&"Computer::list_mcp_servers_with_metadata".to_string()));
     assert!(capabilities.reason.contains("available"));
 }
 
@@ -318,6 +318,145 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         .load_managed_configs_for_instance(TEST_INSTANCE_ID)
         .unwrap();
     assert!(managed.iter().any(|server| server.name() == "audit-mcp"));
+}
+
+#[tokio::test]
+async fn plugin_install_rejects_duplicate_mcp_server_owned_by_another_plugin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_duplicate_mcp_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "duplicate".to_string(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("already"));
+
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit_rows: Vec<_> = servers
+        .iter()
+        .filter(|server| server.name == "audit-mcp")
+        .collect();
+    assert_eq!(audit_rows.len(), 1);
+    match &audit_rows[0].managed_by {
+        McpServerManagedBy::Plugin { plugin, .. } => assert_eq!(plugin, "audit"),
+        other => panic!("expected audit plugin owner, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_import_skips_dynamic_plugin_owned_mcp_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let import_path = tmp.path().join("import.json");
+    let user_config = echo_server_config("audit-mcp");
+    fs::write(
+        &import_path,
+        serde_json::json!({ "servers": [user_config], "inputs": [] }).to_string(),
+    )
+    .unwrap();
+    let result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        Some(config_io::ConfigFormat::CliNative),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.servers_imported, 0);
+    assert_eq!(result.servers_skipped, vec!["audit-mcp".to_string()]);
+    let claude_path = tmp.path().join("claude-import.json");
+    fs::write(
+        &claude_path,
+        serde_json::json!({
+            "mcpServers": {
+                "audit-mcp": {
+                    "command": "node",
+                    "args": [echo_server_path().to_string_lossy().to_string()],
+                    "env": {}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let claude_result = config_io::import_config_core(
+        &state,
+        claude_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        Some(config_io::ConfigFormat::ClaudeDesktop),
+    )
+    .await
+    .unwrap();
+    assert_eq!(claude_result.servers_imported, 0);
+    assert_eq!(claude_result.servers_skipped, vec!["audit-mcp".to_string()]);
+
+    let rows = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let audit = rows
+        .iter()
+        .find(|server| server.name == "audit-mcp")
+        .expect("plugin server remains visible");
+    assert!(matches!(
+        audit.managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
 }
 
 #[tokio::test]
@@ -824,6 +963,50 @@ fn build_marketplace_repo(repo: &Path) {
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
     )
     .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn build_duplicate_mcp_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"audit","source":"./plugins/audit"},{"name":"duplicate","source":"./plugins/duplicate"}]}"#,
+    )
+    .unwrap();
+    let server_path = echo_server_path();
+    for plugin in ["audit", "duplicate"] {
+        let skill = repo.join(format!("plugins/{plugin}/skills/code-review"));
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: code-review\ndescription: review code\n---\nbody",
+        )
+        .unwrap();
+        let servers = repo.join(format!("plugins/{plugin}/mcp-servers"));
+        fs::create_dir_all(&servers).unwrap();
+        fs::write(
+            servers.join("audit-mcp.json"),
+            format!(
+                r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
+                server_path.display()
+            ),
+        )
+        .unwrap();
+    }
 
     run_git(repo, &["init", "-q"]);
     run_git(repo, &["add", "-A"]);

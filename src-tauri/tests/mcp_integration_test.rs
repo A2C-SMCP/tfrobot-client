@@ -401,6 +401,11 @@ async fn test_start_all_and_stop_all_skip_plugin_owned_mcp_servers() {
             },
         )
         .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
 
     mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
@@ -524,6 +529,33 @@ async fn test_start_stop_mcp_server_use_sdk_computer_runtime() {
         .unwrap();
     assert_eq!(stopped[0].name, "sdk-single");
     assert!(!stopped[0].running);
+}
+
+#[tokio::test]
+async fn test_mcp_lifecycle_requires_started_computer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("not-started"))
+        .await
+        .unwrap();
+
+    let start_err = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "not-started")
+        .await
+        .unwrap_err();
+    let stop_err = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "not-started")
+        .await
+        .unwrap_err();
+    let start_all_err = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap_err();
+    let stop_all_err = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap_err();
+
+    for err in [start_err, stop_err, start_all_err, stop_all_err] {
+        assert_eq!(err, "请先启动 Computer");
+    }
 }
 
 #[tokio::test]
