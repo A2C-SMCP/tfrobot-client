@@ -6,8 +6,8 @@ mod common;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use common::{
     create_test_app_state, echo_server_config, everything_server_config,
-    everything_server_config_with_forbidden_tools, slow_echo_server_config,
-    stderr_flood_server_config,
+    everything_server_config_with_forbidden_tools, multi_tool_server_config,
+    slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -728,6 +728,79 @@ async fn test_debug_get_available_tools_uses_sdk_computer() {
 
     let echo = tools.iter().find(|tool| tool.name == "echo").unwrap();
     assert_eq!(echo.server, "debug-tools");
+}
+
+#[tokio::test]
+async fn test_default_tool_meta_alias_collides_across_tools_in_same_server() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    let mut config = multi_tool_server_config("test");
+    match &mut config {
+        MCPServerConfig::Stdio(stdio) => {
+            stdio.default_tool_meta = Some(a2c_smcp::smcp_computer::mcp_clients::ToolMeta {
+                auto_apply: Some(true),
+                alias: Some("123".to_string()),
+                tags: None,
+                ret_object_mapper: None,
+            });
+        }
+        _ => panic!("expected stdio config"),
+    }
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, config)
+        .await
+        .unwrap();
+
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "test")
+        .await
+        .expect_err("default alias should make multiple tools share one exposed name");
+
+    assert!(
+        error.contains("Tool '123' exists in multiple servers"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("[\"test\", \"test\"]"),
+        "same server should appear once per colliding tool source: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_blank_default_tool_meta_alias_does_not_collide_on_first_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    let mut config = multi_tool_server_config("test");
+    match &mut config {
+        MCPServerConfig::Stdio(stdio) => {
+            stdio.default_tool_meta = Some(a2c_smcp::smcp_computer::mcp_clients::ToolMeta {
+                auto_apply: None,
+                alias: Some("".to_string()),
+                tags: None,
+                ret_object_mapper: None,
+            });
+        }
+        _ => panic!("expected stdio config"),
+    }
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, config)
+        .await
+        .unwrap();
+
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "test")
+        .await
+        .expect("blank aliases should be ignored before the SDK validates tool names");
 }
 
 #[tokio::test]

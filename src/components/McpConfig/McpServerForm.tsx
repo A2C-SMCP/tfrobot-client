@@ -31,6 +31,42 @@ export function parseToolMetaJson(json: string | undefined): ToolMetaParseResult
   return { ok: true, value: result };
 }
 
+export function normalizeToolMeta(meta: ToolMeta | undefined | null): ToolMeta | null {
+  if (!meta) return null;
+
+  const normalized: ToolMeta = { ...meta };
+  if (normalized.alias !== undefined && normalized.alias.trim() === '') {
+    delete normalized.alias;
+  }
+  if (normalized.tags !== undefined) {
+    const tags = normalized.tags.filter((tag) => tag.trim() !== '');
+    if (tags.length > 0) {
+      normalized.tags = tags;
+    } else {
+      delete normalized.tags;
+    }
+  }
+
+  if (
+    normalized.auto_apply === undefined
+    && normalized.alias === undefined
+    && normalized.tags === undefined
+    && normalized.ret_object_mapper === undefined
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+export function normalizeToolMetaMap(toolMeta: Record<string, ToolMeta>): Record<string, ToolMeta> {
+  return Object.fromEntries(
+    Object.entries(toolMeta)
+      .map(([name, meta]) => [name, normalizeToolMeta(meta)] as const)
+      .filter((entry): entry is [string, ToolMeta] => entry[1] !== null),
+  );
+}
+
 interface FormValues {
   type: ServerType;
   name: string;
@@ -128,7 +164,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       form.setFields([{ name: 'tool_meta_json', errors: [t(errorKey)] }]);
       return;
     }
-    const toolMeta = toolMetaResult.value;
+    const toolMeta = normalizeToolMetaMap(toolMetaResult.value);
     const advancedFields = {
       disabled: values.disabled || false,
       forbidden_tools: values.forbidden_tools || [],
@@ -138,7 +174,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
     const commonFields = {
       name: values.name,
       ...advancedFields,
-      default_tool_meta: values.default_tool_meta ?? null,
+      default_tool_meta: normalizeToolMeta(values.default_tool_meta),
       vrl: values.vrl ?? null,
     };
 

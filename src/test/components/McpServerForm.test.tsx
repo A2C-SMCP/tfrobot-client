@@ -1,5 +1,10 @@
 import { render, screen } from '../helpers/render';
-import { McpServerForm, parseToolMetaJson } from '@/components/McpConfig/McpServerForm';
+import {
+  McpServerForm,
+  normalizeToolMeta,
+  normalizeToolMetaMap,
+  parseToolMetaJson,
+} from '@/components/McpConfig/McpServerForm';
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -59,6 +64,23 @@ describe('parseToolMetaJson', () => {
   it('rejects mixed valid/invalid — fails on first invalid value', () => {
     const input = '{"good": {"auto_apply": true}, "bad": true}';
     expect(parseToolMetaJson(input)).toEqual({ ok: false, error: 'invalid_format' });
+  });
+});
+
+describe('normalizeToolMeta', () => {
+  it('removes blank aliases so default metadata does not collapse all tool names', () => {
+    expect(normalizeToolMeta({ alias: '' })).toBeNull();
+    expect(normalizeToolMeta({ alias: '   ', auto_apply: true })).toEqual({ auto_apply: true });
+  });
+
+  it('drops blank aliases from parsed per-tool metadata', () => {
+    expect(normalizeToolMetaMap({
+      echo: { alias: '', tags: ['debug', ''] },
+      ping: { alias: 'pong' },
+    })).toEqual({
+      echo: { tags: ['debug'] },
+      ping: { alias: 'pong' },
+    });
   });
 });
 

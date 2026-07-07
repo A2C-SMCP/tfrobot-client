@@ -6,7 +6,7 @@ use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
 use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
     CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
-    ReadResourceResult, Resource, Tool,
+    ReadResourceResult, Resource, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
@@ -451,7 +451,7 @@ impl ComputerInstanceRuntime {
         self.computer
             .read()
             .await
-            .add_or_update_server(server)
+            .add_or_update_server(normalize_mcp_server_tool_meta(server))
             .await
             .map_err(|error| error.to_string())?;
         self.sdk_server_names.write().await.insert(name);
@@ -468,7 +468,7 @@ impl ComputerInstanceRuntime {
         self.computer
             .read()
             .await
-            .add_or_update_server(server)
+            .add_or_update_server(normalize_mcp_server_tool_meta(server))
             .await
             .map_err(|error| error.to_string())?;
         self.plugin_mcp_server_owners
@@ -1129,7 +1129,7 @@ impl ComputerInstanceRuntime {
                 self.computer
                     .read()
                     .await
-                    .add_or_update_server(server.clone())
+                    .add_or_update_server(normalize_mcp_server_tool_meta(server.clone()))
                     .await
                     .map_err(|error| {
                         format!(
@@ -1376,8 +1376,70 @@ fn default_local_skills_root(skill_home_base: &Path, instance_id: &str) -> PathB
 fn managed_mcp_servers_to_map(servers: &[ManagedMcpServer]) -> HashMap<String, MCPServerConfig> {
     servers
         .iter()
-        .map(|server| (server.name().to_string(), server.config.clone()))
+        .map(|server| {
+            (
+                server.name().to_string(),
+                normalize_mcp_server_tool_meta(server.config.clone()),
+            )
+        })
         .collect()
+}
+
+fn normalize_mcp_server_tool_meta(mut config: MCPServerConfig) -> MCPServerConfig {
+    match &mut config {
+        MCPServerConfig::Stdio(server) => {
+            normalize_default_tool_meta(&mut server.default_tool_meta);
+            normalize_tool_meta_map(&mut server.tool_meta);
+        }
+        MCPServerConfig::Http(server) => {
+            normalize_default_tool_meta(&mut server.default_tool_meta);
+            normalize_tool_meta_map(&mut server.tool_meta);
+        }
+        MCPServerConfig::Sse(server) => {
+            normalize_default_tool_meta(&mut server.default_tool_meta);
+            normalize_tool_meta_map(&mut server.tool_meta);
+        }
+    }
+    config
+}
+
+fn normalize_default_tool_meta(meta: &mut Option<ToolMeta>) {
+    if let Some(value) = meta {
+        normalize_tool_meta(value);
+        if is_empty_tool_meta(value) {
+            *meta = None;
+        }
+    }
+}
+
+fn normalize_tool_meta_map(tool_meta: &mut HashMap<String, ToolMeta>) {
+    tool_meta.retain(|_, meta| {
+        normalize_tool_meta(meta);
+        !is_empty_tool_meta(meta)
+    });
+}
+
+fn normalize_tool_meta(meta: &mut ToolMeta) {
+    if meta
+        .alias
+        .as_ref()
+        .is_some_and(|alias| alias.trim().is_empty())
+    {
+        meta.alias = None;
+    }
+    if let Some(tags) = &mut meta.tags {
+        tags.retain(|tag| !tag.trim().is_empty());
+        if tags.is_empty() {
+            meta.tags = None;
+        }
+    }
+}
+
+fn is_empty_tool_meta(meta: &ToolMeta) -> bool {
+    meta.auto_apply.is_none()
+        && meta.alias.is_none()
+        && meta.tags.is_none()
+        && meta.ret_object_mapper.is_none()
 }
 
 fn mcp_server_names(servers: &[ManagedMcpServer]) -> HashSet<String> {
