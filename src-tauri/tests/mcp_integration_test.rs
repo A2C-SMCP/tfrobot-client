@@ -873,6 +873,61 @@ async fn test_debug_get_available_tools_keeps_unknown_server_for_multiple_runnin
 }
 
 #[tokio::test]
+async fn test_sdk_available_tools_raw_metadata_with_multiple_servers() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("raw-meta-echo"),
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        slow_echo_server_config("raw-meta-slow"),
+    )
+    .await
+    .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let statuses = runtime.mcp_server_statuses().await;
+    eprintln!("server_statuses={statuses:#?}");
+
+    let tools = runtime.available_tools().await.unwrap();
+    for tool in &tools {
+        eprintln!(
+            "raw_tool name={} description={:?} meta={:#?}",
+            tool.name, tool.description, tool.meta
+        );
+    }
+
+    assert!(tools.iter().any(|tool| tool.name.as_ref() == "echo"));
+    assert!(tools.iter().any(|tool| tool.name.as_ref() == "slow_echo"));
+    assert!(tools.iter().all(|tool| {
+        tool.meta
+            .as_ref()
+            .and_then(|meta| meta.get("server_name"))
+            .is_none()
+    }));
+}
+
+#[tokio::test]
 async fn test_debug_execute_tool_uses_sdk_computer_and_logs_redacted_history() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();

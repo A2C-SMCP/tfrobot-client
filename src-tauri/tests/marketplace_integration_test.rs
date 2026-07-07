@@ -321,6 +321,78 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
 }
 
 #[tokio::test]
+async fn plugin_disable_removes_skills_from_active_skill_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let active_before_disable = skills::list_skills_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(active_before_disable
+        .iter()
+        .any(|skill| skill.name == "audit:code-review"));
+
+    disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let plugin = governance
+        .plugins
+        .iter()
+        .find(|plugin| plugin.plugin_id.as_deref() == Some("audit@acme"))
+        .expect("disabled plugin should remain visible in governance");
+    assert_eq!(plugin.status, "disabled");
+    assert!(!plugin.enabled);
+
+    let active_after_disable = skills::list_skills_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(active_after_disable
+        .iter()
+        .all(|skill| skill.name != "audit:code-review"));
+    let error = skills::get_skill_core(&state, TEST_INSTANCE_ID, "audit:code-review", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        skills::SkillCommandError::SkillNotFound { .. }
+    ));
+
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let active_after_enable = skills::list_skills_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(active_after_enable
+        .iter()
+        .any(|skill| skill.name == "audit:code-review"));
+}
+
+#[tokio::test]
 async fn plugin_install_rejects_duplicate_mcp_server_owned_by_another_plugin() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;

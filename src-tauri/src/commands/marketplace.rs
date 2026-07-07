@@ -173,8 +173,9 @@ pub async fn add_marketplace_core(
             },
         )
         .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime.mark_sdk_skills_dirty().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -232,8 +233,9 @@ pub async fn remove_marketplace_core(
             },
         )
         .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime.mark_sdk_skills_dirty().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -280,8 +282,9 @@ pub async fn update_marketplace_core(
             },
         )
         .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime.mark_sdk_skills_dirty().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -322,6 +325,7 @@ pub async fn install_plugin_core(
         .await
         .map_err(|error| error.to_string())?;
 
+    runtime.mark_sdk_skills_dirty().await;
     start_registered_plugin_servers_if_running(&runtime, &hooks).await
 }
 
@@ -363,6 +367,7 @@ pub async fn enable_plugin_core(
         .await
         .map_err(|error| error.to_string())?;
 
+    runtime.mark_sdk_skills_dirty().await;
     start_registered_plugin_servers_if_running(&runtime, &hooks).await
 }
 
@@ -402,7 +407,9 @@ pub async fn disable_plugin_core(
             Some(&hooks),
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime.mark_sdk_skills_dirty().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -441,8 +448,9 @@ pub async fn uninstall_plugin_core(
             Some(&hooks),
         )
         .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime.mark_sdk_skills_dirty().await;
+    Ok(())
 }
 
 async fn ensure_runtime(
