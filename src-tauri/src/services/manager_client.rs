@@ -6,10 +6,11 @@
 //! 本模块不依赖 Tauri 运行时，便于单元测试。上层命令负责在 `ManagerError::Unauthorized`
 //! 时向前端 emit 事件。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use reqwest::{header, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -289,6 +290,10 @@ pub struct DigitalEmployeeBrief {
 
 /// connection-info 响应 data 体（`GET /api/v1/digital-employees/{id}/connection-info`）。
 /// 字段与 TFRM-18 / UAT guide §5.5 对齐；`routingHeaders` 是客户端注入 smcp-computer 的权威契约。
+///
+/// TFRC-20（C2）退役连接面内嵌令牌：不再消费 `accessToken` / `expiresAt`——连接面鉴权唯一走
+/// token-exchange 换发的短 JWT（注入 Socket.IO auth dict 字段 `token`，TFRC-11/C1）。M6（TFRM-161）
+/// 后 Manager 也不再下发这两个字段；过渡期旧响应仍含它们时，serde 静默忽略（无 `deny_unknown_fields`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInfoResponse {
@@ -306,14 +311,35 @@ pub struct ConnectionInfoResponse {
     /// Socket.IO 应用层 namespace（固定 `/smcp`，但 Manager 可能仍回传）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smcp_namespace: Option<String>,
-    pub access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_name: Option<String>,
-    /// **客户端必须整 dict 注入 smcp-computer 的 headers 参数**，不要自组装 header 名。
-    /// 唯一的 snake_case 例外：`routingHeaders.access_token`（物化契约，下游 server 按此校验）。
-    pub routing_headers: std::collections::HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    /// 纯路由头（`X-TF-*`）：客户端整 dict verbatim 注入 smcp-computer 的 headers 参数，
+    /// 不要自组装 header 名。连接面鉴权不再走此处（TFRC-20：凭据走 Socket.IO auth dict）。
+    #[serde(default, deserialize_with = "deserialize_routing_headers")]
+    pub routing_headers: HashMap<String, String>,
+}
+
+fn deserialize_routing_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let headers = HashMap::<String, String>::deserialize(deserializer)?;
+    Ok(strip_auth_headers(headers))
+}
+
+fn strip_auth_headers(headers: HashMap<String, String>) -> HashMap<String, String> {
+    headers
+        .into_iter()
+        .filter(|(key, _)| !is_auth_header_name(key))
+        .collect()
+}
+
+fn is_auth_header_name(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('_', "-");
+    normalized.contains("token")
+        || normalized == "authorization"
+        || normalized == "cookie"
+        || normalized == "x-api-key"
 }
 
 // ───────── RFC 8693 token-exchange（TFRC-11 / C1，前置 TFRM-158/M4） ─────────
@@ -1169,6 +1195,7 @@ mod tests {
 
     #[test]
     fn connection_info_deserializes_full_payload() {
+        // M6（TFRM-161）后 connection-info 仅返元数据 + 纯路由头（X-TF-*），不含 accessToken / expiresAt。
         let json = r#"{
             "socketBaseURL": "https://staging.turingfocus.cn",
             "sioPath": "/socket.io/",
@@ -1176,44 +1203,104 @@ mod tests {
             "rid": "robot-xxx",
             "robotType": "tfrobot",
             "smcpNamespace": "/smcp",
-            "accessToken": "admin-secret-plain",
             "computerName": "desktop-001",
             "routingHeaders": {
                 "X-TF-Namespace": "tenant-acme",
                 "X-TF-RobotId": "robot-xxx",
-                "X-TF-RobotType": "tfrobot",
-                "access_token": "admin-secret-plain"
-            },
-            "expiresAt": "2026-04-23T12:00:00Z"
+                "X-TF-RobotType": "tfrobot"
+            }
         }"#;
         let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.socket_base_url, "https://staging.turingfocus.cn");
         assert_eq!(parsed.sio_path.as_deref(), Some("/socket.io/"));
         assert_eq!(parsed.smcp_namespace.as_deref(), Some("/smcp"));
-        assert_eq!(parsed.access_token, "admin-secret-plain");
-        assert_eq!(parsed.routing_headers.len(), 4);
+        assert_eq!(parsed.computer_name.as_deref(), Some("desktop-001"));
+        assert_eq!(parsed.routing_headers.len(), 3);
+        // 连接面鉴权不再随路由头下发（TFRC-20：凭据走 Socket.IO auth dict）。
+        assert!(!parsed.routing_headers.contains_key("access_token"));
+    }
+
+    #[test]
+    fn connection_info_ignores_legacy_token_fields() {
+        // flag-day 过渡期：旧 Manager 仍可能下发 accessToken / expiresAt（含 routingHeaders.access_token）。
+        // 瘦身后的 DTO 无对应字段，serde 必须静默忽略而非反序列化失败（无 `deny_unknown_fields`）。
+        let json = r#"{
+            "socketBaseURL": "https://staging.turingfocus.cn",
+            "rid": "robot-xxx",
+            "accessToken": "admin-secret-plain",
+            "computerName": "desktop-001",
+            "routingHeaders": {
+                "X-TF-Namespace": "tenant-acme",
+                "access_token": "admin-secret-plain"
+            },
+            "expiresAt": "2026-04-23T12:00:00Z"
+        }"#;
+        let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
+        // 顶层 legacy 鉴权字段（accessToken/expiresAt）被瘦身 DTO 忽略；
+        // nested routingHeaders.access_token 也必须在 DTO 边界剔除，避免进入 HTTP header。
+        assert_eq!(parsed.socket_base_url, "https://staging.turingfocus.cn");
+        assert_eq!(parsed.rid.as_deref(), Some("robot-xxx"));
+        assert_eq!(parsed.computer_name.as_deref(), Some("desktop-001"));
         assert_eq!(
             parsed
                 .routing_headers
-                .get("access_token")
+                .get("X-TF-Namespace")
                 .map(String::as_str),
-            Some("admin-secret-plain")
+            Some("tenant-acme")
         );
+        assert!(!parsed.routing_headers.contains_key("access_token"));
+        assert_eq!(parsed.routing_headers.len(), 1);
     }
 
     #[test]
     fn connection_info_tolerates_missing_optional_fields() {
-        // Manager 可能暂未返回 smcpNamespace / expiresAt / computerName 等字段——不应反序列化失败。
+        // Manager 可能暂未返回 smcpNamespace / computerName 等字段——不应反序列化失败。
         let json = r#"{
             "socketBaseURL": "https://s.example.com",
-            "accessToken": "tok",
             "routingHeaders": {}
         }"#;
         let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.socket_base_url, "https://s.example.com");
         assert!(parsed.sio_path.is_none());
         assert!(parsed.smcp_namespace.is_none());
-        assert!(parsed.expires_at.is_none());
+        assert!(parsed.computer_name.is_none());
+    }
+
+    #[test]
+    fn connection_info_strips_auth_like_routing_headers() {
+        let json = r#"{
+            "socketBaseURL": "https://s.example.com",
+            "routingHeaders": {
+                "X-TF-Namespace": "tenant-acme",
+                "X-TF-RobotId": "robot-xxx",
+                "Access_Token": "legacy-secret",
+                "Authorization": "Bearer legacy-secret",
+                "cookie": "sid=legacy-secret",
+                "x-api-key": "legacy-secret"
+            }
+        }"#;
+
+        let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.routing_headers.len(), 2);
+        assert_eq!(
+            parsed
+                .routing_headers
+                .get("X-TF-Namespace")
+                .map(String::as_str),
+            Some("tenant-acme")
+        );
+        assert_eq!(
+            parsed
+                .routing_headers
+                .get("X-TF-RobotId")
+                .map(String::as_str),
+            Some("robot-xxx")
+        );
+        assert!(!parsed.routing_headers.contains_key("Access_Token"));
+        assert!(!parsed.routing_headers.contains_key("Authorization"));
+        assert!(!parsed.routing_headers.contains_key("cookie"));
+        assert!(!parsed.routing_headers.contains_key("x-api-key"));
     }
 
     #[test]

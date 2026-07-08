@@ -14,6 +14,8 @@
 > - rust-sdk @ workspace 0.1.15，`SmcpComputerClientBuilder` + 默认 `access_token` + Agent 对称修改全部到位
 > - tfrobot-client 侧验收：7/7 acceptance tests pass（当前 feature：`cargo test --test smcp_handshake_config_test --features verify-smcp-0-2-2`）
 > - TFRM-16 Jira 不关闭：仍待 UI 改造、Manager 集成、指数退避、跨 SDK 协议版本对齐 4 项子任务（见 §5 非目标）
+>
+> **⚠️ 2026-06-25 退役（TFRC-20 / C2）**：连接面 `access_token`-as-header 已退役，连接面鉴权改走 Socket.IO auth dict 短 JWT（TFRC-11/C1）。本验收套件 `src-tauri/tests/smcp_handshake_config_test.rs` 及 Cargo feature `verify-smcp-0-2-2` 已随本次变更**删除**——在 `smcp-computer` 0.2.3（auth-dict-only，`.auth_secret()` 已移除）下套件本就编译不过、且从不在 CI 运行。下文对该套件 / feature / `cargo test … --features verify-smcp-0-2-2` 的引用仅作历史记录，不再可执行。
 
 ---
 

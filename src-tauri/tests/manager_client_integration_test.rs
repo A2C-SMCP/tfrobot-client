@@ -11,7 +11,7 @@
 //! - 登录 data 扁平 `{token, userId, accountId, accountName}`（无嵌套 user）
 //! - 多账户 data `{message, tempToken, expiresIn, accounts}`
 //!
-//! 不依赖 `hyper`/`warp` 等重量级 server，和已有的 `smcp_handshake_config_test.rs` 风格一致。
+//! 不依赖 `hyper`/`warp` 等重量级 server，用轻量 `tokio::net::TcpListener` mock。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -438,13 +438,11 @@ async fn connection_info_returns_full_dto() {
                 "rid": "5f4b3b3b-3b3b-3b3b-3b3",
                 "robotType": "tfrobot",
                 "smcpNamespace": "/smcp",
-                "accessToken": "ac4a30ae",
                 "computerName": "本地联调员工",
                 "routingHeaders": {
                     "X-TF-Namespace": "tfrobotserver",
                     "X-TF-RobotId": "5f4b3b3b-3b3b-3b3b-3b3",
-                    "X-TF-RobotType": "tfrobot",
-                    "access_token": "ac4a30ae"
+                    "X-TF-RobotType": "tfrobot"
                 }
             })),
         ),
@@ -459,12 +457,13 @@ async fn connection_info_returns_full_dto() {
     let info = client.get_connection_info(11).await.expect("info");
     assert_eq!(info.socket_base_url, "https://127.0.0.1:8443");
     assert_eq!(info.rid.as_deref(), Some("5f4b3b3b-3b3b-3b3b-3b3"));
-    assert_eq!(info.access_token, "ac4a30ae");
     assert_eq!(info.computer_name.as_deref(), Some("本地联调员工"));
-    assert_eq!(info.routing_headers.len(), 4);
+    // M6（TFRM-161）后 connection-info 仅返纯路由头（X-TF-*），不再下发鉴权令牌（TFRC-20/auth-dict）。
+    assert_eq!(info.routing_headers.len(), 3);
+    assert!(!info.routing_headers.contains_key("access_token"));
     assert_eq!(
-        info.routing_headers.get("access_token").map(String::as_str),
-        Some("ac4a30ae")
+        info.routing_headers.get("X-TF-RobotId").map(String::as_str),
+        Some("5f4b3b3b-3b3b-3b3b-3b3")
     );
     let _ = client.logout().await;
 }

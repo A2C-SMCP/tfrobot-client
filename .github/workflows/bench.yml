@@ -16,6 +16,10 @@ jobs:
   benchmark:
     name: Rust Benchmarks
     runs-on: ubuntu-latest
+    # github-action-benchmark auto-push 需要写权限才能把基准历史推到 gh-pages 分支。
+    # 仓库默认 workflow 权限为 read，此处按最小范围授予 contents: write。
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

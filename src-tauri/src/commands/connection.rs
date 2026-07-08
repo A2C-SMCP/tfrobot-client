@@ -505,9 +505,9 @@ pub async fn manager_connect_smcp(
         url,
         computer_name,
         office_id: office_id.clone(),
-        // 只保留纯路由头注入 HTTP header；剔除 legacy 鉴权密钥（如 connection-info 仍下发的
-        // `access_token`）——鉴权唯一走 Socket.IO auth dict（#86），凭据不得进网关可读的 header。
-        routing_headers: routing_only_headers(info.routing_headers.clone()),
+        // routingHeaders 为纯路由头（X-TF-*），verbatim 注入 HTTP header。连接面鉴权唯一走
+        // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
+        routing_headers: info.routing_headers.clone(),
         employee_id,
         robot_account_id,
         scope,
@@ -575,7 +575,7 @@ pub async fn connect_manager_robot_target_core(
         url,
         computer_name,
         office_id: office_id.clone(),
-        routing_headers: routing_only_headers(info.routing_headers.clone()),
+        routing_headers: info.routing_headers.clone(),
         employee_id,
         robot_account_id,
         scope: None,
@@ -980,22 +980,6 @@ fn emit_connection_changed(app: &AppHandle) {
     let _ = app.emit("connection", ());
 }
 
-/// 判定一个 header key 是否承载鉴权（不能进网关可读的 HTTP header）。
-/// connection-info 的 routingHeaders 历史上含 legacy `access_token`；#86 后鉴权只走 auth dict。
-fn is_auth_like_header(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    k.contains("token") || k.contains("authorization") || k == "cookie" || k == "x-api-key"
-}
-
-/// 从 connection-info 的 routingHeaders 中剔除鉴权类 key，只保留纯路由头（如 `X-TF-*`）。
-/// 防止 legacy 鉴权密钥随 HTTP header 外发到网关可读层（违背 Phase 1 安全契约）。
-fn routing_only_headers(headers: HashMap<String, String>) -> HashMap<String, String> {
-    headers
-        .into_iter()
-        .filter(|(k, _)| !is_auth_like_header(k))
-        .collect()
-}
-
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {
     let instance_id = instance_id.trim();
     if instance_id.is_empty() {
@@ -1027,41 +1011,6 @@ pub struct ConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn is_auth_like_header_flags_credentials_not_routing() {
-        assert!(is_auth_like_header("access_token"));
-        assert!(is_auth_like_header("Access_Token"));
-        assert!(is_auth_like_header("Authorization"));
-        assert!(is_auth_like_header("cookie"));
-        assert!(is_auth_like_header("x-api-key"));
-        // 纯路由头不应被当作鉴权剔除。
-        assert!(!is_auth_like_header("X-TF-Namespace"));
-        assert!(!is_auth_like_header("X-TF-RobotId"));
-        assert!(!is_auth_like_header("X-TF-RobotType"));
-    }
-
-    #[test]
-    fn routing_only_headers_strips_legacy_access_token_keeps_routing() {
-        let mut h = HashMap::new();
-        h.insert("X-TF-Namespace".to_string(), "ns".to_string());
-        h.insert("X-TF-RobotId".to_string(), "rid".to_string());
-        h.insert("X-TF-RobotType".to_string(), "tfrobot".to_string());
-        h.insert("access_token".to_string(), "admin-secret".to_string());
-
-        let out = routing_only_headers(h);
-
-        // 鉴权密钥不得随 HTTP header 外发（Phase 1 安全契约：凭据走 auth dict）。
-        assert!(!out.contains_key("access_token"));
-        // 纯路由头保留。
-        assert_eq!(out.len(), 3);
-        assert_eq!(out.get("X-TF-Namespace").map(String::as_str), Some("ns"));
-        assert_eq!(out.get("X-TF-RobotId").map(String::as_str), Some("rid"));
-        assert_eq!(
-            out.get("X-TF-RobotType").map(String::as_str),
-            Some("tfrobot")
-        );
-    }
 
     #[test]
     fn validate_manager_robot_account_accepts_matching_employee() {
