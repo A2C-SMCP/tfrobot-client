@@ -65,7 +65,6 @@ export function RobotConnections() {
     },
     { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
     { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
-    { title: t('connection.table.computer'), dataIndex: 'computer_name', key: 'computer_name' },
     {
       title: t('connection.table.actions'),
       key: 'actions',

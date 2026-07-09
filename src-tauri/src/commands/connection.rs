@@ -38,8 +38,6 @@ fn next_generation() -> u64 {
 pub struct ManagerConnectionParams {
     /// Socket.IO 服务端 URL（connection-info.socketBaseURL）。
     pub url: String,
-    /// Computer 名（Manager 下发）。
-    pub computer_name: String,
     /// SMCP office_id（= connection-info.rid，等价机器人 robotId）。
     pub office_id: String,
     /// 路由 HTTP headers（X-TF-*，**非鉴权**；鉴权走 auth dict）。
@@ -218,6 +216,7 @@ pub async fn connect_connection_target_core(
         let auth_payload = api_key
             .filter(|k| !k.is_empty())
             .map(|tok| serde_json::json!({ "token": tok }));
+        let computer_name = runtime.instance.name.clone();
         runtime
             .connect_smcp_socketio(
                 &target.url,
@@ -225,7 +224,7 @@ pub async fn connect_connection_target_core(
                 target.headers.clone(),
                 Some(target.namespace.clone()),
                 &target.office_id,
-                &target.computer_name,
+                &computer_name,
             )
             .await?;
 
@@ -233,7 +232,7 @@ pub async fn connect_connection_target_core(
             profile_name: target.name.clone(),
             url: target.url.clone(),
             office_id: target.office_id.clone(),
-            computer_name: target.computer_name.clone(),
+            computer_name,
             connected_at: chrono::Utc::now(),
             source_type: SOURCE_MANUAL_SMCP.to_string(),
             target_id: Some(target.id.clone()),
@@ -493,17 +492,8 @@ pub async fn manager_connect_smcp(
     let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
         ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
     })?;
-    let computer_name = info
-        .computer_name
-        .clone()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ManagerError::InvalidResponse("connection-info missing computerName".into())
-        })?;
-
     let params = ManagerConnectionParams {
         url,
-        computer_name,
         office_id: office_id.clone(),
         // routingHeaders 为纯路由头（X-TF-*），verbatim 注入 HTTP header。连接面鉴权唯一走
         // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
@@ -563,17 +553,8 @@ pub async fn connect_manager_robot_target_core(
     let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
         ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
     })?;
-    let computer_name = info
-        .computer_name
-        .clone()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ManagerError::InvalidResponse("connection-info missing computerName".into())
-        })?;
-
     let params = ManagerConnectionParams {
         url,
-        computer_name,
         office_id: office_id.clone(),
         routing_headers: info.routing_headers.clone(),
         employee_id,
@@ -648,7 +629,7 @@ async fn build_and_join(
             params.routing_headers.clone(),
             None,
             &params.office_id,
-            &params.computer_name,
+            &runtime.instance.name,
         )
         .await
 }
@@ -712,7 +693,7 @@ async fn establish_manager_connection(
             profile_name: format!("manager:{}", params.employee_id),
             url: params.url.clone(),
             office_id: params.office_id.clone(),
-            computer_name: params.computer_name.clone(),
+            computer_name: runtime.instance.name.clone(),
             connected_at: chrono::Utc::now(),
             source_type: SOURCE_MANAGER_ROBOT.to_string(),
             target_id: Some(manager_target_id(params.employee_id)),
@@ -924,7 +905,7 @@ async fn refresh_cycle(
 ///
 /// **不依赖 AppHandle / ManagerClient**（emit/log 留给调用方），便于集成测试 build 失败路径。
 /// 顺序 **disconnect-first**：同机器人重连必须先释放 room，否则 server 拒绝重复实例
-/// （同 `(office_id, computer_name)`）。build 失败返回 Retry，同时 runtime 进入 Error 状态，
+/// （同 `(office_id, connection.computer_name)`）。build 失败返回 Retry，同时 runtime 进入 Error 状态，
 /// 避免业务层把已断开的 socket 误判为健康连接。`generation` 守卫防与用户手动断开/改连竞态。
 /// `pub` 供集成测试。
 pub async fn reconnect_with_token(
@@ -935,6 +916,15 @@ pub async fn reconnect_with_token(
     token: &ExchangedToken,
 ) -> RefreshOutcome {
     let auth_payload = serde_json::json!({ "token": token.access_token });
+    let computer_name = {
+        let guard = connection.read().await;
+        match guard.as_ref() {
+            Some(connection) if connection.generation == generation => {
+                connection.computer_name.clone()
+            }
+            _ => return RefreshOutcome::Gone,
+        }
+    };
     match runtime
         .reconnect_smcp_socketio_for_generation(
             connection,
@@ -944,7 +934,7 @@ pub async fn reconnect_with_token(
             params.routing_headers.clone(),
             None,
             &params.office_id,
-            &params.computer_name,
+            &computer_name,
             token.expires_in,
         )
         .await

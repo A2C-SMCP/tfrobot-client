@@ -354,7 +354,6 @@ fn stable_or_existing_manual_target_id(id: &str, target: &ManualSmcpTarget) -> S
             &target.name,
             &target.url,
             &target.office_id,
-            &target.computer_name,
             &target.headers,
         )
     } else {
@@ -366,14 +365,12 @@ fn stable_manual_target_id_from_parts(
     name: &str,
     url: &str,
     office_id: &str,
-    computer_name: &str,
     headers: &HashMap<String, String>,
 ) -> String {
     let mut hasher = Sha256::new();
     hash_string_field(&mut hasher, name);
     hash_string_field(&mut hasher, url);
     hash_string_field(&mut hasher, office_id);
-    hash_string_field(&mut hasher, computer_name);
     let mut header_pairs: Vec<_> = headers.iter().collect();
     header_pairs.sort_by(|a, b| a.0.cmp(b.0));
     for (key, value) in header_pairs {
@@ -973,7 +970,6 @@ mod tests {
             url: "https://smcp.example.com".to_string(),
             namespace: "/smcp".to_string(),
             office_id: "office-1".to_string(),
-            computer_name: "my-pc".to_string(),
             headers: headers_a,
         };
         let target_b = ManualSmcpTarget {
@@ -987,6 +983,35 @@ mod tests {
         assert_eq!(id_a, id_b);
         assert!(id_a.starts_with("manual-"));
         assert_eq!(id_a.len(), "manual-".len() + 32);
+    }
+
+    #[test]
+    fn test_loads_legacy_manual_target_computer_name_without_using_it() {
+        let (svc, tmp) = setup();
+        let path = tmp.path().join("connection_targets.json");
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "schema_version": 1,
+                "manual_smcp_targets": [{
+                    "id": "legacy-target",
+                    "name": "Legacy",
+                    "url": "https://smcp.example.com",
+                    "namespace": "/smcp",
+                    "office_id": "office-1",
+                    "computer_name": "old-wire-name",
+                    "headers": { "X-TF-Namespace": "ns" }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let targets = svc.list_manual_smcp_targets().unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "legacy-target");
+        assert_eq!(targets[0].office_id, "office-1");
     }
 
     // --- File Permissions (Unix only) ---

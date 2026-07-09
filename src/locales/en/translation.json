@@ -359,8 +359,6 @@
       "namespace": "Namespace",
       "officeId": "Office ID",
       "officeIdRequired": "Office ID is required",
-      "computerName": "Computer Name",
-      "computerNameRequired": "Computer name is required",
       "apiKey": "API Key",
       "apiKeyUnchanged": "Leave empty to keep current key",
       "clearApiKey": "Clear saved API key",

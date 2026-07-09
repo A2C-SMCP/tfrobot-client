@@ -9,7 +9,6 @@ export interface ManualSmcpTarget {
   url: string;
   namespace: string;
   office_id: string;
-  computer_name: string;
   headers: Record<string, string>;
 }
 

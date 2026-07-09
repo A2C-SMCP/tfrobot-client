@@ -10,7 +10,6 @@ pub struct ManualSmcpTarget {
     #[serde(default = "default_namespace")]
     pub namespace: String,
     pub office_id: String,
-    pub computer_name: String,
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }

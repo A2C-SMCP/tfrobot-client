@@ -139,7 +139,6 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             url: "https://smcp.example.com".to_string(),
             namespace: "/smcp".to_string(),
             office_id: "office-a".to_string(),
-            computer_name: "computer-a".to_string(),
             headers: std::collections::HashMap::from([(
                 "X-TF-Route".to_string(),
                 "route-a".to_string(),

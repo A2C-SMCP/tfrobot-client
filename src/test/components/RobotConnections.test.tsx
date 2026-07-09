@@ -29,7 +29,6 @@ describe('RobotConnections', () => {
             url: 'https://smcp.example.com',
             namespace: '/smcp',
             office_id: 'office-a',
-            computer_name: 'computer-a',
             headers: {},
           },
         ];

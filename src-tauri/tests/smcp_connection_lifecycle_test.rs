@@ -1044,7 +1044,6 @@ async fn profile_connect_requires_running_computer() {
             url: "http://127.0.0.1:9".to_string(),
             namespace: "/smcp".to_string(),
             office_id: "stopped-office".to_string(),
-            computer_name: "stopped-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1055,6 +1054,43 @@ async fn profile_connect_requires_running_computer() {
 
     assert_eq!(err, "Computer must be running before connecting");
     assert!(runtime.connection.read().await.is_none());
+}
+
+#[tokio::test]
+async fn profile_connect_uses_computer_instance_name_as_connection_identity() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "identity-target".to_string(),
+            name: "identity-target".to_string(),
+            url: server_url.clone(),
+            namespace: "/smcp".to_string(),
+            office_id: "identity-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
+        .await
+        .expect("connect target");
+
+    wait_for("server never observed the SMCP join", || {
+        stats.active() == 1 && stats.join_events() == 1
+    })
+    .await;
+
+    let connection = runtime.connection.read().await.clone().unwrap();
+    assert_eq!(connection.computer_name, "Test Computer");
+
+    close_smcp_connection(&runtime, connection)
+        .await
+        .expect("close smcp socket");
 }
 
 #[tokio::test]
@@ -1090,7 +1126,6 @@ async fn stale_snapshot_after_reconnect_failure_does_not_block_manual_reconnect(
             url: server_url.clone(),
             namespace: "/smcp".to_string(),
             office_id: "stale-office".to_string(),
-            computer_name: "stale-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1119,7 +1154,6 @@ async fn stale_snapshot_after_reconnect_failure_does_not_block_manual_reconnect(
     };
     let params = ManagerConnectionParams {
         url: dead_url,
-        computer_name: "stale-computer".to_string(),
         office_id: "stale-office".to_string(),
         routing_headers: HashMap::new(),
         employee_id: 1,
@@ -1217,7 +1251,6 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
             url: new_server_url.clone(),
             namespace: "/smcp".to_string(),
             office_id: "new-office".to_string(),
-            computer_name: "new-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1322,7 +1355,6 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
             url: server_url,
             namespace: "/smcp".to_string(),
             office_id: "shared-office".to_string(),
-            computer_name: "target-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1397,7 +1429,6 @@ async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
 
     let params = ManagerConnectionParams {
         url: refresh_server_url.clone(),
-        computer_name: "owner-computer".to_string(),
         office_id: "refreshing-office".to_string(),
         routing_headers: HashMap::new(),
         employee_id: 1,
@@ -1476,7 +1507,6 @@ async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
             url: refresh_server_url,
             namespace: "/smcp".to_string(),
             office_id: "refreshing-office".to_string(),
-            computer_name: "challenger-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1542,7 +1572,6 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
             url: server_url.clone(),
             namespace: "/smcp".to_string(),
             office_id: "shared-office".to_string(),
-            computer_name: "shared-computer".to_string(),
             headers: HashMap::new(),
         })
         .expect("save target");
@@ -1667,7 +1696,6 @@ async fn reconnect_with_token_marks_runtime_error_on_sdk_build_failure() {
     };
     let params = ManagerConnectionParams {
         url: dead_url,
-        computer_name: "rollback-test".to_string(),
         office_id: "office".to_string(),
         routing_headers: HashMap::new(),
         employee_id: 1,
@@ -1778,7 +1806,6 @@ async fn reconnect_with_token_reconnects_socket_and_refreshes_snapshot() {
     let connection = runtime.connection.clone();
     let params = ManagerConnectionParams {
         url: new_server_url.clone(),
-        computer_name: "refresh-test".to_string(),
         office_id: "office".to_string(),
         routing_headers: HashMap::new(),
         employee_id: 1,
@@ -1827,6 +1854,7 @@ async fn reconnect_with_token_reconnects_socket_and_refreshes_snapshot() {
         let guard = connection.read().await;
         let snapshot = guard.as_ref().expect("connection snapshot should remain");
         assert_eq!(snapshot.generation, 8);
+        assert_eq!(snapshot.computer_name, "refresh-test");
         assert!(
             snapshot.connected_at > connected_at,
             "successful refresh should update connected_at"
@@ -1886,7 +1914,6 @@ async fn reconnect_with_token_stale_generation_does_not_touch_socket() {
     let connection = runtime.connection.clone();
     let params = ManagerConnectionParams {
         url: server_url.clone(),
-        computer_name: "stale-test".to_string(),
         office_id: "office".to_string(),
         routing_headers: HashMap::new(),
         employee_id: 1,

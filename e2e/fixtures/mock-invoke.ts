@@ -159,7 +159,6 @@ const mockResponses: Record<string, unknown> = {
       url: 'https://smcp.example.com',
       namespace: '/smcp',
       office_id: 'office-a',
-      computer_name: 'computer-a',
       headers: {},
     },
   ],

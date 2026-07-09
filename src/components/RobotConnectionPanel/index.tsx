@@ -147,7 +147,6 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       },
       { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
       { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
-      { title: t('connection.table.computer'), dataIndex: 'computer_name', key: 'computer_name' },
       {
         title: t('connection.table.actions'),
         key: 'actions',
@@ -458,9 +457,6 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
             </Descriptions.Item>
             <Descriptions.Item label={t('connection.table.office')}>
               {detailTarget.office_id}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.computer')}>
-              {detailTarget.computer_name}
             </Descriptions.Item>
             <Descriptions.Item label={t('connection.form.namespace')}>
               {detailTarget.namespace}

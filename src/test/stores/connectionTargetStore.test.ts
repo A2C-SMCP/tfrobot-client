@@ -14,7 +14,6 @@ const target: ManualSmcpTarget = {
   url: 'https://smcp.example.com',
   namespace: '/smcp',
   office_id: 'office-1',
-  computer_name: 'my-pc',
   headers: { 'X-TF-Namespace': 'ns' },
 };
 

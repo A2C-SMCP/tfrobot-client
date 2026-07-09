@@ -89,7 +89,6 @@ describe('RobotConnectionPanel', () => {
             url: 'https://smcp.example.com',
             namespace: '/smcp',
             office_id: 'office-a',
-            computer_name: 'computer-a',
             headers: { 'x-env': 'dev' },
           },
         ];
@@ -120,7 +119,6 @@ describe('RobotConnectionPanel', () => {
             url: 'https://smcp.example.com',
             namespace: '/smcp',
             office_id: 'office-a',
-            computer_name: 'computer-a',
             headers: {},
           },
         ];
@@ -189,7 +187,6 @@ describe('RobotConnectionPanel', () => {
             url: 'https://smcp.example.com/a',
             namespace: '/smcp',
             office_id: 'office-a',
-            computer_name: 'computer-a',
             headers: {},
           },
           {
@@ -198,7 +195,6 @@ describe('RobotConnectionPanel', () => {
             url: 'https://smcp.example.com/b',
             namespace: '/smcp',
             office_id: 'office-b',
-            computer_name: 'computer-b',
             headers: {},
           },
         ];
@@ -247,7 +243,6 @@ describe('RobotConnectionPanel', () => {
             url: 'https://smcp.example.com',
             namespace: '/smcp',
             office_id: 'office-a',
-            computer_name: 'computer-a',
             headers: {},
           },
         ];

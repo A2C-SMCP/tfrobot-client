@@ -41,7 +41,6 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       url: values.url as string,
       namespace: (values.namespace as string) || '/smcp',
       office_id: values.office_id as string,
-      computer_name: values.computer_name as string,
       headers,
     };
     const apiKey = String(values.api_key ?? '').trim();
@@ -69,10 +68,6 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
       </Form.Item>
 
       <Form.Item name="office_id" label={t('connection.form.officeId')} rules={[{ required: true, message: t('connection.form.officeIdRequired') }]}>
-        <Input />
-      </Form.Item>
-
-      <Form.Item name="computer_name" label={t('connection.form.computerName')} rules={[{ required: true, message: t('connection.form.computerNameRequired') }]}>
         <Input />
       </Form.Item>
 
