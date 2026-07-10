@@ -167,6 +167,226 @@ pub struct ComputerInstance {
     pub robot_binding: Option<RobotBindingMetadata>,
 }
 
+pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
+pub const GLOBAL_INPUTS_SCHEMA_VERSION: u32 = 1;
+
+/// Client-owned, durable metadata for one Computer instance.
+///
+/// This intentionally excludes SDK-owned configuration, runtime state, input
+/// definitions, and resolved input values. Keeping a dedicated persistence DTO
+/// prevents the legacy [`ComputerInstance`] aggregate from becoming the schema
+/// of `profile.json` by accident.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerProfile {
+    pub schema_version: u32,
+    pub id: ComputerInstanceId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robot_binding: Option<ComputerProfileRobotBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerProfileConnectionPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ComputerProfileConnectionTarget>,
+    #[serde(default)]
+    pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerProfileConnectionTarget {
+    #[serde(rename = "type")]
+    pub target_type: ComputerConnectionTargetType,
+    pub id: String,
+    #[serde(
+        rename = "robotAccountId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub robot_account_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerProfileRobotBinding {
+    pub employee_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub robot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub robot_account_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub robot_name: Option<String>,
+}
+
+impl ComputerProfile {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            robot_binding: None,
+        }
+    }
+}
+
+impl From<&ComputerInstance> for ComputerProfile {
+    fn from(instance: &ComputerInstance) -> Self {
+        Self {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: instance.id.clone(),
+            name: instance.name.clone(),
+            description: instance.description.clone(),
+            connection_policy: ComputerProfileConnectionPolicy {
+                target: instance.connection_policy.target.as_ref().map(|target| {
+                    ComputerProfileConnectionTarget {
+                        target_type: target.target_type.clone(),
+                        id: target.id.clone(),
+                        robot_account_id: target.robot_account_id,
+                    }
+                }),
+                auto_connect: instance.connection_policy.auto_connect,
+            },
+            robot_binding: instance.robot_binding.as_ref().map(|binding| {
+                ComputerProfileRobotBinding {
+                    employee_id: binding.employee_id,
+                    robot_id: binding.robot_id.clone(),
+                    robot_account_id: binding.robot_account_id,
+                    namespace: binding.namespace.clone(),
+                    robot_name: binding.robot_name.clone(),
+                }
+            }),
+        }
+    }
+}
+
+/// Global input definitions and UI schema owned by the client.
+/// Resolved values and secrets are deliberately stored through `SecretStore`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalInputsConfig {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub inputs: Vec<GlobalInputDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum GlobalInputDefinition {
+    PromptString {
+        id: String,
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<bool>,
+    },
+    PickString {
+        id: String,
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        options: Vec<GlobalPickOption>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+    },
+    Command {
+        id: String,
+        label: String,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<Vec<String>>,
+    },
+}
+
+impl GlobalInputDefinition {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::PromptString { id, .. }
+            | Self::PickString { id, .. }
+            | Self::Command { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalPickOption {
+    pub label: String,
+    pub value: String,
+}
+
+impl From<&InputDefinition> for GlobalInputDefinition {
+    fn from(input: &InputDefinition) -> Self {
+        match input {
+            InputDefinition::PromptString {
+                id,
+                label,
+                description,
+                default,
+                password,
+            } => Self::PromptString {
+                id: id.clone(),
+                label: label.clone(),
+                description: description.clone(),
+                default: default.clone(),
+                password: *password,
+            },
+            InputDefinition::PickString {
+                id,
+                label,
+                description,
+                options,
+                default,
+            } => Self::PickString {
+                id: id.clone(),
+                label: label.clone(),
+                description: description.clone(),
+                options: options
+                    .iter()
+                    .map(|option| GlobalPickOption {
+                        label: option.label.clone(),
+                        value: option.value.clone(),
+                    })
+                    .collect(),
+                default: default.clone(),
+            },
+            InputDefinition::Command {
+                id,
+                label,
+                command,
+                args,
+            } => Self::Command {
+                id: id.clone(),
+                label: label.clone(),
+                command: command.clone(),
+                args: args.clone(),
+            },
+        }
+    }
+}
+
+impl Default for GlobalInputsConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            inputs: Vec::new(),
+        }
+    }
+}
+
 impl ComputerInstance {
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {

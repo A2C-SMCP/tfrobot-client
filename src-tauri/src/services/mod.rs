@@ -1,3 +1,4 @@
+pub mod client_computers;
 pub mod computer;
 pub mod config;
 pub mod connection_targets;
@@ -7,3 +8,4 @@ pub mod manager_client;
 pub mod runtime;
 pub mod settings;
 pub mod shell_env;
+pub mod storage;

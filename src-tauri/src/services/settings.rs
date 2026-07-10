@@ -1,6 +1,10 @@
+use crate::services::client_computers::{ClientComputersPaths, GlobalConfigFile};
+use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -31,13 +35,50 @@ pub struct CustomRuntimePaths {
     pub pnpm: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerSessionSettings {
     pub base_url: String,
     pub user_id: u64,
     pub account_id: u64,
     pub account_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagerSessionConfig {
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<PersistedManagerSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PersistedManagerSession {
+    pub base_url: String,
+    pub user_id: u64,
+    pub account_id: u64,
+    pub account_name: String,
+}
+
+impl From<&ManagerSessionSettings> for PersistedManagerSession {
+    fn from(session: &ManagerSessionSettings) -> Self {
+        Self {
+            base_url: session.base_url.clone(),
+            user_id: session.user_id,
+            account_id: session.account_id,
+            account_name: session.account_name.clone(),
+        }
+    }
+}
+
+impl Default for ManagerSessionConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: MANAGER_SESSION_SCHEMA_VERSION,
+            session: None,
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -55,12 +96,22 @@ impl Default for AppSettings {
 
 pub struct SettingsService {
     settings_file: PathBuf,
+    client_computers_paths: ClientComputersPaths,
 }
 
 impl SettingsService {
     pub fn new(app_data_dir: PathBuf) -> Self {
+        let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
+        Self::new_with_client_computers_paths(app_data_dir, client_computers_paths)
+    }
+
+    pub fn new_with_client_computers_paths(
+        app_data_dir: PathBuf,
+        client_computers_paths: ClientComputersPaths,
+    ) -> Self {
         Self {
             settings_file: app_data_dir.join("settings.json"),
+            client_computers_paths,
         }
     }
 
@@ -75,9 +126,68 @@ impl SettingsService {
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
-        let content = serde_json::to_string_pretty(settings).map_err(std::io::Error::other)?;
-        fs::write(&self.settings_file, content)
+        write_json_atomically(&self.settings_file, settings).map_err(std::io::Error::other)
     }
+
+    pub fn load_global_manager_session(
+        &self,
+    ) -> Result<ManagerSessionConfig, ManagerSessionConfigError> {
+        let path = self.global_manager_session_path();
+        if !path.exists() {
+            return Ok(ManagerSessionConfig::default());
+        }
+        let content = fs::read_to_string(&path)?;
+        if content.trim().is_empty() {
+            return Err(ManagerSessionConfigError::EmptyFile(path));
+        }
+        let config: ManagerSessionConfig = serde_json::from_str(&content)?;
+        validate_manager_session_schema(&config)?;
+        Ok(config)
+    }
+
+    pub fn save_global_manager_session(
+        &self,
+        config: &ManagerSessionConfig,
+    ) -> Result<(), ManagerSessionConfigError> {
+        validate_manager_session_schema(config)?;
+        write_json_atomically(&self.global_manager_session_path(), config)?;
+        Ok(())
+    }
+
+    pub fn global_manager_session_path(&self) -> PathBuf {
+        self.client_computers_paths
+            .global_config(GlobalConfigFile::ManagerSession)
+    }
+}
+
+fn validate_manager_session_schema(
+    config: &ManagerSessionConfig,
+) -> Result<(), ManagerSessionConfigError> {
+    if config.schema_version != MANAGER_SESSION_SCHEMA_VERSION {
+        return Err(ManagerSessionConfigError::UnsupportedSchemaVersion {
+            expected: MANAGER_SESSION_SCHEMA_VERSION,
+            actual: config.schema_version,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ManagerSessionConfigError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    AtomicJsonWrite(#[from] AtomicJsonWriteError),
+
+    #[error("manager session config is empty: {0}")]
+    EmptyFile(PathBuf),
+
+    #[error("unsupported manager session schema version {actual}; expected {expected}")]
+    UnsupportedSchemaVersion { expected: u32, actual: u32 },
 }
 
 #[cfg(test)]
@@ -163,5 +273,79 @@ mod tests {
         assert_eq!(session.user_id, 7);
         assert_eq!(session.account_id, 42);
         assert_eq!(session.account_name, "client_uat");
+    }
+
+    #[test]
+    fn global_manager_session_roundtrip_is_separate_from_app_settings() {
+        let (svc, tmp) = setup();
+        let config = ManagerSessionConfig {
+            schema_version: MANAGER_SESSION_SCHEMA_VERSION,
+            session: Some(PersistedManagerSession {
+                base_url: "https://manager.example.com".to_string(),
+                user_id: 7,
+                account_id: 42,
+                account_name: "client_uat".to_string(),
+            }),
+        };
+
+        svc.save_global_manager_session(&config).unwrap();
+
+        assert_eq!(svc.load_global_manager_session().unwrap(), config);
+        assert_eq!(
+            svc.global_manager_session_path(),
+            tmp.path()
+                .join("client_computers/global/manager_session.json")
+        );
+        assert!(!tmp.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn global_manager_session_rejects_unknown_schema_version() {
+        let (svc, _tmp) = setup();
+        let config = ManagerSessionConfig {
+            schema_version: MANAGER_SESSION_SCHEMA_VERSION + 1,
+            session: None,
+        };
+
+        assert!(matches!(
+            svc.save_global_manager_session(&config).unwrap_err(),
+            ManagerSessionConfigError::UnsupportedSchemaVersion { .. }
+        ));
+
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{"schema_version": 2, "session": null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_manager_session().unwrap_err(),
+            ManagerSessionConfigError::UnsupportedSchemaVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn global_manager_session_rejects_nested_secret_fields() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 1,
+              "session": {
+                "baseUrl": "https://manager.example.com",
+                "userId": 7,
+                "accountId": 42,
+                "accountName": "client_uat",
+                "jwt": "plaintext"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_global_manager_session().unwrap_err(),
+            ManagerSessionConfigError::Json(_)
+        ));
     }
 }

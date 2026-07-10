@@ -162,10 +162,15 @@ pub async fn delete_manual_smcp_target(
         .config
         .delete_manual_smcp_target(&target_id)
         .map_err(|e| e.to_string())?;
-    state
-        .secret_store
-        .delete_secret_best_effort(&manual_target_keychain_id(&target_id));
+    delete_manual_smcp_target_api_key(state.secret_store.as_ref(), &target_id);
     Ok(())
+}
+
+fn delete_manual_smcp_target_api_key(
+    secret_store: &dyn crate::services::keychain::SecretStore,
+    target_id: &str,
+) {
+    secret_store.delete_secret_best_effort(&manual_target_keychain_id(target_id));
 }
 
 #[tauri::command]
@@ -1001,6 +1006,18 @@ pub struct ConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::keychain::{InMemorySecretStore, SecretStore};
+
+    #[test]
+    fn deleting_manual_target_api_key_cleans_up_target_scoped_secret() {
+        let store = InMemorySecretStore::default();
+        let key = manual_target_keychain_id("target-a");
+        store.set_secret(&key, "api-key").unwrap();
+
+        delete_manual_smcp_target_api_key(&store, "target-a");
+
+        assert_eq!(store.get_secret(&key).unwrap(), None);
+    }
 
     #[test]
     fn validate_manager_robot_account_accepts_matching_employee() {

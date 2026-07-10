@@ -334,7 +334,7 @@ fn strip_auth_headers(headers: HashMap<String, String>) -> HashMap<String, Strin
         .collect()
 }
 
-fn is_auth_header_name(key: &str) -> bool {
+pub(crate) fn is_auth_header_name(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace('_', "-");
     normalized.contains("token")
         || normalized == "authorization"

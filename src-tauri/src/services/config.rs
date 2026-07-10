@@ -1,9 +1,21 @@
 use crate::commands::inputs::InputDefinition;
-use crate::services::computer::{ComputerInstance, ComputerInstancesConfig, ManagedMcpServer};
-use crate::services::connection_targets::{ConnectionTargetsConfig, ManualSmcpTarget};
+use crate::services::client_computers::{
+    ClientComputersPathError, ClientComputersPaths, GlobalConfigFile,
+};
+use crate::services::computer::{
+    ComputerInstance, ComputerInstancesConfig, ComputerProfile, GlobalInputDefinition,
+    GlobalInputsConfig, ManagedMcpServer, COMPUTER_PROFILE_SCHEMA_VERSION,
+    GLOBAL_INPUTS_SCHEMA_VERSION,
+};
+use crate::services::connection_targets::{
+    ConnectionTargetsConfig, GlobalManualTargetsConfig, ManualSmcpTarget,
+    MANUAL_TARGETS_SCHEMA_VERSION,
+};
+use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use reqwest::header::{HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +24,109 @@ pub struct ConfigService {
     config_dir: PathBuf,
     computer_instances_file: PathBuf,
     connection_targets_file: PathBuf,
+    client_computers_paths: ClientComputersPaths,
 }
 
 impl ConfigService {
     /// Create a new ConfigService with the given app data directory
     pub fn new(app_data_dir: PathBuf) -> Result<Self, std::io::Error> {
+        let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
+        Self::new_with_client_computers_paths(app_data_dir, client_computers_paths)
+    }
+
+    pub fn new_with_client_computers_paths(
+        app_data_dir: PathBuf,
+        client_computers_paths: ClientComputersPaths,
+    ) -> Result<Self, std::io::Error> {
         fs::create_dir_all(&app_data_dir)?;
 
         Ok(Self {
             computer_instances_file: app_data_dir.join("computer_instances.json"),
             connection_targets_file: app_data_dir.join("connection_targets.json"),
+            client_computers_paths,
             config_dir: app_data_dir,
         })
+    }
+
+    pub fn client_computers_root(&self) -> &Path {
+        self.client_computers_paths.root()
+    }
+
+    pub fn computer_profile_path(&self, instance_id: &str) -> Result<PathBuf, ConfigError> {
+        self.client_computers_paths
+            .computer_profile(instance_id)
+            .map_err(|error| match error {
+                ClientComputersPathError::InvalidInstanceId(id) => {
+                    ConfigError::InvalidComputerProfileId(id)
+                }
+            })
+    }
+
+    pub fn save_computer_profile(&self, profile: &ComputerProfile) -> Result<(), ConfigError> {
+        validate_schema_version(
+            "computer profile",
+            profile.schema_version,
+            COMPUTER_PROFILE_SCHEMA_VERSION,
+        )?;
+        let path = self.computer_profile_path(&profile.id)?;
+        save_json_file(&path, profile)
+    }
+
+    pub fn load_computer_profile(
+        &self,
+        instance_directory_id: &str,
+    ) -> Result<ComputerProfile, ConfigError> {
+        let path = self.computer_profile_path(instance_directory_id)?;
+        if !path.exists() {
+            return Err(ConfigError::NotFound(path.to_string_lossy().into_owned()));
+        }
+        let profile: ComputerProfile = load_required_json_file(&path)?;
+        validate_schema_version(
+            "computer profile",
+            profile.schema_version,
+            COMPUTER_PROFILE_SCHEMA_VERSION,
+        )?;
+        if profile.id != instance_directory_id {
+            return Err(ConfigError::CorruptedComputerProfile {
+                directory_id: instance_directory_id.to_string(),
+                profile_id: profile.id,
+            });
+        }
+        Ok(profile)
+    }
+
+    pub fn load_global_inputs(&self) -> Result<GlobalInputsConfig, ConfigError> {
+        let path = self.global_config_path(GlobalConfigFile::Inputs);
+        let config: GlobalInputsConfig = load_new_artifact_or_default(&path)?;
+        validate_global_inputs_config(&config)?;
+        Ok(config)
+    }
+
+    pub fn save_global_inputs(&self, config: &GlobalInputsConfig) -> Result<(), ConfigError> {
+        validate_global_inputs_config(config)?;
+        save_json_file(&self.global_config_path(GlobalConfigFile::Inputs), config)
+    }
+
+    pub fn load_global_manual_targets(&self) -> Result<GlobalManualTargetsConfig, ConfigError> {
+        let path = self.global_config_path(GlobalConfigFile::ManualTargets);
+        let config: GlobalManualTargetsConfig = load_new_artifact_or_default(&path)?;
+        validate_global_manual_targets_config(&config)?;
+        Ok(config)
+    }
+
+    pub fn save_global_manual_targets(
+        &self,
+        config: &GlobalManualTargetsConfig,
+    ) -> Result<(), ConfigError> {
+        validate_global_manual_targets_config(config)?;
+        save_json_file(
+            &self.global_config_path(GlobalConfigFile::ManualTargets),
+            config,
+        )
+    }
+
+    fn global_config_path(&self, artifact: GlobalConfigFile) -> PathBuf {
+        self.client_computers_paths.global_config(artifact)
     }
 
     pub fn default_local_skills_root(&self, instance_id: &str) -> PathBuf {
@@ -398,6 +501,127 @@ fn load_json_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resu
     Ok(data)
 }
 
+fn load_required_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ConfigError> {
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Err(ConfigError::InvalidArtifact {
+            path: path.to_path_buf(),
+            reason: "file is empty".to_string(),
+        });
+    }
+    serde_json::from_str(&content).map_err(ConfigError::Json)
+}
+
+fn load_new_artifact_or_default<T>(path: &Path) -> Result<T, ConfigError>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    if !path.exists() {
+        return Ok(T::default());
+    }
+    load_required_json_file(path)
+}
+
+fn validate_schema_version(
+    artifact: &'static str,
+    actual: u32,
+    expected: u32,
+) -> Result<(), ConfigError> {
+    if actual != expected {
+        return Err(ConfigError::UnsupportedSchemaVersion {
+            artifact,
+            expected,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn validate_global_inputs_config(config: &GlobalInputsConfig) -> Result<(), ConfigError> {
+    validate_schema_version(
+        "global inputs",
+        config.schema_version,
+        GLOBAL_INPUTS_SCHEMA_VERSION,
+    )?;
+    validate_unique_artifact_ids("global input", config.inputs.iter().map(|input| input.id()))?;
+
+    for input in &config.inputs {
+        if let GlobalInputDefinition::PromptString {
+            id,
+            default: Some(default),
+            password: Some(true),
+            ..
+        } = input
+        {
+            if !default.is_empty() {
+                return Err(ConfigError::SecretPlaintextInGlobalInput {
+                    input_id: id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_global_manual_targets_config(
+    config: &GlobalManualTargetsConfig,
+) -> Result<(), ConfigError> {
+    validate_schema_version(
+        "global manual targets",
+        config.schema_version,
+        MANUAL_TARGETS_SCHEMA_VERSION,
+    )?;
+    validate_unique_artifact_ids(
+        "global manual target",
+        config
+            .manual_smcp_targets
+            .iter()
+            .map(|target| target.id.as_str()),
+    )?;
+
+    for target in &config.manual_smcp_targets {
+        for (header, value) in &target.routing_headers {
+            HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
+                ConfigError::InvalidRoutingHeaderInManualTarget {
+                    target_id: target.id.clone(),
+                    header: header.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            HeaderValue::from_bytes(value.as_bytes()).map_err(|error| {
+                ConfigError::InvalidRoutingHeaderInManualTarget {
+                    target_id: target.id.clone(),
+                    header: header.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_artifact_ids<'a>(
+    artifact: &'static str,
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ConfigError> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if id.trim().is_empty() || id != id.trim() {
+            return Err(ConfigError::InvalidArtifactEntityId {
+                artifact,
+                id: id.to_string(),
+            });
+        }
+        if !seen.insert(id) {
+            return Err(ConfigError::DuplicateArtifactEntityId {
+                artifact,
+                id: id.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn sanitize_path_component(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -431,8 +655,7 @@ pub(crate) fn instance_storage_dir_name(instance_id: &str) -> String {
 }
 
 fn save_json_file<T: serde::Serialize + ?Sized>(path: &Path, data: &T) -> Result<(), ConfigError> {
-    let content = serde_json::to_string_pretty(data)?;
-    fs::write(path, content)?;
+    write_json_atomically(path, data)?;
     Ok(())
 }
 
@@ -444,6 +667,9 @@ pub enum ConfigError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error(transparent)]
+    AtomicJsonWrite(#[from] AtomicJsonWriteError),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -452,12 +678,50 @@ pub enum ConfigError {
 
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    #[error("invalid Computer profile id: {0}")]
+    InvalidComputerProfileId(String),
+
+    #[error(
+        "corrupted Computer profile: directory id '{directory_id}' does not match profile id '{profile_id}'"
+    )]
+    CorruptedComputerProfile {
+        directory_id: String,
+        profile_id: String,
+    },
+
+    #[error("unsupported {artifact} schema version {actual}; expected {expected}")]
+    UnsupportedSchemaVersion {
+        artifact: &'static str,
+        expected: u32,
+        actual: u32,
+    },
+
+    #[error("invalid config artifact at {path}: {reason}")]
+    InvalidArtifact { path: PathBuf, reason: String },
+
+    #[error("global input '{input_id}' contains a password default; store it in keychain")]
+    SecretPlaintextInGlobalInput { input_id: String },
+
+    #[error("{artifact} has invalid entity id '{id}'")]
+    InvalidArtifactEntityId { artifact: &'static str, id: String },
+
+    #[error("{artifact} has duplicate entity id '{id}'")]
+    DuplicateArtifactEntityId { artifact: &'static str, id: String },
+
+    #[error("manual target '{target_id}' contains invalid routing header '{header}': {reason}")]
+    InvalidRoutingHeaderInManualTarget {
+        target_id: String,
+        header: String,
+        reason: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::computer::McpServerManagedBy;
+    use crate::services::connection_targets::GlobalManualSmcpTarget;
     use tempfile::tempdir;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
@@ -474,6 +738,517 @@ mod tests {
         let tmp = tempdir().unwrap();
         let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
         (svc, tmp)
+    }
+
+    #[test]
+    fn computer_profile_roundtrip_uses_client_owned_directory_schema() {
+        let (svc, tmp) = setup_empty();
+        let mut profile = ComputerProfile::new("computer-a", "Computer A");
+        profile.description = Some("Desktop agent".to_string());
+        profile.connection_policy.auto_connect = true;
+
+        svc.save_computer_profile(&profile).unwrap();
+
+        assert_eq!(svc.load_computer_profile("computer-a").unwrap(), profile);
+        assert_eq!(
+            svc.computer_profile_path("computer-a").unwrap(),
+            tmp.path()
+                .join("client_computers/instances/computer-a/profile.json")
+        );
+    }
+
+    #[test]
+    fn computer_profile_serialization_excludes_runtime_sdk_and_secret_fields() {
+        let mut instance = ComputerInstance::new("computer-a", "Computer A");
+        instance.inputs.push(InputDefinition::PromptString {
+            id: "api-key".to_string(),
+            label: "API key".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        });
+        instance
+            .input_values
+            .insert("api-key".to_string(), serde_json::json!("secret-value"));
+
+        let serialized = serde_json::to_value(ComputerProfile::from(&instance)).unwrap();
+        let object = serialized.as_object().unwrap();
+
+        assert_eq!(
+            object
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["connection_policy", "id", "name", "schema_version"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(!serialized.to_string().contains("secret-value"));
+        assert!(!object.contains_key("inputs"));
+        assert!(!object.contains_key("mcp_servers"));
+        assert!(!object.contains_key("input_values"));
+    }
+
+    #[test]
+    fn computer_profile_rejects_directory_and_profile_id_mismatch() {
+        let (svc, _tmp) = setup_empty();
+        let path = svc.computer_profile_path("directory-id").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&ComputerProfile::new("profile-id", "Computer")).unwrap(),
+        )
+        .unwrap();
+
+        let error = svc.load_computer_profile("directory-id").unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::CorruptedComputerProfile {
+                directory_id,
+                profile_id
+            } if directory_id == "directory-id" && profile_id == "profile-id"
+        ));
+    }
+
+    #[test]
+    fn computer_profile_rejects_unsafe_instance_id() {
+        let (svc, _tmp) = setup_empty();
+
+        assert!(matches!(
+            svc.computer_profile_path("../outside").unwrap_err(),
+            ConfigError::InvalidComputerProfileId(id) if id == "../outside"
+        ));
+    }
+
+    #[test]
+    fn versioned_client_owned_artifacts_reject_unknown_schema_versions() {
+        let (svc, _tmp) = setup_empty();
+        let profile = ComputerProfile {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION + 1,
+            ..ComputerProfile::new("computer-a", "Computer")
+        };
+        let inputs = GlobalInputsConfig {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION + 1,
+            inputs: Vec::new(),
+        };
+
+        assert!(matches!(
+            svc.save_computer_profile(&profile).unwrap_err(),
+            ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                ..
+            }
+        ));
+        assert!(matches!(
+            svc.save_global_inputs(&inputs).unwrap_err(),
+            ConfigError::UnsupportedSchemaVersion {
+                artifact: "global inputs",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn global_inputs_and_manual_targets_are_stored_separately() {
+        let (svc, tmp) = setup_empty();
+        let inputs = GlobalInputsConfig {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            inputs: vec![GlobalInputDefinition::PromptString {
+                id: "region".to_string(),
+                label: "Region".to_string(),
+                description: None,
+                default: Some("us-east".to_string()),
+                password: None,
+            }],
+        };
+        let targets = GlobalManualTargetsConfig {
+            schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+            manual_smcp_targets: vec![GlobalManualSmcpTarget {
+                id: "target-a".to_string(),
+                name: "Target A".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                namespace: "/smcp".to_string(),
+                office_id: "office-a".to_string(),
+                routing_headers: HashMap::from([("X-TF-Region".to_string(), "cn".to_string())]),
+            }],
+        };
+
+        svc.save_global_inputs(&inputs).unwrap();
+        svc.save_global_manual_targets(&targets).unwrap();
+
+        let loaded_inputs = svc.load_global_inputs().unwrap();
+        let loaded_targets = svc.load_global_manual_targets().unwrap();
+        assert_eq!(loaded_inputs.inputs[0].id(), "region");
+        assert_eq!(loaded_targets.manual_smcp_targets[0].id, "target-a");
+        assert!(tmp
+            .path()
+            .join("client_computers/global/inputs.json")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("client_computers/global/manual_targets.json")
+            .exists());
+        assert!(
+            !std::fs::read_to_string(tmp.path().join("client_computers/global/inputs.json"))
+                .unwrap()
+                .contains("input_values")
+        );
+    }
+
+    #[test]
+    fn global_inputs_reject_password_default_plaintext() {
+        let (svc, _tmp) = setup_empty();
+        let inputs = GlobalInputsConfig {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            inputs: vec![GlobalInputDefinition::PromptString {
+                id: "api-key".to_string(),
+                label: "API key".to_string(),
+                description: None,
+                default: Some("plaintext-secret".to_string()),
+                password: Some(true),
+            }],
+        };
+
+        assert!(matches!(
+            svc.save_global_inputs(&inputs).unwrap_err(),
+            ConfigError::SecretPlaintextInGlobalInput { input_id } if input_id == "api-key"
+        ));
+    }
+
+    #[test]
+    fn global_manual_targets_persist_custom_routing_headers_without_name_guessing() {
+        let (svc, tmp) = setup_empty();
+        let targets = GlobalManualTargetsConfig {
+            schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+            manual_smcp_targets: vec![GlobalManualSmcpTarget {
+                id: "target-a".to_string(),
+                name: "Target A".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                namespace: "/smcp".to_string(),
+                office_id: "office-a".to_string(),
+                routing_headers: HashMap::from([
+                    ("Authorization".to_string(), "Bearer plaintext".to_string()),
+                    ("X-Correlation-Id".to_string(), "trace-a".to_string()),
+                    ("X-Client-Secret".to_string(), "routing-value".to_string()),
+                ]),
+            }],
+        };
+
+        svc.save_global_manual_targets(&targets).unwrap();
+
+        assert_eq!(svc.load_global_manual_targets().unwrap(), targets);
+        let persisted = std::fs::read_to_string(
+            tmp.path()
+                .join("client_computers/global/manual_targets.json"),
+        )
+        .unwrap();
+        assert!(persisted.contains("Authorization"));
+        assert!(persisted.contains("X-Correlation-Id"));
+        assert!(!persisted.contains("api_key"));
+    }
+
+    #[test]
+    fn global_manual_targets_reject_invalid_http_header_syntax() {
+        let (svc, _tmp) = setup_empty();
+        let mut target = GlobalManualSmcpTarget {
+            id: "target-a".to_string(),
+            name: "Target A".to_string(),
+            url: "https://smcp.example.com".to_string(),
+            namespace: "/smcp".to_string(),
+            office_id: "office-a".to_string(),
+            routing_headers: HashMap::from([(" Invalid Header ".to_string(), "value".to_string())]),
+        };
+
+        let config = |target| GlobalManualTargetsConfig {
+            schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+            manual_smcp_targets: vec![target],
+        };
+        assert!(matches!(
+            svc.save_global_manual_targets(&config(target.clone()))
+                .unwrap_err(),
+            ConfigError::InvalidRoutingHeaderInManualTarget { header, .. }
+                if header == " Invalid Header "
+        ));
+
+        target.routing_headers =
+            HashMap::from([("X-Correlation-Id".to_string(), "line\r\nbreak".to_string())]);
+        assert!(matches!(
+            svc.save_global_manual_targets(&config(target)).unwrap_err(),
+            ConfigError::InvalidRoutingHeaderInManualTarget { header, .. }
+                if header == "X-Correlation-Id"
+        ));
+    }
+
+    #[test]
+    fn global_artifact_entity_ids_must_be_non_empty_and_unique_on_save() {
+        let (svc, _tmp) = setup_empty();
+        let prompt = |id: &str| GlobalInputDefinition::PromptString {
+            id: id.to_string(),
+            label: "Input".to_string(),
+            description: None,
+            default: None,
+            password: None,
+        };
+        let target = |id: &str| GlobalManualSmcpTarget {
+            id: id.to_string(),
+            name: "Target".to_string(),
+            url: "https://smcp.example.com".to_string(),
+            namespace: "/smcp".to_string(),
+            office_id: "office-a".to_string(),
+            routing_headers: HashMap::new(),
+        };
+
+        let invalid_inputs = GlobalInputsConfig {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            inputs: vec![prompt(" ")],
+        };
+        assert!(matches!(
+            svc.save_global_inputs(&invalid_inputs).unwrap_err(),
+            ConfigError::InvalidArtifactEntityId {
+                artifact: "global input",
+                ..
+            }
+        ));
+
+        let duplicate_targets = GlobalManualTargetsConfig {
+            schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+            manual_smcp_targets: vec![target("target-a"), target("target-a")],
+        };
+        assert!(matches!(
+            svc.save_global_manual_targets(&duplicate_targets)
+                .unwrap_err(),
+            ConfigError::DuplicateArtifactEntityId {
+                artifact: "global manual target",
+                id
+            } if id == "target-a"
+        ));
+    }
+
+    #[test]
+    fn global_artifact_entity_ids_are_validated_on_load() {
+        let (svc, _tmp) = setup_empty();
+        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            inputs_path,
+            r#"{
+              "schema_version": 1,
+              "inputs": [
+                {"type": "Command", "id": "duplicate", "label": "One", "command": "one"},
+                {"type": "Command", "id": "duplicate", "label": "Two", "command": "two"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_inputs().unwrap_err(),
+            ConfigError::DuplicateArtifactEntityId {
+                artifact: "global input",
+                id
+            } if id == "duplicate"
+        ));
+
+        std::fs::write(
+            svc.global_config_path(GlobalConfigFile::ManualTargets),
+            r#"{
+              "schema_version": 1,
+              "manual_smcp_targets": [{
+                "id": "",
+                "name": "Target",
+                "url": "https://smcp.example.com",
+                "office_id": "office-a"
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_manual_targets().unwrap_err(),
+            ConfigError::InvalidArtifactEntityId {
+                artifact: "global manual target",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_global_artifacts_return_current_version_defaults() {
+        let (svc, _tmp) = setup_empty();
+
+        let inputs = svc.load_global_inputs().unwrap();
+        let targets = svc.load_global_manual_targets().unwrap();
+
+        assert_eq!(inputs.schema_version, GLOBAL_INPUTS_SCHEMA_VERSION);
+        assert!(inputs.inputs.is_empty());
+        assert_eq!(targets.schema_version, MANUAL_TARGETS_SCHEMA_VERSION);
+        assert!(targets.manual_smcp_targets.is_empty());
+    }
+
+    #[test]
+    fn computer_profile_rejects_unknown_fields_and_corrupted_json() {
+        let (svc, _tmp) = setup_empty();
+        let path = svc.computer_profile_path("computer-a").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 1,
+              "id": "computer-a",
+              "name": "Computer",
+              "connection_policy": {"auto_connect": false},
+              "input_values": {"api-key": "plaintext"}
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_computer_profile("computer-a").unwrap_err(),
+            ConfigError::Json(_)
+        ));
+
+        std::fs::write(path, "not json").unwrap();
+        assert!(matches!(
+            svc.load_computer_profile("computer-a").unwrap_err(),
+            ConfigError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn new_artifacts_reject_nested_unknown_fields() {
+        let (svc, _tmp) = setup_empty();
+
+        let profile_path = svc.computer_profile_path("computer-a").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            profile_path,
+            r#"{
+              "schema_version": 1,
+              "id": "computer-a",
+              "name": "Computer",
+              "connection_policy": {
+                "auto_connect": false,
+                "input_values": {"api-key": "plaintext"}
+              }
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_computer_profile("computer-a").unwrap_err(),
+            ConfigError::Json(_)
+        ));
+
+        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            inputs_path,
+            r#"{
+              "schema_version": 1,
+              "inputs": [{
+                "type": "PromptString",
+                "id": "api-key",
+                "label": "API key",
+                "resolved_value": "plaintext"
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_inputs().unwrap_err(),
+            ConfigError::Json(_)
+        ));
+
+        let targets_path = svc.global_config_path(GlobalConfigFile::ManualTargets);
+        std::fs::write(
+            targets_path,
+            r#"{
+              "schema_version": 1,
+              "manual_smcp_targets": [{
+                "id": "target-a",
+                "name": "Target A",
+                "url": "https://smcp.example.com",
+                "office_id": "office-a",
+                "api_key": "plaintext"
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_manual_targets().unwrap_err(),
+            ConfigError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn existing_empty_global_artifacts_are_reported_as_corrupted() {
+        let (svc, _tmp) = setup_empty();
+        for artifact in [GlobalConfigFile::Inputs, GlobalConfigFile::ManualTargets] {
+            let path = svc.global_config_path(artifact);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+
+        assert!(matches!(
+            svc.load_global_inputs().unwrap_err(),
+            ConfigError::InvalidArtifact { .. }
+        ));
+        assert!(matches!(
+            svc.load_global_manual_targets().unwrap_err(),
+            ConfigError::InvalidArtifact { .. }
+        ));
+    }
+
+    #[test]
+    fn global_artifacts_reject_unknown_schema_versions_when_loaded() {
+        let (svc, _tmp) = setup_empty();
+        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
+        std::fs::write(inputs_path, r#"{"schema_version": 2, "inputs": []}"#).unwrap();
+        std::fs::write(
+            svc.global_config_path(GlobalConfigFile::ManualTargets),
+            r#"{"schema_version": 2, "manual_smcp_targets": []}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_global_inputs().unwrap_err(),
+            ConfigError::UnsupportedSchemaVersion {
+                artifact: "global inputs",
+                ..
+            }
+        ));
+        assert!(matches!(
+            svc.load_global_manual_targets().unwrap_err(),
+            ConfigError::UnsupportedSchemaVersion {
+                artifact: "global manual targets",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn existing_global_manual_targets_requires_explicit_schema_version() {
+        let (svc, _tmp) = setup_empty();
+        let path = svc.global_config_path(GlobalConfigFile::ManualTargets);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, r#"{"manual_smcp_targets": []}"#).unwrap();
+
+        assert!(matches!(
+            svc.load_global_manual_targets().unwrap_err(),
+            ConfigError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn new_profile_repository_does_not_change_legacy_instances_file() {
+        let (svc, tmp) = setup_empty();
+        svc.add_computer_instance(ComputerInstance::new("legacy", "Legacy"))
+            .unwrap();
+        svc.save_computer_profile(&ComputerProfile::new("new-profile", "New"))
+            .unwrap();
+
+        let legacy = svc.load_computer_instances().unwrap();
+        assert_eq!(legacy.instances.len(), 1);
+        assert_eq!(legacy.instances[0].id, "legacy");
+        assert!(tmp.path().join("computer_instances.json").exists());
     }
 
     // --- MCP Server Configs ---

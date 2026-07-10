@@ -2,6 +2,7 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
+use services::client_computers::ClientComputersPaths;
 use services::computer::ComputerRegistry;
 use services::config::ConfigService;
 use services::keychain::{SecretStore, SystemSecretStore};
@@ -134,13 +135,20 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to get app data directory");
 
-            let config_service = ConfigService::new(app_data_dir.clone())
-                .expect("Failed to initialize config service");
+            let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
+            let config_service = ConfigService::new_with_client_computers_paths(
+                app_data_dir.clone(),
+                client_computers_paths.clone(),
+            )
+            .expect("Failed to initialize config service");
 
             let log_service =
                 LogService::new(&app_data_dir).expect("Failed to initialize log service");
 
-            let settings_service = SettingsService::new(app_data_dir.clone());
+            let settings_service = SettingsService::new_with_client_computers_paths(
+                app_data_dir.clone(),
+                client_computers_paths,
+            );
 
             // Use configured log retention days for cleanup
             let settings = settings_service.load();
