@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust SDK 能力审查"
+  short_description: "审查 develop 最新 Rust SDK 并通过隔离实验验证能力"
+  default_prompt: "Use $review-rust-sdk-capability 审查远端 develop 分支最新 commit 是否满足当前需求，并基于客户端调用与实验给出问题和修改方向。"
