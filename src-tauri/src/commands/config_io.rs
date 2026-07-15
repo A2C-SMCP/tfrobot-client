@@ -1,8 +1,9 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 /// Result of an import operation
@@ -141,15 +142,7 @@ async fn import_cli_native(
             continue;
         }
 
-        let previous = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|e| e.to_string())?;
-        let updated_instance = state
-            .config
-            .add_config_for_instance(instance_id, server.clone())
-            .map_err(|e| e.to_string())?;
-        apply_updated_computer_instance(state, previous, updated_instance).await?;
+        super::mcp::add_mcp_server_core(state, instance_id, server.clone()).await?;
         servers_imported += 1;
     }
 
@@ -176,16 +169,8 @@ async fn import_claude_desktop(
             continue;
         }
 
-        let previous = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|e| e.to_string())?;
         let mcp_config = build_stdio_config(&name, &server);
-        let updated_instance = state
-            .config
-            .add_config_for_instance(instance_id, mcp_config.clone())
-            .map_err(|e| e.to_string())?;
-        apply_updated_computer_instance(state, previous, updated_instance).await?;
+        super::mcp::add_mcp_server_core(state, instance_id, mcp_config).await?;
         servers_imported += 1;
     }
 
@@ -199,21 +184,15 @@ async fn import_claude_desktop(
 fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConfig {
     use a2c_smcp::smcp_computer::mcp_clients::model::{StdioServerConfig, StdioServerParameters};
 
-    MCPServerConfig::Stdio(StdioServerConfig {
-        name: name.to_string(),
-        disabled: false,
-        forbidden_tools: vec![],
-        tool_meta: HashMap::new(),
-        default_tool_meta: None,
-        vrl: None,
-        env_file: None,
-        server_parameters: StdioServerParameters {
+    MCPServerConfig::Stdio(StdioServerConfig::new(
+        name,
+        StdioServerParameters {
             command: server.command.clone(),
             args: server.args.clone(),
             env: server.env.clone(),
             cwd: None,
         },
-    })
+    ))
 }
 
 async fn is_plugin_owned_server(
@@ -221,14 +200,6 @@ async fn is_plugin_owned_server(
     instance_id: &str,
     name: &str,
 ) -> Result<bool, String> {
-    match state
-        .config
-        .get_managed_config_for_instance(instance_id, name)
-    {
-        Ok(server) if server.is_plugin_owned() => return Ok(true),
-        Ok(_) | Err(crate::services::config::ConfigError::NotFound(_)) => {}
-        Err(error) => return Err(error.to_string()),
-    }
     if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
         return Ok(runtime.plugin_mcp_server_owner(name).await.is_some());
     }
@@ -253,20 +224,62 @@ pub async fn export_config_core(
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(&instance_id)?;
-    let servers = state
+    state
         .config
-        .load_configs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    let portable = state
+        .sdk_config
+        .export_cli_native_mcp(instance_id)
+        .map_err(|error| error.to_string())?;
+    let validation = state.sdk_config.validate(&portable);
+    if !validation.is_valid() {
+        let details = validation
+            .errors
+            .iter()
+            .map(|error| {
+                format!(
+                    "{}:{}: {}",
+                    error.source_path.as_deref().unwrap_or("project config"),
+                    error.field,
+                    error.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "Cannot export invalid portable SDK configuration: {details}"
+        ));
+    }
+    let servers = cli_native_servers_from_project_config(portable)?;
     let inputs = state
         .config
         .load_inputs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(sanitize_portable_input_definition)
+        .collect();
 
     let filtered_servers = match server_names {
-        Some(names) => servers
-            .into_iter()
-            .filter(|s| names.contains(&s.name().to_string()))
-            .collect(),
+        Some(names) => {
+            let requested: HashSet<_> = names.into_iter().collect();
+            let available: HashSet<_> = servers
+                .iter()
+                .map(|server| server.name().to_string())
+                .collect();
+            let mut missing: Vec<_> = requested.difference(&available).cloned().collect();
+            if !missing.is_empty() {
+                missing.sort();
+                return Err(format!(
+                    "Cannot export unknown MCP server(s): {}",
+                    missing.join(", ")
+                ));
+            }
+            servers
+                .into_iter()
+                .filter(|server| requested.contains(server.name()))
+                .collect()
+        }
         None => servers,
     };
 
@@ -280,6 +293,56 @@ pub async fn export_config_core(
 
     log::info!("Configuration exported to: {}", path);
     Ok(())
+}
+
+fn cli_native_servers_from_project_config(
+    document: ProjectConfigDoc,
+) -> Result<Vec<MCPServerConfig>, String> {
+    let Some(mcp) = document.mcp else {
+        return Ok(Vec::new());
+    };
+    let Some(servers) = mcp.get("servers") else {
+        return Ok(Vec::new());
+    };
+    let servers = servers
+        .as_object()
+        .ok_or_else(|| "Portable SDK mcp.servers must be an object".to_string())?;
+
+    let mut configs = servers
+        .iter()
+        .map(|(name, value)| {
+            let mut body = value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| format!("Portable SDK MCP server '{name}' must be an object"))?;
+            if let Some(explicit_name) = body.get("name") {
+                if explicit_name.as_str() != Some(name) {
+                    return Err(format!(
+                        "Portable SDK MCP server key '{name}' conflicts with its name field"
+                    ));
+                }
+            }
+            body.insert("name".to_string(), serde_json::Value::String(name.clone()));
+            serde_json::from_value(serde_json::Value::Object(body))
+                .map_err(|error| format!("Invalid portable SDK MCP server '{name}': {error}"))
+        })
+        .collect::<Result<Vec<MCPServerConfig>, String>>()?;
+    configs.sort_by(|left, right| left.name().cmp(right.name()));
+    Ok(configs)
+}
+
+fn sanitize_portable_input_definition(
+    mut input: super::inputs::InputDefinition,
+) -> super::inputs::InputDefinition {
+    if let super::inputs::InputDefinition::PromptString {
+        default, password, ..
+    } = &mut input
+    {
+        if *password == Some(true) {
+            *default = None;
+        }
+    }
+    input
 }
 
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {

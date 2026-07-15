@@ -11,7 +11,11 @@ const MAX_ERROR_SUMMARY_CHARS: usize = 500;
 /// Tool with server attribution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
+    /// Stable SDK executable identity (`{bundle_id}__{tool}`).
     pub name: String,
+    /// Human-friendly raw tool name for presentation only.
+    #[serde(rename = "displayName")]
+    pub display_name: String,
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
@@ -116,6 +120,7 @@ pub async fn get_available_tools_core(
                 .and_then(|v| v.as_bool());
 
             ToolInfo {
+                display_name: display_tool_name(t.name.as_ref()),
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
@@ -127,6 +132,14 @@ pub async fn get_available_tools_core(
         .collect();
 
     Ok(result)
+}
+
+fn display_tool_name(exposed_name: &str) -> String {
+    exposed_name
+        .split_once("__")
+        .map(|(_, raw_name)| raw_name)
+        .unwrap_or(exposed_name)
+        .to_string()
 }
 
 #[tauri::command]
@@ -522,6 +535,13 @@ fn tool_history_records_from_logs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn display_tool_name_removes_only_the_bundle_prefix() {
+        assert_eq!(display_tool_name("bundle__tool"), "tool");
+        assert_eq!(display_tool_name("bundle__foo__bar"), "foo__bar");
+        assert_eq!(display_tool_name("unprefixed"), "unprefixed");
+    }
 
     #[test]
     fn redacts_sensitive_tool_parameters_recursively() {

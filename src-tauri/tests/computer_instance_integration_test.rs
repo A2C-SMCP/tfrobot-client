@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod common;
 
+use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
 use common::create_test_app_state;
 use tempfile::TempDir;
 use tfrobot_client_lib::commands::computer::{
@@ -115,6 +116,19 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     )
     .await
     .unwrap();
+    let source_sdk_snapshot = state
+        .sdk_config
+        .update(
+            &source.id,
+            &[ConfigEdit::new(
+                ConfigEntity::McpServer("source-sdk-server".to_string()),
+                EditIntent::Upsert(serde_json::json!({
+                    "type": "stdio",
+                    "server_parameters": {"command": "node"}
+                })),
+            )],
+        )
+        .unwrap();
     state
         .config
         .update_computer_instance(&source.id, |instance| {
@@ -164,6 +178,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     .unwrap();
 
     let duplicate_config = state.config.get_computer_instance(&duplicate.id).unwrap();
+    let duplicate_sdk_snapshot = state.sdk_config.load(&duplicate.id);
     assert_eq!(duplicate.name, "Duplicate");
     assert_eq!(
         duplicate.description.as_deref(),
@@ -192,6 +207,53 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     );
     assert!(!duplicate.running);
     assert!(!duplicate.connected);
+    assert!(!source_sdk_snapshot.revision.0.is_empty());
+    assert!(!duplicate_sdk_snapshot.revision.0.is_empty());
+    assert_eq!(
+        duplicate_sdk_snapshot.revision,
+        state.sdk_config.load(&duplicate.id).revision
+    );
+    assert_eq!(
+        state.sdk_config.export(&source.id).unwrap(),
+        state.sdk_config.export(&duplicate.id).unwrap()
+    );
+    assert_eq!(
+        duplicate_sdk_snapshot.provenance,
+        source_sdk_snapshot.provenance
+    );
+    assert_eq!(
+        duplicate_sdk_snapshot
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["source-sdk-server"]
+    );
+    state
+        .sdk_config
+        .update(
+            &duplicate.id,
+            &[ConfigEdit::new(
+                ConfigEntity::McpServer("duplicate-only".to_string()),
+                EditIntent::Upsert(serde_json::json!({
+                    "type": "stdio",
+                    "server_parameters": {"command": "node"}
+                })),
+            )],
+        )
+        .unwrap();
+    assert_eq!(
+        state
+            .sdk_config
+            .load(&source.id)
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["source-sdk-server"]
+    );
     assert!(
         state
             .computer_registry
@@ -217,9 +279,21 @@ async fn duplicate_uses_own_skill_home_and_can_copy_source_contents() {
     .await
     .unwrap();
     let source_skill_root = state.config.default_local_skills_root(&source.id);
-    std::fs::create_dir_all(source_skill_root.join("nested")).unwrap();
-    std::fs::write(source_skill_root.join("skill.md"), "source skill").unwrap();
-    std::fs::write(source_skill_root.join("nested").join("data.txt"), "nested").unwrap();
+    let source_user_skills = source_skill_root.join("user");
+    std::fs::create_dir_all(source_user_skills.join("nested")).unwrap();
+    std::fs::write(source_user_skills.join("skill.md"), "source skill").unwrap();
+    std::fs::write(source_user_skills.join("nested").join("data.txt"), "nested").unwrap();
+    std::fs::write(
+        source_skill_root.join("installed_plugins.json"),
+        r#"{"plugins":{"audit@acme":{"installPath":"/source/plugin"}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(source_skill_root.join("marketplace/acme")).unwrap();
+    std::fs::write(
+        source_skill_root.join("marketplace/acme/plugin.json"),
+        "source governance content",
+    )
+    .unwrap();
 
     let empty_duplicate = duplicate_computer_instance_core(
         &state,
@@ -241,7 +315,7 @@ async fn duplicate_uses_own_skill_home_and_can_copy_source_contents() {
     let empty_skill_root = state.config.default_local_skills_root(&empty_duplicate.id);
     assert!(empty_config.local_skills_root.is_none());
     assert!(empty_skill_root.exists());
-    assert!(!empty_skill_root.join("skill.md").exists());
+    assert!(!empty_skill_root.join("user/skill.md").exists());
 
     let copy_duplicate = duplicate_computer_instance_core(
         &state,
@@ -264,13 +338,15 @@ async fn duplicate_uses_own_skill_home_and_can_copy_source_contents() {
     assert!(copy_config.local_skills_root.is_none());
     assert_ne!(copy_skill_root, source_skill_root);
     assert_eq!(
-        std::fs::read_to_string(copy_skill_root.join("skill.md")).unwrap(),
+        std::fs::read_to_string(copy_skill_root.join("user/skill.md")).unwrap(),
         "source skill"
     );
     assert_eq!(
-        std::fs::read_to_string(copy_skill_root.join("nested").join("data.txt")).unwrap(),
+        std::fs::read_to_string(copy_skill_root.join("user/nested/data.txt")).unwrap(),
         "nested"
     );
+    assert!(!copy_skill_root.join("installed_plugins.json").exists());
+    assert!(!copy_skill_root.join("marketplace").exists());
 }
 
 #[tokio::test]
@@ -286,14 +362,22 @@ async fn duplicate_copy_failure_cleans_destination_and_returns_error() {
     )
     .await
     .unwrap();
-    let source_skill_file = dir.path().join("source-skill-file");
-    std::fs::write(&source_skill_file, "not a directory").unwrap();
     state
-        .config
-        .update_computer_instance(&source.id, |instance| {
-            instance.local_skills_root = Some(source_skill_file.clone());
-        })
+        .sdk_config
+        .update(
+            &source.id,
+            &[ConfigEdit::new(
+                ConfigEntity::McpServer("rollback-source".to_string()),
+                EditIntent::Upsert(serde_json::json!({
+                    "type": "stdio",
+                    "server_parameters": {"command": "node"}
+                })),
+            )],
+        )
         .unwrap();
+    let source_skill_root = state.config.default_local_skills_root(&source.id);
+    std::fs::create_dir_all(&source_skill_root).unwrap();
+    std::fs::write(source_skill_root.join("user"), "not a directory").unwrap();
 
     let error = duplicate_computer_instance_core(
         &state,
@@ -326,11 +410,16 @@ async fn duplicate_copy_failure_cleans_destination_and_returns_error() {
     } else {
         0
     };
-    assert_eq!(remaining_entries, 0);
+    assert_eq!(remaining_entries, 1);
+    assert!(state
+        .sdk_config
+        .project_anchor(&source.id)
+        .join(".tfrobot/mcp.json")
+        .is_file());
 }
 
 #[tokio::test]
-async fn duplicate_rejects_copy_when_destination_would_be_inside_source() {
+async fn duplicate_copy_is_safe_when_custom_root_contains_target_storage() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     let source = create_computer_instance_core(
@@ -343,8 +432,13 @@ async fn duplicate_rejects_copy_when_destination_would_be_inside_source() {
     .await
     .unwrap();
     let skill_home_base = state.config.computer_skill_home_base();
-    std::fs::create_dir_all(&skill_home_base).unwrap();
-    std::fs::write(skill_home_base.join("root-skill.md"), "root").unwrap();
+    std::fs::create_dir_all(skill_home_base.join("user")).unwrap();
+    std::fs::write(skill_home_base.join("user/root-skill.md"), "root").unwrap();
+    std::fs::write(
+        skill_home_base.join("installed_plugins.json"),
+        r#"{"plugins":{"audit@acme":{"installPath":"/source/plugin"}}}"#,
+    )
+    .unwrap();
     state
         .config
         .update_computer_instance(&source.id, |instance| {
@@ -352,7 +446,7 @@ async fn duplicate_rejects_copy_when_destination_would_be_inside_source() {
         })
         .unwrap();
 
-    let error = duplicate_computer_instance_core(
+    let duplicate = duplicate_computer_instance_core(
         &state,
         DuplicateComputerInstanceRequest {
             source_id: source.id.clone(),
@@ -364,23 +458,14 @@ async fn duplicate_rejects_copy_when_destination_would_be_inside_source() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("destination is inside source directory"));
+    let duplicate_skill_root = state.config.default_local_skills_root(&duplicate.id);
     assert_eq!(
-        state
-            .config
-            .load_computer_instances()
-            .unwrap()
-            .instances
-            .len(),
-        1
-    );
-    assert_eq!(
-        std::fs::read_to_string(skill_home_base.join("root-skill.md")).unwrap(),
+        std::fs::read_to_string(duplicate_skill_root.join("user/root-skill.md")).unwrap(),
         "root"
     );
-    assert_eq!(std::fs::read_dir(&skill_home_base).unwrap().count(), 1);
+    assert!(!duplicate_skill_root.join("installed_plugins.json").exists());
 }
 
 #[tokio::test]
@@ -525,6 +610,15 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
         .config
         .add_computer_instance(ComputerInstance::new(LEGACY_INSTANCE_ID, "Legacy Computer"))
         .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(LEGACY_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await;
     let second = create_computer_instance_core(
         &state,
         CreateComputerInstanceRequest {

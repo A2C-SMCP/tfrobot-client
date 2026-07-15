@@ -6,6 +6,7 @@ pub mod keychain;
 pub mod logger;
 pub mod manager_client;
 pub mod runtime;
+pub mod sdk_config;
 pub mod settings;
 pub mod shell_env;
 pub mod storage;

@@ -43,11 +43,20 @@ export interface PluginSummary {
   plugin: string;
   pluginId?: string | null;
   version?: string | null;
+  installed: boolean;
   enabled: boolean;
   status: string;
   bundledMcpServers: string[];
   bundledSkills: string[];
+  declared: DeclaredPluginCapabilities | null;
   message?: string | null;
+}
+
+export interface DeclaredPluginCapabilities {
+  version?: string | null;
+  description?: string | null;
+  mcpServers: string[];
+  skills: string[];
 }
 
 export interface MarketplaceGovernance {

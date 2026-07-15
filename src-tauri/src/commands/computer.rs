@@ -236,6 +236,7 @@ pub async fn duplicate_computer_instance_core(
     instance.description = normalize_optional_text(request.description);
     instance.local_skills_root = None;
     let destination_skill_root = state.config.default_local_skills_root(&instance.id);
+    let destination_storage_root = state.config.computer_instance_storage_root(&instance.id);
     if !request.copy_robot_binding {
         instance.robot_binding = None;
     }
@@ -254,6 +255,15 @@ pub async fn duplicate_computer_instance_core(
         .config
         .add_computer_instance(instance.clone())
         .map_err(|error| error.to_string())?;
+    if let Err(error) = state.sdk_config.duplicate(&source_id, &instance.id) {
+        return Err(rollback_failed_duplicate(
+            state,
+            &instance.id,
+            &destination_storage_root,
+            error.to_string(),
+        )
+        .await);
+    }
     if let Err(error) = prepare_duplicate_skill_home(
         &source_skill_root,
         &destination_skill_root,
@@ -261,34 +271,13 @@ pub async fn duplicate_computer_instance_core(
     )
     .await
     {
-        let rollback_config_result = state
-            .config
-            .remove_computer_instance(&instance.id)
-            .map_err(|rollback_error| rollback_error.to_string());
-        let cleanup_result =
-            cleanup_duplicate_skill_home_after_config_failure(&destination_skill_root).await;
-
-        match (rollback_config_result, cleanup_result) {
-            (Ok(_), Ok(())) => {}
-            (Err(rollback_error), Ok(())) => {
-                return Err(format!(
-                    "Failed to duplicate Computer instance: {error}; additionally failed to rollback persisted config: {rollback_error}"
-                ));
-            }
-            (Ok(_), Err(cleanup_error)) => {
-                return Err(format!(
-                    "Failed to duplicate Computer instance: {error}; additionally failed to clean duplicate skill directory {}: {cleanup_error}",
-                    destination_skill_root.display()
-                ));
-            }
-            (Err(rollback_error), Err(cleanup_error)) => {
-                return Err(format!(
-                    "Failed to duplicate Computer instance: {error}; additionally failed to rollback persisted config: {rollback_error}; additionally failed to clean duplicate skill directory {}: {cleanup_error}",
-                    destination_skill_root.display()
-                ));
-            }
-        }
-        return Err(error);
+        return Err(rollback_failed_duplicate(
+            state,
+            &instance.id,
+            &destination_storage_root,
+            error,
+        )
+        .await);
     }
     let runtime = state
         .computer_registry
@@ -567,7 +556,7 @@ async fn status_from_instance(
         effective_skill_home: runtime.sdk_skill_home().await,
         running: runtime.is_running().await,
         connected: runtime.is_connected().await,
-        mcp_server_count: instance.mcp_servers.len(),
+        mcp_server_count: runtime.mcp_server_inventory_count().await,
         robot_binding: instance.robot_binding.clone(),
         connection_policy: instance.connection_policy.clone(),
         connection: runtime.connection_status().await,
@@ -605,8 +594,10 @@ async fn prepare_duplicate_skill_home(
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        if mode == DuplicateSkillHomeMode::Copy && source.exists() {
-            validate_duplicate_skill_copy(&source, &destination)?;
+        let source_user_skills = source.join("user");
+        let destination_user_skills = destination.join("user");
+        if mode == DuplicateSkillHomeMode::Copy && source_user_skills.exists() {
+            validate_duplicate_skill_copy(&source_user_skills, &destination_user_skills)?;
         }
 
         fs::create_dir_all(&destination).map_err(|error| {
@@ -617,21 +608,26 @@ async fn prepare_duplicate_skill_home(
             )
         })?;
 
-        if mode == DuplicateSkillHomeMode::Copy && source.exists() {
-            if let Err(error) = copy_directory_contents(&source, &destination) {
+        if mode == DuplicateSkillHomeMode::Copy && source_user_skills.exists() {
+            if let Err(error) = fs::create_dir_all(&destination_user_skills)
+                .map_err(|error| error.to_string())
+                .and_then(|_| {
+                    copy_directory_contents(&source_user_skills, &destination_user_skills)
+                })
+            {
                 if let Err(cleanup_error) = cleanup_duplicate_skill_destination(&destination) {
                     return Err(format!(
                         "Failed to copy skills from {} to {}: {}; cleanup failed: {}",
-                        source.display(),
-                        destination.display(),
+                        source_user_skills.display(),
+                        destination_user_skills.display(),
                         error,
                         cleanup_error
                     ));
                 }
                 return Err(format!(
                     "Failed to copy skills from {} to {}: {}; created directory was cleaned up",
-                    source.display(),
-                    destination.display(),
+                    source_user_skills.display(),
+                    destination_user_skills.display(),
                     error
                 ));
             }
@@ -657,13 +653,31 @@ async fn cleanup_computer_instance_storage(path: &Path) -> Result<(), String> {
     .map_err(|error| format!("Failed to delete computer instance storage: {error}"))?
 }
 
-async fn cleanup_duplicate_skill_home_after_config_failure(path: &Path) -> Result<(), String> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        cleanup_duplicate_skill_destination(&path).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("Failed to clean duplicate skill directory: {error}"))?
+async fn rollback_failed_duplicate(
+    state: &AppState,
+    instance_id: &str,
+    storage_root: &Path,
+    primary_error: String,
+) -> String {
+    let mut rollback_errors = Vec::new();
+    if let Err(error) = state.sdk_config.delete(instance_id) {
+        rollback_errors.push(format!("delete SDK config: {error}"));
+    }
+    if let Err(error) = state.config.remove_computer_instance(instance_id) {
+        rollback_errors.push(format!("remove persisted Computer profile: {error}"));
+    }
+    if let Err(error) = cleanup_computer_instance_storage(storage_root).await {
+        rollback_errors.push(format!("clean target instance storage: {error}"));
+    }
+
+    if rollback_errors.is_empty() {
+        format!("Failed to duplicate Computer instance: {primary_error}")
+    } else {
+        format!(
+            "Failed to duplicate Computer instance: {primary_error}; additionally failed to rollback: {}",
+            rollback_errors.join("; ")
+        )
+    }
 }
 
 fn validate_duplicate_skill_copy(source: &Path, destination: &Path) -> Result<(), String> {
@@ -766,6 +780,7 @@ mod tests {
     use crate::services::config::ConfigService;
     use crate::services::logger::LogService;
     use crate::services::settings::SettingsService;
+    use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
     use tempfile::TempDir;
 
     fn test_state() -> (AppState, TempDir) {
@@ -812,5 +827,34 @@ mod tests {
             restored.effective_skill_home,
             state.config.default_local_skills_root("computer-a")
         );
+    }
+
+    #[tokio::test]
+    async fn computer_status_counts_sdk_snapshot_servers_not_legacy_profile_servers() {
+        let (state, _dir) = test_state();
+        state
+            .sdk_config
+            .update(
+                "computer-a",
+                &[ConfigEdit::new(
+                    ConfigEntity::McpServer("snapshot-only".to_string()),
+                    EditIntent::Upsert(serde_json::json!({
+                        "type": "stdio",
+                        "server_parameters": {"command": "node"}
+                    })),
+                )],
+            )
+            .unwrap();
+        assert!(state
+            .config
+            .get_computer_instance("computer-a")
+            .unwrap()
+            .mcp_servers
+            .is_empty());
+
+        let status = get_computer_instance_status_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(status.mcp_server_count, 1);
     }
 }

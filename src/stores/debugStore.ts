@@ -3,6 +3,7 @@ import { create } from 'zustand';
 
 export interface ToolInfo {
   name: string;
+  displayName: string;
   description: string;
   inputSchema: Record<string, unknown>;
   server: string;

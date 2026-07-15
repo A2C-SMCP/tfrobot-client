@@ -8,6 +8,7 @@ use services::config::ConfigService;
 use services::keychain::{SecretStore, SystemSecretStore};
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
+use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use tokio::sync::Mutex;
 pub struct AppState {
     /// Configuration persistence service
     pub config: Arc<ConfigService>,
+    /// Adapter for SDK-owned per-Computer configuration.
+    pub sdk_config: Arc<SdkConfigService>,
     /// Runtime registry for all configured Computer instances
     pub computer_registry: Arc<ComputerRegistry>,
     /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
@@ -66,8 +69,12 @@ impl AppState {
             config.computer_skill_home_base(),
         );
 
+        let config = Arc::new(config);
+        let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
+
         Self {
-            config: Arc::new(config),
+            config,
+            sdk_config,
             computer_registry: Arc::new(computer_registry),
             secret_store: secret_store.clone(),
             connection_establish_lock: Arc::new(Mutex::new(())),
@@ -208,6 +215,7 @@ pub fn run() {
             commands::mcp::add_mcp_server,
             commands::mcp::remove_mcp_server,
             commands::mcp::update_mcp_server,
+            commands::sdk_config::get_computer_config_snapshot,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::start_all_servers,

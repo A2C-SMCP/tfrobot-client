@@ -1,4 +1,3 @@
-use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::McpServerManagedBy;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -16,6 +15,12 @@ pub struct McpServerStatus {
     pub managed_by: McpServerManagedBy,
 }
 
+#[derive(Debug, Clone)]
+struct McpServerRuntimeMetadata {
+    disabled: bool,
+    managed_by: McpServerManagedBy,
+}
+
 #[tauri::command]
 pub async fn get_mcp_servers(
     state: State<'_, AppState>,
@@ -29,10 +34,11 @@ pub async fn get_mcp_servers_core(
     instance_id: &str,
 ) -> Result<Vec<McpServerStatus>, String> {
     let instance_id = require_instance_id(instance_id)?;
-    let configs = state
+    state
         .config
-        .load_managed_configs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    let snapshot = state.sdk_config.load(instance_id);
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -44,41 +50,27 @@ pub async fn get_mcp_servers_core(
         .into_iter()
         .map(|(name, running, status_message)| (name, (running, status_message)))
         .collect();
-    let sdk_ownership = runtime.sdk_mcp_server_ownership().await;
-    let sdk_managed_by: std::collections::HashMap<_, _> = sdk_ownership
-        .iter()
-        .filter_map(|entry| {
-            crate::services::computer::sdk_managed_by_to_client(entry.managed_by.clone())
-                .map(|managed_by| (entry.name.clone(), managed_by))
-        })
-        .collect();
-    let sdk_disabled: std::collections::HashMap<_, _> = sdk_ownership
-        .iter()
-        .map(|entry| (entry.name.clone(), entry.disabled))
-        .collect();
+    let runtime_metadata = mcp_server_runtime_metadata(&runtime).await;
 
-    let mut statuses: Vec<_> = configs
+    let mut statuses: Vec<_> = snapshot
+        .mcp
+        .servers
         .into_iter()
         .map(|server| {
-            let persisted_plugin_owned = server.is_plugin_owned();
             let config = server.config;
             let name = config.name().to_string();
             let (running, status_message) = runtime_statuses
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| (false, "Stopped".to_string()));
-            let managed_by = if persisted_plugin_owned {
-                sdk_managed_by
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or(server.managed_by)
-            } else {
-                McpServerManagedBy::User
-            };
+            let managed_by = runtime_metadata
+                .get(&name)
+                .map(|metadata| metadata.managed_by.clone())
+                .unwrap_or(McpServerManagedBy::User);
             McpServerStatus {
-                disabled: sdk_disabled
+                disabled: runtime_metadata
                     .get(&name)
-                    .copied()
+                    .map(|metadata| metadata.disabled)
                     .unwrap_or(config.disabled()),
                 name: name.clone(),
                 running,
@@ -90,25 +82,20 @@ pub async fn get_mcp_servers_core(
 
     let configured_names: std::collections::HashSet<_> =
         statuses.iter().map(|status| status.name.clone()).collect();
-    for entry in sdk_ownership {
-        if configured_names.contains(&entry.name) {
+    for (name, metadata) in runtime_metadata {
+        if configured_names.contains(&name) {
             continue;
         }
-        let Some(managed_by) =
-            crate::services::computer::sdk_managed_by_to_client(entry.managed_by)
-        else {
-            continue;
-        };
         let (running, status_message) = runtime_statuses
-            .get(&entry.name)
+            .get(&name)
             .cloned()
             .unwrap_or_else(|| (false, "Stopped".to_string()));
         statuses.push(McpServerStatus {
-            name: entry.name,
+            name,
             running,
             status_message,
-            disabled: entry.disabled,
-            managed_by,
+            disabled: metadata.disabled,
+            managed_by: metadata.managed_by,
         });
     }
 
@@ -130,13 +117,18 @@ pub fn get_mcp_server_config_core(
     name: &str,
 ) -> Result<MCPServerConfig, String> {
     let instance_id = require_instance_id(instance_id)?;
-    let configs = state
+    state
         .config
-        .load_configs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    configs
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
         .into_iter()
-        .find(|c| c.name() == name)
+        .map(|server| server.config)
+        .find(|config| config.name() == name)
         .ok_or(format!("Server not found: {}", name))
 }
 
@@ -157,18 +149,10 @@ pub async fn add_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Adding MCP server for instance {}: {}", instance_id, name);
-    ensure_no_plugin_managed_runtime_server(state, instance_id, &name).await?;
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-
-    let updated_instance = state
-        .config
-        .add_config_for_instance(instance_id, config.clone())
-        .map_err(|e| e.to_string())?;
-
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_no_plugin_managed_runtime_server(&runtime, &name).await?;
+    // Computer validates/render-checks before its SDK-owned CRUD persist + runtime reload.
+    runtime.add_or_update_server(config).await?;
 
     log::info!("MCP server added for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -197,18 +181,9 @@ pub async fn remove_mcp_server_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Removing MCP server for instance {}: {}", instance_id, name);
-    ensure_no_plugin_managed_runtime_server(state, instance_id, name).await?;
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    ensure_user_managed_server(state, instance_id, name)?;
-
-    let updated_instance = state
-        .config
-        .remove_config_for_instance(instance_id, name)
-        .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_user_managed_server(state, instance_id, name, &runtime).await?;
+    runtime.remove_server(name).await?;
 
     log::info!("MCP server removed for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -238,19 +213,10 @@ pub async fn update_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Updating MCP server for instance {}: {}", instance_id, name);
-    ensure_no_plugin_managed_runtime_server(state, instance_id, &name).await?;
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    ensure_user_managed_server(state, instance_id, &name)?;
-
-    let updated_instance = state
-        .config
-        .add_config_for_instance(instance_id, config.clone())
-        .map_err(|e| e.to_string())?;
-
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_user_managed_server(state, instance_id, &name, &runtime).await?;
+    // Computer validates/render-checks before its SDK-owned CRUD persist + runtime reload.
+    runtime.add_or_update_server(config).await?;
 
     log::info!("MCP server updated for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -280,14 +246,8 @@ pub async fn start_mcp_server_core(
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Starting MCP server for instance {}: {}", instance_id, name);
 
-    ensure_no_plugin_managed_runtime_server(state, instance_id, name).await?;
-    ensure_user_managed_server(state, instance_id, name)?;
-    let _config = get_mcp_server_config_core(state, instance_id, name)?;
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_user_managed_server(state, instance_id, name, &runtime).await?;
     ensure_computer_started(&runtime).await?;
     runtime.start_mcp_server(name).await?;
 
@@ -318,14 +278,8 @@ pub async fn stop_mcp_server_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Stopping MCP server for instance {}: {}", instance_id, name);
-    ensure_no_plugin_managed_runtime_server(state, instance_id, name).await?;
-    ensure_user_managed_server(state, instance_id, name)?;
-
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_user_managed_server(state, instance_id, name, &runtime).await?;
     ensure_computer_started(&runtime).await?;
     runtime.stop_mcp_server(name).await?;
 
@@ -352,16 +306,9 @@ pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Resu
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
-    let instance = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance(instance)
-        .await?;
+    let runtime = require_runtime(state, instance_id).await?;
     ensure_computer_started(&runtime).await?;
-    for server in user_managed_servers(state, instance_id)? {
+    for server in user_managed_servers(state, instance_id, &runtime).await {
         runtime.start_mcp_server(server.name()).await?;
     }
 
@@ -381,13 +328,9 @@ pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Resul
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Stopping all MCP servers for instance {}", instance_id);
 
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let runtime = require_runtime(state, instance_id).await?;
     ensure_computer_started(&runtime).await?;
-    for server in user_managed_servers(state, instance_id)? {
+    for server in user_managed_servers(state, instance_id, &runtime).await {
         runtime.stop_mcp_server(server.name()).await?;
     }
 
@@ -413,16 +356,44 @@ async fn ensure_computer_started(
     }
 }
 
-fn ensure_user_managed_server(
+async fn ensure_user_managed_server(
     state: &AppState,
     instance_id: &str,
     name: &str,
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> Result<(), String> {
-    let server = state
-        .config
-        .get_managed_config_for_instance(instance_id, name)
-        .map_err(|e| e.to_string())?;
-    if server.is_plugin_owned() {
+    ensure_no_plugin_managed_runtime_server(runtime, name).await?;
+    state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == name)
+        .ok_or_else(|| format!("Server not found: {name}"))?;
+    Ok(())
+}
+
+async fn require_runtime(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<crate::services::computer::ComputerInstanceRuntime, String> {
+    state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))
+}
+
+async fn ensure_no_plugin_managed_runtime_server(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+    name: &str,
+) -> Result<(), String> {
+    let metadata = mcp_server_runtime_metadata(runtime).await;
+    if metadata
+        .get(name)
+        .is_some_and(|metadata| metadata.managed_by.is_plugin_owned())
+    {
         return Err(format!(
             "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
             name
@@ -431,33 +402,48 @@ fn ensure_user_managed_server(
     Ok(())
 }
 
-async fn ensure_no_plugin_managed_runtime_server(
+async fn user_managed_servers(
     state: &AppState,
     instance_id: &str,
-    name: &str,
-) -> Result<(), String> {
-    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
-        if runtime.plugin_mcp_server_owner(name).await.is_some() {
-            return Err(format!(
-                "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
-                name
-            ));
-        }
-    }
-    Ok(())
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Vec<MCPServerConfig> {
+    let metadata = mcp_server_runtime_metadata(runtime).await;
+    state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .filter(|server| {
+            !metadata
+                .get(&server.name)
+                .is_some_and(|metadata| metadata.managed_by.is_plugin_owned())
+        })
+        .map(|server| server.config)
+        .collect()
 }
 
-fn user_managed_servers(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<Vec<crate::services::computer::ManagedMcpServer>, String> {
-    Ok(state
-        .config
-        .load_managed_configs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?
+async fn mcp_server_runtime_metadata(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> std::collections::HashMap<String, McpServerRuntimeMetadata> {
+    runtime
+        .sdk_mcp_server_ownership()
+        .await
         .into_iter()
-        .filter(|server| !server.is_plugin_owned())
-        .collect())
+        .filter_map(|entry| {
+            crate::services::computer::sdk_managed_by_to_client(entry.managed_by).map(
+                |managed_by| {
+                    (
+                        entry.name,
+                        McpServerRuntimeMetadata {
+                            disabled: entry.disabled,
+                            managed_by,
+                        },
+                    )
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

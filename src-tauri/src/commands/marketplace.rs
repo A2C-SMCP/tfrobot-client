@@ -5,19 +5,14 @@ use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
 use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
-    load_installed_plugins, load_known_marketplaces, resolve_policy_settings, resolve_settings,
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
-    McpInstallHooks, RemoveMarketplaceParams, ResolveSettingsArgs, UninstallOptions,
-    XDG_CONFIG_HOME_ENV,
+    McpInstallHooks, RemoveMarketplaceParams, UninstallOptions,
 };
-use a2c_smcp::smcp_computer::skills::{
-    iter_plugin_entries, load_bundled_servers, marketplace_skill_dir, read_marketplace_manifest,
-    MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR,
-};
+use a2c_smcp::smcp_computer::skills::{MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR};
+use a2c_smcp::smcp_computer::{GovernanceDiagnostic, MarketplaceStatus, PluginStatus};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
@@ -43,6 +38,7 @@ const AVAILABLE_SDK_APIS: &[&str] = &[
     "Computer::disable_plugin",
     "Computer::uninstall_plugin",
     "Computer::reconcile_governance",
+    "Computer::governance_snapshot",
     "Computer::list_mcp_servers_with_metadata",
 ];
 
@@ -71,11 +67,24 @@ pub struct PluginSummary {
     pub plugin: String,
     pub plugin_id: Option<String>,
     pub version: Option<String>,
+    pub installed: bool,
     pub enabled: bool,
     pub status: String,
     pub bundled_mcp_servers: Vec<String>,
     pub bundled_skills: Vec<String>,
+    /// Catalog-declared capabilities. `None` means the SDK could not inspect the declaration;
+    /// `Some` with empty lists means the plugin explicitly declares no such capability.
+    pub declared: Option<DeclaredPluginCapabilities>,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclaredPluginCapabilities {
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub mcp_servers: Vec<String>,
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,8 +145,7 @@ pub async fn get_marketplace_governance_core(
     instance_id: &str,
 ) -> Result<MarketplaceGovernance, String> {
     let runtime = ensure_runtime(state, instance_id).await?;
-    let env = sdk_settings_env(state, instance_id);
-    let snapshot = marketplace_governance_snapshot(&runtime, &env).await;
+    let snapshot = marketplace_governance_snapshot(&runtime).await?;
 
     Ok(MarketplaceGovernance {
         capabilities: supported_capabilities(),
@@ -217,8 +225,7 @@ pub async fn remove_marketplace_core(
 ) -> Result<(), String> {
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
-    let env = sdk_settings_env(state, instance_id);
-    let snapshot = marketplace_governance_snapshot(&runtime, &env).await;
+    let snapshot = marketplace_governance_snapshot(&runtime).await?;
     if snapshot.has_installed_plugins_for_marketplace(marketplace) {
         return Err(format!(
             "marketplace '{marketplace}' has installed plugins; uninstall plugins before removing the marketplace"
@@ -255,8 +262,7 @@ pub async fn update_marketplace_core(
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
     let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
-    let env = sdk_settings_env(state, instance_id);
-    let snapshot = marketplace_governance_snapshot(&runtime, &env).await;
+    let snapshot = marketplace_governance_snapshot(&runtime).await?;
     if snapshot.has_installed_plugins_for_marketplace(name) {
         return Err(format!(
             "marketplace '{name}' has installed plugins; uninstall plugins before updating the marketplace URL"
@@ -305,13 +311,16 @@ pub async fn install_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
+    // Install is intentionally inactive, but the SDK still requires hooks to enforce its
+    // zero-mutation bundled MCP name-conflict gate before recording installation intent.
     let hooks = MarketplaceMcpHooks::for_plugin(
         state,
         instance_id,
         &request.marketplace,
         &request.plugin,
         UserMcpConflictPolicy::Reject,
-    );
+    )
+    .await;
     runtime
         .sdk_install_plugin(
             &plugin_id,
@@ -326,7 +335,7 @@ pub async fn install_plugin_core(
         .map_err(|error| error.to_string())?;
 
     runtime.mark_sdk_skills_dirty().await;
-    start_registered_plugin_servers_if_running(&runtime, &hooks).await
+    Ok(())
 }
 
 #[tauri::command]
@@ -353,7 +362,8 @@ pub async fn enable_plugin_core(
         &request.marketplace,
         &request.plugin,
         UserMcpConflictPolicy::KeepUserServer,
-    );
+    )
+    .await;
     runtime
         .sdk_enable_plugin(
             &plugin_id,
@@ -395,7 +405,8 @@ pub async fn disable_plugin_core(
         &request.marketplace,
         &request.plugin,
         UserMcpConflictPolicy::Reject,
-    );
+    )
+    .await;
     runtime
         .sdk_disable_plugin(
             &plugin_id,
@@ -436,7 +447,8 @@ pub async fn uninstall_plugin_core(
         &request.marketplace,
         &request.plugin,
         UserMcpConflictPolicy::Reject,
-    );
+    )
+    .await;
     runtime
         .sdk_uninstall_plugin(
             &plugin_id,
@@ -513,257 +525,153 @@ fn supported_capabilities() -> MarketplaceCapabilities {
 struct GovernanceSnapshot {
     marketplaces: Vec<MarketplaceSummary>,
     plugins: Vec<PluginSummary>,
+    installed_marketplaces: HashSet<String>,
 }
 
 impl GovernanceSnapshot {
     fn has_installed_plugins_for_marketplace(&self, marketplace: &str) -> bool {
-        self.plugins
-            .iter()
-            .any(|plugin| plugin.marketplace == marketplace && plugin.status != "available")
+        self.installed_marketplaces.contains(marketplace)
     }
 }
 
 async fn marketplace_governance_snapshot(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
-    env: &EnvMap,
-) -> GovernanceSnapshot {
-    let skill_home = runtime.sdk_skill_home().await;
-    // SDK does not yet expose a Computer-level read-only governance summary. Keep
-    // direct ledger reads isolated here so the call site can be replaced by that
-    // API without spreading SDK store schema knowledge through command handlers.
-    let known = load_known_marketplaces(Some(&skill_home), Some(env));
-    let installed = load_installed_plugins(Some(&skill_home), Some(env));
-    // Keep the read model constrained to a snapshot. Cold-start recovery,
-    // env-aware settings merge, and bundled MCP remount remain SDK-owned
-    // lifecycle responsibilities; tfrobot-client must not compensate by
-    // mutating SDK governance state from this view.
-    let policy = resolve_policy_settings(Some(env), None, None);
-    let cwd = state_like_instance_cwd_from_skill_home(&skill_home);
-    let declared = resolve_settings(ResolveSettingsArgs {
-        cwd: cwd.as_deref(),
-        env: Some(env),
-        flag_settings_path: None,
-        policy_settings: Some(&policy),
-    })
-    .settings;
-    let active_skills = runtime.sdk_skills().await;
-
-    let known_marketplaces = known.account.marketplaces;
-    let installed_plugins = installed.account.plugins;
-    let installed_plugin_ids: HashSet<String> = installed_plugins.keys().cloned().collect();
-
-    let marketplaces = known_marketplaces
+) -> Result<GovernanceSnapshot, String> {
+    let snapshot = runtime.sdk_governance_snapshot().await?;
+    let installed_marketplaces = snapshot
+        .plugins
         .iter()
-        .map(|(name, entry)| MarketplaceSummary {
-            name: name.clone(),
-            git_url: entry
-                .source
-                .get("url")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string),
-            status: "known".to_string(),
-            message: entry
-                .extra
-                .get("lastUpdated")
-                .and_then(|value| value.as_str())
-                .map(|last_updated| format!("lastUpdated={last_updated}")),
+        .filter(|plugin| plugin.installed)
+        .map(|plugin| plugin.marketplace.clone())
+        .collect();
+    let marketplaces = snapshot
+        .marketplaces
+        .into_iter()
+        .map(|marketplace| MarketplaceSummary {
+            name: marketplace.name,
+            git_url: marketplace.source_url,
+            status: marketplace_status(marketplace.status).to_string(),
+            message: diagnostic_message(
+                &marketplace.diagnostics,
+                marketplace
+                    .last_updated
+                    .map(|last_updated| format!("lastUpdated={last_updated}")),
+            ),
         })
         .collect();
-
-    let mut plugins: Vec<PluginSummary> = installed_plugins
+    let plugins = snapshot
+        .plugins
         .into_iter()
-        .flat_map(|(plugin_id, records)| {
-            let declared = declared.clone();
-            let bundled_skills = active_skills
-                .iter()
-                .filter(|skill| {
-                    skill.source
-                        == format!("marketplace:{}", marketplace_from_plugin_id(&plugin_id))
-                })
-                .filter(|skill| {
-                    skill
-                        .name
-                        .starts_with(&format!("{}:", plugin_from_plugin_id(&plugin_id)))
-                })
-                .map(|skill| skill.name.clone())
-                .collect::<Vec<_>>();
-            records.into_iter().map(move |record| {
-                let (plugin, marketplace) = split_plugin_id(&plugin_id);
-                let enabled = plugin_enabled(&declared, &plugin_id);
-                PluginSummary {
-                    marketplace,
-                    plugin,
-                    plugin_id: Some(plugin_id.clone()),
-                    version: record
-                        .extra
-                        .get("version")
-                        .and_then(|value| value.as_str())
-                        .map(ToString::to_string),
-                    enabled,
-                    status: if enabled { "enabled" } else { "disabled" }.to_string(),
-                    bundled_mcp_servers: record.bundled_mcp_servers,
-                    bundled_skills: bundled_skills.clone(),
-                    message: record.install_path,
-                }
-            })
-        })
-        .collect();
+        .map(|plugin| {
+            let declared = plugin.declared.as_ref();
+            let version = plugin
+                .version
+                .clone()
+                .or_else(|| declared.and_then(|caps| caps.version.clone()));
+            let bundled_mcp_servers = if plugin.installed {
+                plugin.bundled_mcp_servers.clone()
+            } else {
+                declared
+                    .map(|caps| caps.mcp_servers.clone())
+                    .unwrap_or_default()
+            };
+            let bundled_skills = if plugin.installed {
+                plugin.bundled_skills.clone()
+            } else {
+                declared.map(|caps| caps.skills.clone()).unwrap_or_default()
+            };
+            let fallback_message = plugin
+                .install_path
+                .clone()
+                .or_else(|| declared.and_then(|caps| caps.description.clone()));
+            let declared = declared.map(|caps| DeclaredPluginCapabilities {
+                version: caps.version.clone(),
+                description: caps.description.clone(),
+                mcp_servers: caps.mcp_servers.clone(),
+                skills: caps.skills.clone(),
+            });
 
-    for (marketplace, _) in &known_marketplaces {
-        plugins.extend(available_plugin_summaries(
-            &skill_home,
-            marketplace,
-            &installed_plugin_ids,
-        ));
-    }
-
-    plugins.sort_by(|left, right| {
-        left.marketplace
-            .cmp(&right.marketplace)
-            .then_with(|| left.plugin.cmp(&right.plugin))
-            .then_with(|| left.status.cmp(&right.status))
-    });
-
-    GovernanceSnapshot {
-        marketplaces,
-        plugins,
-    }
-}
-
-fn state_like_instance_cwd_from_skill_home(skill_home: &Path) -> Option<std::path::PathBuf> {
-    skill_home.parent().map(Path::to_path_buf)
-}
-
-fn available_plugin_summaries(
-    skill_home: &Path,
-    marketplace: &str,
-    installed_plugin_ids: &HashSet<String>,
-) -> Vec<PluginSummary> {
-    let catalog_dir = marketplace_skill_dir(skill_home, marketplace, &[]);
-    let manifest = match read_marketplace_manifest(&catalog_dir) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            log::warn!(
-                "Failed to read marketplace manifest for '{}': {}",
-                marketplace,
-                error
-            );
-            return Vec::new();
-        }
-    };
-
-    iter_plugin_entries(&manifest)
-        .into_iter()
-        .filter_map(|entry| {
-            let plugin = entry.get("name").and_then(Value::as_str)?.trim();
-            if plugin.is_empty() {
-                return None;
-            }
-            let plugin_id = format!("{plugin}@{marketplace}");
-            if installed_plugin_ids.contains(&plugin_id) {
-                return None;
-            }
-            let plugin_root = catalog_dir.join(
-                entry
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or(plugin),
-            );
-            let bundled_mcp_servers = load_bundled_servers(&plugin_root)
-                .map(|servers| {
-                    servers
-                        .into_iter()
-                        .map(|server| server.name().to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let bundled_skills = std::fs::read_dir(plugin_root.join("skills"))
-                .map(|entries| {
-                    entries
-                        .filter_map(Result::ok)
-                        .filter(|entry| entry.path().join("SKILL.md").is_file())
-                        .filter_map(|entry| entry.file_name().into_string().ok())
-                        .map(|skill| format!("{plugin}:{skill}"))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            Some(PluginSummary {
-                marketplace: marketplace.to_string(),
-                plugin: plugin.to_string(),
-                plugin_id: Some(plugin_id),
-                version: entry
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-                enabled: false,
-                status: "available".to_string(),
+            PluginSummary {
+                marketplace: plugin.marketplace,
+                plugin: plugin.plugin,
+                plugin_id: Some(plugin.id),
+                version,
+                installed: plugin.installed,
+                enabled: plugin.enabled,
+                status: plugin_status(plugin.status).to_string(),
                 bundled_mcp_servers,
                 bundled_skills,
-                message: entry
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-            })
+                declared,
+                message: diagnostic_message(&plugin.diagnostics, fallback_message),
+            }
         })
-        .collect()
+        .collect();
+    Ok(GovernanceSnapshot {
+        marketplaces,
+        plugins,
+        installed_marketplaces,
+    })
+}
+
+fn marketplace_status(status: MarketplaceStatus) -> &'static str {
+    match status {
+        MarketplaceStatus::Known => "known",
+        MarketplaceStatus::Available => "available",
+        MarketplaceStatus::Degraded => "degraded",
+        _ => "unknown",
+    }
+}
+
+fn plugin_status(status: PluginStatus) -> &'static str {
+    match status {
+        PluginStatus::Available => "available",
+        PluginStatus::InstalledDisabled => "disabled",
+        PluginStatus::InstalledEnabled => "enabled",
+        PluginStatus::Degraded => "degraded",
+        _ => "unknown",
+    }
+}
+
+fn diagnostic_message(
+    diagnostics: &[GovernanceDiagnostic],
+    fallback: Option<String>,
+) -> Option<String> {
+    if diagnostics.is_empty() {
+        fallback
+    } else {
+        Some(
+            diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
 }
 
 fn sdk_settings_env(state: &AppState, instance_id: &str) -> EnvMap {
-    let mut env = HashMap::new();
-    env.insert(
-        XDG_CONFIG_HOME_ENV.to_string(),
-        state
-            .config
-            .computer_instance_storage_root(instance_id)
-            .join("sdk_config")
-            .to_string_lossy()
-            .to_string(),
-    );
-    env
+    state.sdk_config.env(instance_id)
 }
 
 fn plugin_id(request: &PluginLifecycleRequest) -> String {
     format!("{}@{}", request.plugin.trim(), request.marketplace.trim())
 }
 
-fn split_plugin_id(plugin_id: &str) -> (String, String) {
-    plugin_id
-        .split_once('@')
-        .map(|(plugin, marketplace)| (plugin.to_string(), marketplace.to_string()))
-        .unwrap_or_else(|| (plugin_id.to_string(), String::new()))
-}
-
-fn plugin_from_plugin_id(plugin_id: &str) -> String {
-    split_plugin_id(plugin_id).0
-}
-
-fn marketplace_from_plugin_id(plugin_id: &str) -> String {
-    split_plugin_id(plugin_id).1
-}
-
-fn plugin_enabled(declared: &Map<String, Value>, plugin_id: &str) -> bool {
-    declared
-        .get("enabledPlugins")
-        .and_then(Value::as_object)
-        .and_then(|plugins| plugins.get(plugin_id))
-        .and_then(Value::as_bool)
-        != Some(false)
-}
-
 struct MarketplaceMcpHooks {
     config: Arc<crate::services::config::ConfigService>,
+    sdk_config: Arc<crate::services::sdk_config::SdkConfigService>,
     registry: Arc<crate::services::computer::ComputerRegistry>,
     instance_id: String,
     marketplace: String,
     plugin: String,
     plugin_id: String,
     user_conflict_policy: UserMcpConflictPolicy,
+    existing_server_names: HashSet<String>,
     registered_server_names: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 impl MarketplaceMcpHooks {
-    fn for_plugin(
+    async fn for_plugin(
         state: &AppState,
         instance_id: &str,
         marketplace: &str,
@@ -772,14 +680,38 @@ impl MarketplaceMcpHooks {
     ) -> Self {
         debug_assert!(!marketplace.trim().is_empty());
         debug_assert!(!plugin.trim().is_empty());
+        // Every server in the SDK snapshot is a real user declaration. `bundled` only reports
+        // that an installed plugin contributes the same name; it is not ownership metadata.
+        let mut existing_server_names =
+            if matches!(user_conflict_policy, UserMcpConflictPolicy::Reject) {
+                state
+                    .sdk_config
+                    .load(instance_id)
+                    .mcp
+                    .servers
+                    .into_iter()
+                    .map(|server| server.name)
+                    .collect::<HashSet<_>>()
+            } else {
+                HashSet::new()
+            };
+        if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
+            for name in runtime.sdk_mcp_server_names().await {
+                if runtime.plugin_mcp_server_owner(&name).await.is_some() {
+                    existing_server_names.insert(name);
+                }
+            }
+        }
         Self {
             config: state.config.clone(),
+            sdk_config: state.sdk_config.clone(),
             registry: state.computer_registry.clone(),
             instance_id: instance_id.to_string(),
             marketplace: marketplace.to_string(),
             plugin: plugin.to_string(),
             plugin_id: format!("{plugin}@{marketplace}"),
             user_conflict_policy,
+            existing_server_names,
             registered_server_names: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
@@ -798,41 +730,31 @@ enum UserMcpConflictPolicy {
 #[async_trait]
 impl McpInstallHooks for MarketplaceMcpHooks {
     fn existing_server_names(&self) -> HashSet<String> {
-        self.config
-            .load_managed_configs_for_instance(&self.instance_id)
-            .map(|servers| {
-                servers
-                    .into_iter()
-                    .filter(|server| {
-                        server.is_plugin_owned()
-                            || matches!(self.user_conflict_policy, UserMcpConflictPolicy::Reject)
-                    })
-                    .map(|server| server.name().to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.existing_server_names.clone()
     }
 
     async fn register_server(&self, cfg: MCPServerConfig) -> Result<(), McpHookError> {
         let name = cfg.name().to_string();
-        if let Ok(existing) = self
-            .config
-            .get_managed_config_for_instance(&self.instance_id, &name)
+        if self
+            .sdk_config
+            .load(&self.instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .any(|server| server.name == name)
         {
-            if !existing.is_plugin_owned() {
-                if matches!(
-                    self.user_conflict_policy,
-                    UserMcpConflictPolicy::KeepUserServer
-                ) {
-                    return Ok(());
-                }
-                return Err(McpHookError(format!(
-                    "MCP server '{}' already exists as a user-managed MCP server; rename or remove it before installing plugin '{}@{}'",
-                    name,
-                    self.plugin,
-                    self.marketplace,
-                )));
+            if matches!(
+                self.user_conflict_policy,
+                UserMcpConflictPolicy::KeepUserServer
+            ) {
+                return Ok(());
             }
+            return Err(McpHookError(format!(
+                "MCP server '{}' already exists as a user-managed MCP server; rename or remove it before installing plugin '{}@{}'",
+                name,
+                self.plugin,
+                self.marketplace,
+            )));
         }
         let managed_by = McpServerManagedBy::Plugin {
             marketplace: self.marketplace.clone(),
@@ -851,6 +773,12 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                             "MCP server '{}' is already managed by another Marketplace plugin",
                             name
                         )));
+                    }
+                    if matches!(
+                        self.user_conflict_policy,
+                        UserMcpConflictPolicy::KeepUserServer
+                    ) {
+                        return Ok(());
                     }
                     return Err(McpHookError(format!(
                         "MCP server '{}' already exists in the active SDK Computer; rename or remove it before installing plugin '{}@{}'",
@@ -1023,48 +951,87 @@ mod tests {
         .unwrap()
     }
 
+    fn seed_sdk_user_server(state: &AppState, name: &str) {
+        use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
+
+        state
+            .sdk_config
+            .update(
+                TEST_INSTANCE_ID,
+                &[ConfigEdit::new(
+                    ConfigEntity::McpServer(name.to_string()),
+                    EditIntent::Upsert(serde_json::json!({
+                        "type": "stdio",
+                        "server_parameters": {
+                            "command": "node",
+                            "args": ["server.js"],
+                            "env": {}
+                        }
+                    })),
+                )],
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn hook_register_does_not_persist_plugin_server_to_config() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_without_runtime(tmp.path());
+        let instance = state
+            .config
+            .get_computer_instance(TEST_INSTANCE_ID)
+            .unwrap();
+        state.computer_registry.upsert_runtime(instance).await;
         let hooks = MarketplaceMcpHooks::for_plugin(
             &state,
             TEST_INSTANCE_ID,
             "acme",
             "audit",
             UserMcpConflictPolicy::Reject,
-        );
+        )
+        .await;
 
-        let error = hooks
+        hooks
             .register_server(server_config("audit-mcp"))
             .await
-            .unwrap_err();
-
-        assert!(error
-            .0
-            .contains("Computer instance not found while registering"));
-        let managed = state
-            .config
-            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
             .unwrap();
-        assert!(managed.is_empty());
+
+        assert!(state
+            .sdk_config
+            .load(TEST_INSTANCE_ID)
+            .mcp
+            .servers
+            .is_empty());
+        let runtime = state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap();
+        assert!(runtime.plugin_mcp_server_owner("audit-mcp").await.is_some());
+
+        hooks.remove_server("audit-mcp").await.unwrap();
+        assert!(state
+            .sdk_config
+            .load(TEST_INSTANCE_ID)
+            .mcp
+            .servers
+            .is_empty());
+        assert!(runtime.plugin_mcp_server_owner("audit-mcp").await.is_none());
     }
 
     #[tokio::test]
     async fn hook_register_rejects_user_owned_server_name_conflict() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_without_runtime(tmp.path());
-        state
-            .config
-            .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
-            .unwrap();
+        seed_sdk_user_server(&state, "audit-mcp");
         let hooks = MarketplaceMcpHooks::for_plugin(
             &state,
             TEST_INSTANCE_ID,
             "acme",
             "audit",
             UserMcpConflictPolicy::Reject,
-        );
+        )
+        .await;
 
         let error = hooks
             .register_server(server_config("audit-mcp"))
@@ -1074,60 +1041,44 @@ mod tests {
         assert!(error
             .0
             .contains("already exists as a user-managed MCP server"));
-        let managed = state
-            .config
-            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        assert_eq!(managed.len(), 1);
-        assert_eq!(managed[0].name(), "audit-mcp");
-        assert!(!managed[0].is_plugin_owned());
+        assert_eq!(state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers.len(), 1);
     }
 
     #[tokio::test]
     async fn hook_remove_without_runtime_does_not_touch_user_config() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_without_runtime(tmp.path());
-        state
-            .config
-            .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
-            .unwrap();
+        seed_sdk_user_server(&state, "audit-mcp");
         let hooks = MarketplaceMcpHooks::for_plugin(
             &state,
             TEST_INSTANCE_ID,
             "acme",
             "audit",
             UserMcpConflictPolicy::Reject,
-        );
+        )
+        .await;
 
         let error = hooks.remove_server("audit-mcp").await.unwrap_err();
 
         assert!(error
             .0
             .contains("Computer instance not found while removing"));
-        let managed = state
-            .config
-            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        assert_eq!(managed.len(), 1);
-        assert_eq!(managed[0].name(), "audit-mcp");
-        assert!(!managed[0].is_plugin_owned());
+        assert_eq!(state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers.len(), 1);
     }
 
     #[tokio::test]
     async fn hook_register_keeps_user_server_when_policy_allows_conflict() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_without_runtime(tmp.path());
-        state
-            .config
-            .add_config_for_instance(TEST_INSTANCE_ID, server_config("audit-mcp"))
-            .unwrap();
+        seed_sdk_user_server(&state, "audit-mcp");
         let hooks = MarketplaceMcpHooks::for_plugin(
             &state,
             TEST_INSTANCE_ID,
             "acme",
             "audit",
             UserMcpConflictPolicy::KeepUserServer,
-        );
+        )
+        .await;
 
         assert!(!hooks.existing_server_names().contains("audit-mcp"));
         hooks
@@ -1135,12 +1086,6 @@ mod tests {
             .await
             .unwrap();
 
-        let managed = state
-            .config
-            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        assert_eq!(managed.len(), 1);
-        assert_eq!(managed[0].name(), "audit-mcp");
-        assert!(!managed[0].is_plugin_owned());
+        assert_eq!(state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers.len(), 1);
     }
 }

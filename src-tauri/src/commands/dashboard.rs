@@ -93,7 +93,7 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
             name: runtime.instance.name.clone(),
             running,
             connected,
-            mcp_server_count: runtime.instance.mcp_servers.len(),
+            mcp_server_count: runtime.mcp_server_inventory_count().await,
             robot_name: runtime
                 .instance
                 .robot_binding
@@ -160,8 +160,8 @@ pub async fn get_computer_overview_data_core(
     let connection_url = connection.as_ref().map(|c| c.url.clone());
     let connection_profile = connection.as_ref().map(|c| c.profile_name.clone());
 
+    let mcp_total = runtime.mcp_server_inventory_count().await;
     let statuses = runtime.mcp_server_statuses().await;
-    let mcp_total = statuses.len();
     let mcp_running = statuses.iter().filter(|(_, running, _)| *running).count();
     let tools_count = runtime.available_tools().await.unwrap_or_default().len();
     let mcp_stopped = mcp_total.saturating_sub(mcp_running);
@@ -203,6 +203,7 @@ mod tests {
     use crate::services::logger::LogService;
     use crate::services::settings::SettingsService;
     use crate::AppState;
+    use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
     use tempfile::TempDir;
 
     fn test_state() -> (AppState, TempDir) {
@@ -222,6 +223,19 @@ mod tests {
     #[tokio::test]
     async fn dashboard_data_summarizes_computer_runtimes() {
         let (state, _dir) = test_state();
+        state
+            .sdk_config
+            .update(
+                "computer-a",
+                &[ConfigEdit::new(
+                    ConfigEntity::McpServer("snapshot-only".to_string()),
+                    EditIntent::Upsert(serde_json::json!({
+                        "type": "stdio",
+                        "server_parameters": {"command": "node"}
+                    })),
+                )],
+            )
+            .unwrap();
         state
             .computer_registry
             .start_runtime("computer-a")
@@ -245,10 +259,12 @@ mod tests {
             .recent_logs
             .iter()
             .any(|log| log.message == "Server failed"));
-        assert!(data
+        let computer_a = data
             .computers
             .iter()
-            .any(|computer| computer.id == "computer-a"));
+            .find(|computer| computer.id == "computer-a")
+            .unwrap();
+        assert_eq!(computer_a.mcp_server_count, 1);
         assert!(data
             .runtimes
             .iter()

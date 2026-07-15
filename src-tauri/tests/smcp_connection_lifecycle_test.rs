@@ -49,11 +49,7 @@ const TEST_RELAY_TOKEN: &str = "skills-relay-token";
 async fn create_test_runtime(state: &AppState) -> ComputerInstanceRuntime {
     state
         .config
-        .add_computer_instance(ComputerInstance {
-            id: TEST_INSTANCE_ID.to_string(),
-            name: "Test Computer".to_string(),
-            ..ComputerInstance::new("", "")
-        })
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Test Computer"))
         .unwrap();
     state
         .computer_registry
@@ -612,11 +608,7 @@ async fn agent_get_skills_is_scoped_to_connected_computer_instance() {
     );
     state
         .config
-        .add_computer_instance(ComputerInstance {
-            id: "second-computer".to_string(),
-            name: "Second Computer".to_string(),
-            ..ComputerInstance::new("", "")
-        })
+        .add_computer_instance(ComputerInstance::new("second-computer", "Second Computer"))
         .unwrap();
     let runtime_two = state
         .computer_registry
@@ -1298,11 +1290,7 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
     let other_instance_id = "other-computer";
     state
         .config
-        .add_computer_instance(ComputerInstance {
-            id: other_instance_id.to_string(),
-            name: "Other Computer".to_string(),
-            ..ComputerInstance::new("", "")
-        })
+        .add_computer_instance(ComputerInstance::new(other_instance_id, "Other Computer"))
         .unwrap();
     let other_runtime = state
         .computer_registry
@@ -1479,11 +1467,10 @@ async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
     let challenger_instance_id = "challenger-computer";
     state
         .config
-        .add_computer_instance(ComputerInstance {
-            id: challenger_instance_id.to_string(),
-            name: "Challenger Computer".to_string(),
-            ..ComputerInstance::new("", "")
-        })
+        .add_computer_instance(ComputerInstance::new(
+            challenger_instance_id,
+            "Challenger Computer",
+        ))
         .unwrap();
     let challenger_runtime = state
         .computer_registry
@@ -1547,11 +1534,7 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
     let other_instance_id = "other-computer";
     state
         .config
-        .add_computer_instance(ComputerInstance {
-            id: other_instance_id.to_string(),
-            name: "Other Computer".to_string(),
-            ..ComputerInstance::new("", "")
-        })
+        .add_computer_instance(ComputerInstance::new(other_instance_id, "Other Computer"))
         .unwrap();
     let other_runtime = state
         .computer_registry

@@ -6,6 +6,7 @@ const mockDebugStore = {
   tools: [
     {
       name: 'click',
+      displayName: 'click',
       description: 'Click target',
       inputSchema: {},
       server: 'desktop',
@@ -14,6 +15,7 @@ const mockDebugStore = {
   toolsLoading: false,
   selectedTool: {
     name: 'click',
+    displayName: 'click',
     description: 'Click target',
     inputSchema: {},
     server: 'desktop',
@@ -36,6 +38,7 @@ describe('ToolBrowser', () => {
     mockDebugStore.tools = [
       {
         name: 'click',
+        displayName: 'click',
         description: 'Click target',
         inputSchema: {},
         server: 'desktop',
@@ -43,6 +46,7 @@ describe('ToolBrowser', () => {
     ];
     mockDebugStore.selectedTool = {
       name: 'click',
+      displayName: 'click',
       description: 'Click target',
       inputSchema: {},
       server: 'desktop',
@@ -76,6 +80,7 @@ describe('ToolBrowser', () => {
     mockDebugStore.tools = [
       {
         name: 'echo',
+        displayName: 'echo',
         description: 'Echoes input',
         inputSchema: {},
         server: 'unknown',
@@ -83,6 +88,7 @@ describe('ToolBrowser', () => {
     ];
     mockDebugStore.selectedTool = {
       name: 'echo',
+      displayName: 'echo',
       description: 'Echoes input',
       inputSchema: {},
       server: 'unknown',

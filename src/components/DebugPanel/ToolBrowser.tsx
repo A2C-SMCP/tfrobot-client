@@ -36,7 +36,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   }, [serverFilter, servers]);
 
   const filtered = tools.filter((tool) => {
-    if (search && !tool.name.toLowerCase().includes(search.toLowerCase()) && !tool.description.toLowerCase().includes(search.toLowerCase())) {
+    if (search && !tool.displayName.toLowerCase().includes(search.toLowerCase()) && !tool.description.toLowerCase().includes(search.toLowerCase())) {
       return false;
     }
     if (serverFilter && tool.server !== serverFilter) return false;
@@ -91,7 +91,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
                   <List.Item.Meta
                     title={
                       <Space>
-                        <Text strong>{tool.name}</Text>
+                        <Text strong>{tool.displayName}</Text>
                         {tool.server !== UNKNOWN_SERVER && <Tag>{tool.server}</Tag>}
                       </Space>
                     }
@@ -125,7 +125,7 @@ function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }
 
   return (
     <div>
-      <Typography.Title level={5}>{tool.name}</Typography.Title>
+      <Typography.Title level={5}>{tool.displayName}</Typography.Title>
       <Space style={{ marginBottom: 8 }}>
         {tool.server !== UNKNOWN_SERVER && <Tag color="blue">{tool.server}</Tag>}
         {tool.tags?.map((tag) => <Tag key={tag}>{tag}</Tag>)}

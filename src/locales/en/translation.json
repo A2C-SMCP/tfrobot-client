@@ -156,6 +156,8 @@
       "skills": "Skills",
       "emptyMcpServers": "No bundled MCP servers",
       "emptySkills": "No bundled skills",
+      "unknownMcpServers": "Bundled MCP server capabilities are unknown",
+      "unknownSkills": "Bundled skill capabilities are unknown",
       "emptyDescription": "No description available",
       "mcpServerDescription": "Bundled MCP server",
       "selectSkill": "Select a bundled skill to preview SKILL.md",

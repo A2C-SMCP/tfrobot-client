@@ -10,5 +10,6 @@ pub mod manager;
 pub mod marketplace;
 pub mod mcp;
 pub mod runtime_sync;
+pub mod sdk_config;
 pub mod settings;
 pub mod skills;

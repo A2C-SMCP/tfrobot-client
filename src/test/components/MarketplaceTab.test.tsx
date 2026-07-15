@@ -62,10 +62,12 @@ describe('MarketplaceTab', () => {
           plugin: 'desktop-tools',
           pluginId: 'plugin-1',
           version: '1.0.0',
+          installed: true,
           enabled: false,
           status: 'installed',
           bundledMcpServers: ['browser'],
           bundledSkills: ['summarizer'],
+          declared: null,
           message: null,
         },
         {
@@ -73,10 +75,12 @@ describe('MarketplaceTab', () => {
           plugin: 'audit',
           pluginId: 'plugin-2',
           version: null,
+          installed: true,
           enabled: true,
           status: 'enabled',
           bundledMcpServers: ['audit-mcp'],
           bundledSkills: ['audit:code-review'],
+          declared: null,
           message: 'Audit tools',
         },
       ],
@@ -107,6 +111,66 @@ describe('MarketplaceTab', () => {
     expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.getByText('audit:code-review')).toBeInTheDocument();
+  });
+
+  it('preserves unknown, empty, declared, and installed capability semantics', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'tf-market', plugin: 'unknown-plugin', pluginId: 'unknown@tf-market', version: null,
+          installed: false, enabled: false, status: 'available', bundledMcpServers: [], bundledSkills: [],
+          declared: null, message: null,
+        },
+        {
+          marketplace: 'tf-market', plugin: 'empty-plugin', pluginId: 'empty@tf-market', version: null,
+          installed: false, enabled: false, status: 'available', bundledMcpServers: [], bundledSkills: [],
+          declared: { version: null, description: null, mcpServers: [], skills: [] }, message: null,
+        },
+        {
+          marketplace: 'tf-market', plugin: 'declared-plugin', pluginId: 'declared@tf-market', version: '1.0.0',
+          installed: false, enabled: false, status: 'available',
+          bundledMcpServers: ['catalog-mcp'], bundledSkills: ['catalog-skill'],
+          declared: {
+            version: '1.0.0', description: 'Catalog declaration',
+            mcpServers: ['catalog-mcp'], skills: ['catalog-skill'],
+          },
+          message: null,
+        },
+        {
+          marketplace: 'tf-market', plugin: 'installed-plugin', pluginId: 'installed@tf-market', version: '2.0.0',
+          installed: true, enabled: true, status: 'enabled',
+          bundledMcpServers: ['actual-mcp'], bundledSkills: ['actual-skill'],
+          declared: {
+            version: '1.0.0', description: 'Stale catalog declaration',
+            mcpServers: ['declared-only-mcp'], skills: ['declared-only-skill'],
+          },
+          message: null,
+        },
+      ],
+    }).mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('Bundled skill capabilities are unknown')).toBeInTheDocument();
+    expect(screen.getByText('Bundled MCP server capabilities are unknown')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('empty-plugin'));
+    expect(await screen.findByText('No bundled skills')).toBeInTheDocument();
+    expect(screen.getByText('No bundled MCP servers')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('declared-plugin'));
+    expect(await screen.findByText('catalog-skill')).toBeInTheDocument();
+    expect(screen.getByText('catalog-mcp')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('installed-plugin'));
+    expect(await screen.findByText('actual-skill')).toBeInTheDocument();
+    expect(screen.getByText('actual-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('declared-only-skill')).not.toBeInTheDocument();
+    expect(screen.queryByText('declared-only-mcp')).not.toBeInTheDocument();
   });
 
   it('updates an existing marketplace URL from the marketplace form', async () => {
@@ -204,10 +268,12 @@ describe('MarketplaceTab', () => {
           plugin: 'desktop-tools',
           pluginId: 'plugin-1',
           version: '1.0.0',
+          installed: true,
           enabled: false,
           status: 'installed',
           bundledMcpServers: [],
           bundledSkills: [],
+          declared: null,
           message: null,
         },
       ],
@@ -235,10 +301,12 @@ describe('MarketplaceTab', () => {
             plugin: 'desktop-tools',
             pluginId: 'plugin-1',
             version: '1.0.0',
+            installed: true,
             enabled: true,
             status: 'enabled',
             bundledMcpServers: ['browser'],
             bundledSkills: ['summarizer'],
+            declared: null,
             message: null,
         },
       ],
@@ -290,10 +358,12 @@ describe('MarketplaceTab', () => {
             plugin: 'desktop-tools',
             pluginId: 'plugin-1',
             version: '1.0.0',
+            installed: true,
             enabled: false,
             status: 'disabled',
             bundledMcpServers: [],
             bundledSkills: ['summarizer'],
+            declared: null,
             message: null,
         },
       ],
@@ -326,10 +396,12 @@ describe('MarketplaceTab', () => {
           plugin: 'stale-plugin',
           pluginId: 'plugin-1',
           version: '1.0.0',
+          installed: true,
           enabled: false,
           status: 'installed',
           bundledMcpServers: [],
           bundledSkills: [],
+          declared: null,
           message: null,
         },
       ],
@@ -349,10 +421,12 @@ describe('MarketplaceTab', () => {
                 plugin: 'stale-plugin',
                 pluginId: 'plugin-1',
                 version: '1.0.0',
+                installed: true,
                 enabled: false,
                 status: 'installed',
                 bundledMcpServers: [],
                 bundledSkills: [],
+                declared: null,
                 message: null,
               },
             ],

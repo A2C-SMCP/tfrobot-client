@@ -148,6 +148,16 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
 
   const selectedMarketplace = marketplaces.find((marketplace) => marketplace.name === selectedMarketplaceName) ?? null;
   const selectedPlugin = marketplacePlugins.find((plugin) => pluginKey(plugin) === selectedPluginKey) ?? null;
+  const selectedPluginSkills = selectedPlugin
+    ? selectedPlugin.installed
+      ? selectedPlugin.bundledSkills
+      : selectedPlugin.declared?.skills ?? null
+    : null;
+  const selectedPluginMcpServers = selectedPlugin
+    ? selectedPlugin.installed
+      ? selectedPlugin.bundledMcpServers
+      : selectedPlugin.declared?.mcpServers ?? null
+    : null;
   const skillDescriptionByName = useMemo(() => (
     new Map(skills.map((skill) => [skill.name, skill.description]))
   ), [skills]);
@@ -513,11 +523,13 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
 
               <Space direction="vertical" size={8} className={styles.detailSection}>
                 <Text strong>{t('marketplace.details.skills')}</Text>
-                {selectedPlugin.bundledSkills.length === 0 ? (
+                {selectedPluginSkills === null ? (
+                  <Text type="secondary">{t('marketplace.details.unknownSkills')}</Text>
+                ) : selectedPluginSkills.length === 0 ? (
                   <Text type="secondary">{t('marketplace.details.emptySkills')}</Text>
                 ) : (
                   <div className={styles.assetGrid}>
-                    {selectedPlugin.bundledSkills.map((skill) => (
+                    {selectedPluginSkills.map((skill) => (
                       renderAssetCard(
                         skill,
                         skillDescriptionByName.get(skill) ?? t('marketplace.details.emptyDescription'),
@@ -533,11 +545,13 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
 
               <Space direction="vertical" size={8} className={styles.detailSection}>
                 <Text strong>{t('marketplace.details.mcpServers')}</Text>
-                {selectedPlugin.bundledMcpServers.length === 0 ? (
+                {selectedPluginMcpServers === null ? (
+                  <Text type="secondary">{t('marketplace.details.unknownMcpServers')}</Text>
+                ) : selectedPluginMcpServers.length === 0 ? (
                   <Text type="secondary">{t('marketplace.details.emptyMcpServers')}</Text>
                 ) : (
                   <div className={styles.assetGrid}>
-                    {selectedPlugin.bundledMcpServers.map((server) => (
+                    {selectedPluginMcpServers.map((server) => (
                       renderAssetCard(server, t('marketplace.details.mcpServerDescription'))
                     ))}
                   </div>

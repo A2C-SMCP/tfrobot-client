@@ -27,6 +27,7 @@ function resetStore() {
 
 const mockTool: ToolInfo = {
   name: 'read_file',
+  displayName: 'read_file',
   description: 'Read a file',
   inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
   server: 'fs-server',

@@ -34,6 +34,20 @@ smcp_computer::Computer
 
 Production code must not bypass `ComputerInstanceRuntime` to access SDK internals.
 
+Configuration ownership follows the same boundary:
+
+- `tfrobot-client` owns Computer profiles, connection policy, robot binding, global input
+  definitions, input values, and secrets.
+- `SdkConfigService` is the only client adapter for SDK-owned MCP, skill, Marketplace/plugin,
+  runtime-default, revision, and provenance configuration.
+- `ConfigService` exposes legacy inline MCP declarations only through the read-only,
+  migration-specific `load_legacy_mcp_configs_for_migration` API; it has no general MCP write
+  entry point.
+- The client chooses and injects each Computer's config directory and skill-home path; SDK owns
+  discovery, lifecycle, and governance within those roots.
+- The UI-facing SDK config snapshot intentionally excludes SDK `inputs`, so it cannot become a
+  second source of truth for client-owned input definitions.
+
 ## Runtime State
 
 `ComputerInstanceRuntime` exposes `ComputerRuntimeState`:
@@ -68,26 +82,59 @@ or the business connection state:
 The registry clones the target runtime before awaiting these operations, so single-computer work
 does not hold a global registry write lock.
 
-## MCP Server Management
+## SDK Configuration And MCP Server Management
 
-MCP command handlers persist config through `ConfigService`, then synchronize the target
-`ComputerInstanceRuntime`.
+MCP command handlers persist SDK-owned server config through SDK `Computer` high-level APIs, then
+synchronize the target `ComputerInstanceRuntime`. The `Computer` is configured with the same
+instance-scoped config/home/env context used by `SdkConfigService`. `ConfigService` does not persist
+the SDK MCP source of truth.
+
+`SdkConfigService` wraps the SDK config lifecycle (`init`, `load`, `save`, `update`, `validate`,
+`migrate`, `delete`, `duplicate`, `import`, and `export`) with an isolated config/home/env context
+per Computer instance.
+
+Computer duplication keeps SDK governance isolated. `DuplicateSkillHomeMode::Copy` copies only the
+source Skill Home's `user/` namespace into the target `user/` namespace. It never copies SDK-owned
+Marketplace/plugin ledgers, materialized Marketplace content, or derived MCP sources. The SDK
+project-config adapter duplicates only the project anchor; Marketplace and plugin lifecycle state
+must be established independently for the target Computer.
 
 Runtime behavior:
 
-- Initial runtime construction seeds SDK `Computer` with configured MCP servers.
+- Initial runtime construction injects the instance SDK config directory, config env, and selected
+  skill home into SDK `Computer`; legacy profile MCP servers are not imported.
 - `start()` calls `Computer.boot_up()`.
 - `add_or_update_server()` calls `Computer.add_or_update_server(...)`.
-- `remove_server()` calls `Computer.remove_server(...)`.
+- User-owned removal resolves the SDK bundle ID, calls `Computer.remove_server(...)`, and, while
+  the runtime is running, immediately reconciles governance so an enabled same-name plugin can
+  remount and start its MCP server without a restart or plugin state toggle.
+- Plugin-owned MCP uses runtime-only `Computer.mount_server(...)` / `unmount_server(...)` hooks and
+  never persists into user SDK config.
 - `mcp_server_statuses()` calls `Computer.get_server_status()`.
+- UI-facing MCP totals use the unified SDK inventory (user-configured servers plus enabled-plugin
+  servers). Running/stopped counts remain derived from live runtime status rather than persisted
+  configuration.
 - `start_mcp_server()` calls `Computer.start_mcp_client(...)`.
 - `stop_mcp_server()` calls `Computer.stop_mcp_client(...)`.
-- `sync_runtime()` applies ordinary MCP config differences incrementally with
-  `sync_sdk_mcp_servers(...)`.
+- `sync_runtime()` reconciles from the SDK-owned config projection without importing client profile
+  MCP state.
 
 Ordinary MCP config changes must not rebuild the whole SDK `Computer`, because that would stop
 active MCP clients. Rebuild is reserved for structural runtime changes such as Computer name,
 auto-connect policy, or skill home changes.
+
+## Marketplace And Plugin Governance
+
+Marketplace/plugin lifecycle and reads use SDK `Computer` high-level APIs. The client does not read
+SDK settings ledgers, Marketplace manifests, or plugin directories to construct governance state.
+
+- Lifecycle uses `add/refresh/remove_marketplace` and `install/enable/disable/uninstall_plugin`.
+- Read state uses `Computer::governance_snapshot()` through `ComputerInstanceRuntime`.
+- For an available plugin, installation preview comes from `PluginSnapshot.declared`.
+- For an installed plugin, the client reports the SDK's actual bundled/live fields.
+- `declared: None` means the catalog declaration is unknown; an empty declared list means the SDK
+  inspected it and found no capability. Formal UI DTOs must preserve this distinction when it is
+  user-visible.
 
 ## Tools
 
@@ -165,7 +212,9 @@ contract material:
 The architecture alignment is guarded by:
 
 - Rust unit and integration tests: `cargo test`
+- SDK config adapter tests under `services::sdk_config`.
 - MCP lifecycle integration tests: `cargo test --test mcp_integration_test`
+- Marketplace governance integration tests: `cargo test --test marketplace_integration_test`
 - SMCP lifecycle integration tests: `cargo test --test smcp_connection_lifecycle_test`
 - frontend store/component tests:
   `pnpm test src/test/components/Dashboard.test.tsx src/test/components/ComputerOverview.test.tsx src/test/components/DesktopResources.test.tsx src/test/components/ResourceBrowser.test.tsx src/test/stores/dashboardStore.test.ts src/test/stores/computerOverviewStore.test.ts src/test/stores/desktopStore.test.ts src/test/stores/debugStore.test.ts`

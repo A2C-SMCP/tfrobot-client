@@ -156,6 +156,8 @@
       "skills": "Skills",
       "emptyMcpServers": "无内置 MCP servers",
       "emptySkills": "无内置 Skills",
+      "unknownMcpServers": "内置 MCP server 能力未知",
+      "unknownSkills": "内置 Skill 能力未知",
       "emptyDescription": "暂无描述",
       "mcpServerDescription": "内置 MCP server",
       "selectSkill": "选择一个内置 Skill 预览 SKILL.md",

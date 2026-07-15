@@ -12,6 +12,7 @@ use crate::services::connection_targets::{
     MANUAL_TARGETS_SCHEMA_VERSION,
 };
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
+#[cfg(test)]
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use reqwest::header::{HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
@@ -143,20 +144,13 @@ impl ConfigService {
         self.config_dir.join("computer_instances")
     }
 
-    // --- MCP Server Configs ---
-
-    pub fn load_configs_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<Vec<MCPServerConfig>, ConfigError> {
-        Ok(self
-            .load_managed_configs_for_instance(instance_id)?
-            .into_iter()
-            .map(|server| server.config)
-            .collect())
-    }
-
-    pub fn load_managed_configs_for_instance(
+    /// Read legacy inline MCP declarations only for one-time profile migration.
+    ///
+    /// SDK-owned MCP configuration must otherwise cross `SdkConfigService`. Keeping this
+    /// deliberately named, read-only entry point prevents the legacy profile aggregate from
+    /// becoming a second persistence boundary while older `computer_instances.json` files remain
+    /// deserializable.
+    pub fn load_legacy_mcp_configs_for_migration(
         &self,
         instance_id: &str,
     ) -> Result<Vec<ManagedMcpServer>, ConfigError> {
@@ -167,88 +161,6 @@ impl ConfigService {
             .find(|instance| instance.id == instance_id)
             .map(|instance| instance.mcp_servers.clone())
             .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
-    }
-
-    pub fn save_configs_for_instance(
-        &self,
-        instance_id: &str,
-        configs: &[MCPServerConfig],
-    ) -> Result<ComputerInstance, ConfigError> {
-        if let Some(plugin_owned) = self
-            .load_managed_configs_for_instance(instance_id)?
-            .iter()
-            .find(|server| server.is_plugin_owned())
-        {
-            return Err(plugin_managed_mcp_error(plugin_owned.name()));
-        }
-
-        let managed_configs: Vec<_> = configs
-            .iter()
-            .cloned()
-            .map(ManagedMcpServer::user)
-            .collect();
-        self.save_managed_configs_for_instance(instance_id, &managed_configs)
-    }
-
-    pub fn save_managed_configs_for_instance(
-        &self,
-        instance_id: &str,
-        configs: &[ManagedMcpServer],
-    ) -> Result<ComputerInstance, ConfigError> {
-        self.update_computer_instance(instance_id, |instance| {
-            instance.mcp_servers = configs.to_vec();
-        })
-    }
-
-    pub fn add_config_for_instance(
-        &self,
-        instance_id: &str,
-        config: MCPServerConfig,
-    ) -> Result<ComputerInstance, ConfigError> {
-        if let Ok(existing) = self.get_managed_config_for_instance(instance_id, config.name()) {
-            if existing.is_plugin_owned() {
-                return Err(plugin_managed_mcp_error(existing.name()));
-            }
-        }
-
-        self.add_managed_config_for_instance(instance_id, ManagedMcpServer::user(config))
-    }
-
-    pub fn add_managed_config_for_instance(
-        &self,
-        instance_id: &str,
-        server: ManagedMcpServer,
-    ) -> Result<ComputerInstance, ConfigError> {
-        let mut configs = self.load_managed_configs_for_instance(instance_id)?;
-        let name = server.name().to_string();
-        configs.retain(|c| c.name() != name);
-        configs.push(server);
-        self.save_managed_configs_for_instance(instance_id, &configs)
-    }
-
-    pub fn get_managed_config_for_instance(
-        &self,
-        instance_id: &str,
-        name: &str,
-    ) -> Result<ManagedMcpServer, ConfigError> {
-        self.load_managed_configs_for_instance(instance_id)?
-            .into_iter()
-            .find(|server| server.name() == name)
-            .ok_or_else(|| ConfigError::NotFound(name.to_string()))
-    }
-
-    pub fn remove_config_for_instance(
-        &self,
-        instance_id: &str,
-        name: &str,
-    ) -> Result<ComputerInstance, ConfigError> {
-        let mut configs = self.load_managed_configs_for_instance(instance_id)?;
-        let original_len = configs.len();
-        configs.retain(|c| c.name() != name);
-        if configs.len() == original_len {
-            return Err(ConfigError::NotFound(name.to_string()));
-        }
-        self.save_managed_configs_for_instance(instance_id, &configs)
     }
 
     // --- Input Definitions ---
@@ -436,13 +348,6 @@ impl ConfigService {
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
     }
-}
-
-fn plugin_managed_mcp_error(name: &str) -> ConfigError {
-    ConfigError::InvalidOperation(format!(
-        "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
-        name
-    ))
 }
 
 pub fn normalize_manual_smcp_target(mut target: ManualSmcpTarget) -> ManualSmcpTarget {
@@ -675,9 +580,6 @@ pub enum ConfigError {
 
     #[error("Already exists: {0}")]
     AlreadyExists(String),
-
-    #[error("Invalid operation: {0}")]
-    InvalidOperation(String),
 
     #[error("invalid Computer profile id: {0}")]
     InvalidComputerProfileId(String),
@@ -1251,12 +1153,14 @@ mod tests {
         assert!(tmp.path().join("computer_instances.json").exists());
     }
 
-    // --- MCP Server Configs ---
+    // --- Legacy MCP migration ---
 
     #[test]
-    fn test_load_empty_configs() {
+    fn legacy_mcp_migration_read_is_empty_for_new_profiles() {
         let (svc, _tmp) = setup();
-        let configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
+        let configs = svc
+            .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
+            .unwrap();
         assert!(configs.is_empty());
     }
 
@@ -1287,76 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_load_configs_roundtrip() {
-        let (svc, _tmp) = setup();
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "test-server",
-            "server_parameters": {
-                "command": "node",
-                "args": ["server.js"],
-                "env": {}
-            }
-        }))
-        .unwrap();
-
-        svc.save_configs_for_instance(TEST_INSTANCE_ID, std::slice::from_ref(&config))
-            .unwrap();
-        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name(), "test-server");
-    }
-
-    #[test]
-    fn test_managed_mcp_server_wrapper_roundtrip_preserves_plugin_owner() {
-        let (svc, _tmp) = setup();
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "plugin-owned",
-            "server_parameters": {
-                "command": "node",
-                "args": ["server.js"],
-                "env": {}
-            }
-        }))
-        .unwrap();
-        let server = ManagedMcpServer {
-            config,
-            managed_by: McpServerManagedBy::Plugin {
-                marketplace: "tf-market".to_string(),
-                plugin: "desktop-tools".to_string(),
-                plugin_id: Some("plugin-1".to_string()),
-            },
-        };
-
-        svc.save_managed_configs_for_instance(TEST_INSTANCE_ID, &[server])
-            .unwrap();
-
-        let managed = svc
-            .load_managed_configs_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        let sdk_configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-
-        assert_eq!(managed.len(), 1);
-        assert!(managed[0].is_plugin_owned());
-        match &managed[0].managed_by {
-            McpServerManagedBy::Plugin {
-                marketplace,
-                plugin,
-                plugin_id,
-            } => {
-                assert_eq!(marketplace, "tf-market");
-                assert_eq!(plugin, "desktop-tools");
-                assert_eq!(plugin_id.as_deref(), Some("plugin-1"));
-            }
-            McpServerManagedBy::User => panic!("expected plugin owner"),
-        }
-        assert_eq!(sdk_configs.len(), 1);
-        assert_eq!(sdk_configs[0].name(), "plugin-owned");
-    }
-
-    #[test]
-    fn test_legacy_inline_mcp_servers_load_as_user_managed() {
+    fn explicit_migration_read_loads_legacy_inline_mcp_as_user_managed() {
         let (svc, tmp) = setup_empty();
         std::fs::write(
             tmp.path().join("computer_instances.json"),
@@ -1389,10 +1224,10 @@ mod tests {
         )
         .unwrap();
 
-        let instances = svc.load_computer_instances().unwrap();
+        let servers = svc.load_legacy_mcp_configs_for_migration("legacy").unwrap();
 
-        assert_eq!(instances.instances.len(), 1);
-        let server = &instances.instances[0].mcp_servers[0];
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
         assert_eq!(server.name(), "legacy-inline");
         assert!(!server.is_plugin_owned());
         assert!(matches!(server.managed_by, McpServerManagedBy::User));
@@ -1439,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_load_multiple_computer_instances_roundtrip() {
+    fn legacy_mcp_migration_read_is_instance_scoped() {
         let (svc, _tmp) = setup();
         let first_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
             "type": "Stdio",
@@ -1472,21 +1307,13 @@ mod tests {
         };
 
         svc.save_computer_instances(&instances).unwrap();
-        let loaded = svc.load_computer_instances().unwrap();
+        let first = svc.load_legacy_mcp_configs_for_migration("first").unwrap();
+        let second = svc.load_legacy_mcp_configs_for_migration("second").unwrap();
 
-        assert_eq!(loaded.instances.len(), 2);
-        let first = loaded
-            .instances
-            .iter()
-            .find(|instance| instance.id == "first")
-            .unwrap();
-        assert_eq!(first.mcp_servers[0].name(), "first-server");
-        let second = loaded
-            .instances
-            .iter()
-            .find(|instance| instance.id == "second")
-            .unwrap();
-        assert_eq!(second.mcp_servers[0].name(), "second-server");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name(), "first-server");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name(), "second-server");
     }
 
     #[test]
@@ -1538,132 +1365,10 @@ mod tests {
     }
 
     #[test]
-    fn test_add_config() {
-        let (svc, _tmp) = setup();
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "added-server",
-            "server_parameters": {
-                "command": "node",
-                "args": [],
-                "env": {}
-            }
-        }))
-        .unwrap();
-
-        svc.add_config_for_instance(TEST_INSTANCE_ID, config)
-            .unwrap();
-        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name(), "added-server");
-    }
-
-    #[test]
-    fn test_add_duplicate_config_replaces() {
-        let (svc, _tmp) = setup();
-        let config1: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "dup-server",
-            "server_parameters": { "command": "node", "args": ["v1"], "env": {} }
-        }))
-        .unwrap();
-        let config2: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "dup-server",
-            "server_parameters": { "command": "python", "args": ["v2"], "env": {} }
-        }))
-        .unwrap();
-
-        svc.add_config_for_instance(TEST_INSTANCE_ID, config1)
-            .unwrap();
-        svc.add_config_for_instance(TEST_INSTANCE_ID, config2)
-            .unwrap();
-
-        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name(), "dup-server");
-        // Verify content was actually replaced (command: "node" → "python")
-        match &loaded[0] {
-            MCPServerConfig::Stdio(c) => {
-                assert_eq!(
-                    c.server_parameters.command, "python",
-                    "Config should be replaced, not appended"
-                );
-                assert_eq!(c.server_parameters.args, vec!["v2"]);
-            }
-            other => panic!("Expected Stdio variant, got: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_instance_scoped_configs_are_isolated() {
-        let (svc, _tmp) = setup();
-        svc.add_computer_instance(ComputerInstance {
-            id: "second".to_string(),
-            name: "Second".to_string(),
-            ..ComputerInstance::new("", "")
-        })
-        .unwrap();
-
-        let first_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "first-server",
-            "server_parameters": { "command": "node", "args": [], "env": {} }
-        }))
-        .unwrap();
-        let second_config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "second-server",
-            "server_parameters": { "command": "python", "args": [], "env": {} }
-        }))
-        .unwrap();
-
-        svc.add_config_for_instance(TEST_INSTANCE_ID, first_config)
-            .unwrap();
-        svc.add_config_for_instance("second", second_config)
-            .unwrap();
-
-        let first_configs = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-        let second_configs = svc.load_configs_for_instance("second").unwrap();
-
-        assert_eq!(first_configs.len(), 1);
-        assert_eq!(first_configs[0].name(), "first-server");
-        assert_eq!(second_configs.len(), 1);
-        assert_eq!(second_configs[0].name(), "second-server");
-    }
-
-    #[test]
-    fn test_remove_config() {
-        let (svc, _tmp) = setup();
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "to-remove",
-            "server_parameters": { "command": "node", "args": [], "env": {} }
-        }))
-        .unwrap();
-
-        svc.add_config_for_instance(TEST_INSTANCE_ID, config)
-            .unwrap();
-        svc.remove_config_for_instance(TEST_INSTANCE_ID, "to-remove")
-            .unwrap();
-
-        let loaded = svc.load_configs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert!(loaded.is_empty());
-    }
-
-    #[test]
-    fn test_remove_nonexistent_config_returns_error() {
-        let (svc, _tmp) = setup();
-        let result = svc.remove_config_for_instance(TEST_INSTANCE_ID, "nonexistent");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_load_corrupted_json_file() {
+    fn legacy_migration_read_reports_corrupted_instances_file() {
         let (svc, tmp) = setup();
         std::fs::write(tmp.path().join("computer_instances.json"), "not json").unwrap();
-        let result = svc.load_configs_for_instance(TEST_INSTANCE_ID);
+        let result = svc.load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID);
         assert!(result.is_err());
     }
 
@@ -1787,25 +1492,5 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "legacy-target");
         assert_eq!(targets[0].office_id, "office-1");
-    }
-
-    // --- File Permissions (Unix only) ---
-
-    #[cfg(unix)]
-    #[test]
-    fn test_config_file_permissions_error() {
-        use std::os::unix::fs::PermissionsExt;
-        let (svc, tmp) = setup();
-        let path = tmp.path().join("computer_instances.json");
-        std::fs::write(&path, "{}").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "test",
-            "server_parameters": { "command": "node", "args": [], "env": {} }
-        }))
-        .unwrap();
-        let result = svc.add_config_for_instance(TEST_INSTANCE_ID, config);
-        assert!(result.is_err());
     }
 }
