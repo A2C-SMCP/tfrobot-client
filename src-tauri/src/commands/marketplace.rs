@@ -168,6 +168,7 @@ pub async fn add_marketplace_core(
     instance_id: &str,
     request: AddMarketplaceRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
     let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
@@ -200,6 +201,7 @@ pub async fn refresh_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
     let rows = runtime.sdk_refresh_marketplace(marketplace).await;
@@ -223,6 +225,7 @@ pub async fn remove_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
     let snapshot = marketplace_governance_snapshot(&runtime).await?;
@@ -259,6 +262,7 @@ pub async fn update_marketplace_core(
     instance_id: &str,
     request: UpdateMarketplaceRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
     let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
@@ -307,6 +311,7 @@ pub async fn install_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -352,6 +357,7 @@ pub async fn enable_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -395,6 +401,7 @@ pub async fn disable_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -437,6 +444,7 @@ pub async fn uninstall_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -661,6 +669,8 @@ struct MarketplaceMcpHooks {
     config: Arc<crate::services::config::ConfigService>,
     sdk_config: Arc<crate::services::sdk_config::SdkConfigService>,
     registry: Arc<crate::services::computer::ComputerRegistry>,
+    secret_store: Arc<dyn crate::services::keychain::SecretStore>,
+    input_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     instance_id: String,
     marketplace: String,
     plugin: String,
@@ -706,6 +716,8 @@ impl MarketplaceMcpHooks {
             config: state.config.clone(),
             sdk_config: state.sdk_config.clone(),
             registry: state.computer_registry.clone(),
+            secret_store: state.secret_store.clone(),
+            input_mutation_lock: state.input_mutation_lock.clone(),
             instance_id: instance_id.to_string(),
             marketplace: marketplace.to_string(),
             plugin: plugin.to_string(),
@@ -834,6 +846,7 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             return Ok(());
         }
 
+        let _mutation_guard = self.input_mutation_lock.lock().await;
         let mut definitions = self
             .config
             .load_inputs_for_instance(&self.instance_id)
@@ -843,18 +856,15 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             definitions.retain(|definition| definition.id() != id);
             definitions.push(input_definition_from_mcp(input));
         }
-        self.config
-            .save_inputs_for_instance(&self.instance_id, &definitions)
-            .map_err(|error| McpHookError(error.to_string()))?;
-
-        if let Some(runtime) = self.registry.runtime(&self.instance_id).await {
-            for input in inputs {
-                runtime
-                    .add_or_update_input(input)
-                    .await
-                    .map_err(McpHookError)?;
-            }
-        }
+        crate::commands::inputs::replace_global_input_definitions_with_parts_locked(
+            self.config.as_ref(),
+            self.registry.as_ref(),
+            self.secret_store.as_ref(),
+            &self.instance_id,
+            &definitions,
+        )
+        .await
+        .map_err(McpHookError)?;
         Ok(())
     }
 }

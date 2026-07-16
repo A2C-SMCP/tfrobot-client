@@ -121,6 +121,7 @@ pub async fn refresh_skills_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<(), SkillCommandError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = runtime_for_instance(state, instance_id).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
@@ -148,6 +149,7 @@ pub async fn open_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let root = local_user_skills_root(state, instance_id).await?;
     std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
         path: root.to_string_lossy().to_string(),

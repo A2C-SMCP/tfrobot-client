@@ -1,5 +1,5 @@
 use crate::commands::connection::{
-    connect_connection_target_core, connect_manager_robot_target_core, disconnect_smcp_core,
+    connect_connection_target_locked, connect_manager_robot_target_locked, disconnect_smcp_locked,
 };
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
@@ -8,6 +8,7 @@ use crate::services::computer::{
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
@@ -87,22 +88,33 @@ pub async fn list_computer_instances(
 pub async fn list_computer_instances_core(
     state: &AppState,
 ) -> Result<Vec<ComputerInstanceStatus>, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let config = state
-        .config
-        .load_computer_instances()
+        .load_hydrated_computer_instances()
         .map_err(|error| error.to_string())?;
+    let discovered_ids = config
+        .instances
+        .iter()
+        .map(|instance| instance.id.clone())
+        .collect::<HashSet<_>>();
+    for runtime in state.computer_registry.list_runtimes().await {
+        if !discovered_ids.contains(&runtime.instance.id) {
+            if let Some(removed) = state
+                .computer_registry
+                .remove_runtime(&runtime.instance.id)
+                .await
+            {
+                removed.shutdown().await;
+            }
+        }
+    }
     let mut statuses = Vec::with_capacity(config.instances.len());
 
     for instance in config.instances {
-        let runtime = match state.computer_registry.runtime(&instance.id).await {
-            Some(runtime) => runtime,
-            None => {
-                state
-                    .computer_registry
-                    .upsert_runtime(instance.clone())
-                    .await
-            }
-        };
+        let runtime = state
+            .computer_registry
+            .update_runtime_instance(instance.clone())
+            .await?;
         statuses.push(status_from_instance(&instance, &runtime).await);
     }
 
@@ -121,24 +133,19 @@ pub async fn get_computer_instance_status_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let config = state
-        .config
-        .load_computer_instances()
+        .load_hydrated_computer_instances()
         .map_err(|error| error.to_string())?;
     let instance = config
         .instances
         .into_iter()
         .find(|instance| instance.id == id)
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
-    let runtime = match state.computer_registry.runtime(&instance.id).await {
-        Some(runtime) => runtime,
-        None => {
-            state
-                .computer_registry
-                .upsert_runtime(instance.clone())
-                .await
-        }
-    };
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(instance.clone())
+        .await?;
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -155,6 +162,7 @@ pub async fn create_computer_instance_core(
     state: &AppState,
     request: CreateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let instance = ComputerInstance {
         id: generate_instance_id(),
@@ -172,6 +180,20 @@ pub async fn create_computer_instance_core(
         .config
         .add_computer_instance(instance.clone())
         .map_err(|error| error.to_string())?;
+    let instance_storage_root = state.config.computer_instance_storage_root(&instance.id);
+    let instance = match load_hydrated_computer_instance(state, &instance.id) {
+        Ok(instance) => instance,
+        Err(error) => {
+            return Err(rollback_failed_computer_creation(
+                state,
+                &instance.id,
+                &instance_storage_root,
+                "create",
+                error,
+            )
+            .await)
+        }
+    };
     let runtime = state
         .computer_registry
         .upsert_runtime(instance.clone())
@@ -192,6 +214,7 @@ pub async fn rename_computer_instance_core(
     state: &AppState,
     request: RenameComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let previous = state
         .config
@@ -221,6 +244,7 @@ pub async fn duplicate_computer_instance_core(
     state: &AppState,
     request: DuplicateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let mut instance = state
         .config
@@ -256,10 +280,11 @@ pub async fn duplicate_computer_instance_core(
         .add_computer_instance(instance.clone())
         .map_err(|error| error.to_string())?;
     if let Err(error) = state.sdk_config.duplicate(&source_id, &instance.id) {
-        return Err(rollback_failed_duplicate(
+        return Err(rollback_failed_computer_creation(
             state,
             &instance.id,
             &destination_storage_root,
+            "duplicate",
             error.to_string(),
         )
         .await);
@@ -271,14 +296,28 @@ pub async fn duplicate_computer_instance_core(
     )
     .await
     {
-        return Err(rollback_failed_duplicate(
+        return Err(rollback_failed_computer_creation(
             state,
             &instance.id,
             &destination_storage_root,
+            "duplicate",
             error,
         )
         .await);
     }
+    let instance = match load_hydrated_computer_instance(state, &instance.id) {
+        Ok(instance) => instance,
+        Err(error) => {
+            return Err(rollback_failed_computer_creation(
+                state,
+                &instance.id,
+                &destination_storage_root,
+                "duplicate",
+                error,
+            )
+            .await)
+        }
+    };
     let runtime = state
         .computer_registry
         .upsert_runtime(instance.clone())
@@ -299,16 +338,26 @@ pub async fn delete_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_storage_root = state.config.computer_instance_storage_root(&id);
-    state
-        .config
-        .remove_computer_instance(&id)
-        .map_err(|error| error.to_string())?;
-
-    if let Some(runtime) = state.computer_registry.remove_runtime(&id).await {
+    if let Some(runtime) = state.computer_registry.runtime(&id).await {
         runtime.shutdown().await;
     }
-    cleanup_computer_instance_storage(&instance_storage_root).await?;
+    let quarantined_storage = quarantine_computer_instance_storage(&instance_storage_root).await?;
+    if let Err(error) = state.config.remove_computer_instance(&id) {
+        if let Some(quarantined) = quarantined_storage.as_ref() {
+            restore_quarantined_computer_storage(quarantined, &instance_storage_root)
+                .await
+                .map_err(|restore_error| {
+                    format!(
+                        "Failed to remove Computer profile: {error}; additionally failed to restore SDK storage: {restore_error}"
+                    )
+                })?;
+        }
+        return Err(error.to_string());
+    }
+    state.computer_registry.remove_runtime(&id).await;
+    cleanup_quarantined_computer_storage(quarantined_storage).await;
 
     Ok(())
 }
@@ -327,9 +376,13 @@ pub async fn start_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
+        .map_err(|error| error.to_string())?;
+    let instance = state
+        .hydrate_computer_instance(instance)
         .map_err(|error| error.to_string())?;
     let runtime = state
         .computer_registry
@@ -367,6 +420,7 @@ pub async fn stop_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -393,6 +447,7 @@ pub async fn update_computer_connection_policy_core(
     state: &AppState,
     request: UpdateComputerConnectionPolicyRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     validate_connection_target_reference(state, request.target.as_ref())?;
     let previous = state
         .config
@@ -425,6 +480,7 @@ pub async fn update_computer_skill_home_core(
     state: &AppState,
     request: UpdateComputerSkillHomeRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let previous = state
         .config
         .get_computer_instance(&request.id)
@@ -456,6 +512,7 @@ pub async fn connect_computer_connection_target_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -482,7 +539,8 @@ pub async fn disconnect_computer_connection_target(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
-    disconnect_smcp_core(&state, &id).await
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    disconnect_smcp_locked(&state, &id).await
 }
 
 async fn connect_computer_connection_target_by_policy(
@@ -493,7 +551,7 @@ async fn connect_computer_connection_target_by_policy(
 ) -> Result<(), String> {
     match target.target_type {
         ComputerConnectionTargetType::ManualSmcp => {
-            connect_connection_target_core(state, id, &target.id).await
+            connect_connection_target_locked(state, id, &target.id).await
         }
         ComputerConnectionTargetType::ManagerRobot => {
             let app = app.ok_or_else(|| {
@@ -506,7 +564,7 @@ async fn connect_computer_connection_target_by_policy(
             let robot_account_id = target
                 .robot_account_id
                 .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
-            connect_manager_robot_target_core(app, state, id, employee_id, robot_account_id)
+            connect_manager_robot_target_locked(app, state, id, employee_id, robot_account_id)
                 .await
                 .map_err(|error| error.to_string())
         }
@@ -638,25 +696,106 @@ async fn prepare_duplicate_skill_home(
     .map_err(|error| format!("Failed to prepare duplicate skill directory: {error}"))?
 }
 
-async fn cleanup_computer_instance_storage(path: &Path) -> Result<(), String> {
+async fn quarantine_computer_instance_storage(path: &Path) -> Result<Option<PathBuf>, String> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || match fs::remove_dir_all(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "Failed to delete computer instance storage {}: {}",
-            path.display(),
-            error
-        )),
+    tokio::task::spawn_blocking(move || {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let parent = path.parent().ok_or_else(|| {
+            format!(
+                "Computer instance storage has no parent: {}",
+                path.display()
+            )
+        })?;
+        let trash = parent.join(".trash");
+        fs::create_dir_all(&trash).map_err(|error| {
+            format!(
+                "Failed to create Computer storage trash {}: {}",
+                trash.display(),
+                error
+            )
+        })?;
+        let quarantined = trash.join(format!("deleting-{}", uuid::Uuid::new_v4()));
+        fs::rename(&path, &quarantined).map_err(|error| {
+            format!(
+                "Failed to atomically quarantine Computer storage {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        Ok(Some(quarantined))
     })
     .await
-    .map_err(|error| format!("Failed to delete computer instance storage: {error}"))?
+    .map_err(|error| format!("Failed to quarantine Computer instance storage: {error}"))?
 }
 
-async fn rollback_failed_duplicate(
+async fn restore_quarantined_computer_storage(
+    quarantined: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    let quarantined = quarantined.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        fs::rename(&quarantined, &destination).map_err(|error| {
+            format!(
+                "failed to restore {} to {}: {}",
+                quarantined.display(),
+                destination.display(),
+                error
+            )
+        })
+    })
+    .await
+    .map_err(|error| format!("Failed to restore Computer instance storage: {error}"))?
+}
+
+async fn cleanup_quarantined_computer_storage(path: Option<PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+    let trash_root = path.parent().map(Path::to_path_buf);
+    match tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || fs::remove_dir_all(path)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!(
+            "Computer was deleted, but quarantined SDK storage {} could not be cleaned up: {}",
+            path.display(),
+            error
+        ),
+        Err(error) => log::warn!(
+            "Computer was deleted, but quarantined SDK storage cleanup could not run for {}: {}",
+            path.display(),
+            error
+        ),
+    }
+    if let Some(trash_root) = trash_root {
+        let _ = tokio::task::spawn_blocking(move || fs::remove_dir(trash_root)).await;
+    }
+}
+
+fn load_hydrated_computer_instance(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<ComputerInstance, String> {
+    let instance = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .hydrate_computer_instance(instance)
+        .map_err(|error| error.to_string())
+}
+
+async fn rollback_failed_computer_creation(
     state: &AppState,
     instance_id: &str,
     storage_root: &Path,
+    operation: &str,
     primary_error: String,
 ) -> String {
     let mut rollback_errors = Vec::new();
@@ -666,15 +805,16 @@ async fn rollback_failed_duplicate(
     if let Err(error) = state.config.remove_computer_instance(instance_id) {
         rollback_errors.push(format!("remove persisted Computer profile: {error}"));
     }
-    if let Err(error) = cleanup_computer_instance_storage(storage_root).await {
-        rollback_errors.push(format!("clean target instance storage: {error}"));
+    match quarantine_computer_instance_storage(storage_root).await {
+        Ok(quarantined) => cleanup_quarantined_computer_storage(quarantined).await,
+        Err(error) => rollback_errors.push(format!("clean target instance storage: {error}")),
     }
 
     if rollback_errors.is_empty() {
-        format!("Failed to duplicate Computer instance: {primary_error}")
+        format!("Failed to {operation} Computer instance: {primary_error}")
     } else {
         format!(
-            "Failed to duplicate Computer instance: {primary_error}; additionally failed to rollback: {}",
+            "Failed to {operation} Computer instance: {primary_error}; additionally failed to rollback: {}",
             rollback_errors.join("; ")
         )
     }

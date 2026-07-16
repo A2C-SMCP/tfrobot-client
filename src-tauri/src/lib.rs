@@ -3,8 +3,9 @@ pub mod services;
 pub mod tray;
 
 use services::client_computers::ClientComputersPaths;
-use services::computer::ComputerRegistry;
+use services::computer::{ComputerInstance, ComputerInstancesConfig, ComputerRegistry};
 use services::config::ConfigService;
+use services::config_migration::{migrate_legacy_config, MigrationError};
 use services::keychain::{SecretStore, SystemSecretStore};
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
@@ -29,6 +30,11 @@ pub struct AppState {
     /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
     /// happen as one transaction across Computer instances.
     pub connection_establish_lock: Arc<Mutex<()>>,
+    /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
+    /// These operations are infrequent and must not observe one another half-committed.
+    pub computer_lifecycle_lock: Arc<Mutex<()>>,
+    /// Serializes global input definition/value mutations through runtime compensation.
+    pub input_mutation_lock: Arc<Mutex<()>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
     /// Settings persistence service
@@ -37,13 +43,32 @@ pub struct AppState {
     pub manager_client: Arc<ManagerClient>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AppStateInitError {
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
+    #[error("failed to discover Computer profiles: {0}")]
+    Config(#[from] services::config::ConfigError),
+    #[error("failed to load Computer input values from Keychain: {0}")]
+    Keychain(#[from] services::keychain::KeychainError),
+}
+
 impl AppState {
     pub fn new(
         config: ConfigService,
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
-        Self::new_with_secret_store(
+        Self::try_new(config, log_service, settings_service)
+            .expect("failed to initialize application state")
+    }
+
+    pub fn try_new(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+    ) -> Result<Self, AppStateInitError> {
+        Self::try_new_with_secret_store(
             config,
             log_service,
             settings_service,
@@ -57,32 +82,87 @@ impl AppState {
         settings_service: SettingsService,
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
-        let instances = config.load_computer_instances().unwrap_or_else(|error| {
-            log::error!(
-                "Failed to load ComputerInstance configuration; starting with empty registry: {}",
-                error
-            );
-            Default::default()
-        });
+        Self::try_new_with_secret_store(config, log_service, settings_service, secret_store)
+            .expect("failed to initialize application state")
+    }
+
+    pub fn try_new_with_secret_store(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Result<Self, AppStateInitError> {
+        let config = Arc::new(config);
+        let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
+        let settings_service = Arc::new(settings_service);
+
+        migrate_legacy_config(
+            config.as_ref(),
+            sdk_config.as_ref(),
+            settings_service.as_ref(),
+            secret_store.as_ref(),
+        )?;
+        let instances =
+            hydrate_computer_instances(config.load_computer_instances()?, secret_store.as_ref())?;
         let computer_registry = ComputerRegistry::from_config_with_skill_home_base(
             instances,
             config.computer_skill_home_base(),
         );
 
-        let config = Arc::new(config);
-        let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
-
-        Self {
+        Ok(Self {
             config,
             sdk_config,
             computer_registry: Arc::new(computer_registry),
             secret_store: secret_store.clone(),
             connection_establish_lock: Arc::new(Mutex::new(())),
+            computer_lifecycle_lock: Arc::new(Mutex::new(())),
+            input_mutation_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
-            settings_service: Arc::new(settings_service),
+            settings_service,
             manager_client: Arc::new(ManagerClient::new_with_secret_store(secret_store)),
+        })
+    }
+
+    pub fn hydrate_computer_instance(
+        &self,
+        instance: ComputerInstance,
+    ) -> Result<ComputerInstance, services::keychain::KeychainError> {
+        hydrate_computer_instance(instance, self.secret_store.as_ref())
+    }
+
+    pub fn load_hydrated_computer_instances(
+        &self,
+    ) -> Result<ComputerInstancesConfig, AppStateInitError> {
+        Ok(hydrate_computer_instances(
+            self.config.load_computer_instances()?,
+            self.secret_store.as_ref(),
+        )?)
+    }
+}
+
+fn hydrate_computer_instances(
+    mut config: ComputerInstancesConfig,
+    secret_store: &dyn SecretStore,
+) -> Result<ComputerInstancesConfig, services::keychain::KeychainError> {
+    config.instances = config
+        .instances
+        .into_iter()
+        .map(|instance| hydrate_computer_instance(instance, secret_store))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(config)
+}
+
+fn hydrate_computer_instance(
+    mut instance: ComputerInstance,
+    secret_store: &dyn SecretStore,
+) -> Result<ComputerInstance, services::keychain::KeychainError> {
+    instance.input_values.clear();
+    for input in &instance.inputs {
+        if let Some(value) = services::keychain::get_input_value(secret_store, input.id())? {
+            instance.input_values.insert(input.id().to_string(), value);
         }
     }
+    Ok(instance)
 }
 
 /// Remove log files older than `retention_days` from the given directory.
@@ -173,7 +253,7 @@ pub fn run() {
                 );
             }
 
-            let state = AppState::new(config_service, log_service, settings_service);
+            let state = AppState::try_new(config_service, log_service, settings_service)?;
 
             // Write startup log and cleanup old entries
             let _ = state

@@ -146,6 +146,15 @@ pub async fn add_mcp_server_core(
     instance_id: &str,
     config: MCPServerConfig,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    add_mcp_server_locked(state, instance_id, config).await
+}
+
+pub(crate) async fn add_mcp_server_locked(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Adding MCP server for instance {}: {}", instance_id, name);
@@ -179,6 +188,7 @@ pub async fn remove_mcp_server_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Removing MCP server for instance {}: {}", instance_id, name);
     let runtime = require_runtime(state, instance_id).await?;
@@ -210,6 +220,7 @@ pub async fn update_mcp_server_core(
     instance_id: &str,
     config: MCPServerConfig,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     let name = config.name().to_string();
     log::info!("Updating MCP server for instance {}: {}", instance_id, name);
@@ -243,6 +254,7 @@ pub async fn start_mcp_server_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Starting MCP server for instance {}: {}", instance_id, name);
 
@@ -276,6 +288,7 @@ pub async fn stop_mcp_server_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Stopping MCP server for instance {}: {}", instance_id, name);
     let runtime = require_runtime(state, instance_id).await?;
@@ -303,6 +316,7 @@ pub async fn start_all_servers(
 }
 
 pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
@@ -325,6 +339,7 @@ pub async fn stop_all_servers(
 }
 
 pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Stopping all MCP servers for instance {}", instance_id);
 

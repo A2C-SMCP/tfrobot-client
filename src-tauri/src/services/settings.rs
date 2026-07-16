@@ -12,7 +12,7 @@ pub struct AppSettings {
     pub language: String,
     pub log_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub manager_session: Option<ManagerSessionSettings>,
     /// User-configured PATH override. When set, takes priority over auto-detected PATH.
     #[serde(default)]
@@ -119,10 +119,26 @@ impl SettingsService {
         if !self.settings_file.exists() {
             return AppSettings::default();
         }
-        fs::read_to_string(&self.settings_file)
+        let mut settings: AppSettings = fs::read_to_string(&self.settings_file)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Legacy Manager metadata is migration-only and is never an active settings source.
+        settings.manager_session = None;
+        settings
+    }
+
+    pub fn load_legacy_for_migration(&self) -> Result<AppSettings, ManagerSessionConfigError> {
+        if !self.settings_file.exists() {
+            return Ok(AppSettings::default());
+        }
+        let content = fs::read_to_string(&self.settings_file)?;
+        if content.trim().is_empty() {
+            return Err(ManagerSessionConfigError::EmptyFile(
+                self.settings_file.clone(),
+            ));
+        }
+        Ok(serde_json::from_str(&content)?)
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
@@ -157,6 +173,10 @@ impl SettingsService {
     pub fn global_manager_session_path(&self) -> PathBuf {
         self.client_computers_paths
             .global_config(GlobalConfigFile::ManagerSession)
+    }
+
+    pub fn legacy_settings_path(&self) -> &std::path::Path {
+        &self.settings_file
     }
 }
 
@@ -256,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_manager_session_roundtrip() {
+    fn normal_settings_save_does_not_recreate_legacy_manager_session() {
         let (svc, _tmp) = setup();
         let mut settings = svc.load();
         settings.manager_session = Some(ManagerSessionSettings {
@@ -267,12 +287,45 @@ mod tests {
         });
         svc.save(&settings).unwrap();
 
-        let loaded = svc.load();
-        let session = loaded.manager_session.unwrap();
-        assert_eq!(session.base_url, "https://manager.example.com");
-        assert_eq!(session.user_id, 7);
-        assert_eq!(session.account_id, 42);
-        assert_eq!(session.account_name, "client_uat");
+        assert!(svc.load().manager_session.is_none());
+        assert!(!std::fs::read_to_string(svc.legacy_settings_path())
+            .unwrap()
+            .contains("manager_session"));
+    }
+
+    #[test]
+    fn strict_legacy_loader_reads_manager_session_and_rejects_corruption() {
+        let (svc, _tmp) = setup();
+        std::fs::write(
+            svc.legacy_settings_path(),
+            r#"{
+                "theme":"system",
+                "language":"en",
+                "log_retention_days":30,
+                "custom_runtime_paths":{},
+                "manager_session":{
+                    "baseUrl":"https://manager.example.com",
+                    "userId":7,
+                    "accountId":42,
+                    "accountName":"client_uat"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            svc.load_legacy_for_migration()
+                .unwrap()
+                .manager_session
+                .unwrap()
+                .account_id,
+            42
+        );
+
+        std::fs::write(svc.legacy_settings_path(), "not json").unwrap();
+        assert!(matches!(
+            svc.load_legacy_for_migration().unwrap_err(),
+            ManagerSessionConfigError::Json(_)
+        ));
     }
 
     #[test]

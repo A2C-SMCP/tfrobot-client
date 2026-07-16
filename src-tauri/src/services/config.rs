@@ -1,24 +1,28 @@
 use crate::commands::inputs::InputDefinition;
 use crate::services::client_computers::{
-    ClientComputersPathError, ClientComputersPaths, GlobalConfigFile,
+    ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_PROFILE_FILE_NAME,
 };
 use crate::services::computer::{
     ComputerInstance, ComputerInstancesConfig, ComputerProfile, GlobalInputDefinition,
-    GlobalInputsConfig, ManagedMcpServer, COMPUTER_PROFILE_SCHEMA_VERSION,
-    GLOBAL_INPUTS_SCHEMA_VERSION,
+    GlobalInputsConfig, ManagedMcpServer, SdkContextConfig, COMPUTER_PROFILE_SCHEMA_VERSION,
+    GLOBAL_INPUTS_SCHEMA_VERSION, SDK_CONTEXT_SCHEMA_VERSION,
 };
 use crate::services::connection_targets::{
-    ConnectionTargetsConfig, GlobalManualTargetsConfig, ManualSmcpTarget,
+    ConnectionTargetsConfig, GlobalManualSmcpTarget, GlobalManualTargetsConfig, ManualSmcpTarget,
     MANUAL_TARGETS_SCHEMA_VERSION,
 };
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 #[cfg(test)]
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use reqwest::header::{HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Service for persisting all configuration data to disk
 pub struct ConfigService {
@@ -26,6 +30,44 @@ pub struct ConfigService {
     computer_instances_file: PathBuf,
     connection_targets_file: PathBuf,
     client_computers_paths: ClientComputersPaths,
+    directory_transaction_lock: Mutex<()>,
+    #[cfg(test)]
+    directory_rename_actions: Mutex<VecDeque<DirectoryRenameTestAction>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DirectoryRenameTestAction {
+    Proceed,
+    Fail,
+    FailAfterCreatingDestinationFile,
+}
+
+#[derive(Debug)]
+pub struct ComputerProfileDiscoveryError {
+    pub path: PathBuf,
+    pub error: ConfigError,
+}
+
+#[derive(Debug, Default)]
+pub struct ComputerProfileDiscovery {
+    pub config: ComputerInstancesConfig,
+    pub errors: Vec<ComputerProfileDiscoveryError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComputerDirectoryTransaction {
+    schema_version: u32,
+    instance_id: String,
+    phase: ComputerDirectoryTransactionPhase,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ComputerDirectoryTransactionPhase {
+    Preparing,
+    Ready,
 }
 
 impl ConfigService {
@@ -45,6 +87,9 @@ impl ConfigService {
             computer_instances_file: app_data_dir.join("computer_instances.json"),
             connection_targets_file: app_data_dir.join("connection_targets.json"),
             client_computers_paths,
+            directory_transaction_lock: Mutex::new(()),
+            #[cfg(test)]
+            directory_rename_actions: Mutex::new(VecDeque::new()),
             config_dir: app_data_dir,
         })
     }
@@ -61,6 +106,30 @@ impl ConfigService {
                     ConfigError::InvalidComputerProfileId(id)
                 }
             })
+    }
+
+    pub fn computer_instance_root(&self, instance_id: &str) -> Result<PathBuf, ConfigError> {
+        self.client_computers_paths
+            .instance_root(instance_id)
+            .map_err(map_client_computers_path_error)
+    }
+
+    pub fn sdk_context_path(&self, instance_id: &str) -> Result<PathBuf, ConfigError> {
+        self.client_computers_paths
+            .sdk_context(instance_id)
+            .map_err(map_client_computers_path_error)
+    }
+
+    pub fn migration_state_path(&self) -> PathBuf {
+        self.client_computers_paths.migration_state()
+    }
+
+    pub fn legacy_computer_instances_path(&self) -> &Path {
+        &self.computer_instances_file
+    }
+
+    pub fn legacy_connection_targets_path(&self) -> &Path {
+        &self.connection_targets_file
     }
 
     pub fn save_computer_profile(&self, profile: &ComputerProfile) -> Result<(), ConfigError> {
@@ -96,11 +165,49 @@ impl ConfigService {
         Ok(profile)
     }
 
+    pub fn load_sdk_context(&self, instance_id: &str) -> Result<SdkContextConfig, ConfigError> {
+        let path = self.sdk_context_path(instance_id)?;
+        let config: SdkContextConfig = load_new_artifact_or_default(&path)?;
+        validate_schema_version(
+            "SDK context",
+            config.schema_version,
+            SDK_CONTEXT_SCHEMA_VERSION,
+        )?;
+        Ok(config)
+    }
+
+    pub fn save_sdk_context(
+        &self,
+        instance_id: &str,
+        context: &SdkContextConfig,
+    ) -> Result<(), ConfigError> {
+        validate_schema_version(
+            "SDK context",
+            context.schema_version,
+            SDK_CONTEXT_SCHEMA_VERSION,
+        )?;
+        save_json_file(&self.sdk_context_path(instance_id)?, context)
+    }
+
+    pub fn save_computer_directory(
+        &self,
+        profile: &ComputerProfile,
+        context: &SdkContextConfig,
+    ) -> Result<(), ConfigError> {
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        self.save_computer_directory_transaction_unlocked(profile, context, false)
+    }
+
     pub fn load_global_inputs(&self) -> Result<GlobalInputsConfig, ConfigError> {
         let path = self.global_config_path(GlobalConfigFile::Inputs);
         let config: GlobalInputsConfig = load_new_artifact_or_default(&path)?;
         validate_global_inputs_config(&config)?;
         Ok(config)
+    }
+
+    pub fn global_inputs_path(&self) -> PathBuf {
+        self.global_config_path(GlobalConfigFile::Inputs)
     }
 
     pub fn save_global_inputs(&self, config: &GlobalInputsConfig) -> Result<(), ConfigError> {
@@ -113,6 +220,10 @@ impl ConfigService {
         let config: GlobalManualTargetsConfig = load_new_artifact_or_default(&path)?;
         validate_global_manual_targets_config(&config)?;
         Ok(config)
+    }
+
+    pub fn global_manual_targets_path(&self) -> PathBuf {
+        self.global_config_path(GlobalConfigFile::ManualTargets)
     }
 
     pub fn save_global_manual_targets(
@@ -154,7 +265,7 @@ impl ConfigService {
         &self,
         instance_id: &str,
     ) -> Result<Vec<ManagedMcpServer>, ConfigError> {
-        let instances = self.load_computer_instances()?;
+        let instances = self.load_legacy_computer_instances()?;
         instances
             .instances
             .iter()
@@ -169,13 +280,7 @@ impl ConfigService {
         &self,
         instance_id: &str,
     ) -> Result<Vec<InputDefinition>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        instances
-            .instances
-            .iter()
-            .find(|instance| instance.id == instance_id)
-            .map(|instance| instance.inputs.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
+        Ok(self.get_computer_instance(instance_id)?.inputs)
     }
 
     pub fn save_inputs_for_instance(
@@ -183,73 +288,153 @@ impl ConfigService {
         instance_id: &str,
         inputs: &[InputDefinition],
     ) -> Result<ComputerInstance, ConfigError> {
-        self.update_computer_instance(instance_id, |instance| {
-            instance.inputs = inputs.to_vec();
-        })
-    }
-
-    // --- Input Values ---
-
-    pub fn load_input_values_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        instances
-            .instances
-            .iter()
-            .find(|instance| instance.id == instance_id)
-            .map(|instance| instance.input_values.clone())
-            .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
-    }
-
-    pub fn save_input_values_for_instance(
-        &self,
-        instance_id: &str,
-        values: &HashMap<String, serde_json::Value>,
-    ) -> Result<ComputerInstance, ConfigError> {
-        self.update_computer_instance(instance_id, |instance| {
-            instance.input_values = values.clone();
-        })
+        self.get_computer_instance(instance_id)?;
+        self.save_global_inputs(&GlobalInputsConfig {
+            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            inputs: inputs.iter().map(GlobalInputDefinition::from).collect(),
+        })?;
+        self.get_computer_instance(instance_id)
     }
 
     // --- Computer Instances ---
 
     pub fn load_computer_instances(&self) -> Result<ComputerInstancesConfig, ConfigError> {
-        let mut config: ComputerInstancesConfig = load_json_file(&self.computer_instances_file)?;
-        config.normalize();
-        Ok(config)
+        let discovery = self.discover_computer_instances()?;
+        for error in &discovery.errors {
+            log::warn!(
+                "Ignoring invalid Computer profile {}: {}",
+                error.path.display(),
+                error.error
+            );
+        }
+        Ok(discovery.config)
+    }
+
+    pub fn discover_computer_instances(&self) -> Result<ComputerProfileDiscovery, ConfigError> {
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        let root = self.client_computers_paths.instances_root();
+        if !root.exists() {
+            return Ok(ComputerProfileDiscovery::default());
+        }
+
+        let global_inputs = self.load_global_inputs()?;
+        let mut instances = Vec::new();
+        let mut errors = Vec::new();
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() {
+                errors.push(ComputerProfileDiscoveryError {
+                    path,
+                    error: ConfigError::InvalidArtifact {
+                        path: entry.path(),
+                        reason: format!(
+                            "expected an instance directory containing {COMPUTER_PROFILE_FILE_NAME}"
+                        ),
+                    },
+                });
+                continue;
+            }
+            let Some(directory_id) = entry.file_name().to_str().map(str::to_string) else {
+                errors.push(ComputerProfileDiscoveryError {
+                    path: path.clone(),
+                    error: ConfigError::InvalidArtifact {
+                        path,
+                        reason: "instance directory name is not valid UTF-8".to_string(),
+                    },
+                });
+                continue;
+            };
+            match self.load_computer_profile(&directory_id) {
+                Ok(profile) => {
+                    let mut instance = ComputerInstance::from(profile);
+                    instance.inputs = global_inputs
+                        .inputs
+                        .iter()
+                        .map(InputDefinition::from)
+                        .collect();
+                    match self.load_sdk_context(&directory_id) {
+                        Ok(context) => instance.local_skills_root = context.skill_home_override,
+                        Err(error) => {
+                            errors.push(ComputerProfileDiscoveryError {
+                                path: self.sdk_context_path(&directory_id)?,
+                                error,
+                            });
+                            continue;
+                        }
+                    }
+                    instances.push(instance);
+                }
+                Err(error) => errors.push(ComputerProfileDiscoveryError {
+                    path: path.join(COMPUTER_PROFILE_FILE_NAME),
+                    error,
+                }),
+            }
+        }
+        instances.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(ComputerProfileDiscovery {
+            config: ComputerInstancesConfig {
+                schema_version: 1,
+                instances,
+            },
+            errors,
+        })
+    }
+
+    pub fn load_legacy_computer_instances(&self) -> Result<ComputerInstancesConfig, ConfigError> {
+        load_json_file(&self.computer_instances_file)
     }
 
     pub fn save_computer_instances(
         &self,
         instances: &ComputerInstancesConfig,
     ) -> Result<(), ConfigError> {
-        let mut instances = instances.clone();
-        instances.normalize();
-        save_json_file(&self.computer_instances_file, &instances)
+        for instance in &instances.instances {
+            let profile = ComputerProfile::from(instance);
+            let context = SdkContextConfig {
+                schema_version: SDK_CONTEXT_SCHEMA_VERSION,
+                skill_home_override: instance.local_skills_root.clone(),
+            };
+            self.save_computer_directory(&profile, &context)?;
+        }
+        Ok(())
     }
 
     pub fn get_computer_instance(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
-        let instances = self.load_computer_instances()?;
-        instances
-            .instances
-            .into_iter()
-            .find(|instance| instance.id == id)
-            .ok_or_else(|| ConfigError::NotFound(id.to_string()))
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        self.load_computer_instance_unlocked(id)
+    }
+
+    fn load_computer_instance_unlocked(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
+        let mut instance = ComputerInstance::from(self.load_computer_profile(id)?);
+        instance.inputs = self
+            .load_global_inputs()?
+            .inputs
+            .iter()
+            .map(InputDefinition::from)
+            .collect();
+        instance.local_skills_root = self.load_sdk_context(id)?.skill_home_override;
+        Ok(instance)
     }
 
     pub fn add_computer_instance(&self, instance: ComputerInstance) -> Result<(), ConfigError> {
-        let mut instances = self.load_computer_instances()?;
-        if instances
-            .instances
-            .iter()
-            .any(|existing| existing.id == instance.id)
-        {
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        let path = self.computer_profile_path(&instance.id)?;
+        if path.exists() {
             return Err(ConfigError::AlreadyExists(instance.id));
         }
-        instances.instances.push(instance);
-        self.save_computer_instances(&instances)
+        self.save_computer_directory_transaction_unlocked(
+            &ComputerProfile::from(&instance),
+            &SdkContextConfig {
+                schema_version: SDK_CONTEXT_SCHEMA_VERSION,
+                skill_home_override: instance.local_skills_root.clone(),
+            },
+            true,
+        )
     }
 
     pub fn rename_computer_instance(
@@ -270,41 +455,310 @@ impl ConfigService {
     where
         F: FnOnce(&mut ComputerInstance),
     {
-        let mut instances = self.load_computer_instances()?;
-        let instance = instances
-            .instances
-            .iter_mut()
-            .find(|instance| instance.id == id)
-            .ok_or_else(|| ConfigError::NotFound(id.to_string()))?;
-        update(instance);
-        let updated = instance.clone();
-        self.save_computer_instances(&instances)?;
-        Ok(updated)
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        let mut instance = self.load_computer_instance_unlocked(id)?;
+        update(&mut instance);
+        self.save_computer_directory_transaction_unlocked(
+            &ComputerProfile::from(&instance),
+            &SdkContextConfig {
+                schema_version: SDK_CONTEXT_SCHEMA_VERSION,
+                skill_home_override: instance.local_skills_root.clone(),
+            },
+            false,
+        )?;
+        Ok(instance)
+    }
+
+    fn save_computer_directory_transaction_unlocked(
+        &self,
+        profile: &ComputerProfile,
+        context: &SdkContextConfig,
+        require_absent: bool,
+    ) -> Result<(), ConfigError> {
+        validate_schema_version(
+            "computer profile",
+            profile.schema_version,
+            COMPUTER_PROFILE_SCHEMA_VERSION,
+        )?;
+        validate_schema_version(
+            "SDK context",
+            context.schema_version,
+            SDK_CONTEXT_SCHEMA_VERSION,
+        )?;
+        let instance_root = self.computer_instance_root(&profile.id)?;
+        if require_absent && instance_root.exists() {
+            return Err(ConfigError::AlreadyExists(profile.id.clone()));
+        }
+        fs::create_dir_all(self.client_computers_paths.instances_root())?;
+
+        let transactions_root = self.client_computers_paths.root().join(".transactions");
+        fs::create_dir_all(&transactions_root)?;
+        let transaction_root = transactions_root.join(uuid::Uuid::new_v4().to_string());
+        let staged_root = transaction_root.join("new");
+        let previous_root = transaction_root.join("old");
+        let preparation = (|| {
+            fs::create_dir_all(&staged_root)?;
+            let mut transaction = ComputerDirectoryTransaction {
+                schema_version: 1,
+                instance_id: profile.id.clone(),
+                phase: ComputerDirectoryTransactionPhase::Preparing,
+            };
+            save_json_file(&transaction_root.join("transaction.json"), &transaction)?;
+            save_json_file(&staged_root.join(COMPUTER_PROFILE_FILE_NAME), profile)?;
+            save_json_file(
+                &staged_root.join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME),
+                context,
+            )?;
+            let (staged_profile, staged_context) =
+                validate_staged_computer_directory(&staged_root, &profile.id)?;
+            if staged_profile != *profile || staged_context != *context {
+                return Err(ConfigError::InvalidArtifact {
+                    path: staged_root.clone(),
+                    reason: "staged Computer directory does not match the requested profile and SDK context"
+                        .to_string(),
+                });
+            }
+            transaction.phase = ComputerDirectoryTransactionPhase::Ready;
+            save_json_file(&transaction_root.join("transaction.json"), &transaction)?;
+            Ok::<(), ConfigError>(())
+        })();
+        if let Err(error) = preparation {
+            let _ = fs::remove_dir_all(&transaction_root);
+            let _ = fs::remove_dir(&transactions_root);
+            return Err(error);
+        }
+
+        if instance_root.exists() {
+            self.rename_computer_directory(&instance_root, &previous_root)?;
+        }
+        if let Err(error) = self.rename_computer_directory(&staged_root, &instance_root) {
+            if previous_root.exists() {
+                if let Err(rollback_error) =
+                    self.rename_computer_directory(&previous_root, &instance_root)
+                {
+                    return Err(ConfigError::DirectoryTransactionRollback {
+                        instance_id: profile.id.clone(),
+                        primary: error.to_string(),
+                        rollback: rollback_error.to_string(),
+                        transaction_root: transaction_root.display().to_string(),
+                    });
+                }
+            }
+            let _ = fs::remove_dir_all(&transaction_root);
+            return Err(ConfigError::Io(error));
+        }
+        if previous_root.exists() {
+            if let Err(error) = fs::remove_dir_all(&previous_root) {
+                log::warn!(
+                    "Computer '{}' directory update committed, but previous directory cleanup failed: {}",
+                    profile.id,
+                    error
+                );
+                return Ok(());
+            }
+        }
+        if let Err(error) = fs::remove_dir_all(&transaction_root) {
+            log::warn!(
+                "Computer '{}' directory update committed, but transaction cleanup failed: {}",
+                profile.id,
+                error
+            );
+            return Ok(());
+        }
+        let _ = fs::remove_dir(&transactions_root);
+        Ok(())
+    }
+
+    fn rename_computer_directory(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        match self
+            .directory_rename_actions
+            .lock()
+            .expect("directory rename action lock poisoned")
+            .pop_front()
+            .unwrap_or(DirectoryRenameTestAction::Proceed)
+        {
+            DirectoryRenameTestAction::Proceed => {}
+            DirectoryRenameTestAction::Fail => {
+                return Err(std::io::Error::other("injected directory rename failure"));
+            }
+            DirectoryRenameTestAction::FailAfterCreatingDestinationFile => {
+                fs::write(to, b"injected directory rename blocker")?;
+                return Err(std::io::Error::other(
+                    "injected directory rename failure after creating destination file",
+                ));
+            }
+        }
+
+        fs::rename(from, to)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_directory_rename_actions(
+        &self,
+        actions: impl IntoIterator<Item = DirectoryRenameTestAction>,
+    ) {
+        self.directory_rename_actions
+            .lock()
+            .expect("directory rename action lock poisoned")
+            .extend(actions);
+    }
+
+    fn recover_computer_directory_transactions_unlocked(&self) -> Result<(), ConfigError> {
+        let transactions_root = self.client_computers_paths.root().join(".transactions");
+        if !transactions_root.exists() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&transactions_root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                return Err(ConfigError::InvalidArtifact {
+                    path: entry.path(),
+                    reason: "expected a Computer directory transaction".to_string(),
+                });
+            }
+            let transaction_root = entry.path();
+            let marker_path = transaction_root.join("transaction.json");
+            let staged_root = transaction_root.join("new");
+            let previous_root = transaction_root.join("old");
+            if !marker_path.exists() {
+                if previous_root.exists() {
+                    return Err(ConfigError::InvalidArtifact {
+                        path: transaction_root,
+                        reason:
+                            "markerless Computer directory transaction retains a previous directory"
+                                .to_string(),
+                    });
+                }
+                fs::remove_dir_all(entry.path())?;
+                continue;
+            }
+            let transaction: ComputerDirectoryTransaction = load_required_json_file(&marker_path)?;
+            if transaction.schema_version != 1 {
+                return Err(ConfigError::UnsupportedSchemaVersion {
+                    artifact: "Computer directory transaction",
+                    expected: 1,
+                    actual: transaction.schema_version,
+                });
+            }
+            if transaction.phase == ComputerDirectoryTransactionPhase::Preparing {
+                if previous_root.exists() {
+                    return Err(ConfigError::InvalidArtifact {
+                        path: transaction_root,
+                        reason: format!(
+                            "preparing Computer '{}' transaction unexpectedly retains a previous directory",
+                            transaction.instance_id
+                        ),
+                    });
+                }
+                fs::remove_dir_all(entry.path())?;
+                continue;
+            }
+            let instance_root = self.computer_instance_root(&transaction.instance_id)?;
+            if instance_root.exists() && previous_root.exists() && staged_root.exists() {
+                return Err(ConfigError::InvalidArtifact {
+                    path: transaction_root,
+                    reason: format!(
+                        "Computer '{}' destination is occupied while both previous and staged directories are retained",
+                        transaction.instance_id
+                    ),
+                });
+            }
+            if !instance_root.exists() {
+                if previous_root.exists() {
+                    fs::rename(&previous_root, &instance_root)?;
+                } else if staged_root.exists() {
+                    validate_staged_computer_directory(&staged_root, &transaction.instance_id)?;
+                    fs::rename(&staged_root, &instance_root)?;
+                } else {
+                    return Err(ConfigError::InvalidArtifact {
+                        path: transaction_root,
+                        reason: "transaction has no current, previous, or staged directory"
+                            .to_string(),
+                    });
+                }
+            }
+            fs::remove_dir_all(entry.path())?;
+        }
+        let _ = fs::remove_dir(&transactions_root);
+        Ok(())
+    }
+
+    pub(crate) fn discard_computer_directory_transactions(&self) -> Result<(), ConfigError> {
+        let _guard = self.lock_computer_directories()?;
+        let transactions_root = self.client_computers_paths.root().join(".transactions");
+        if transactions_root.exists() {
+            fs::remove_dir_all(transactions_root)?;
+        }
+        Ok(())
     }
 
     pub fn remove_computer_instance(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
-        let mut instances = self.load_computer_instances()?;
-        let index = instances
-            .instances
-            .iter()
-            .position(|instance| instance.id == id)
-            .ok_or_else(|| ConfigError::NotFound(id.to_string()))?;
-        let removed = instances.instances.remove(index);
-        self.save_computer_instances(&instances)?;
+        let _guard = self.lock_computer_directories()?;
+        self.recover_computer_directory_transactions_unlocked()?;
+        let removed = self.load_computer_instance_unlocked(id)?;
+        let instance_root = self.computer_instance_root(id)?;
+        let trash_root = self.client_computers_paths.root().join(".trash");
+        fs::create_dir_all(&trash_root)?;
+        let quarantined = trash_root.join(format!("{id}-{}", uuid::Uuid::new_v4().as_hyphenated()));
+        fs::rename(&instance_root, &quarantined)?;
+        if let Err(error) = fs::remove_dir_all(&quarantined) {
+            log::warn!(
+                "Computer profile '{}' was removed, but its quarantined directory {} could not be cleaned up: {}",
+                id,
+                quarantined.display(),
+                error
+            );
+        } else {
+            let _ = fs::remove_dir(&trash_root);
+        }
         Ok(removed)
+    }
+
+    fn lock_computer_directories(&self) -> Result<std::sync::MutexGuard<'_, ()>, ConfigError> {
+        self.directory_transaction_lock
+            .lock()
+            .map_err(|error| ConfigError::Lock(error.to_string()))
     }
 
     // --- Connection Targets ---
 
     pub fn load_connection_targets(&self) -> Result<ConnectionTargetsConfig, ConfigError> {
-        load_json_file(&self.connection_targets_file)
+        let config = self.load_global_manual_targets()?;
+        Ok(ConnectionTargetsConfig {
+            schema_version: config.schema_version,
+            manual_smcp_targets: config
+                .manual_smcp_targets
+                .into_iter()
+                .map(|target| ManualSmcpTarget {
+                    id: target.id,
+                    name: target.name,
+                    url: target.url,
+                    namespace: target.namespace,
+                    office_id: target.office_id,
+                    headers: target.routing_headers,
+                })
+                .collect(),
+        })
     }
 
     pub fn save_connection_targets(
         &self,
         targets: &ConnectionTargetsConfig,
     ) -> Result<(), ConfigError> {
-        save_json_file(&self.connection_targets_file, targets)
+        self.save_global_manual_targets(&GlobalManualTargetsConfig {
+            schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+            manual_smcp_targets: targets
+                .manual_smcp_targets
+                .iter()
+                .map(GlobalManualSmcpTarget::from)
+                .collect(),
+        })
+    }
+
+    pub fn load_legacy_connection_targets(&self) -> Result<ConnectionTargetsConfig, ConfigError> {
+        load_json_file(&self.connection_targets_file)
     }
 
     pub fn list_manual_smcp_targets(&self) -> Result<Vec<ManualSmcpTarget>, ConfigError> {
@@ -347,6 +801,14 @@ impl ConfigService {
 
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
+    }
+}
+
+fn map_client_computers_path_error(error: ClientComputersPathError) -> ConfigError {
+    match error {
+        ClientComputersPathError::InvalidInstanceId(id) => {
+            ConfigError::InvalidComputerProfileId(id)
+        }
     }
 }
 
@@ -564,10 +1026,51 @@ fn save_json_file<T: serde::Serialize + ?Sized>(path: &Path, data: &T) -> Result
     Ok(())
 }
 
+fn validate_staged_computer_directory(
+    staged_root: &Path,
+    instance_id: &str,
+) -> Result<(ComputerProfile, SdkContextConfig), ConfigError> {
+    let profile_path = staged_root.join(COMPUTER_PROFILE_FILE_NAME);
+    let profile: ComputerProfile = load_required_json_file(&profile_path)?;
+    validate_schema_version(
+        "computer profile",
+        profile.schema_version,
+        COMPUTER_PROFILE_SCHEMA_VERSION,
+    )?;
+    if profile.id != instance_id {
+        return Err(ConfigError::CorruptedComputerProfile {
+            directory_id: instance_id.to_string(),
+            profile_id: profile.id,
+        });
+    }
+
+    let context_path = staged_root.join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME);
+    let context: SdkContextConfig = load_required_json_file(&context_path)?;
+    validate_schema_version(
+        "SDK context",
+        context.schema_version,
+        SDK_CONTEXT_SCHEMA_VERSION,
+    )?;
+    Ok((profile, context))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("configuration lock error: {0}")]
+    Lock(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error(
+        "Computer '{instance_id}' directory update failed: {primary}; rollback failed: {rollback}; transaction retained at {transaction_root}"
+    )]
+    DirectoryTransactionRollback {
+        instance_id: String,
+        primary: String,
+        rollback: String,
+        transaction_root: String,
+    },
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -1015,6 +1518,265 @@ mod tests {
     }
 
     #[test]
+    fn profile_discovery_is_deterministic_and_isolates_invalid_directories() {
+        let (svc, _tmp) = setup_empty();
+        svc.save_computer_profile(&ComputerProfile::new("computer-b", "B"))
+            .unwrap();
+        svc.save_computer_profile(&ComputerProfile::new("computer-a", "A"))
+            .unwrap();
+        svc.save_computer_profile(&ComputerProfile::new("bad-context", "Bad context"))
+            .unwrap();
+        std::fs::write(
+            svc.sdk_context_path("bad-context").unwrap(),
+            r#"{"schema_version": 99}"#,
+        )
+        .unwrap();
+
+        let corrupt_path = svc.computer_profile_path("corrupt").unwrap();
+        std::fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
+        std::fs::write(&corrupt_path, "not json").unwrap();
+        let mismatched_path = svc.computer_profile_path("directory-id").unwrap();
+        std::fs::create_dir_all(mismatched_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mismatched_path,
+            serde_json::to_vec(&ComputerProfile::new("profile-id", "Mismatch")).unwrap(),
+        )
+        .unwrap();
+
+        let discovery = svc.discover_computer_instances().unwrap();
+
+        assert_eq!(
+            discovery
+                .config
+                .instances
+                .iter()
+                .map(|instance| instance.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["computer-a", "computer-b"]
+        );
+        assert_eq!(discovery.errors.len(), 3);
+        assert!(discovery
+            .errors
+            .iter()
+            .any(|error| error.path == corrupt_path));
+        assert!(discovery
+            .errors
+            .iter()
+            .any(|error| error.path == mismatched_path));
+        assert!(discovery
+            .errors
+            .iter()
+            .any(|error| { error.path == svc.sdk_context_path("bad-context").unwrap() }));
+    }
+
+    #[test]
+    fn discovery_recovers_interrupted_directory_swap_without_partial_profile() {
+        let (svc, _tmp) = setup_empty();
+        svc.add_computer_instance(ComputerInstance::new("computer-a", "Original"))
+            .unwrap();
+        let instance_root = svc.computer_instance_root("computer-a").unwrap();
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_root = transactions_root.join("interrupted");
+        let previous_root = transaction_root.join("old");
+        let staged_root = transaction_root.join("new");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        save_json_file(
+            &transaction_root.join("transaction.json"),
+            &ComputerDirectoryTransaction {
+                schema_version: 1,
+                instance_id: "computer-a".to_string(),
+                phase: ComputerDirectoryTransactionPhase::Ready,
+            },
+        )
+        .unwrap();
+        save_json_file(
+            &staged_root.join(COMPUTER_PROFILE_FILE_NAME),
+            &ComputerProfile::new("computer-a", "Replacement"),
+        )
+        .unwrap();
+        save_json_file(
+            &staged_root.join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME),
+            &SdkContextConfig::default(),
+        )
+        .unwrap();
+        std::fs::rename(&instance_root, &previous_root).unwrap();
+
+        let discovered = svc.discover_computer_instances().unwrap();
+
+        assert_eq!(discovered.config.instances[0].name, "Original");
+        assert!(instance_root.join(COMPUTER_PROFILE_FILE_NAME).is_file());
+        assert!(instance_root
+            .join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME)
+            .is_file());
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
+    fn discovery_discards_markerless_partial_directory_transaction() {
+        let (svc, _tmp) = setup_empty();
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_root = transactions_root.join("markerless");
+        let staged_root = transaction_root.join("new");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        save_json_file(
+            &staged_root.join(COMPUTER_PROFILE_FILE_NAME),
+            &ComputerProfile::new("computer-a", "Partial"),
+        )
+        .unwrap();
+
+        let discovery = svc.discover_computer_instances().unwrap();
+
+        assert!(discovery.config.instances.is_empty());
+        assert!(discovery.errors.is_empty());
+        assert!(!svc.computer_instance_root("computer-a").unwrap().exists());
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
+    fn discovery_does_not_publish_transaction_with_only_profile_staged() {
+        let (svc, _tmp) = setup_empty();
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_root = transactions_root.join("only-profile");
+        let staged_root = transaction_root.join("new");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        save_json_file(
+            &transaction_root.join("transaction.json"),
+            &ComputerDirectoryTransaction {
+                schema_version: 1,
+                instance_id: "computer-a".to_string(),
+                phase: ComputerDirectoryTransactionPhase::Preparing,
+            },
+        )
+        .unwrap();
+        save_json_file(
+            &staged_root.join(COMPUTER_PROFILE_FILE_NAME),
+            &ComputerProfile::new("computer-a", "Partial"),
+        )
+        .unwrap();
+
+        let discovery = svc.discover_computer_instances().unwrap();
+
+        assert!(discovery.config.instances.is_empty());
+        assert!(discovery.errors.is_empty());
+        assert!(!svc.computer_instance_root("computer-a").unwrap().exists());
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
+    fn discovery_discards_preparing_transaction_with_no_artifacts() {
+        let (svc, _tmp) = setup_empty();
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_root = transactions_root.join("marker-only");
+        std::fs::create_dir_all(&transaction_root).unwrap();
+        save_json_file(
+            &transaction_root.join("transaction.json"),
+            &ComputerDirectoryTransaction {
+                schema_version: 1,
+                instance_id: "computer-a".to_string(),
+                phase: ComputerDirectoryTransactionPhase::Preparing,
+            },
+        )
+        .unwrap();
+
+        let discovery = svc.discover_computer_instances().unwrap();
+
+        assert!(discovery.config.instances.is_empty());
+        assert!(discovery.errors.is_empty());
+        assert!(!svc.computer_instance_root("computer-a").unwrap().exists());
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
+    fn discovery_publishes_only_complete_ready_directory_transaction() {
+        let (svc, tmp) = setup_empty();
+        std::fs::create_dir_all(svc.client_computers_paths.instances_root()).unwrap();
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_root = transactions_root.join("ready");
+        let staged_root = transaction_root.join("new");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        let skill_home = tmp.path().join("custom-skill-home");
+        save_json_file(
+            &staged_root.join(COMPUTER_PROFILE_FILE_NAME),
+            &ComputerProfile::new("computer-a", "Ready"),
+        )
+        .unwrap();
+        save_json_file(
+            &staged_root.join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME),
+            &SdkContextConfig {
+                schema_version: SDK_CONTEXT_SCHEMA_VERSION,
+                skill_home_override: Some(skill_home.clone()),
+            },
+        )
+        .unwrap();
+        save_json_file(
+            &transaction_root.join("transaction.json"),
+            &ComputerDirectoryTransaction {
+                schema_version: 1,
+                instance_id: "computer-a".to_string(),
+                phase: ComputerDirectoryTransactionPhase::Ready,
+            },
+        )
+        .unwrap();
+
+        let discovery = svc.discover_computer_instances().unwrap();
+
+        assert_eq!(discovery.config.instances.len(), 1);
+        assert_eq!(discovery.config.instances[0].name, "Ready");
+        assert_eq!(
+            discovery.config.instances[0].local_skills_root,
+            Some(skill_home)
+        );
+        assert!(discovery.errors.is_empty());
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
+    fn failed_directory_swap_and_rollback_retains_original_for_recovery() {
+        let (svc, _tmp) = setup_empty();
+        svc.add_computer_instance(ComputerInstance::new("computer-a", "Original"))
+            .unwrap();
+        svc.inject_directory_rename_actions([
+            DirectoryRenameTestAction::Proceed,
+            DirectoryRenameTestAction::Fail,
+            DirectoryRenameTestAction::Fail,
+        ]);
+
+        let error = svc
+            .rename_computer_instance("computer-a", "Replacement".to_string())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::DirectoryTransactionRollback {
+                ref instance_id,
+                ref primary,
+                ref rollback,
+                ..
+            } if instance_id == "computer-a"
+                && primary.contains("injected directory rename failure")
+                && rollback.contains("injected directory rename failure")
+        ));
+        let transactions_root = svc.client_computers_paths.root().join(".transactions");
+        let transaction_roots = std::fs::read_dir(&transactions_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(transaction_roots.len(), 1);
+        let retained_profile: ComputerProfile = load_required_json_file(
+            &transaction_roots[0]
+                .join("old")
+                .join(COMPUTER_PROFILE_FILE_NAME),
+        )
+        .unwrap();
+        assert_eq!(retained_profile.name, "Original");
+
+        let discovered = svc.discover_computer_instances().unwrap();
+
+        assert_eq!(discovered.config.instances[0].name, "Original");
+        assert!(!transactions_root.exists());
+    }
+
+    #[test]
     fn new_artifacts_reject_nested_unknown_fields() {
         let (svc, _tmp) = setup_empty();
 
@@ -1142,26 +1904,30 @@ mod tests {
     #[test]
     fn new_profile_repository_does_not_change_legacy_instances_file() {
         let (svc, tmp) = setup_empty();
-        svc.add_computer_instance(ComputerInstance::new("legacy", "Legacy"))
-            .unwrap();
+        let legacy = ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![ComputerInstance::new("legacy", "Legacy")],
+        };
+        save_json_file(&tmp.path().join("computer_instances.json"), &legacy).unwrap();
         svc.save_computer_profile(&ComputerProfile::new("new-profile", "New"))
             .unwrap();
 
-        let legacy = svc.load_computer_instances().unwrap();
+        let legacy = svc.load_legacy_computer_instances().unwrap();
         assert_eq!(legacy.instances.len(), 1);
         assert_eq!(legacy.instances[0].id, "legacy");
+        assert_eq!(svc.load_computer_instances().unwrap().instances.len(), 1);
         assert!(tmp.path().join("computer_instances.json").exists());
     }
 
     // --- Legacy MCP migration ---
 
     #[test]
-    fn legacy_mcp_migration_read_is_empty_for_new_profiles() {
+    fn legacy_mcp_migration_read_does_not_treat_new_profiles_as_legacy() {
         let (svc, _tmp) = setup();
-        let configs = svc
-            .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-            .unwrap();
-        assert!(configs.is_empty());
+        assert!(matches!(
+            svc.load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID),
+            Err(ConfigError::NotFound(id)) if id == TEST_INSTANCE_ID
+        ));
     }
 
     #[test]
@@ -1306,7 +2072,7 @@ mod tests {
             ],
         };
 
-        svc.save_computer_instances(&instances).unwrap();
+        save_json_file(svc.legacy_computer_instances_path(), &instances).unwrap();
         let first = svc.load_legacy_mcp_configs_for_migration("first").unwrap();
         let second = svc.load_legacy_mcp_configs_for_migration("second").unwrap();
 
@@ -1406,34 +2172,6 @@ mod tests {
         assert_eq!(loaded.len(), 1);
     }
 
-    // --- Input Values ---
-
-    #[test]
-    fn test_load_empty_input_values() {
-        let (svc, _tmp) = setup();
-        let values = svc
-            .load_input_values_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn test_save_and_load_input_values_roundtrip() {
-        let (svc, _tmp) = setup();
-        let mut values = HashMap::new();
-        values.insert("key1".to_string(), serde_json::json!("value1"));
-        values.insert("key2".to_string(), serde_json::json!(42));
-
-        svc.save_input_values_for_instance(TEST_INSTANCE_ID, &values)
-            .unwrap();
-        let loaded = svc
-            .load_input_values_for_instance(TEST_INSTANCE_ID)
-            .unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded["key1"], serde_json::json!("value1"));
-        assert_eq!(loaded["key2"], serde_json::json!(42));
-    }
-
     #[test]
     fn test_manual_target_id_is_stable_and_independent_of_header_order() {
         let mut headers_a = HashMap::new();
@@ -1487,7 +2225,10 @@ mod tests {
         )
         .unwrap();
 
-        let targets = svc.list_manual_smcp_targets().unwrap();
+        let targets = svc
+            .load_legacy_connection_targets()
+            .unwrap()
+            .manual_smcp_targets;
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "legacy-target");

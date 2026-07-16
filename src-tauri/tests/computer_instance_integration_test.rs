@@ -3,6 +3,9 @@ mod common;
 
 use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
 use common::create_test_app_state;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tfrobot_client_lib::commands::computer::{
     create_computer_instance_core, delete_computer_instance_core, duplicate_computer_instance_core,
@@ -10,12 +13,101 @@ use tfrobot_client_lib::commands::computer::{
     start_computer_instance_core, stop_computer_instance_core, CreateComputerInstanceRequest,
     DuplicateComputerInstanceRequest, DuplicateSkillHomeMode, RenameComputerInstanceRequest,
 };
-use tfrobot_client_lib::commands::inputs::InputDefinition;
+use tfrobot_client_lib::commands::connection::connect_connection_target_core;
+use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
 use tfrobot_client_lib::commands::mcp;
 use tfrobot_client_lib::services::computer::{ComputerInstance, RobotBindingMetadata};
+use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
+use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
+use tfrobot_client_lib::services::logger::LogService;
+use tfrobot_client_lib::services::settings::SettingsService;
+use tfrobot_client_lib::AppState;
 
 const LEGACY_INSTANCE_ID: &str = "default";
+
+#[derive(Default)]
+struct ToggleReadFailureSecretStore {
+    secrets: Mutex<HashMap<String, String>>,
+    fail_reads: AtomicBool,
+}
+
+impl ToggleReadFailureSecretStore {
+    fn fail_reads(&self) {
+        self.fail_reads.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SecretStore for ToggleReadFailureSecretStore {
+    fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+        self.secrets
+            .lock()
+            .map_err(|error| KeychainError::Store(error.to_string()))?
+            .insert(key.to_string(), secret.to_string());
+        Ok(())
+    }
+
+    fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(KeychainError::Store(
+                "injected Keychain read failure".to_string(),
+            ));
+        }
+        Ok(self
+            .secrets
+            .lock()
+            .map_err(|error| KeychainError::Store(error.to_string()))?
+            .get(key)
+            .cloned())
+    }
+
+    fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+        self.secrets
+            .lock()
+            .map_err(|error| KeychainError::Store(error.to_string()))?
+            .remove(key);
+        Ok(())
+    }
+}
+
+fn create_state_with_toggle_secret_store(
+    path: &std::path::Path,
+) -> (AppState, Arc<ToggleReadFailureSecretStore>) {
+    let secrets = Arc::new(ToggleReadFailureSecretStore::default());
+    let state = AppState::new_with_secret_store(
+        ConfigService::new(path.to_path_buf()).unwrap(),
+        LogService::new(path).unwrap(),
+        SettingsService::new(path.to_path_buf()),
+        secrets.clone(),
+    );
+    (state, secrets)
+}
+
+async fn create_computer_with_global_input(state: &AppState, name: &str) -> String {
+    let created = create_computer_instance_core(
+        state,
+        CreateComputerInstanceRequest {
+            name: name.to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    inputs::add_or_update_input_core(
+        state,
+        &created.id,
+        InputDefinition::PromptString {
+            id: "token".to_string(),
+            label: "Token".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    created.id
+}
 
 #[tokio::test]
 async fn command_core_creates_renames_lists_and_deletes_instance() {
@@ -104,6 +196,209 @@ async fn created_instances_use_uuid_based_ids() {
 }
 
 #[tokio::test]
+async fn create_rolls_back_profile_when_keychain_hydration_fails() {
+    let dir = TempDir::new().unwrap();
+    let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
+    create_computer_with_global_input(&state, "Existing").await;
+    secrets.fail_reads();
+
+    let error = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Should Roll Back".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("injected Keychain read failure"));
+    let persisted = state.config.load_computer_instances().unwrap();
+    assert_eq!(persisted.instances.len(), 1);
+    assert_eq!(persisted.instances[0].name, "Existing");
+}
+
+#[tokio::test]
+async fn rename_restores_profile_when_keychain_hydration_fails() {
+    let dir = TempDir::new().unwrap();
+    let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
+    let id = create_computer_with_global_input(&state, "Original").await;
+    secrets.fail_reads();
+
+    let error = rename_computer_instance_core(
+        &state,
+        RenameComputerInstanceRequest {
+            id: id.clone(),
+            name: "Should Roll Back".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("reverted persisted config"));
+    assert_eq!(
+        state.config.get_computer_instance(&id).unwrap().name,
+        "Original"
+    );
+    assert_eq!(
+        state
+            .computer_registry
+            .runtime(&id)
+            .await
+            .unwrap()
+            .instance
+            .name,
+        "Original"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_rolls_back_profile_and_sdk_storage_when_keychain_hydration_fails() {
+    let dir = TempDir::new().unwrap();
+    let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
+    let source_id = create_computer_with_global_input(&state, "Source").await;
+    let storage_root = state.config.computer_skill_home_base();
+    let storage_count_before = std::fs::read_dir(&storage_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or_default();
+    secrets.fail_reads();
+
+    let error = duplicate_computer_instance_core(
+        &state,
+        DuplicateComputerInstanceRequest {
+            source_id: source_id.clone(),
+            name: "Should Roll Back".to_string(),
+            description: None,
+            copy_robot_binding: false,
+            connection_target_id: None,
+            skill_home_mode: DuplicateSkillHomeMode::Empty,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("injected Keychain read failure"));
+    let persisted = state.config.load_computer_instances().unwrap();
+    assert_eq!(persisted.instances.len(), 1);
+    assert_eq!(persisted.instances[0].id, source_id);
+    let storage_count_after = std::fs::read_dir(&storage_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or_default();
+    assert_eq!(storage_count_after, storage_count_before);
+}
+
+#[tokio::test]
+async fn computer_lifecycle_commands_wait_for_the_transaction_lock() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let guard = state.computer_lifecycle_lock.lock().await;
+    let operation_state = state.clone();
+    let mut operation = tokio::spawn(async move {
+        create_computer_instance_core(
+            operation_state.as_ref(),
+            CreateComputerInstanceRequest {
+                name: "Serialized".to_string(),
+                description: None,
+            },
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
+            .await
+            .is_err()
+    );
+    drop(guard);
+
+    let created = operation.await.unwrap().unwrap();
+
+    let guard = state.computer_lifecycle_lock.lock().await;
+    let operation_state = state.clone();
+    let mut input_operation = tokio::spawn(async move {
+        inputs::add_or_update_input_core(
+            operation_state.as_ref(),
+            &created.id,
+            InputDefinition::PromptString {
+                id: "serialized-input".to_string(),
+                label: "Serialized input".to_string(),
+                description: None,
+                default: None,
+                password: None,
+            },
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut input_operation)
+            .await
+            .is_err()
+    );
+    drop(guard);
+
+    input_operation.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let created = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Serialized MCP".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let guard = state.computer_lifecycle_lock.lock().await;
+    let operation_state = state.clone();
+    let instance_id = created.id.clone();
+    let mut operation = tokio::spawn(async move {
+        mcp::add_mcp_server_core(
+            operation_state.as_ref(),
+            &instance_id,
+            common::echo_server_config("serialized-mcp"),
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
+            .await
+            .is_err(),
+        "MCP mutation escaped the Computer lifecycle transaction"
+    );
+    drop(guard);
+
+    operation.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn connection_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let guard = state.computer_lifecycle_lock.lock().await;
+    let operation_state = state.clone();
+    let mut operation = tokio::spawn(async move {
+        connect_connection_target_core(operation_state.as_ref(), "missing", "missing-target").await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
+            .await
+            .is_err(),
+        "connection mutation escaped the Computer lifecycle transaction"
+    );
+    drop(guard);
+
+    assert!(operation.await.unwrap().is_err());
+}
+
+#[tokio::test]
 async fn duplicate_copies_configuration_without_runtime_state() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
@@ -139,10 +434,6 @@ async fn duplicate_copies_configuration_without_runtime_state() {
                 namespace: Some("test".to_string()),
                 robot_name: Some("Robot 42".to_string()),
             });
-            instance.input_values.insert(
-                "token".to_string(),
-                serde_json::Value::String("persisted-input".to_string()),
-            );
         })
         .unwrap();
     let target = state
@@ -186,10 +477,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     );
     assert_ne!(duplicate.id, source.id);
     assert_uuid_instance_id(&duplicate.id);
-    assert_eq!(
-        duplicate_config.input_values.get("token"),
-        Some(&serde_json::Value::String("persisted-input".to_string()))
-    );
+    assert!(duplicate_config.input_values.is_empty());
     assert_eq!(
         duplicate_config
             .robot_binding
@@ -527,7 +815,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
 }
 
 #[tokio::test]
-async fn status_reads_do_not_sync_runtime_inputs() {
+async fn status_reads_reconcile_runtime_inputs_from_global_storage() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     let created = create_computer_instance_core(
@@ -549,7 +837,7 @@ async fn status_reads_do_not_sync_runtime_inputs() {
                 label: "API Key".to_string(),
                 description: None,
                 default: Some("default-key".to_string()),
-                password: Some(true),
+                password: Some(false),
             }],
         )
         .unwrap();
@@ -560,7 +848,7 @@ async fn status_reads_do_not_sync_runtime_inputs() {
         .unwrap();
 
     let runtime = state.computer_registry.runtime(&created.id).await.unwrap();
-    assert!(!runtime.inputs.read().await.contains_key("api-key"));
+    assert!(runtime.inputs.read().await.contains_key("api-key"));
 }
 
 #[tokio::test]
@@ -603,7 +891,7 @@ async fn legacy_default_id_instance_is_a_normal_instance() {
 }
 
 #[tokio::test]
-async fn mcp_configs_and_input_values_are_isolated_per_instance() {
+async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     state
@@ -643,52 +931,27 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
     )
     .await
     .unwrap();
-    state
-        .config
-        .save_inputs_for_instance(
-            LEGACY_INSTANCE_ID,
-            &[InputDefinition::PromptString {
-                id: "token".to_string(),
-                label: "Default token".to_string(),
-                description: None,
-                default: None,
-                password: None,
-            }],
-        )
-        .unwrap();
-    state
-        .config
-        .save_inputs_for_instance(
-            &second.id,
-            &[InputDefinition::PromptString {
-                id: "token".to_string(),
-                label: "Second token".to_string(),
-                description: None,
-                default: None,
-                password: None,
-            }],
-        )
-        .unwrap();
-    state
-        .config
-        .save_input_values_for_instance(
-            LEGACY_INSTANCE_ID,
-            &std::collections::HashMap::from([(
-                "token".to_string(),
-                serde_json::Value::String("default-secret".to_string()),
-            )]),
-        )
-        .unwrap();
-    state
-        .config
-        .save_input_values_for_instance(
-            &second.id,
-            &std::collections::HashMap::from([(
-                "token".to_string(),
-                serde_json::Value::String("second-secret".to_string()),
-            )]),
-        )
-        .unwrap();
+    inputs::add_or_update_input_core(
+        &state,
+        LEGACY_INSTANCE_ID,
+        InputDefinition::PromptString {
+            id: "token".to_string(),
+            label: "Shared token".to_string(),
+            description: None,
+            default: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        &second.id,
+        "token".to_string(),
+        serde_json::Value::String("shared-secret".to_string()),
+    )
+    .await
+    .unwrap();
 
     let default_servers = mcp::get_mcp_servers_core(&state, LEGACY_INSTANCE_ID)
         .await
@@ -699,34 +962,27 @@ async fn mcp_configs_and_input_values_are_isolated_per_instance() {
         .load_inputs_for_instance(LEGACY_INSTANCE_ID)
         .unwrap();
     let second_inputs = state.config.load_inputs_for_instance(&second.id).unwrap();
-    let default_values = state
-        .config
-        .load_input_values_for_instance(LEGACY_INSTANCE_ID)
-        .unwrap();
-    let second_values = state
-        .config
-        .load_input_values_for_instance(&second.id)
-        .unwrap();
+    let shared_value = tfrobot_client_lib::services::keychain::get_input_value(
+        state.secret_store.as_ref(),
+        "token",
+    )
+    .unwrap();
 
     assert_eq!(default_servers[0].name, "default-only");
     assert_eq!(second_servers[0].name, "second-only");
     assert_eq!(default_inputs[0].id(), "token");
     assert_eq!(second_inputs[0].id(), "token");
     match &default_inputs[0] {
-        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Default token"),
+        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Shared token"),
         _ => panic!("expected default PromptString input"),
     }
     match &second_inputs[0] {
-        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Second token"),
+        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Shared token"),
         _ => panic!("expected second PromptString input"),
     }
     assert_eq!(
-        default_values.get("token"),
-        Some(&serde_json::Value::String("default-secret".to_string()))
-    );
-    assert_eq!(
-        second_values.get("token"),
-        Some(&serde_json::Value::String("second-secret".to_string()))
+        shared_value,
+        Some(serde_json::Value::String("shared-secret".to_string()))
     );
 }
 

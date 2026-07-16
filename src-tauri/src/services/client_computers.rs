@@ -7,6 +7,10 @@ pub(crate) enum GlobalConfigFile {
     ManagerSession,
 }
 
+pub const COMPUTER_PROFILE_FILE_NAME: &str = "profile.json";
+pub const SDK_CONTEXT_FILE_NAME: &str = "sdk_context.json";
+pub const MIGRATION_STATE_FILE_NAME: &str = "migration_state.json";
+
 impl GlobalConfigFile {
     fn file_name(self) -> &'static str {
         match self {
@@ -39,20 +43,41 @@ impl ClientComputersPaths {
         &self.root
     }
 
+    pub fn instances_root(&self) -> PathBuf {
+        self.root.join("instances")
+    }
+
+    pub(crate) fn instance_root(
+        &self,
+        instance_id: &str,
+    ) -> Result<PathBuf, ClientComputersPathError> {
+        validate_instance_directory_id(instance_id)?;
+        Ok(self.instances_root().join(instance_id))
+    }
+
     pub(crate) fn computer_profile(
         &self,
         instance_id: &str,
     ) -> Result<PathBuf, ClientComputersPathError> {
         validate_instance_directory_id(instance_id)?;
         Ok(self
-            .root
-            .join("instances")
-            .join(instance_id)
-            .join("profile.json"))
+            .instance_root(instance_id)?
+            .join(COMPUTER_PROFILE_FILE_NAME))
+    }
+
+    pub(crate) fn sdk_context(
+        &self,
+        instance_id: &str,
+    ) -> Result<PathBuf, ClientComputersPathError> {
+        Ok(self.instance_root(instance_id)?.join(SDK_CONTEXT_FILE_NAME))
     }
 
     pub(crate) fn global_config(&self, artifact: GlobalConfigFile) -> PathBuf {
         self.root.join("global").join(artifact.file_name())
+    }
+
+    pub(crate) fn migration_state(&self) -> PathBuf {
+        self.root.join(MIGRATION_STATE_FILE_NAME)
     }
 }
 

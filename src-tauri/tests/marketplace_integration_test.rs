@@ -227,11 +227,12 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         .bundled_skills
         .contains(&"audit:code-review".to_string()));
 
-    let managed = state
-        .config
-        .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-        .unwrap();
-    assert!(managed.iter().all(|server| server.name() != "audit-mcp"));
+    let stored = state.sdk_config.load(TEST_INSTANCE_ID);
+    assert!(stored
+        .mcp
+        .servers
+        .iter()
+        .all(|server| server.name != "audit-mcp"));
     let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -260,11 +261,12 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
     uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
         .await
         .unwrap();
-    let managed = state
-        .config
-        .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-        .unwrap();
-    assert!(managed.iter().all(|server| server.name() != "audit-mcp"));
+    let stored = state.sdk_config.load(TEST_INSTANCE_ID);
+    assert!(stored
+        .mcp
+        .servers
+        .iter()
+        .all(|server| server.name != "audit-mcp"));
     let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -528,11 +530,6 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
     uninstall_plugin_core(&restarted, TEST_INSTANCE_ID, request)
         .await
         .unwrap();
-    let managed = restarted
-        .config
-        .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-        .unwrap();
-    assert!(managed.iter().all(|server| server.name() != "audit-mcp"));
     assert!(restarted
         .sdk_config
         .load(TEST_INSTANCE_ID)

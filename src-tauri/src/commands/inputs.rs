@@ -1,10 +1,10 @@
-use crate::commands::runtime_sync::apply_updated_computer_instance;
+use crate::services::keychain;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 /// Input variable definition for the frontend
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum InputDefinition {
     PromptString {
@@ -35,7 +35,7 @@ pub enum InputDefinition {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PickOption {
     pub label: String,
     pub value: String,
@@ -93,24 +93,33 @@ pub async fn add_or_update_input_core(
     input: InputDefinition,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
     let id = input.id().to_string();
     log::info!("Adding/updating input for instance {}: {}", instance_id, id);
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+    require_existing_instance(state, instance_id)?;
 
     let mut inputs = state
         .config
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    let previous_inputs = inputs.clone();
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
-    let updated_instance = state
+    state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            Some(&previous_inputs),
+            &[],
+            error,
+        )
+        .await);
+    }
 
     Ok(())
 }
@@ -131,16 +140,18 @@ pub async fn remove_input_core(
     id: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Removing input for instance {}: {}", instance_id, id);
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+    require_existing_instance(state, instance_id)?;
 
     let mut inputs = state
         .config
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    let previous_inputs = inputs.clone();
+    let previous_value =
+        keychain::get_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
     let original_len = inputs.len();
     inputs.retain(|i| i.id() != id);
 
@@ -148,14 +159,30 @@ pub async fn remove_input_core(
         return Err(format!("Input not found: {}", id));
     }
 
-    let updated_instance = state
+    state
         .config
-        .update_computer_instance(instance_id, |instance| {
-            instance.inputs = inputs;
-            instance.input_values.remove(id);
-        })
+        .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    if let Err(error) = keychain::delete_input_value(state.secret_store.as_ref(), id) {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            Some(&previous_inputs),
+            &[(id.to_string(), previous_value)],
+            error.to_string(),
+        )
+        .await);
+    }
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            Some(&previous_inputs),
+            &[(id.to_string(), previous_value)],
+            error,
+        )
+        .await);
+    }
 
     Ok(())
 }
@@ -166,10 +193,7 @@ pub async fn list_input_values(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
-    state
-        .config
-        .load_input_values_for_instance(require_instance_id(&instance_id)?)
-        .map_err(|e| e.to_string())
+    list_input_values_core(&state, require_instance_id(&instance_id)?)
 }
 
 /// Get a single cached input value
@@ -179,11 +203,9 @@ pub async fn get_input_value(
     instance_id: String,
     id: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    let values = state
-        .config
-        .load_input_values_for_instance(require_instance_id(&instance_id)?)
-        .map_err(|e| e.to_string())?;
-    Ok(values.get(&id).cloned())
+    let instance_id = require_instance_id(&instance_id)?;
+    require_existing_instance(&state, instance_id)?;
+    keychain::get_input_value(state.secret_store.as_ref(), &id).map_err(|e| e.to_string())
 }
 
 /// Set a cached input value
@@ -204,22 +226,31 @@ pub async fn set_input_value_core(
     value: serde_json::Value,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Setting input value: {}", id);
-    let previous = state
+    require_existing_instance(state, instance_id)?;
+    let inputs = state
         .config
-        .get_computer_instance(instance_id)
+        .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
-
-    let mut values = state
-        .config
-        .load_input_values_for_instance(instance_id)
+    if !inputs.iter().any(|input| input.id() == id) {
+        return Err(format!("Input not found: {id}"));
+    }
+    let previous_value =
+        keychain::get_input_value(state.secret_store.as_ref(), &id).map_err(|e| e.to_string())?;
+    keychain::set_input_value(state.secret_store.as_ref(), &id, &value)
         .map_err(|e| e.to_string())?;
-    values.insert(id, value);
-    let updated_instance = state
-        .config
-        .save_input_values_for_instance(instance_id, &values)
-        .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            None,
+            &[(id, previous_value)],
+            error,
+        )
+        .await);
+    }
 
     Ok(())
 }
@@ -240,20 +271,22 @@ pub async fn remove_input_value_core(
     id: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    let mut values = state
-        .config
-        .load_input_values_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
-    values.remove(id);
-    let updated_instance = state
-        .config
-        .save_input_values_for_instance(instance_id, &values)
-        .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(state, instance_id)?;
+    let previous_value =
+        keychain::get_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
+    keychain::delete_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            None,
+            &[(id.to_string(), previous_value)],
+            error,
+        )
+        .await);
+    }
     Ok(())
 }
 
@@ -268,15 +301,38 @@ pub async fn clear_input_values(
 
 pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
-    let previous = state
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(state, instance_id)?;
+    let inputs = state
         .config
-        .get_computer_instance(instance_id)
+        .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
-    let updated_instance = state
-        .config
-        .save_input_values_for_instance(instance_id, &std::collections::HashMap::new())
+    let previous_values = inputs
+        .iter()
+        .map(|input| {
+            keychain::get_input_value(state.secret_store.as_ref(), input.id())
+                .map(|value| (input.id().to_string(), value))
+        })
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(state, previous, updated_instance).await?;
+    for input in &inputs {
+        if let Err(error) = keychain::delete_input_value(state.secret_store.as_ref(), input.id()) {
+            return Err(rollback_input_mutation(
+                state,
+                instance_id,
+                None,
+                &previous_values,
+                error.to_string(),
+            )
+            .await);
+        }
+    }
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        return Err(
+            rollback_input_mutation(state, instance_id, None, &previous_values, error).await,
+        );
+    }
     Ok(())
 }
 
@@ -288,10 +344,9 @@ pub async fn import_inputs(
     path: String,
 ) -> Result<usize, String> {
     let instance_id = require_instance_id(&instance_id)?;
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(&state, instance_id)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let imported: Vec<InputDefinition> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
@@ -301,18 +356,142 @@ pub async fn import_inputs(
         .config
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
+    let previous_inputs = inputs.clone();
     for input in imported {
         let id = input.id().to_string();
         inputs.retain(|i| i.id() != id);
         inputs.push(input);
     }
-    let updated_instance = state
+    state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    apply_updated_computer_instance(&state, previous, updated_instance).await?;
+    if let Err(error) = sync_all_computer_runtimes(&state).await {
+        return Err(rollback_input_mutation(
+            &state,
+            instance_id,
+            Some(&previous_inputs),
+            &[],
+            error,
+        )
+        .await);
+    }
 
     Ok(count)
+}
+
+async fn sync_all_computer_runtimes(state: &AppState) -> Result<(), String> {
+    sync_all_computer_runtimes_with_parts(
+        state.config.as_ref(),
+        state.computer_registry.as_ref(),
+        state.secret_store.as_ref(),
+    )
+    .await
+}
+
+async fn sync_all_computer_runtimes_with_parts(
+    config: &crate::services::config::ConfigService,
+    registry: &crate::services::computer::ComputerRegistry,
+    secret_store: &dyn crate::services::keychain::SecretStore,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for mut instance in config
+        .load_computer_instances()
+        .map_err(|error| error.to_string())?
+        .instances
+    {
+        for input in &instance.inputs {
+            if let Some(value) = keychain::get_input_value(secret_store, input.id())
+                .map_err(|error| error.to_string())?
+            {
+                instance.input_values.insert(input.id().to_string(), value);
+            }
+        }
+        if let Err(error) = registry.update_runtime_instance(instance).await {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+pub(crate) async fn replace_global_input_definitions_with_parts_locked(
+    config: &crate::services::config::ConfigService,
+    registry: &crate::services::computer::ComputerRegistry,
+    secret_store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
+    definitions: &[InputDefinition],
+) -> Result<(), String> {
+    let previous = config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    config
+        .save_inputs_for_instance(instance_id, definitions)
+        .map_err(|error| error.to_string())?;
+    if let Err(primary_error) =
+        sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
+    {
+        let mut rollback_errors = Vec::new();
+        if let Err(error) = config.save_inputs_for_instance(instance_id, &previous) {
+            rollback_errors.push(format!("restore global input definitions: {error}"));
+        }
+        if let Err(error) =
+            sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
+        {
+            rollback_errors.push(format!("restore Computer runtimes: {error}"));
+        }
+        return if rollback_errors.is_empty() {
+            Err(format!(
+                "Failed to synchronize global input definitions; changes were reverted: {primary_error}"
+            ))
+        } else {
+            Err(format!(
+                "Failed to synchronize global input definitions: {primary_error}; rollback also failed: {}",
+                rollback_errors.join("; ")
+            ))
+        };
+    }
+    Ok(())
+}
+
+async fn rollback_input_mutation(
+    state: &AppState,
+    instance_id: &str,
+    previous_inputs: Option<&[InputDefinition]>,
+    previous_values: &[(String, Option<serde_json::Value>)],
+    primary_error: String,
+) -> String {
+    let mut rollback_errors = Vec::new();
+    if let Some(inputs) = previous_inputs {
+        if let Err(error) = state.config.save_inputs_for_instance(instance_id, inputs) {
+            rollback_errors.push(format!("restore global input definitions: {error}"));
+        }
+    }
+    for (id, value) in previous_values {
+        let result = match value {
+            Some(value) => keychain::set_input_value(state.secret_store.as_ref(), id, value),
+            None => keychain::delete_input_value(state.secret_store.as_ref(), id),
+        };
+        if let Err(error) = result {
+            rollback_errors.push(format!("restore Keychain input '{id}': {error}"));
+        }
+    }
+    if let Err(error) = sync_all_computer_runtimes(state).await {
+        rollback_errors.push(format!("restore Computer runtimes: {error}"));
+    }
+    if rollback_errors.is_empty() {
+        format!(
+            "Failed to synchronize global input mutation; changes were reverted: {primary_error}"
+        )
+    } else {
+        format!(
+            "Failed to synchronize global input mutation: {primary_error}; rollback also failed: {}",
+            rollback_errors.join("; ")
+        )
+    }
 }
 
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {
@@ -321,4 +500,32 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
         return Err("instance_id is required".to_string());
     }
     Ok(instance_id)
+}
+
+fn require_existing_instance(state: &AppState, instance_id: &str) -> Result<(), String> {
+    state
+        .config
+        .get_computer_instance(instance_id)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn list_input_values_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    require_existing_instance(state, instance_id)?;
+    let mut values = std::collections::HashMap::new();
+    for input in state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(value) = keychain::get_input_value(state.secret_store.as_ref(), input.id())
+            .map_err(|error| error.to_string())?
+        {
+            values.insert(input.id().to_string(), value);
+        }
+    }
+    Ok(values)
 }

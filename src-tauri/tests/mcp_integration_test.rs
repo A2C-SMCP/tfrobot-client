@@ -289,14 +289,8 @@ async fn test_legacy_profile_plugin_owner_does_not_block_sdk_owned_user_config()
     assert_eq!(claude_result.servers_imported, 1);
     assert!(claude_result.servers_skipped.is_empty());
 
-    let managed = state
-        .config
-        .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-        .unwrap()
-        .into_iter()
-        .find(|server| server.name() == "plugin-owned")
-        .expect("legacy migration read should retain the plugin owner");
-    assert!(managed.is_plugin_owned());
+    assert!(mcp::get_mcp_server_config_core(&state, TEST_INSTANCE_ID, "plugin-owned").is_ok());
+    assert!(!state.config.legacy_computer_instances_path().exists());
 }
 
 #[tokio::test]
@@ -378,11 +372,14 @@ async fn test_sdk_config_remains_authoritative_across_runtime_sync_and_restart()
         .servers
         .iter()
         .any(|server| server.name == "sdk-authoritative"));
-    assert!(state
-        .config
-        .load_legacy_mcp_configs_for_migration(TEST_INSTANCE_ID)
-        .unwrap()
-        .is_empty());
+    let profile_json = std::fs::read_to_string(
+        state
+            .config
+            .computer_profile_path(TEST_INSTANCE_ID)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!profile_json.contains("sdk-authoritative"));
 
     let profile = state
         .config
@@ -1164,11 +1161,17 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
                 id: "api-token".to_string(),
                 label: "API token".to_string(),
                 description: None,
-                default: Some("input-secret".to_string()),
+                default: None,
                 password: Some(true),
             }],
         )
         .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_value(
+        state.secret_store.as_ref(),
+        "api-token",
+        &serde_json::json!("input-secret"),
+    )
+    .unwrap();
 
     config_io::export_config_core(
         &state,
@@ -1772,7 +1775,7 @@ async fn test_input_commands_sync_runtime_definitions() {
             label: "API Key".to_string(),
             description: Some("Secret API key".to_string()),
             default: Some("default-key".to_string()),
-            password: Some(true),
+            password: Some(false),
         },
     )
     .await
@@ -1793,7 +1796,7 @@ async fn test_input_commands_sync_runtime_definitions() {
             a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
                 if prompt.description == "Secret API key"
                     && prompt.default.as_deref() == Some("default-key")
-                    && prompt.password == Some(true)
+                    && prompt.password == Some(false)
         ));
     }
 
@@ -1877,7 +1880,7 @@ async fn test_input_commands_sync_runtime_definitions() {
             label: "API Key".to_string(),
             description: None,
             default: Some("default-key".to_string()),
-            password: Some(true),
+            password: Some(false),
         },
     )
     .await
@@ -1898,33 +1901,70 @@ async fn test_input_values_crud() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
-    // Set values
-    let mut values = std::collections::HashMap::new();
-    values.insert("key1".to_string(), serde_json::json!("value1"));
-    values.insert("key2".to_string(), serde_json::json!(42));
-    state
-        .config
-        .save_input_values_for_instance(TEST_INSTANCE_ID, &values)
+    for id in ["key1", "key2"] {
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: id.to_string(),
+                label: id.to_string(),
+                description: None,
+                default: None,
+                password: None,
+            },
+        )
+        .await
         .unwrap();
+    }
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "key1".to_string(),
+        serde_json::json!("value1"),
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "key2".to_string(),
+        serde_json::json!(42),
+    )
+    .await
+    .unwrap();
 
-    // Read back
-    let loaded = state
-        .config
-        .load_input_values_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    assert_eq!(loaded["key1"], serde_json::json!("value1"));
-    assert_eq!(loaded["key2"], serde_json::json!(42));
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_value(
+            state.secret_store.as_ref(),
+            "key1"
+        )
+        .unwrap(),
+        Some(serde_json::json!("value1"))
+    );
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_value(
+            state.secret_store.as_ref(),
+            "key2"
+        )
+        .unwrap(),
+        Some(serde_json::json!(42))
+    );
 
-    // Clear
-    state
-        .config
-        .save_input_values_for_instance(TEST_INSTANCE_ID, &std::collections::HashMap::new())
+    inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
+        .await
         .unwrap();
-    let after = state
-        .config
-        .load_input_values_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    assert!(after.is_empty());
+    assert!(tfrobot_client_lib::services::keychain::get_input_value(
+        state.secret_store.as_ref(),
+        "key1"
+    )
+    .unwrap()
+    .is_none());
+    assert!(tfrobot_client_lib::services::keychain::get_input_value(
+        state.secret_store.as_ref(),
+        "key2"
+    )
+    .unwrap()
+    .is_none());
 }
 
 // ── Issue #19 regression: stderr pipe deadlock ──

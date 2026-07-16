@@ -1,4 +1,3 @@
-use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
@@ -108,6 +107,7 @@ async fn import_cli_native(
     content: &str,
 ) -> Result<ImportResult, String> {
     let config: CliNativeConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
 
     let mut servers_imported = 0;
     let mut servers_skipped = Vec::new();
@@ -116,10 +116,7 @@ async fn import_cli_native(
     // Import inputs before servers so SDK Computer can render ${input:...}
     // placeholders while each imported server is synchronized into runtime.
     if !config.inputs.is_empty() {
-        let previous = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|e| e.to_string())?;
+        let _mutation_guard = state.input_mutation_lock.lock().await;
         let mut existing = state
             .config
             .load_inputs_for_instance(instance_id)
@@ -129,11 +126,14 @@ async fn import_cli_native(
             existing.retain(|i| i.id() != id);
             existing.push(input);
         }
-        let updated_instance = state
-            .config
-            .save_inputs_for_instance(instance_id, &existing)
-            .map_err(|e| e.to_string())?;
-        apply_updated_computer_instance(state, previous, updated_instance).await?;
+        crate::commands::inputs::replace_global_input_definitions_with_parts_locked(
+            state.config.as_ref(),
+            state.computer_registry.as_ref(),
+            state.secret_store.as_ref(),
+            instance_id,
+            &existing,
+        )
+        .await?;
     }
 
     for server in &config.servers {
@@ -142,7 +142,7 @@ async fn import_cli_native(
             continue;
         }
 
-        super::mcp::add_mcp_server_core(state, instance_id, server.clone()).await?;
+        super::mcp::add_mcp_server_locked(state, instance_id, server.clone()).await?;
         servers_imported += 1;
     }
 
@@ -159,6 +159,7 @@ async fn import_claude_desktop(
     content: &str,
 ) -> Result<ImportResult, String> {
     let config: ClaudeDesktopConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
 
     let mut servers_imported = 0;
     let mut servers_skipped = Vec::new();
@@ -170,7 +171,7 @@ async fn import_claude_desktop(
         }
 
         let mcp_config = build_stdio_config(&name, &server);
-        super::mcp::add_mcp_server_core(state, instance_id, mcp_config).await?;
+        super::mcp::add_mcp_server_locked(state, instance_id, mcp_config).await?;
         servers_imported += 1;
     }
 

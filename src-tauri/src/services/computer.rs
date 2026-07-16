@@ -1,5 +1,5 @@
 use crate::commands::connection::ConnectionState;
-use crate::commands::inputs::InputDefinition;
+use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::services::config::instance_storage_dir_name;
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
@@ -169,6 +169,7 @@ pub struct ComputerInstance {
 
 pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
 pub const GLOBAL_INPUTS_SCHEMA_VERSION: u32 = 1;
+pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 /// Client-owned, durable metadata for one Computer instance.
 ///
@@ -270,9 +271,62 @@ impl From<&ComputerInstance> for ComputerProfile {
     }
 }
 
+impl From<ComputerProfile> for ComputerInstance {
+    fn from(profile: ComputerProfile) -> Self {
+        Self {
+            id: profile.id,
+            name: profile.name,
+            description: profile.description,
+            mcp_servers: Vec::new(),
+            inputs: Vec::new(),
+            input_values: HashMap::new(),
+            local_skills_root: None,
+            connection_policy: ComputerConnectionPolicy {
+                target: profile
+                    .connection_policy
+                    .target
+                    .map(|target| ComputerConnectionTarget {
+                        target_type: target.target_type,
+                        id: target.id,
+                        robot_account_id: target.robot_account_id,
+                    }),
+                auto_connect: profile.connection_policy.auto_connect,
+            },
+            robot_binding: profile.robot_binding.map(|binding| RobotBindingMetadata {
+                employee_id: binding.employee_id,
+                robot_id: binding.robot_id,
+                robot_account_id: binding.robot_account_id,
+                namespace: binding.namespace,
+                robot_name: binding.robot_name,
+            }),
+        }
+    }
+}
+
+/// Client-owned injection context for the SDK runtime.
+///
+/// This remains separate from `profile.json`: the profile is product metadata,
+/// while this sidecar only selects an SDK Skill Home for the instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SdkContextConfig {
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_home_override: Option<PathBuf>,
+}
+
+impl Default for SdkContextConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: SDK_CONTEXT_SCHEMA_VERSION,
+            skill_home_override: None,
+        }
+    }
+}
+
 /// Global input definitions and UI schema owned by the client.
 /// Resolved values and secrets are deliberately stored through `SecretStore`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalInputsConfig {
     pub schema_version: u32,
@@ -364,6 +418,56 @@ impl From<&InputDefinition> for GlobalInputDefinition {
                 default: default.clone(),
             },
             InputDefinition::Command {
+                id,
+                label,
+                command,
+                args,
+            } => Self::Command {
+                id: id.clone(),
+                label: label.clone(),
+                command: command.clone(),
+                args: args.clone(),
+            },
+        }
+    }
+}
+
+impl From<&GlobalInputDefinition> for InputDefinition {
+    fn from(input: &GlobalInputDefinition) -> Self {
+        match input {
+            GlobalInputDefinition::PromptString {
+                id,
+                label,
+                description,
+                default,
+                password,
+            } => Self::PromptString {
+                id: id.clone(),
+                label: label.clone(),
+                description: description.clone(),
+                default: default.clone(),
+                password: *password,
+            },
+            GlobalInputDefinition::PickString {
+                id,
+                label,
+                description,
+                options,
+                default,
+            } => Self::PickString {
+                id: id.clone(),
+                label: label.clone(),
+                description: description.clone(),
+                options: options
+                    .iter()
+                    .map(|option| PickOption {
+                        label: option.label.clone(),
+                        value: option.value.clone(),
+                    })
+                    .collect(),
+                default: default.clone(),
+            },
+            GlobalInputDefinition::Command {
                 id,
                 label,
                 command,

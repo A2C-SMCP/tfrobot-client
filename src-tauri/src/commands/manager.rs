@@ -10,7 +10,9 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::services::manager_client::{DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo};
-use crate::services::settings::ManagerSessionSettings;
+use crate::services::settings::{
+    ManagerSessionConfig, PersistedManagerSession, MANAGER_SESSION_SCHEMA_VERSION,
+};
 use crate::AppState;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -77,7 +79,14 @@ pub async fn manager_restore_session(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<Option<RestoredManagerSession>, ManagerError> {
-    let Some(saved) = state.settings_service.load().manager_session else {
+    let saved_config = state
+        .settings_service
+        .load_global_manager_session()
+        .map_err(|error| ManagerError::Other {
+            status: 0,
+            body: format!("failed to load Manager session metadata: {error}"),
+        })?;
+    let Some(saved) = saved_config.session else {
         return Ok(None);
     };
     let user = UserInfo {
@@ -116,9 +125,10 @@ pub async fn manager_list_digital_employees(
 pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerError> {
     log::info!("manager_logout");
     state.manager_client.logout().await?;
-    let mut settings = state.settings_service.load();
-    settings.manager_session = None;
-    if let Err(error) = state.settings_service.save(&settings) {
+    if let Err(error) = state
+        .settings_service
+        .save_global_manager_session(&ManagerSessionConfig::default())
+    {
         log::warn!("manager: failed to clear persisted session metadata: {error}");
     }
     Ok(())
@@ -128,14 +138,16 @@ async fn persist_manager_session(state: &AppState, user: &UserInfo) {
     let Some(base_url) = state.manager_client.current_base_url().await else {
         return;
     };
-    let mut settings = state.settings_service.load();
-    settings.manager_session = Some(ManagerSessionSettings {
-        base_url,
-        user_id: user.user_id,
-        account_id: user.account_id,
-        account_name: user.account_name.clone(),
-    });
-    if let Err(error) = state.settings_service.save(&settings) {
+    let config = ManagerSessionConfig {
+        schema_version: MANAGER_SESSION_SCHEMA_VERSION,
+        session: Some(PersistedManagerSession {
+            base_url,
+            user_id: user.user_id,
+            account_id: user.account_id,
+            account_name: user.account_name.clone(),
+        }),
+    };
+    if let Err(error) = state.settings_service.save_global_manager_session(&config) {
         log::warn!("manager: failed to persist session metadata: {error}");
     }
 }

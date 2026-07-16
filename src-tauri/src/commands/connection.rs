@@ -114,6 +114,7 @@ pub async fn save_manual_smcp_target(
     target: ManualSmcpTarget,
     api_key_action: Option<ManualSmcpApiKeyAction>,
 ) -> Result<ManualSmcpTarget, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let target = normalize_manual_smcp_target(target);
     let credential_key = manual_target_keychain_id(&target.id);
     let saved = state
@@ -147,6 +148,7 @@ pub async fn delete_manual_smcp_target(
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     for runtime in state.computer_registry.list_runtimes().await {
         let guard = runtime.connection.read().await;
         if guard
@@ -183,6 +185,15 @@ pub async fn connect_connection_target(
 }
 
 pub async fn connect_connection_target_core(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    connect_connection_target_locked(state, instance_id, target_id).await
+}
+
+pub(crate) async fn connect_connection_target_locked(
     state: &AppState,
     instance_id: &str,
     target_id: &str,
@@ -361,6 +372,14 @@ pub(crate) async fn disconnect_smcp_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    disconnect_smcp_locked(state, instance_id).await
+}
+
+pub(crate) async fn disconnect_smcp_locked(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
@@ -530,10 +549,11 @@ pub async fn manager_connect_smcp(
         .await?;
 
     // 3) 连接 + 入库 + 起预刷新任务
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     establish_manager_connection(&app, state.inner(), &instance_id, params, token).await
 }
 
-pub async fn connect_manager_robot_target_core(
+pub(crate) async fn connect_manager_robot_target_locked(
     app: &AppHandle,
     state: &AppState,
     instance_id: &str,
