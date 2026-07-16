@@ -1,6 +1,7 @@
 use crate::commands::connection::{
     connect_connection_target_locked, connect_manager_robot_target_locked, disconnect_smcp_locked,
 };
+use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
@@ -367,7 +368,7 @@ pub async fn start_computer_instance(
     app: AppHandle,
     state: State<'_, AppState>,
     id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, String> {
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
     start_computer_instance_core(Some(&app), &state, id).await
 }
 
@@ -375,20 +376,21 @@ pub async fn start_computer_instance_core(
     app: Option<&AppHandle>,
     state: &AppState,
     id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, String> {
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let instance = state
         .hydrate_computer_instance(instance)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let runtime = state
         .computer_registry
         .update_runtime_instance(instance.clone())
-        .await?;
-    runtime.start().await?;
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    runtime.start().await.map_err(RuntimeActionError::from)?;
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             if let Err(error) =

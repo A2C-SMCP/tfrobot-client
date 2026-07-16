@@ -127,6 +127,19 @@ describe('computerStore', () => {
     expect(useComputerStore.getState().instances[0].status).toBe('stopped');
   });
 
+  it('preserves structured missing-input failures for the UI', async () => {
+    const error = {
+      code: 'missing_secret',
+      input_id: 'api-key',
+      env_hint: 'A2C_INPUT_API_KEY',
+      message: 'Required secret input is unresolved',
+    };
+    mockedInvoke.mockRejectedValueOnce(error);
+
+    await expect(useComputerStore.getState().startInstance('computer-a')).rejects.toBe(error);
+    expect(useComputerStore.getState().error).toBe('Required secret input is unresolved');
+  });
+
   it('updates unified connection policy for a Computer', async () => {
     useComputerStore.setState({
       instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],

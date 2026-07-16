@@ -1,6 +1,8 @@
 use crate::commands::connection::ConnectionState;
 use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::services::config::instance_storage_dir_name;
+use crate::services::input_resolver::RuntimeInputResolver;
+use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
@@ -510,31 +512,17 @@ impl ComputerInstance {
 #[derive(Clone)]
 pub struct InstanceSession {
     id: String,
-    input_values: Arc<RwLock<HashMap<String, serde_json::Value>>>,
 }
 
 impl InstanceSession {
-    fn new(id: impl Into<String>, input_values: HashMap<String, serde_json::Value>) -> Self {
-        Self {
-            id: id.into(),
-            input_values: Arc::new(RwLock::new(input_values)),
-        }
-    }
-
-    async fn sync_values(&self, input_values: HashMap<String, serde_json::Value>) {
-        let mut values = self.input_values.write().await;
-        *values = input_values;
+    fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
     }
 }
 
 #[async_trait]
 impl Session for InstanceSession {
     async fn resolve_input(&self, input: &MCPServerInput) -> ComputerResult<serde_json::Value> {
-        let input_id = input.id();
-        if let Some(value) = self.input_values.read().await.get(input_id).cloned() {
-            return Ok(value);
-        }
-
         match input {
             MCPServerInput::PromptString(input) => Ok(serde_json::Value::String(
                 input.default.clone().unwrap_or_default(),
@@ -615,6 +603,14 @@ pub enum ComputerRuntimeState {
     Error,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ComputerRuntimeStartError {
+    #[error(transparent)]
+    Sdk(#[from] ComputerError),
+    #[error("{0}")]
+    Client(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmcpReconnectOutcome {
     Reconnected { expires_in: i64 },
@@ -627,6 +623,7 @@ pub struct ComputerInstanceRuntime {
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     session: InstanceSession,
+    input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: PathBuf,
     sdk_auto_connect: Arc<RwLock<bool>>,
     sdk_server_names: Arc<RwLock<HashSet<String>>>,
@@ -642,16 +639,35 @@ impl ComputerInstanceRuntime {
     /// Builds isolated runtime handles for an instance. MCP runtime ownership lives in SDK
     /// Computer; the client keeps only instance-scoped state and lifecycle handles here.
     pub fn new(instance: ComputerInstance, skill_home_base: PathBuf) -> Self {
+        Self::new_with_secret_store(
+            instance,
+            skill_home_base,
+            Arc::new(InMemorySecretStore::default()),
+        )
+    }
+
+    pub fn new_with_secret_store(
+        instance: ComputerInstance,
+        skill_home_base: PathBuf,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         let inputs = input_definitions_to_mcp_map(&instance.inputs);
-        let session = InstanceSession::new(instance.id.clone(), instance.input_values.clone());
-        let (computer, sdk_server_names) =
-            build_sdk_computer(&instance, &inputs, session.clone(), &skill_home_base);
+        let session = InstanceSession::new(instance.id.clone());
+        let input_resolver = Arc::new(RuntimeInputResolver::new(secret_store));
+        let (computer, sdk_server_names) = build_sdk_computer(
+            &instance,
+            &inputs,
+            session.clone(),
+            input_resolver.clone(),
+            &skill_home_base,
+        );
         let auto_connect = instance.connection_policy.auto_connect;
         Self {
             instance,
             inputs: Arc::new(RwLock::new(inputs)),
             computer: Arc::new(RwLock::new(computer)),
             session,
+            input_resolver,
             skill_home_base,
             sdk_auto_connect: Arc::new(RwLock::new(auto_connect)),
             sdk_server_names: Arc::new(RwLock::new(sdk_server_names)),
@@ -670,6 +686,7 @@ impl ComputerInstanceRuntime {
             inputs: self.inputs.clone(),
             computer: self.computer.clone(),
             session: self.session.clone(),
+            input_resolver: self.input_resolver.clone(),
             skill_home_base: self.skill_home_base.clone(),
             sdk_auto_connect: self.sdk_auto_connect.clone(),
             sdk_server_names: self.sdk_server_names.clone(),
@@ -682,15 +699,17 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
         let _guard = self.lifecycle_lock.lock().await;
         self.set_state(ComputerRuntimeState::Booting).await;
 
         if let Err(error) = self.computer.read().await.boot_up().await {
             self.set_state(ComputerRuntimeState::Error).await;
-            return Err(error.to_string());
+            return Err(ComputerRuntimeStartError::Sdk(error));
         }
-        self.reconcile_sdk_governance_inner().await?;
+        self.reconcile_sdk_governance_inner()
+            .await
+            .map_err(ComputerRuntimeStartError::Client)?;
 
         let mut running = self.running.write().await;
         *running = true;
@@ -753,9 +772,6 @@ impl ComputerInstanceRuntime {
 
         let mut inputs = self.inputs.write().await;
         *inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        self.session
-            .sync_values(self.instance.input_values.clone())
-            .await;
         self.computer
             .read()
             .await
@@ -780,15 +796,14 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    pub async fn add_or_update_server(&self, server: MCPServerConfig) -> Result<(), String> {
+    pub async fn add_or_update_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let name = server.name().to_string();
         self.computer
             .read()
             .await
             .add_or_update_server(normalize_mcp_server_tool_meta(server))
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         self.sdk_server_names.write().await.insert(name);
         Ok(())
     }
@@ -863,21 +878,23 @@ impl ComputerInstanceRuntime {
 
     pub async fn mcp_server_statuses(&self) -> Vec<(String, bool, String)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer.read().await.get_server_status().await
+        self.computer
+            .read()
+            .await
+            .get_server_status()
+            .await
+            .into_iter()
+            .map(|(_bundle_id, name, running, status)| (name, running, status))
+            .collect()
     }
 
     pub async fn plugin_mcp_server_owner(&self, name: &str) -> Option<McpServerManagedBy> {
         self.plugin_mcp_server_owner_inner(name).await
     }
 
-    pub async fn start_mcp_server(&self, name: &str) -> Result<(), String> {
+    pub async fn start_mcp_server(&self, name: &str) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer
-            .read()
-            .await
-            .start_mcp_client(name)
-            .await
-            .map_err(|error| error.to_string())?;
+        self.computer.read().await.start_mcp_client(name).await?;
         self.emit_sdk_tool_list_update_if_connected().await;
         Ok(())
     }
@@ -899,7 +916,7 @@ impl ComputerInstanceRuntime {
         self.reconcile_sdk_governance_inner().await.map(|_| ())
     }
 
-    pub async fn start_all_mcp_servers(&self) -> Result<(), String> {
+    pub async fn start_all_mcp_servers(&self) -> ComputerResult<()> {
         self.start_mcp_server("all").await
     }
 
@@ -1087,17 +1104,6 @@ impl ComputerInstanceRuntime {
             .read()
             .await
             .get_tool_history()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn resolve_input_value(&self, input_id: &str) -> Result<serde_json::Value, String> {
-        let inputs = self.inputs.read().await;
-        let input = inputs
-            .get(input_id)
-            .ok_or_else(|| format!("Input not found: {input_id}"))?;
-        self.session
-            .resolve_input(input)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1548,6 +1554,7 @@ impl ComputerInstanceRuntime {
             &self.instance,
             &inputs,
             self.session.clone(),
+            self.input_resolver.clone(),
             &self.skill_home_base,
         );
 
@@ -1620,6 +1627,7 @@ fn build_sdk_computer(
     instance: &ComputerInstance,
     inputs: &HashMap<String, MCPServerInput>,
     session: InstanceSession,
+    input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: &Path,
 ) -> (Computer<InstanceSession>, HashSet<String>) {
     let instance_storage_root = skill_home_base.join(instance_storage_dir_name(&instance.id));
@@ -1643,6 +1651,8 @@ fn build_sdk_computer(
     );
 
     let computer = computer
+        .with_input_resolver(input_resolver.clone())
+        .with_secret_resolver(input_resolver)
         .with_skill_home(skill_home)
         .with_config_dir(config_context.project_anchor())
         .with_config_env(config_context.env().clone())
@@ -2022,6 +2032,7 @@ impl From<&ConnectionState> for ConnectionStateSummary {
 pub struct ComputerRegistry {
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
     skill_home_base: PathBuf,
+    secret_store: Arc<dyn SecretStore>,
 }
 
 impl ComputerRegistry {
@@ -2034,7 +2045,25 @@ impl ComputerRegistry {
         skill_home_base: PathBuf,
     ) -> Self {
         let (registry, _) =
-            Self::from_config_with_initial_runtime_and_skill_home_base(config, skill_home_base);
+            Self::from_config_with_initial_runtime_and_skill_home_base_and_secret_store(
+                config,
+                skill_home_base,
+                Arc::new(InMemorySecretStore::default()),
+            );
+        registry
+    }
+
+    pub fn from_config_with_skill_home_base_and_secret_store(
+        config: ComputerInstancesConfig,
+        skill_home_base: PathBuf,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        let (registry, _) =
+            Self::from_config_with_initial_runtime_and_skill_home_base_and_secret_store(
+                config,
+                skill_home_base,
+                secret_store,
+            );
         registry
     }
 
@@ -2048,15 +2077,31 @@ impl ComputerRegistry {
     }
 
     pub fn from_config_with_initial_runtime_and_skill_home_base(
+        config: ComputerInstancesConfig,
+        skill_home_base: PathBuf,
+    ) -> (Self, Option<ComputerInstanceRuntime>) {
+        Self::from_config_with_initial_runtime_and_skill_home_base_and_secret_store(
+            config,
+            skill_home_base,
+            Arc::new(InMemorySecretStore::default()),
+        )
+    }
+
+    fn from_config_with_initial_runtime_and_skill_home_base_and_secret_store(
         mut config: ComputerInstancesConfig,
         skill_home_base: PathBuf,
+        secret_store: Arc<dyn SecretStore>,
     ) -> (Self, Option<ComputerInstanceRuntime>) {
         config.normalize();
         let mut runtimes = HashMap::new();
 
         for instance in config.instances {
             let instance_id = instance.id.clone();
-            let runtime = ComputerInstanceRuntime::new(instance, skill_home_base.clone());
+            let runtime = ComputerInstanceRuntime::new_with_secret_store(
+                instance,
+                skill_home_base.clone(),
+                secret_store.clone(),
+            );
             runtimes.insert(instance_id, runtime);
         }
 
@@ -2064,6 +2109,7 @@ impl ComputerRegistry {
         let registry = Self {
             runtimes: RwLock::new(runtimes),
             skill_home_base,
+            secret_store,
         };
 
         (registry, initial_runtime)
@@ -2082,7 +2128,11 @@ impl ComputerRegistry {
     }
 
     pub async fn upsert_runtime(&self, instance: ComputerInstance) -> ComputerInstanceRuntime {
-        let runtime = ComputerInstanceRuntime::new(instance.clone(), self.skill_home_base.clone());
+        let runtime = ComputerInstanceRuntime::new_with_secret_store(
+            instance.clone(),
+            self.skill_home_base.clone(),
+            self.secret_store.clone(),
+        );
         let mut runtimes = self.runtimes.write().await;
         runtimes.insert(instance.id, runtime.clone());
         runtime
@@ -2097,9 +2147,11 @@ impl ComputerRegistry {
             let mut runtimes = self.runtimes.write().await;
             let runtime = match runtimes.get(&instance.id) {
                 Some(existing) => existing.with_instance(instance.clone()),
-                None => {
-                    ComputerInstanceRuntime::new(instance.clone(), self.skill_home_base.clone())
-                }
+                None => ComputerInstanceRuntime::new_with_secret_store(
+                    instance.clone(),
+                    self.skill_home_base.clone(),
+                    self.secret_store.clone(),
+                ),
             };
             runtimes.insert(instance.id, runtime.clone());
             runtime
@@ -2135,7 +2187,7 @@ impl ComputerRegistry {
             .runtime(id)
             .await
             .ok_or_else(|| format!("Computer instance not found: {id}"))?;
-        runtime.start().await
+        runtime.start().await.map_err(|error| error.to_string())
     }
 
     pub async fn stop_runtime(&self, id: &str) -> Result<(), String> {
@@ -2418,7 +2470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instance_session_resolves_values_from_current_instance() {
+    async fn instance_session_does_not_receive_transient_resolved_values() {
         let runtime = ComputerInstanceRuntime::new(
             instance_with_input_value("one", serde_json::json!("persisted-secret")),
             std::env::temp_dir().join("tfrobot-client-test-skill-home"),
@@ -2428,13 +2480,13 @@ mod tests {
 
         assert_eq!(
             runtime.session.resolve_input(input).await.unwrap(),
-            serde_json::json!("persisted-secret")
+            serde_json::json!("default-value")
         );
     }
 
     #[tokio::test]
     async fn instance_session_falls_back_to_sdk_input_semantics() {
-        let session = InstanceSession::new("one", HashMap::new());
+        let session = InstanceSession::new("one");
         let pick = MCPServerInput::PickString(PickStringInput {
             id: "runtime".to_string(),
             description: "Runtime".to_string(),

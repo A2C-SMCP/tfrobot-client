@@ -302,6 +302,13 @@
     "confirmRemove": "Are you sure you want to remove this variable?",
     "confirmClearValues": "Are you sure you want to clear all cached values?",
     "setValueFor": "Set value for: {{id}}",
+    "configuredSecret": "Configured secret",
+    "runtime": {
+      "missingInput": "Input required to start",
+      "missingSecret": "Secret required to start",
+      "envHint": "You can save it here or provide it through {{env}}.",
+      "definitionMissing": "Input definition {{id}} could not be loaded."
+    },
     "table": {
       "id": "ID",
       "type": "Type",

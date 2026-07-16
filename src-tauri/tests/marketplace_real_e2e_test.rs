@@ -206,7 +206,12 @@ async fn assert_plugin_owned_mcp_server_visible_and_user_lifecycle_blocked(state
         .await
         .unwrap_err();
 
-    for error in [update_err, remove_err, start_err, stop_err] {
+    for error in [
+        update_err.to_string(),
+        remove_err,
+        start_err.to_string(),
+        stop_err,
+    ] {
         assert!(
             error.contains("Marketplace plugin"),
             "expected plugin lifecycle guard, got: {error}"

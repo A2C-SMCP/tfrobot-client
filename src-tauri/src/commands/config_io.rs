@@ -142,7 +142,9 @@ async fn import_cli_native(
             continue;
         }
 
-        super::mcp::add_mcp_server_locked(state, instance_id, server.clone()).await?;
+        super::mcp::add_mcp_server_locked(state, instance_id, server.clone())
+            .await
+            .map_err(|error| error.to_string())?;
         servers_imported += 1;
     }
 
@@ -171,7 +173,9 @@ async fn import_claude_desktop(
         }
 
         let mcp_config = build_stdio_config(&name, &server);
-        super::mcp::add_mcp_server_locked(state, instance_id, mcp_config).await?;
+        super::mcp::add_mcp_server_locked(state, instance_id, mcp_config)
+            .await
+            .map_err(|error| error.to_string())?;
         servers_imported += 1;
     }
 

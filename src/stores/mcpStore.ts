@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
+import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -144,7 +145,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
     }
   },
 
@@ -155,7 +156,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info(`MCP server added: ${config.name}`);
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -166,7 +167,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       await invoke('update_mcp_server', { instanceId, config });
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -178,7 +179,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info(`MCP server removed: ${name}`);
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -190,7 +191,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info(`MCP server started: ${name}`);
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -202,7 +203,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info(`MCP server stopped: ${name}`);
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -214,7 +215,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info('All MCP servers started');
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -226,7 +227,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info('All MCP servers stopped');
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -242,7 +243,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       await get().fetchServers(instanceId);
       return result;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -255,7 +256,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       await invoke('export_config', { path, instanceId, serverNames: serverNames || null });
       set({ loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 
 export type ComputerStatus = 'running' | 'stopped' | 'error';
 export type ComputerConnectionStatus = 'connected' | 'disconnected';
@@ -171,7 +172,7 @@ export const useComputerStore = create<ComputerState>((set) => ({
       }));
       return created;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -189,7 +190,7 @@ export const useComputerStore = create<ComputerState>((set) => ({
       }));
       return updated;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
@@ -250,7 +251,7 @@ export const useComputerStore = create<ComputerState>((set) => ({
       }));
       return started;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },

@@ -302,6 +302,13 @@
     "confirmRemove": "确定要删除此变量吗？",
     "confirmClearValues": "确定要清空所有缓存值吗？",
     "setValueFor": "设置变量值：{{id}}",
+    "configuredSecret": "密钥已配置",
+    "runtime": {
+      "missingInput": "启动需要补充变量",
+      "missingSecret": "启动需要补充密钥",
+      "envHint": "可以在此保存，或通过 {{env}} 提供。",
+      "definitionMissing": "无法加载变量 {{id}} 的定义。"
+    },
     "table": {
       "id": "ID",
       "type": "类型",

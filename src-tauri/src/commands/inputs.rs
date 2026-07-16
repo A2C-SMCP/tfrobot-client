@@ -49,6 +49,30 @@ impl InputDefinition {
             InputDefinition::Command { id, .. } => id,
         }
     }
+
+    pub fn is_secret(&self) -> bool {
+        matches!(
+            self,
+            InputDefinition::PromptString {
+                password: Some(true),
+                ..
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InputValueView {
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredInputSnapshot {
+    id: String,
+    value: Option<serde_json::Value>,
+    secret: Option<String>,
 }
 
 /// List all input variable definitions
@@ -104,18 +128,35 @@ pub async fn add_or_update_input_core(
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     let previous_inputs = inputs.clone();
+    let previous_definition = inputs.iter().find(|item| item.id() == id).cloned();
+    let previous_value = snapshot_input_storage(state, &id)?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
     state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
+    let new_definition = inputs.iter().find(|item| item.id() == id);
+    if let Err(error) = reconcile_definition_storage(
+        state.secret_store.as_ref(),
+        previous_definition.as_ref(),
+        new_definition,
+    ) {
+        return Err(rollback_input_mutation(
+            state,
+            instance_id,
+            Some(&previous_inputs),
+            std::slice::from_ref(&previous_value),
+            error,
+        )
+        .await);
+    }
     if let Err(error) = sync_all_computer_runtimes(state).await {
         return Err(rollback_input_mutation(
             state,
             instance_id,
             Some(&previous_inputs),
-            &[],
+            &[previous_value],
             error,
         )
         .await);
@@ -150,8 +191,7 @@ pub async fn remove_input_core(
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     let previous_inputs = inputs.clone();
-    let previous_value =
-        keychain::get_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
+    let previous_value = snapshot_input_storage(state, id)?;
     let original_len = inputs.len();
     inputs.retain(|i| i.id() != id);
 
@@ -163,12 +203,12 @@ pub async fn remove_input_core(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    if let Err(error) = keychain::delete_input_value(state.secret_store.as_ref(), id) {
+    if let Err(error) = delete_input_storage(state, id) {
         return Err(rollback_input_mutation(
             state,
             instance_id,
             Some(&previous_inputs),
-            &[(id.to_string(), previous_value)],
+            std::slice::from_ref(&previous_value),
             error.to_string(),
         )
         .await);
@@ -178,7 +218,7 @@ pub async fn remove_input_core(
             state,
             instance_id,
             Some(&previous_inputs),
-            &[(id.to_string(), previous_value)],
+            &[previous_value],
             error,
         )
         .await);
@@ -192,7 +232,7 @@ pub async fn remove_input_core(
 pub async fn list_input_values(
     state: State<'_, AppState>,
     instance_id: String,
-) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+) -> Result<std::collections::HashMap<String, InputValueView>, String> {
     list_input_values_core(&state, require_instance_id(&instance_id)?)
 }
 
@@ -202,10 +242,17 @@ pub async fn get_input_value(
     state: State<'_, AppState>,
     instance_id: String,
     id: String,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<InputValueView>, String> {
     let instance_id = require_instance_id(&instance_id)?;
     require_existing_instance(&state, instance_id)?;
-    keychain::get_input_value(state.secret_store.as_ref(), &id).map_err(|e| e.to_string())
+    let definition = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|input| input.id() == id)
+        .ok_or_else(|| format!("Input not found: {id}"))?;
+    input_value_view(state.secret_store.as_ref(), &definition)
 }
 
 /// Set a cached input value
@@ -234,22 +281,36 @@ pub async fn set_input_value_core(
         .config
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
-    if !inputs.iter().any(|input| input.id() == id) {
-        return Err(format!("Input not found: {id}"));
+    let definition = inputs
+        .iter()
+        .find(|input| input.id() == id)
+        .ok_or_else(|| format!("Input not found: {id}"))?;
+    let previous_value = snapshot_input_storage(state, &id)?;
+    let mutation = if definition.is_secret() {
+        let secret = value
+            .as_str()
+            .ok_or_else(|| format!("Secret input '{id}' must be a string"))?;
+        keychain::set_input_secret(state.secret_store.as_ref(), &id, secret)
+            .and_then(|_| keychain::delete_input_value(state.secret_store.as_ref(), &id))
+    } else {
+        keychain::set_input_value(state.secret_store.as_ref(), &id, &value)
+            .and_then(|_| keychain::delete_input_secret(state.secret_store.as_ref(), &id))
+    };
+    if let Err(error) = mutation {
+        let primary_error = error.to_string();
+        return match restore_input_storage(state, &previous_value) {
+            Ok(()) => Err(format!(
+                "Failed to store input value; changes were reverted: {primary_error}"
+            )),
+            Err(rollback_error) => Err(format!(
+                "Failed to store input value: {primary_error}; rollback also failed: {rollback_error}"
+            )),
+        };
     }
-    let previous_value =
-        keychain::get_input_value(state.secret_store.as_ref(), &id).map_err(|e| e.to_string())?;
-    keychain::set_input_value(state.secret_store.as_ref(), &id, &value)
-        .map_err(|e| e.to_string())?;
     if let Err(error) = sync_all_computer_runtimes(state).await {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            None,
-            &[(id, previous_value)],
-            error,
-        )
-        .await);
+        return Err(
+            rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
+        );
     }
 
     Ok(())
@@ -274,18 +335,16 @@ pub async fn remove_input_value_core(
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
-    let previous_value =
-        keychain::get_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
-    keychain::delete_input_value(state.secret_store.as_ref(), id).map_err(|e| e.to_string())?;
+    let previous_value = snapshot_input_storage(state, id)?;
+    if let Err(error) = delete_input_storage(state, id) {
+        return Err(
+            rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
+        );
+    }
     if let Err(error) = sync_all_computer_runtimes(state).await {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            None,
-            &[(id.to_string(), previous_value)],
-            error,
-        )
-        .await);
+        return Err(
+            rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
+        );
     }
     Ok(())
 }
@@ -310,14 +369,10 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
         .map_err(|e| e.to_string())?;
     let previous_values = inputs
         .iter()
-        .map(|input| {
-            keychain::get_input_value(state.secret_store.as_ref(), input.id())
-                .map(|value| (input.id().to_string(), value))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+        .map(|input| snapshot_input_storage(state, input.id()))
+        .collect::<Result<Vec<_>, _>>()?;
     for input in &inputs {
-        if let Err(error) = keychain::delete_input_value(state.secret_store.as_ref(), input.id()) {
+        if let Err(error) = delete_input_storage(state, input.id()) {
             return Err(rollback_input_mutation(
                 state,
                 instance_id,
@@ -357,6 +412,14 @@ pub async fn import_inputs(
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     let previous_inputs = inputs.clone();
+    let imported_ids = imported
+        .iter()
+        .map(|input| input.id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let previous_values = imported_ids
+        .iter()
+        .map(|id| snapshot_input_storage(&state, id))
+        .collect::<Result<Vec<_>, _>>()?;
     for input in imported {
         let id = input.id().to_string();
         inputs.retain(|i| i.id() != id);
@@ -366,12 +429,30 @@ pub async fn import_inputs(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
+    for id in &imported_ids {
+        let previous_definition = previous_inputs.iter().find(|input| input.id() == id);
+        let new_definition = inputs.iter().find(|input| input.id() == id);
+        if let Err(error) = reconcile_definition_storage(
+            state.secret_store.as_ref(),
+            previous_definition,
+            new_definition,
+        ) {
+            return Err(rollback_input_mutation(
+                &state,
+                instance_id,
+                Some(&previous_inputs),
+                &previous_values,
+                error,
+            )
+            .await);
+        }
+    }
     if let Err(error) = sync_all_computer_runtimes(&state).await {
         return Err(rollback_input_mutation(
             &state,
             instance_id,
             Some(&previous_inputs),
-            &[],
+            &previous_values,
             error,
         )
         .await);
@@ -392,21 +473,14 @@ async fn sync_all_computer_runtimes(state: &AppState) -> Result<(), String> {
 async fn sync_all_computer_runtimes_with_parts(
     config: &crate::services::config::ConfigService,
     registry: &crate::services::computer::ComputerRegistry,
-    secret_store: &dyn crate::services::keychain::SecretStore,
+    _secret_store: &dyn crate::services::keychain::SecretStore,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
-    for mut instance in config
+    for instance in config
         .load_computer_instances()
         .map_err(|error| error.to_string())?
         .instances
     {
-        for input in &instance.inputs {
-            if let Some(value) = keychain::get_input_value(secret_store, input.id())
-                .map_err(|error| error.to_string())?
-            {
-                instance.input_values.insert(input.id().to_string(), value);
-            }
-        }
         if let Err(error) = registry.update_runtime_instance(instance).await {
             errors.push(error);
         }
@@ -428,15 +502,38 @@ pub(crate) async fn replace_global_input_definitions_with_parts_locked(
     let previous = config
         .load_inputs_for_instance(instance_id)
         .map_err(|error| error.to_string())?;
+    let affected_ids = previous
+        .iter()
+        .chain(definitions.iter())
+        .map(|definition| definition.id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let previous_values = affected_ids
+        .iter()
+        .map(|id| snapshot_input_storage_with_store(secret_store, id))
+        .collect::<Result<Vec<_>, _>>()?;
     config
         .save_inputs_for_instance(instance_id, definitions)
         .map_err(|error| error.to_string())?;
-    if let Err(primary_error) =
-        sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
-    {
+    let storage_result = affected_ids.iter().try_for_each(|id| {
+        reconcile_definition_storage(
+            secret_store,
+            previous.iter().find(|definition| definition.id() == id),
+            definitions.iter().find(|definition| definition.id() == id),
+        )
+    });
+    let sync_result = match storage_result {
+        Ok(()) => sync_all_computer_runtimes_with_parts(config, registry, secret_store).await,
+        Err(error) => Err(error),
+    };
+    if let Err(primary_error) = sync_result {
         let mut rollback_errors = Vec::new();
         if let Err(error) = config.save_inputs_for_instance(instance_id, &previous) {
             rollback_errors.push(format!("restore global input definitions: {error}"));
+        }
+        for snapshot in &previous_values {
+            if let Err(error) = restore_input_storage_with_store(secret_store, snapshot) {
+                rollback_errors.push(format!("restore Keychain input '{}': {error}", snapshot.id));
+            }
         }
         if let Err(error) =
             sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
@@ -461,7 +558,7 @@ async fn rollback_input_mutation(
     state: &AppState,
     instance_id: &str,
     previous_inputs: Option<&[InputDefinition]>,
-    previous_values: &[(String, Option<serde_json::Value>)],
+    previous_values: &[StoredInputSnapshot],
     primary_error: String,
 ) -> String {
     let mut rollback_errors = Vec::new();
@@ -470,13 +567,10 @@ async fn rollback_input_mutation(
             rollback_errors.push(format!("restore global input definitions: {error}"));
         }
     }
-    for (id, value) in previous_values {
-        let result = match value {
-            Some(value) => keychain::set_input_value(state.secret_store.as_ref(), id, value),
-            None => keychain::delete_input_value(state.secret_store.as_ref(), id),
-        };
+    for snapshot in previous_values {
+        let result = restore_input_storage(state, snapshot);
         if let Err(error) = result {
-            rollback_errors.push(format!("restore Keychain input '{id}': {error}"));
+            rollback_errors.push(format!("restore Keychain input '{}': {error}", snapshot.id));
         }
     }
     if let Err(error) = sync_all_computer_runtimes(state).await {
@@ -513,7 +607,7 @@ fn require_existing_instance(state: &AppState, instance_id: &str) -> Result<(), 
 fn list_input_values_core(
     state: &AppState,
     instance_id: &str,
-) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+) -> Result<std::collections::HashMap<String, InputValueView>, String> {
     require_existing_instance(state, instance_id)?;
     let mut values = std::collections::HashMap::new();
     for input in state
@@ -521,11 +615,452 @@ fn list_input_values_core(
         .load_inputs_for_instance(instance_id)
         .map_err(|error| error.to_string())?
     {
-        if let Some(value) = keychain::get_input_value(state.secret_store.as_ref(), input.id())
-            .map_err(|error| error.to_string())?
-        {
+        if let Some(value) = input_value_view(state.secret_store.as_ref(), &input)? {
             values.insert(input.id().to_string(), value);
         }
     }
     Ok(values)
+}
+
+fn input_value_view(
+    store: &dyn crate::services::keychain::SecretStore,
+    definition: &InputDefinition,
+) -> Result<Option<InputValueView>, String> {
+    if definition.is_secret() {
+        let configured = keychain::get_input_secret(store, definition.id())
+            .map_err(|error| error.to_string())?
+            .is_some()
+            || keychain::get_input_value(store, definition.id())
+                .map_err(|error| error.to_string())?
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .is_some();
+        return Ok(configured.then_some(InputValueView {
+            configured: true,
+            value: None,
+        }));
+    }
+
+    Ok(keychain::get_input_value(store, definition.id())
+        .map_err(|error| error.to_string())?
+        .map(|value| InputValueView {
+            configured: true,
+            value: Some(value),
+        }))
+}
+
+fn snapshot_input_storage(state: &AppState, id: &str) -> Result<StoredInputSnapshot, String> {
+    snapshot_input_storage_with_store(state.secret_store.as_ref(), id)
+}
+
+fn snapshot_input_storage_with_store(
+    store: &dyn crate::services::keychain::SecretStore,
+    id: &str,
+) -> Result<StoredInputSnapshot, String> {
+    Ok(StoredInputSnapshot {
+        id: id.to_string(),
+        value: keychain::get_input_value(store, id).map_err(|error| error.to_string())?,
+        secret: keychain::get_input_secret(store, id).map_err(|error| error.to_string())?,
+    })
+}
+
+fn delete_input_storage(state: &AppState, id: &str) -> Result<(), String> {
+    keychain::delete_input_value(state.secret_store.as_ref(), id)
+        .map_err(|error| error.to_string())?;
+    keychain::delete_input_secret(state.secret_store.as_ref(), id)
+        .map_err(|error| error.to_string())
+}
+
+fn restore_input_storage(state: &AppState, snapshot: &StoredInputSnapshot) -> Result<(), String> {
+    restore_input_storage_with_store(state.secret_store.as_ref(), snapshot)
+}
+
+fn restore_input_storage_with_store(
+    store: &dyn crate::services::keychain::SecretStore,
+    snapshot: &StoredInputSnapshot,
+) -> Result<(), String> {
+    match &snapshot.value {
+        Some(value) => keychain::set_input_value(store, &snapshot.id, value),
+        None => keychain::delete_input_value(store, &snapshot.id),
+    }
+    .map_err(|error| error.to_string())?;
+    match &snapshot.secret {
+        Some(secret) => keychain::set_input_secret(store, &snapshot.id, secret),
+        None => keychain::delete_input_secret(store, &snapshot.id),
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn reconcile_definition_storage(
+    store: &dyn crate::services::keychain::SecretStore,
+    previous: Option<&InputDefinition>,
+    next: Option<&InputDefinition>,
+) -> Result<(), String> {
+    let Some(next) = next else {
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        keychain::delete_input_value(store, previous.id()).map_err(|error| error.to_string())?;
+        return keychain::delete_input_secret(store, previous.id())
+            .map_err(|error| error.to_string());
+    };
+
+    if next.is_secret() {
+        let secret =
+            keychain::get_input_secret(store, next.id()).map_err(|error| error.to_string())?;
+        let legacy_value =
+            keychain::get_input_value(store, next.id()).map_err(|error| error.to_string())?;
+        if secret.is_none() {
+            if let Some(value) = legacy_value.as_ref().and_then(serde_json::Value::as_str) {
+                keychain::set_input_secret(store, next.id(), value)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        return keychain::delete_input_value(store, next.id()).map_err(|error| error.to_string());
+    }
+
+    if previous.is_some_and(InputDefinition::is_secret) {
+        keychain::delete_input_value(store, next.id()).map_err(|error| error.to_string())?;
+    }
+    keychain::delete_input_secret(store, next.id()).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::computer::ComputerInstance;
+    use crate::services::config::ConfigService;
+    use crate::services::keychain::{self, InMemorySecretStore, KeychainError, SecretStore};
+    use crate::services::logger::LogService;
+    use crate::services::settings::SettingsService;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn test_state() -> (AppState, Arc<InMemorySecretStore>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
+            .unwrap();
+        let store = Arc::new(InMemorySecretStore::default());
+        let state = AppState::new_with_secret_store(
+            config,
+            LogService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            store.clone(),
+        );
+        (state, store, dir)
+    }
+
+    #[derive(Default)]
+    struct FailOnceDeleteSecretStore {
+        inner: InMemorySecretStore,
+        fail_next_delete: AtomicBool,
+    }
+
+    impl SecretStore for FailOnceDeleteSecretStore {
+        fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+            self.inner.set_secret(key, secret)
+        }
+
+        fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+            self.inner.get_secret(key)
+        }
+
+        fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+            if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+                return Err(KeychainError::Store("injected delete failure".to_string()));
+            }
+            self.inner.delete_secret(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn password_input_uses_secret_namespace_and_list_never_returns_plaintext() {
+        let (state, store, _dir) = test_state();
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "api-key".to_string(),
+                label: "API Key".to_string(),
+                description: None,
+                default: None,
+                password: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+
+        set_input_value_core(
+            &state,
+            "computer-a",
+            "api-key".to_string(),
+            serde_json::json!("top-secret"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "api-key")
+                .unwrap()
+                .as_deref(),
+            Some("top-secret")
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "api-key").unwrap(),
+            None
+        );
+        let view = list_input_values_core(&state, "computer-a").unwrap();
+        assert_eq!(
+            view.get("api-key"),
+            Some(&InputValueView {
+                configured: true,
+                value: None,
+            })
+        );
+        assert!(!serde_json::to_string(&view).unwrap().contains("top-secret"));
+    }
+
+    #[tokio::test]
+    async fn removing_and_clearing_password_inputs_delete_both_namespaces() {
+        let (state, store, _dir) = test_state();
+        for id in ["remove-me", "clear-me"] {
+            add_or_update_input_core(
+                &state,
+                "computer-a",
+                InputDefinition::PromptString {
+                    id: id.to_string(),
+                    label: id.to_string(),
+                    description: None,
+                    default: None,
+                    password: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+            set_input_value_core(
+                &state,
+                "computer-a",
+                id.to_string(),
+                serde_json::json!(format!("{id}-secret")),
+            )
+            .await
+            .unwrap();
+        }
+
+        remove_input_core(&state, "computer-a", "remove-me")
+            .await
+            .unwrap();
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "remove-me").unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "remove-me").unwrap(),
+            None
+        );
+
+        clear_input_values_core(&state, "computer-a").await.unwrap();
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "clear-me").unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "clear-me").unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_value_definition_to_secret_migrates_only_string_values() {
+        let (state, store, _dir) = test_state();
+        let value_definition = InputDefinition::PromptString {
+            id: "credential".to_string(),
+            label: "Credential".to_string(),
+            description: None,
+            default: None,
+            password: Some(false),
+        };
+        add_or_update_input_core(&state, "computer-a", value_definition.clone())
+            .await
+            .unwrap();
+        set_input_value_core(
+            &state,
+            "computer-a",
+            "credential".to_string(),
+            serde_json::json!("legacy-secret"),
+        )
+        .await
+        .unwrap();
+
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: "Credential".to_string(),
+                description: None,
+                default: None,
+                password: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "credential")
+                .unwrap()
+                .as_deref(),
+            Some("legacy-secret")
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            None
+        );
+
+        add_or_update_input_core(&state, "computer-a", value_definition.clone())
+            .await
+            .unwrap();
+        keychain::set_input_value(
+            store.as_ref(),
+            "credential",
+            &serde_json::json!({"nested": true}),
+        )
+        .unwrap();
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: "Credential".to_string(),
+                description: None,
+                default: None,
+                password: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "credential").unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_secret_definition_to_value_drops_secret_and_requires_reentry() {
+        let (state, store, _dir) = test_state();
+        let secret_definition = InputDefinition::PromptString {
+            id: "credential".to_string(),
+            label: "Credential".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        };
+        add_or_update_input_core(&state, "computer-a", secret_definition.clone())
+            .await
+            .unwrap();
+        set_input_value_core(
+            &state,
+            "computer-a",
+            "credential".to_string(),
+            serde_json::json!("top-secret"),
+        )
+        .await
+        .unwrap();
+
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: "Credential".to_string(),
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "credential").unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            None
+        );
+        assert!(!list_input_values_core(&state, "computer-a")
+            .unwrap()
+            .contains_key("credential"));
+    }
+
+    #[tokio::test]
+    async fn definition_type_change_rolls_back_definition_and_both_namespaces_on_failure() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
+            .unwrap();
+        let store = Arc::new(FailOnceDeleteSecretStore::default());
+        let state = AppState::new_with_secret_store(
+            config,
+            LogService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            store.clone(),
+        );
+        let secret_definition = InputDefinition::PromptString {
+            id: "credential".to_string(),
+            label: "Credential".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        };
+        add_or_update_input_core(&state, "computer-a", secret_definition.clone())
+            .await
+            .unwrap();
+        set_input_value_core(
+            &state,
+            "computer-a",
+            "credential".to_string(),
+            serde_json::json!("top-secret"),
+        )
+        .await
+        .unwrap();
+        store.fail_next_delete.store(true, Ordering::SeqCst);
+
+        let error = add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: "Credential".to_string(),
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("changes were reverted"));
+        assert_eq!(
+            state.config.load_inputs_for_instance("computer-a").unwrap(),
+            vec![secret_definition]
+        );
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "credential")
+                .unwrap()
+                .as_deref(),
+            Some("top-secret")
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            None
+        );
+    }
 }

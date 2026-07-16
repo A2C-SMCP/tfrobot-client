@@ -170,6 +170,21 @@ describe('mcpStore', () => {
 
       expect(useMcpStore.getState().error).toBe('duplicate');
     });
+
+    it('preserves structured runtime errors for the retry UI', async () => {
+      const error = {
+        code: 'missing_secret',
+        input_id: 'api-key',
+        env_hint: 'A2C_INPUT_API_KEY',
+        message: 'Required secret input is unresolved',
+      };
+      mockedInvoke.mockRejectedValueOnce(error);
+
+      await expect(
+        useMcpStore.getState().addServer(instanceId, makeStdioConfig()),
+      ).rejects.toBe(error);
+      expect(useMcpStore.getState().error).toBe(error.message);
+    });
   });
 
   describe('removeServer', () => {

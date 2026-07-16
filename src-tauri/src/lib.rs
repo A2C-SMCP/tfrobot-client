@@ -104,9 +104,10 @@ impl AppState {
         )?;
         let instances =
             hydrate_computer_instances(config.load_computer_instances()?, secret_store.as_ref())?;
-        let computer_registry = ComputerRegistry::from_config_with_skill_home_base(
+        let computer_registry = ComputerRegistry::from_config_with_skill_home_base_and_secret_store(
             instances,
             config.computer_skill_home_base(),
+            secret_store.clone(),
         );
 
         Ok(Self {
@@ -154,14 +155,11 @@ fn hydrate_computer_instances(
 
 fn hydrate_computer_instance(
     mut instance: ComputerInstance,
-    secret_store: &dyn SecretStore,
+    _secret_store: &dyn SecretStore,
 ) -> Result<ComputerInstance, services::keychain::KeychainError> {
+    // Resolved values are intentionally never hydrated into the runtime profile. The SDK
+    // requests them through RuntimeInputResolver only while rendering a referenced input.
     instance.input_values.clear();
-    for input in &instance.inputs {
-        if let Some(value) = services::keychain::get_input_value(secret_store, input.id())? {
-            instance.input_values.insert(input.id().to_string(), value);
-        }
-    }
     Ok(instance)
 }
 

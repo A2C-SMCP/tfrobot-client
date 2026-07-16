@@ -15,9 +15,14 @@ export function getInputId(input: InputDefinition): string {
   return input.id;
 }
 
+export interface InputValueView {
+  configured: boolean;
+  value?: unknown;
+}
+
 interface InputState {
   inputs: InputDefinition[];
-  values: Record<string, unknown>;
+  values: Record<string, InputValueView>;
   loading: boolean;
   error: string | null;
   activeInstanceId: string | null;
@@ -26,6 +31,7 @@ interface InputState {
 
   fetchInputs: (instanceId: string) => Promise<void>;
   fetchValues: (instanceId: string) => Promise<void>;
+  getInput: (instanceId: string, id: string) => Promise<InputDefinition | null>;
   addOrUpdateInput: (instanceId: string, input: InputDefinition) => Promise<void>;
   removeInput: (instanceId: string, id: string) => Promise<void>;
   setValue: (instanceId: string, id: string, value: unknown) => Promise<void>;
@@ -37,7 +43,7 @@ interface InputState {
 
 const initialState = {
   inputs: [] as InputDefinition[],
-  values: {} as Record<string, unknown>,
+  values: {} as Record<string, InputValueView>,
   loading: false,
   error: null as string | null,
   activeInstanceId: null as string | null,
@@ -82,7 +88,7 @@ export const useInputStore = create<InputState>((set, get) => ({
       error: null,
     });
     try {
-      const values = await invoke<Record<string, unknown>>('list_input_values', { instanceId });
+      const values = await invoke<Record<string, InputValueView>>('list_input_values', { instanceId });
       if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
@@ -94,6 +100,10 @@ export const useInputStore = create<InputState>((set, get) => ({
       set({ error: String(e) });
     }
   },
+
+  getInput: async (instanceId: string, id: string) => (
+    invoke<InputDefinition | null>('get_input', { instanceId, id })
+  ),
 
   addOrUpdateInput: async (instanceId: string, input: InputDefinition) => {
     set({ loading: true, error: null });

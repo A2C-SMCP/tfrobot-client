@@ -1,4 +1,4 @@
-import { render, screen } from '../helpers/render';
+import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { McpConfig } from '@/components/McpConfig';
 
@@ -19,8 +19,34 @@ const mockStore = {
   exportConfig: vi.fn(),
 };
 
+const { getInput, setValue } = vi.hoisted(() => ({
+  getInput: vi.fn(),
+  setValue: vi.fn(),
+}));
+
 vi.mock('@/stores/mcpStore', () => ({
   useMcpStore: vi.fn(() => mockStore),
+}));
+
+vi.mock('@/stores/inputStore', () => ({
+  useInputStore: (selector: (state: unknown) => unknown) => selector({ getInput, setValue }),
+}));
+
+vi.mock('@/components/McpConfig/McpServerForm', () => ({
+  McpServerForm: ({ onSubmit }: { onSubmit: (config: unknown) => Promise<void> }) => (
+    <button
+      onClick={() => onSubmit({
+        type: 'Stdio',
+        name: 'runtime-server',
+        disabled: true,
+        forbidden_tools: [],
+        tool_meta: {},
+        server_parameters: { command: 'echo', args: ['${input:api-key}'], env: {} },
+      })}
+    >
+      Submit mocked server
+    </button>
+  ),
 }));
 
 import { useMcpStore } from '@/stores/mcpStore';
@@ -63,6 +89,13 @@ describe('McpConfig', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    getInput.mockResolvedValue({
+      type: 'PromptString',
+      id: 'api-key',
+      label: 'API Key',
+      password: true,
+    });
+    setValue.mockResolvedValue(undefined);
     mockUseMcpStore.mockReturnValue({ ...mockStore, servers: [] } as any);
   });
 
@@ -106,4 +139,32 @@ describe('McpConfig', () => {
     expect(screen.getByTitle('Edit')).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
   });
+
+  it('prompts for a missing input and retries the original MCP reload action', async () => {
+    const missing = {
+      code: 'missing_secret',
+      input_id: 'api-key',
+      env_hint: 'A2C_INPUT_API_KEY',
+      message: 'Required secret input is unresolved',
+    };
+    mockStore.addServer
+      .mockRejectedValueOnce(missing)
+      .mockResolvedValueOnce(undefined);
+
+    render(<McpConfig instanceId={instanceId} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+
+    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
+    const input = await screen.findByPlaceholderText('Enter value');
+    fireEvent.change(input, { target: { value: 'top-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mockStore.addServer).toHaveBeenCalledTimes(2));
+    expect(setValue).toHaveBeenCalledWith(instanceId, 'api-key', 'top-secret');
+    expect(mockStore.addServer.mock.calls[1]).toEqual(mockStore.addServer.mock.calls[0]);
+    await waitFor(() => {
+      expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
+    });
+  }, 10000);
 });

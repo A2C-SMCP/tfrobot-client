@@ -19,9 +19,20 @@ import {
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
-import { useComputerStore, type ComputerConnectionTarget, type ComputerInstance, type ComputerStatus } from '@/stores/computerStore';
+import {
+  useComputerStore,
+  type ComputerConnectionTarget,
+  type ComputerInstance,
+  type ComputerStatus,
+} from '@/stores/computerStore';
+import {
+  formatRuntimeActionError,
+  isMissingRuntimeInputError,
+  type MissingRuntimeInputError,
+} from '@/utils/runtimeActionError';
 import { McpConfig } from '@/components/McpConfig';
 import { InputVariables } from '@/components/InputVariables';
+import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import { DesktopResources } from '@/components/DesktopResources';
 import { DebugPanel } from '@/components/DebugPanel';
 import { LogViewer } from '@/components/LogViewer';
@@ -216,6 +227,10 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   const [activeTab, setActiveTab] = useState<ComputerDetailTab>(initialTab);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
+  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
+    instanceId: string;
+    error: MissingRuntimeInputError;
+  } | null>(null);
   const [form] = Form.useForm<{
     name: string;
     description?: string;
@@ -305,17 +320,30 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     }
   };
 
-  const handleStartStop = async (instance: ComputerInstance) => {
+  const startWithInputPrompt = async (instance: ComputerInstance) => {
     try {
-      if (instance.status === 'running') {
-        await stopInstance(instance.id);
-        message.success(t('computer.messages.stopped'));
-      } else {
-        await startInstance(instance.id);
-        message.success(t('computer.messages.started'));
-      }
+      await startInstance(instance.id);
+      setRuntimeInputPrompt(null);
+      message.success(t('computer.messages.started'));
     } catch (e) {
-      message.error(String(e));
+      if (isMissingRuntimeInputError(e)) {
+        setRuntimeInputPrompt({ instanceId: instance.id, error: e });
+        return;
+      }
+      message.error(formatRuntimeActionError(e));
+    }
+  };
+
+  const handleStartStop = async (instance: ComputerInstance) => {
+    if (instance.status !== 'running') {
+      await startWithInputPrompt(instance);
+      return;
+    }
+    try {
+      await stopInstance(instance.id);
+      message.success(t('computer.messages.stopped'));
+    } catch (e) {
+      message.error(formatRuntimeActionError(e));
     }
   };
 
@@ -397,6 +425,19 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
         )}
       </Form>
     </Modal>
+  );
+
+  const renderRuntimeInputPrompt = () => runtimeInputPrompt && (
+    <RuntimeInputPrompt
+      key={`${runtimeInputPrompt.instanceId}:${runtimeInputPrompt.error.input_id}`}
+      instanceId={runtimeInputPrompt.instanceId}
+      error={runtimeInputPrompt.error}
+      onCancel={() => setRuntimeInputPrompt(null)}
+      onSubmitted={async () => {
+        const instance = instances.find((item) => item.id === runtimeInputPrompt.instanceId);
+        if (instance) await startWithInputPrompt(instance);
+      }}
+    />
   );
 
   if (loading && instances.length === 0) {
@@ -511,6 +552,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
           />
         </Space>
         {renderComputerModal()}
+        {renderRuntimeInputPrompt()}
       </div>
     );
   }
@@ -550,6 +592,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
         </Row>
       )}
       {renderComputerModal()}
+      {renderRuntimeInputPrompt()}
     </div>
   );
 }

@@ -161,6 +161,25 @@ pub fn delete_input_value(store: &dyn SecretStore, input_id: &str) -> Result<(),
     store.delete_secret(&input_value_key(input_id))
 }
 
+pub fn set_input_secret(
+    store: &dyn SecretStore,
+    input_id: &str,
+    secret: &str,
+) -> Result<(), KeychainError> {
+    store.set_secret(&input_secret_key(input_id), secret)
+}
+
+pub fn get_input_secret(
+    store: &dyn SecretStore,
+    input_id: &str,
+) -> Result<Option<String>, KeychainError> {
+    store.get_secret(&input_secret_key(input_id))
+}
+
+pub fn delete_input_secret(store: &dyn SecretStore, input_id: &str) -> Result<(), KeychainError> {
+    store.delete_secret(&input_secret_key(input_id))
+}
+
 fn scoped_secret_key(namespace: &str, logical_id: &str) -> String {
     let digest = Sha256::digest(logical_id.as_bytes());
     format!("{namespace}:{}", hex::encode(&digest[..16]))
@@ -201,6 +220,21 @@ mod tests {
 
         delete_input_value(&store, "credentials").unwrap();
         assert_eq!(get_input_value(&store, "credentials").unwrap(), None);
+    }
+
+    #[test]
+    fn input_secrets_roundtrip_without_json_serialization() {
+        let store = InMemorySecretStore::default();
+
+        set_input_secret(&store, "api-key", "top-secret").unwrap();
+        assert_eq!(
+            get_input_secret(&store, "api-key").unwrap().as_deref(),
+            Some("top-secret")
+        );
+        assert_eq!(get_input_value(&store, "api-key").unwrap(), None);
+
+        delete_input_secret(&store, "api-key").unwrap();
+        assert_eq!(get_input_secret(&store, "api-key").unwrap(), None);
     }
 
     #[test]

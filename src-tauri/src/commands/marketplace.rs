@@ -494,7 +494,10 @@ async fn start_registered_plugin_servers_if_running(
     }
 
     for name in hooks.registered_server_names().await {
-        runtime.start_mcp_server(&name).await?;
+        runtime
+            .start_mcp_server(&name)
+            .await
+            .map_err(|error| error.to_string())?;
     }
 
     Ok(())

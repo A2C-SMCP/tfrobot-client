@@ -3,6 +3,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { Computer } from '@/components/Computer';
 import { useComputerStore } from '@/stores/computerStore';
+import { useInputStore } from '@/stores/inputStore';
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -113,6 +114,7 @@ describe('Computer', () => {
     vi.clearAllMocks();
     mockFetchManualTargets.mockReset();
     useComputerStore.getState().reset();
+    useInputStore.getState().reset();
     mockInvoke.mockResolvedValue(mockComputerInstances);
   });
 
@@ -377,5 +379,80 @@ describe('Computer', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
     fireEvent.click(last(await screen.findAllByText('OK')));
     expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
+  }, 80000);
+
+  it('prompts for consecutive missing values and retries only the original start action', async () => {
+    const stopped = { ...mockComputerInstances[0], running: false, connected: false };
+    let startAttempts = 0;
+    mockInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === 'list_computer_instances') return [stopped];
+      if (cmd === 'start_computer_instance') {
+        startAttempts += 1;
+        if (startAttempts === 1) {
+          throw {
+            code: 'missing_secret',
+            input_id: 'secret-a',
+            env_hint: 'A2C_INPUT_SECRET_A',
+            message: 'Required secret input is unresolved',
+          };
+        }
+        if (startAttempts === 2) {
+          throw {
+            code: 'missing_input',
+            input_id: 'value-b',
+            env_hint: 'A2C_INPUT_VALUE_B',
+            message: 'Required input is unresolved',
+          };
+        }
+        return { ...stopped, running: true };
+      }
+      if (cmd === 'get_input') {
+        const inputId = (args as { id?: string } | undefined)?.id;
+        return inputId === 'secret-a' ? {
+          type: 'PromptString',
+          id: 'secret-a',
+          label: 'Secret A',
+          password: true,
+        } : {
+          type: 'PromptString',
+          id: 'value-b',
+          label: 'Value B',
+          password: false,
+        };
+      }
+      if (cmd === 'set_input_value') return null;
+      if (cmd === 'list_input_values') return { 'api-key': { configured: true } };
+      return null;
+    });
+
+    render(<Computer />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Start' }))[0]);
+
+    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
+    const input = await screen.findByPlaceholderText('Enter value');
+    fireEvent.change(input, { target: { value: 'secret-a-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(startAttempts).toBe(2));
+    expect(await screen.findByText('Input required to start')).toBeInTheDocument();
+    const secondInput = await screen.findByPlaceholderText('Enter value');
+    expect(secondInput).toHaveAttribute('type', 'text');
+    expect(secondInput).toHaveValue('');
+    expect(screen.queryByDisplayValue('secret-a-value')).not.toBeInTheDocument();
+    fireEvent.change(secondInput, { target: { value: 'value-b-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(startAttempts).toBe(3));
+    expect(await screen.findByText('Running')).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
+      instanceId: 'computer-a',
+      id: 'secret-a',
+      value: 'secret-a-value',
+    });
+    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
+      instanceId: 'computer-a',
+      id: 'value-b',
+      value: 'value-b-value',
+    });
   }, 80000);
 });

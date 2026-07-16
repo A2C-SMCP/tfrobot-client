@@ -414,7 +414,7 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
             .await
             .unwrap_err();
-    assert!(add_error.contains("Marketplace plugin"));
+    assert!(add_error.to_string().contains("Marketplace plugin"));
 
     disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await

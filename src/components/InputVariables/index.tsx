@@ -119,15 +119,18 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
       key: 'value',
       width: 200,
       render: (_: unknown, record: InputDefinition) => {
-        const val = values[record.id];
-        if (val !== undefined && val !== null) {
+        const stored = values[record.id];
+        if (stored?.configured) {
+          const displayValue = record.type === 'PromptString' && record.password
+            ? t('inputs.configuredSecret')
+            : String(stored.value ?? '');
           return (
             <Tag
               color="cyan"
               style={{ cursor: 'pointer' }}
               onClick={() => handleSetValue(record.id)}
             >
-              {String(val).length > 30 ? String(val).substring(0, 30) + '...' : String(val)}
+              {displayValue.length > 30 ? displayValue.substring(0, 30) + '...' : displayValue}
             </Tag>
           );
         }
@@ -222,7 +225,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
         <InputValueEditor
           inputId={editingValueId}
           inputs={inputs}
-          currentValue={values[editingValueId]}
+          currentValue={values[editingValueId]?.value}
           onSubmit={handleValueSubmit}
           onCancel={() => setValueEditorVisible(false)}
         />

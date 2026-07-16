@@ -30,12 +30,7 @@ export function McpServerList({
   const { message } = App.useApp();
 
   const handleStart = async (name: string) => {
-    try {
-      await onStart(name);
-      message.success(t('mcp.messages.started', { name }));
-    } catch (e) {
-      message.error(String(e));
-    }
+    await onStart(name);
   };
 
   const handleStop = async (name: string) => {

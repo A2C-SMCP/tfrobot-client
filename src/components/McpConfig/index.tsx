@@ -10,13 +10,32 @@ import {
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useMcpStore, type McpServerConfig } from '@/stores/mcpStore';
+import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import { McpServerList } from './McpServerList';
 import { McpServerForm } from './McpServerForm';
+import { useMcpRuntimeActions, type McpRuntimeAction } from './useMcpRuntimeActions';
 
 const { Title } = Typography;
 
 interface McpConfigProps {
   instanceId: string;
+}
+
+function runtimeActionSuccess(action: McpRuntimeAction) {
+  switch (action.kind) {
+    case 'add':
+      return { key: 'mcp.messages.added' as const, closeForm: true };
+    case 'update':
+      return { key: 'mcp.messages.updated' as const, closeForm: true };
+    case 'start':
+      return {
+        key: 'mcp.messages.started' as const,
+        options: { name: action.name },
+        closeForm: false,
+      };
+    case 'startAll':
+      return { key: 'mcp.messages.allStarted' as const, closeForm: false };
+  }
 }
 
 export function McpConfig({ instanceId }: McpConfigProps) {
@@ -46,6 +65,22 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     fetchServers(instanceId);
   }, [fetchServers, instanceId]);
 
+  const reportRuntimeActionSuccess = (action: McpRuntimeAction) => {
+    const success = runtimeActionSuccess(action);
+    message.success(t(success.key, success.options));
+    if (success.closeForm) setFormVisible(false);
+  };
+
+  const runtimeActions = useMcpRuntimeActions({
+    instanceId,
+    addServer,
+    updateServer,
+    startServer,
+    startAll,
+    onError: (errorMessage) => message.error(errorMessage),
+    onSuccess: reportRuntimeActionSuccess,
+  });
+
   const handleAdd = () => {
     setEditingServer(undefined);
     setFormVisible(true);
@@ -62,27 +97,11 @@ export function McpConfig({ instanceId }: McpConfigProps) {
   };
 
   const handleFormSubmit = async (config: McpServerConfig) => {
-    try {
-      if (editingServer) {
-        await updateServer(instanceId, config);
-        message.success(t('mcp.messages.updated'));
-      } else {
-        await addServer(instanceId, config);
-        message.success(t('mcp.messages.added'));
-      }
-      setFormVisible(false);
-    } catch (e) {
-      message.error(String(e));
-    }
+    await runtimeActions.run(editingServer ? { kind: 'update', config } : { kind: 'add', config });
   };
 
   const handleStartAll = async () => {
-    try {
-      await startAll(instanceId);
-      message.success(t('mcp.messages.allStarted'));
-    } catch (e) {
-      message.error(String(e));
-    }
+    await runtimeActions.run({ kind: 'startAll' });
   };
 
   const handleStopAll = async () => {
@@ -191,7 +210,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         onStop={(name) => stopServer(instanceId, name)}
         onEdit={handleEdit}
         onRemove={(name) => removeServer(instanceId, name)}
-        onStart={(name) => startServer(instanceId, name)}
+        onStart={(name) => runtimeActions.run({ kind: 'start', name })}
       />
 
       <Modal
@@ -209,6 +228,15 @@ export function McpConfig({ instanceId }: McpConfigProps) {
           loading={loading}
         />
       </Modal>
+      {runtimeActions.pending && (
+        <RuntimeInputPrompt
+          key={`${instanceId}:${runtimeActions.pending.error.input_id}`}
+          instanceId={instanceId}
+          error={runtimeActions.pending.error}
+          onCancel={runtimeActions.cancel}
+          onSubmitted={runtimeActions.retry}
+        />
+      )}
     </div>
   );
 }

@@ -5,7 +5,7 @@
 use a2c_smcp::smcp_computer::mcp_clients::model::*;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::{
-    computer::{Computer, Session},
+    computer::{Computer, Session, SilentSession},
     errors::ComputerResult,
 };
 use std::collections::HashMap;
@@ -66,6 +66,48 @@ fn contract_version_exists() {
         version.contains('.'),
         "VERSION should be semver format: {version}"
     );
+}
+
+#[tokio::test]
+#[ignore = "blocked by https://github.com/A2C-SMCP/rust-sdk/issues/144"]
+async fn contract_boot_surfaces_structured_missing_input() {
+    let input = MCPServerInput::PromptString(PromptStringInput {
+        id: "required-token".to_string(),
+        description: "Required token".to_string(),
+        default: None,
+        password: Some(false),
+    });
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "missing-input-contract",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": ["${input:required-token}"],
+            "env": {}
+        }
+    }))
+    .unwrap();
+    let computer = Computer::new(
+        "contract-computer",
+        SilentSession::new("contract-session"),
+        Some(HashMap::from([("required-token".to_string(), input)])),
+        Some(HashMap::from([(
+            "missing-input-contract".to_string(),
+            server,
+        )])),
+        false,
+        true,
+    );
+
+    let error = computer
+        .boot_up()
+        .await
+        .expect_err("boot_up must surface a referenced missing input");
+    assert!(matches!(
+        error,
+        a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(_)
+    ));
 }
 
 // ── Serialization Format Contracts ──

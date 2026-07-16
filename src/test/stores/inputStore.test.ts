@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useInputStore, type InputDefinition } from '@/stores/inputStore';
+import { useInputStore, type InputDefinition, type InputValueView } from '@/stores/inputStore';
 
 const mockedInvoke = vi.mocked(invoke);
 const instanceId = 'computer-a';
@@ -83,7 +83,7 @@ describe('inputStore', () => {
 
   describe('fetchValues', () => {
     it('populates values map', async () => {
-      const mockValues = { api_key: 'secret123' };
+      const mockValues = { api_key: { configured: true, value: 'secret123' } };
       mockedInvoke.mockResolvedValueOnce(mockValues);
 
       await useInputStore.getState().fetchValues(instanceId);
@@ -93,27 +93,27 @@ describe('inputStore', () => {
     });
 
     it('ignores stale input values from a previous computer instance', async () => {
-      const first = deferred<Record<string, unknown>>();
-      const second = deferred<Record<string, unknown>>();
+      const first = deferred<Record<string, InputValueView>>();
+      const second = deferred<Record<string, InputValueView>>();
       mockedInvoke.mockReturnValueOnce(first.promise as any);
       mockedInvoke.mockReturnValueOnce(second.promise as any);
 
       const firstFetch = useInputStore.getState().fetchValues('computer-a');
       const secondFetch = useInputStore.getState().fetchValues('computer-b');
 
-      second.resolve({ token: 'b-secret' });
+      second.resolve({ token: { configured: true } });
       await secondFetch;
-      first.resolve({ token: 'a-secret' });
+      first.resolve({ token: { configured: true } });
       await firstFetch;
 
-      expect(useInputStore.getState().values).toEqual({ token: 'b-secret' });
+      expect(useInputStore.getState().values).toEqual({ token: { configured: true } });
       expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
     });
 
     it('keeps definitions and values scoped during a component-style instance switch', async () => {
       const inputsA = deferred<InputDefinition[]>();
       const inputsB = deferred<InputDefinition[]>();
-      const valuesB = deferred<Record<string, unknown>>();
+      const valuesB = deferred<Record<string, InputValueView>>();
       const definitionsB: InputDefinition[] = [
         { type: 'PromptString', id: 'token_b', label: 'Token B' },
       ];
@@ -126,7 +126,7 @@ describe('inputStore', () => {
       const secondValuesFetch = useInputStore.getState().fetchValues('computer-b');
 
       inputsB.resolve(definitionsB);
-      valuesB.resolve({ token_b: 'b-secret' });
+      valuesB.resolve({ token_b: { configured: true } });
       await secondInputsFetch;
       await secondValuesFetch;
 
@@ -134,7 +134,7 @@ describe('inputStore', () => {
       await firstInputsFetch;
 
       expect(useInputStore.getState().inputs).toEqual(definitionsB);
-      expect(useInputStore.getState().values).toEqual({ token_b: 'b-secret' });
+      expect(useInputStore.getState().values).toEqual({ token_b: { configured: true } });
       expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
       expect(useInputStore.getState().loading).toBe(false);
       expect(useInputStore.getState().error).toBeNull();
@@ -189,7 +189,12 @@ describe('inputStore', () => {
 
   describe('clearValues', () => {
     it('clears values map', async () => {
-      useInputStore.setState({ values: { a: '1', b: '2' } });
+      useInputStore.setState({
+        values: {
+          a: { configured: true, value: '1' },
+          b: { configured: true, value: '2' },
+        },
+      });
       mockedInvoke.mockResolvedValueOnce(undefined);
 
       await useInputStore.getState().clearValues(instanceId);

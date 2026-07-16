@@ -67,10 +67,14 @@ describe('InputVariables', () => {
     mockUseInputStore.mockReturnValue({
       ...mockStore,
       inputs: mockInputs,
-      values: { 'api-key': 'secret-123', env: 'dev' },
+      values: {
+        'api-key': { configured: true },
+        env: { configured: true, value: 'dev' },
+      },
     } as any);
     render(<InputVariables instanceId="computer-a" />);
-    expect(screen.getByText('secret-123')).toBeInTheDocument();
+    expect(screen.getByText('Configured secret')).toBeInTheDocument();
+    expect(screen.queryByText('secret-123')).not.toBeInTheDocument();
     expect(screen.getByText('dev')).toBeInTheDocument();
   });
 

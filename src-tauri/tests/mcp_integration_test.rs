@@ -19,6 +19,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tfrobot_client_lib::commands::connection::ConnectionState;
+use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{config_io, debug, inputs, mcp};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
@@ -490,7 +491,12 @@ async fn test_mcp_lifecycle_requires_started_computer() {
         .await
         .unwrap_err();
 
-    for err in [start_err, stop_err, start_all_err, stop_all_err] {
+    for err in [
+        start_err.to_string(),
+        stop_err,
+        start_all_err.to_string(),
+        stop_all_err,
+    ] {
         assert_eq!(err, "请先启动 Computer");
     }
 }
@@ -1169,7 +1175,13 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
     tfrobot_client_lib::services::keychain::set_input_value(
         state.secret_store.as_ref(),
         "api-token",
-        &serde_json::json!("input-secret"),
+        &serde_json::json!("legacy-input-secret"),
+    )
+    .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_secret(
+        state.secret_store.as_ref(),
+        "api-token",
+        "namespaced-input-secret",
     )
     .unwrap();
 
@@ -1222,7 +1234,8 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
     assert!(exported["inputs"][0].get("default").is_none());
     assert!(!content.contains("literal-secret"));
     assert!(!content.contains("local-secret"));
-    assert!(!content.contains("input-secret"));
+    assert!(!content.contains("legacy-input-secret"));
+    assert!(!content.contains("namespaced-input-secret"));
     assert!(content.contains("local-command"));
 }
 
@@ -1334,10 +1347,6 @@ async fn test_cli_native_import_syncs_inputs_before_servers_with_placeholders() 
     assert_eq!(import_result.servers_imported, 1);
     assert_eq!(import_result.inputs_imported, 1);
     assert_eq!(imported_inputs[0].id(), "node-command");
-    assert_eq!(
-        runtime.resolve_input_value("node-command").await.unwrap(),
-        serde_json::json!("node")
-    );
     assert!(runtime
         .synced_sdk_server_names()
         .await
@@ -1763,6 +1772,70 @@ async fn test_input_definitions_crud() {
 }
 
 #[tokio::test]
+async fn test_mcp_reload_surfaces_missing_input_and_retries_after_keychain_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: "Runtime token".to_string(),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "runtime-input-reload",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": ["${input:runtime-token}"],
+            "env": {}
+        }
+    }))
+    .unwrap();
+
+    let error = mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, server.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingInput {
+            input_id,
+            env_hint,
+            ..
+        } if input_id == "runtime-token" && env_hint == "A2C_INPUT_RUNTIME_TOKEN"
+    ));
+
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "runtime-token".to_string(),
+        serde_json::json!("resolved-at-retry"),
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .sdk_mcp_server_names()
+        .await
+        .contains("runtime-input-reload"));
+}
+
+#[tokio::test]
 async fn test_input_commands_sync_runtime_definitions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1814,22 +1887,43 @@ async fn test_input_commands_sync_runtime_definitions() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    let resolver_probe: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "input-resolver-probe",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": ["${input:api-key}"],
+            "env": {}
+        }
+    }))
+    .unwrap();
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, resolver_probe)
+        .await
+        .unwrap();
     assert_eq!(
-        runtime.resolve_input_value("api-key").await.unwrap(),
-        serde_json::json!("runtime-key")
+        tfrobot_client_lib::services::keychain::get_input_value(
+            state.secret_store.as_ref(),
+            "api-key"
+        )
+        .unwrap(),
+        Some(serde_json::json!("runtime-key"))
     );
+    assert!(runtime
+        .sdk_mcp_server_names()
+        .await
+        .contains("input-resolver-probe"));
 
     inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "api-key")
         .await
         .unwrap();
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     assert_eq!(
-        runtime.resolve_input_value("api-key").await.unwrap(),
-        serde_json::json!("default-key")
+        tfrobot_client_lib::services::keychain::get_input_value(
+            state.secret_store.as_ref(),
+            "api-key"
+        )
+        .unwrap(),
+        None
     );
 
     inputs::set_input_value_core(
@@ -1843,14 +1937,13 @@ async fn test_input_commands_sync_runtime_definitions() {
     inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     assert_eq!(
-        runtime.resolve_input_value("api-key").await.unwrap(),
-        serde_json::json!("default-key")
+        tfrobot_client_lib::services::keychain::get_input_value(
+            state.secret_store.as_ref(),
+            "api-key"
+        )
+        .unwrap(),
+        None
     );
 
     inputs::set_input_value_core(
@@ -1890,10 +1983,12 @@ async fn test_input_commands_sync_runtime_definitions() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    assert_eq!(
-        runtime.resolve_input_value("api-key").await.unwrap(),
-        serde_json::json!("default-key")
-    );
+    let runtime_inputs = runtime.inputs.read().await;
+    assert!(matches!(
+        runtime_inputs.get("api-key"),
+        Some(a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt))
+            if prompt.default.as_deref() == Some("default-key")
+    ));
 }
 
 #[tokio::test]

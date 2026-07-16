@@ -1,3 +1,4 @@
+use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::McpServerManagedBy;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -137,7 +138,7 @@ pub async fn add_mcp_server(
     state: State<'_, AppState>,
     instance_id: String,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     add_mcp_server_core(&state, &instance_id, config).await
 }
 
@@ -145,7 +146,7 @@ pub async fn add_mcp_server_core(
     state: &AppState,
     instance_id: &str,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     add_mcp_server_locked(state, instance_id, config).await
 }
@@ -154,14 +155,21 @@ pub(crate) async fn add_mcp_server_locked(
     state: &AppState,
     instance_id: &str,
     config: MCPServerConfig,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
+) -> Result<(), RuntimeActionError> {
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     let name = config.name().to_string();
     log::info!("Adding MCP server for instance {}: {}", instance_id, name);
-    let runtime = require_runtime(state, instance_id).await?;
-    ensure_no_plugin_managed_runtime_server(&runtime, &name).await?;
+    let runtime = require_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_no_plugin_managed_runtime_server(&runtime, &name)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
     // Computer validates/render-checks before its SDK-owned CRUD persist + runtime reload.
-    runtime.add_or_update_server(config).await?;
+    runtime
+        .add_or_update_server(config)
+        .await
+        .map_err(RuntimeActionError::from)?;
 
     log::info!("MCP server added for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -211,7 +219,7 @@ pub async fn update_mcp_server(
     state: State<'_, AppState>,
     instance_id: String,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     update_mcp_server_core(&state, &instance_id, config).await
 }
 
@@ -219,15 +227,22 @@ pub async fn update_mcp_server_core(
     state: &AppState,
     instance_id: &str,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let instance_id = require_instance_id(instance_id)?;
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     let name = config.name().to_string();
     log::info!("Updating MCP server for instance {}: {}", instance_id, name);
-    let runtime = require_runtime(state, instance_id).await?;
-    ensure_user_managed_server(state, instance_id, &name, &runtime).await?;
+    let runtime = require_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_user_managed_server(state, instance_id, &name, &runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
     // Computer validates/render-checks before its SDK-owned CRUD persist + runtime reload.
-    runtime.add_or_update_server(config).await?;
+    runtime
+        .add_or_update_server(config)
+        .await
+        .map_err(RuntimeActionError::from)?;
 
     log::info!("MCP server updated for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -245,7 +260,7 @@ pub async fn start_mcp_server(
     state: State<'_, AppState>,
     instance_id: String,
     name: String,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     start_mcp_server_core(&state, &instance_id, &name).await
 }
 
@@ -253,15 +268,24 @@ pub async fn start_mcp_server_core(
     state: &AppState,
     instance_id: &str,
     name: &str,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let instance_id = require_instance_id(instance_id)?;
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     log::info!("Starting MCP server for instance {}: {}", instance_id, name);
 
-    let runtime = require_runtime(state, instance_id).await?;
-    ensure_user_managed_server(state, instance_id, name, &runtime).await?;
-    ensure_computer_started(&runtime).await?;
-    runtime.start_mcp_server(name).await?;
+    let runtime = require_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_user_managed_server(state, instance_id, name, &runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_computer_started(&runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    runtime
+        .start_mcp_server(name)
+        .await
+        .map_err(RuntimeActionError::from)?;
 
     log::info!("MCP server started for instance {}: {}", instance_id, name);
     let _ = state.log_service.write_for_instance(
@@ -311,19 +335,29 @@ pub async fn stop_mcp_server_core(
 pub async fn start_all_servers(
     state: State<'_, AppState>,
     instance_id: String,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     start_all_servers_core(&state, &instance_id).await
 }
 
-pub async fn start_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+pub async fn start_all_servers_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let instance_id = require_instance_id(instance_id)?;
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
-    let runtime = require_runtime(state, instance_id).await?;
-    ensure_computer_started(&runtime).await?;
+    let runtime = require_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_computer_started(&runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
     for server in user_managed_servers(state, instance_id, &runtime).await {
-        runtime.start_mcp_server(server.name()).await?;
+        runtime
+            .start_mcp_server(server.name())
+            .await
+            .map_err(RuntimeActionError::from)?;
     }
 
     log::info!("All MCP servers started for instance {}", instance_id);
