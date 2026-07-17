@@ -82,6 +82,13 @@ export function ComputerRuntime({
         return t('computer.runtime.eventCauses.capabilityRevisionBumped', {
           revision: cause.revision,
         });
+      case 'client_connection_authority_changed':
+        return t('computer.runtime.eventCauses.clientConnectionAuthorityChanged', {
+          revision: cause.revision,
+          status: cause.present
+            ? t('computer.runtime.eventCauses.connectionPresent')
+            : t('computer.runtime.eventCauses.connectionAbsent'),
+        });
       case 'client_diagnostic_changed':
         return t('computer.runtime.eventCauses.clientDiagnosticChanged', {
           operation: cause.operation,

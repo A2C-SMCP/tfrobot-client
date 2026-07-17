@@ -129,13 +129,20 @@ impl ComputerRegistry {
         }
     }
 
-    pub async fn runtime_snapshots(&self) -> Vec<(ComputerInstanceId, ComputerRuntimeSnapshot)> {
+    pub async fn runtime_observations(
+        &self,
+    ) -> Vec<(
+        ComputerInstanceId,
+        ComputerRuntimeSnapshot,
+        ClientConnectionAuthoritySnapshot,
+    )> {
         let runtimes = self.list_runtimes().await;
         let mut snapshots = Vec::with_capacity(runtimes.len());
         for runtime in runtimes {
             snapshots.push((
                 runtime.instance.id.clone(),
                 runtime.runtime_snapshot().await,
+                runtime.connection_authority_snapshot().await,
             ));
         }
         snapshots

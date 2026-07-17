@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useComputerStore } from '@/stores/computerStore';
+import { getClientConnectionAuthority } from '@/stores/connectionAuthority';
 import { useDashboardStore } from '@/stores/dashboardStore';
+import { useConnectionStore } from '@/stores/connectionStore';
 import { useRuntimeStore } from '@/stores/runtimeStore';
 import { runtimeSnapshot } from '../helpers/store';
 
@@ -33,9 +35,13 @@ function resetStore() {
     loading: false,
     error: null,
     selectedInstanceId: null,
+    pendingMutationCount: 0,
     listRequestId: 0,
     mutationEpoch: 0,
+    mutationCompletionRevision: 0,
+    deletionRevision: 0,
     profileMutationVersions: {},
+    connectionMetadataRequestIds: {},
   });
 }
 
@@ -44,6 +50,7 @@ describe('computerStore', () => {
     useRuntimeStore.getState().reset();
     resetStore();
     useDashboardStore.getState().reset();
+    useConnectionStore.getState().reset();
     mockedInvoke.mockReset();
   });
 
@@ -101,6 +108,408 @@ describe('computerStore', () => {
     await fetch;
 
     expect(useComputerStore.getState().instances[0].name).toBe('New');
+  });
+
+  it('does not let a list started during a profile mutation undo its committed result', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveProfile!: (value: unknown) => void;
+    let resolveList!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveProfile = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveList = resolve;
+      }));
+
+    const profile = useComputerStore.getState().updateConnectionPolicy('computer-a', {
+      target: { type: 'manual_smcp', id: 'new-target' },
+      auto_connect: true,
+    });
+    const list = useComputerStore.getState().fetchInstances();
+    resolveProfile({
+      ...baseStatus,
+      connection_policy: {
+        target: { type: 'manual_smcp', id: 'new-target' },
+        auto_connect: true,
+      },
+    });
+    await profile;
+    resolveList([{
+      ...baseStatus,
+      connection_policy: { target: null, auto_connect: false },
+    }]);
+    await list;
+
+    expect(useComputerStore.getState().instances[0].connectionPolicy).toEqual({
+      target: { type: 'manual_smcp', id: 'new-target' },
+      auto_connect: true,
+    });
+    expect(useComputerStore.getState().error).toBeNull();
+  });
+
+  it('does not let a list started during metadata reconciliation overwrite or report stale data', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveMetadata!: (value: unknown) => void;
+    let rejectList!: (reason: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveMetadata = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectList = reject;
+      }));
+
+    const metadata = useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    const list = useComputerStore.getState().fetchInstances();
+    resolveMetadata([{
+      ...baseStatus,
+      robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+      connection_policy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    }]);
+    await metadata;
+    rejectList('stale list failure');
+    await list;
+
+    expect(useComputerStore.getState()).toMatchObject({
+      error: null,
+      instances: [{
+        robotName: 'New Robot',
+        connectionPolicy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }],
+    });
+  });
+
+  it('keeps a newer metadata reconciliation current when an older runtime mutation completes', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveStart!: (value: unknown) => void;
+    let resolveMetadata!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveStart = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveMetadata = resolve;
+      }));
+
+    const olderStart = useComputerStore.getState().startInstance('computer-a');
+    const metadata = useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    resolveStart({
+      ...baseStatus,
+      running: true,
+      runtime: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 2 }),
+    });
+    await olderStart;
+    resolveMetadata([{
+      ...baseStatus,
+      robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+      connection_policy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    }]);
+    await metadata;
+
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      robotName: 'New Robot',
+      connectionPolicy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    });
+  });
+
+  it('does not let an older reconciliation completion swallow the newest failure', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveOlder!: (value: unknown) => void;
+    let rejectNewest!: (reason: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOlder = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectNewest = reject;
+      }));
+
+    const older = useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    const newest = useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    resolveOlder([baseStatus]);
+    await older;
+    rejectNewest('newest metadata failure');
+    await expect(newest).rejects.toThrow(
+      'Connection succeeded, but refreshing its saved binding and policy failed: newest metadata failure',
+    );
+    expect(useComputerStore.getState().error).toBe(
+      'Connection succeeded, but refreshing its saved binding and policy failed: newest metadata failure',
+    );
+  });
+
+  it('does not let a list started during create remove the committed instance', async () => {
+    let resolveCreate!: (value: unknown) => void;
+    let resolveList!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveCreate = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveList = resolve;
+      }));
+
+    const creation = useComputerStore.getState().createInstance({ name: 'Created' });
+    const list = useComputerStore.getState().fetchInstances();
+    resolveCreate({ ...baseStatus, id: 'computer-created', name: 'Created' });
+    await creation;
+    resolveList([]);
+    await list;
+
+    expect(useComputerStore.getState().instances).toMatchObject([
+      { id: 'computer-created', name: 'Created' },
+    ]);
+  });
+
+  it('does not let an older full list overwrite reconciled connection metadata', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveOldList!: (value: unknown) => void;
+    let resolveMetadata!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOldList = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveMetadata = resolve;
+      }));
+
+    const oldList = useComputerStore.getState().fetchInstances();
+    const metadata = useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    resolveMetadata([{
+      ...baseStatus,
+      robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+      connection_policy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    }]);
+    await metadata;
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      robotName: 'New Robot',
+      connectionPolicy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    });
+
+    resolveOldList([{
+      ...baseStatus,
+      robot_binding: null,
+      connection_policy: { target: null, auto_connect: false },
+    }]);
+    await oldList;
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      robotName: 'New Robot',
+      connectionPolicy: {
+        target: { type: 'manager_robot', id: '11' },
+        auto_connect: true,
+      },
+    });
+  });
+
+  it('ignores an older full-list failure after connection metadata is reconciled', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let rejectOldList!: (reason: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectOldList = reject;
+      }))
+      .mockResolvedValueOnce([{
+        ...baseStatus,
+        robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+        connection_policy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }]);
+
+    const oldList = useComputerStore.getState().fetchInstances();
+    await useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    rejectOldList('stale list failure');
+    await oldList;
+
+    expect(useComputerStore.getState()).toMatchObject({
+      error: null,
+      loading: false,
+      instances: [{
+        robotName: 'New Robot',
+        connectionPolicy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }],
+    });
+  });
+
+  it('does not let an older profile success overwrite reconciled connection metadata', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveOldProfile!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOldProfile = resolve;
+      }))
+      .mockResolvedValueOnce([{
+        ...baseStatus,
+        robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+        connection_policy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }]);
+
+    const oldProfile = useComputerStore.getState().updateConnectionPolicy('computer-a', {
+      target: { type: 'manual_smcp', id: 'old-target' },
+      auto_connect: false,
+    });
+    await useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    resolveOldProfile({
+      ...baseStatus,
+      robot_binding: null,
+      connection_policy: {
+        target: { type: 'manual_smcp', id: 'old-target' },
+        auto_connect: false,
+      },
+    });
+    await oldProfile;
+
+    expect(useComputerStore.getState()).toMatchObject({
+      error: null,
+      loading: false,
+      instances: [{
+        robotName: 'New Robot',
+        connectionPolicy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }],
+    });
+  });
+
+  it('ignores an older profile failure after connection metadata is reconciled', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let rejectOldProfile!: (reason: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectOldProfile = reject;
+      }))
+      .mockResolvedValueOnce([{
+        ...baseStatus,
+        robot_binding: { employee_id: 11, robot_name: 'New Robot' },
+        connection_policy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }]);
+
+    const oldProfile = useComputerStore.getState().updateSkillHome(
+      'computer-a',
+      '/old/skill/home',
+    );
+    await useComputerStore.getState().reconcileConnectionMetadata('computer-a');
+    rejectOldProfile('stale profile failure');
+    await expect(oldProfile).rejects.toBe('stale profile failure');
+
+    expect(useComputerStore.getState()).toMatchObject({
+      error: null,
+      loading: false,
+      instances: [{
+        robotName: 'New Robot',
+        connectionPolicy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: true,
+        },
+      }],
+    });
+  });
+
+  it('ignores a stale metadata reconciliation failure after a newer profile mutation', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let rejectMetadata!: (reason: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectMetadata = reject;
+      }))
+      .mockResolvedValueOnce({
+        ...baseStatus,
+        connection_policy: {
+          target: { type: 'manual_smcp', id: 'manual-a' },
+          auto_connect: true,
+        },
+      });
+
+    const staleMetadata = useComputerStore
+      .getState()
+      .reconcileConnectionMetadata('computer-a');
+    await useComputerStore.getState().updateConnectionPolicy('computer-a', {
+      target: { type: 'manual_smcp', id: 'manual-a' },
+      auto_connect: true,
+    });
+    rejectMetadata('stale metadata failure');
+    await staleMetadata;
+
+    expect(useComputerStore.getState().error).toBeNull();
+    expect(useComputerStore.getState().instances[0].connectionPolicy).toEqual({
+      target: { type: 'manual_smcp', id: 'manual-a' },
+      auto_connect: true,
+    });
+  });
+
+  it('surfaces a current post-connect metadata reconciliation failure', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    mockedInvoke.mockRejectedValueOnce('metadata unavailable');
+
+    await expect(
+      useComputerStore.getState().reconcileConnectionMetadata('computer-a'),
+    ).rejects.toThrow(
+      'Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
+    );
+
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: false,
+      error: 'Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
+    });
   });
 
   it('preserves raw connection authority when status refetches during reconnect', async () => {
@@ -269,6 +678,154 @@ describe('computerStore', () => {
     expect(useComputerStore.getState().selectedInstanceId).toBeNull();
   });
 
+  it('does not trust a list started while backend deletion is still in flight', async () => {
+    const knownRuntime = runtimeSnapshot({
+      incarnation: 4,
+      lifecycle: 'joined_office',
+    });
+    const connection = {
+      present: true,
+      revision: 1,
+      context: {
+        profile_name: 'prod',
+        url: 'https://smcp.example.com',
+        office_id: 'office-a',
+        computer_name: 'Computer A',
+        connected_at: '2026-07-17T00:00:00Z',
+        source_type: 'manual_smcp',
+      },
+    };
+    useComputerStore.setState({
+      instances: [{
+        id: 'computer-a',
+        name: 'A',
+        ...baseInstance,
+        runtime: knownRuntime,
+      }],
+      selectedInstanceId: 'computer-a',
+    });
+    useRuntimeStore.getState().receiveSnapshot('computer-a', knownRuntime, connection);
+
+    let resolveDelete!: (value: unknown) => void;
+    let resolveList!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveDelete = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveList = resolve;
+      }));
+
+    const deletion = useComputerStore.getState().deleteInstance('computer-a');
+    const list = useComputerStore.getState().fetchInstances();
+    resolveList([{
+      ...baseStatus,
+      runtime: runtimeSnapshot({ incarnation: 5, lifecycle: 'joined_office' }),
+      connected: true,
+      client_connection_present: true,
+      connection_revision: 2,
+      connection_context: connection.context,
+    }]);
+    resolveDelete(null);
+    await Promise.all([deletion, list]);
+
+    expect(useComputerStore.getState().instances).toEqual([]);
+    expect(useRuntimeStore.getState().snapshots['computer-a']).toBeUndefined();
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+  });
+
+  it('keeps mutation loading while a list succeeds during pending deletion', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveDelete!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveDelete = resolve;
+      }))
+      .mockResolvedValueOnce([baseStatus]);
+
+    const deletion = useComputerStore.getState().deleteInstance('computer-a');
+    await useComputerStore.getState().fetchInstances();
+
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: true,
+      pendingMutationCount: 1,
+      error: null,
+    });
+
+    resolveDelete(null);
+    await deletion;
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: false,
+      pendingMutationCount: 0,
+      error: null,
+    });
+  });
+
+  it('does not retain a list failure that occurs during pending deletion', async () => {
+    useComputerStore.setState({
+      instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
+      selectedInstanceId: 'computer-a',
+    });
+    let resolveDelete!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveDelete = resolve;
+      }))
+      .mockRejectedValueOnce('list failed while deleting');
+
+    const deletion = useComputerStore.getState().deleteInstance('computer-a');
+    await useComputerStore.getState().fetchInstances();
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: true,
+      pendingMutationCount: 1,
+      error: null,
+    });
+
+    resolveDelete(null);
+    await deletion;
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: false,
+      pendingMutationCount: 0,
+      error: null,
+    });
+  });
+
+  it('does not let a successful delete clear another concurrent mutation error', async () => {
+    useComputerStore.setState({
+      instances: [
+        { id: 'computer-a', name: 'A', ...baseInstance },
+        { id: 'computer-b', name: 'B', ...baseInstance },
+      ],
+      selectedInstanceId: 'computer-a',
+    });
+    let rejectStart!: (reason: unknown) => void;
+    let resolveDelete!: (value: unknown) => void;
+    mockedInvoke
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectStart = reject;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveDelete = resolve;
+      }));
+
+    const start = useComputerStore.getState().startInstance('computer-a');
+    const deletion = useComputerStore.getState().deleteInstance('computer-b');
+    rejectStart('start failed');
+    await expect(start).rejects.toBe('start failed');
+    resolveDelete(null);
+    await deletion;
+
+    expect(useComputerStore.getState()).toMatchObject({
+      loading: false,
+      pendingMutationCount: 0,
+      error: 'start failed',
+    });
+  });
+
   it('rejects late runtime events after a Computer is deleted', async () => {
     useComputerStore.setState({
       instances: [{ id: 'computer-a', name: 'A', ...baseInstance }],
@@ -283,7 +840,7 @@ describe('computerStore', () => {
     await useComputerStore.getState().deleteInstance('computer-a');
     useRuntimeStore.getState().receiveSnapshot(
       'computer-a',
-      runtimeSnapshot({ lifecycle: 'shutdown', snapshot_revision: 2 }),
+      runtimeSnapshot({ incarnation: 2, lifecycle: 'shutdown', snapshot_revision: 2 }),
     );
 
     expect(useComputerStore.getState().instances).toEqual([]);
@@ -668,18 +1225,53 @@ describe('computerStore', () => {
       .mockResolvedValueOnce([{
         ...baseStatus,
         connected: true,
+        client_connection_present: true,
+        connection_revision: 4,
+        connection_context: {
+          profile_name: 'manager:11',
+          url: 'https://smcp.example.com',
+          office_id: 'office-a',
+          computer_name: 'A',
+          connected_at: '2026-07-17T00:00:00Z',
+          source_type: 'manager_robot',
+          employee_id: 11,
+        },
+        robot_binding: { employee_id: 11, robot_name: 'Robot 11' },
+        connection_policy: {
+          target: { type: 'manager_robot', id: '11' },
+          auto_connect: false,
+        },
         runtime: runtimeSnapshot({ lifecycle: 'joined_office', snapshot_revision: 2 }),
       }])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce([{
-        ...baseStatus,
-        connected: false,
-        runtime: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 3 }),
-      }]);
+      .mockResolvedValueOnce(undefined);
 
     await useComputerStore.getState().connectSelectedTarget('computer-a');
     expect(mockedInvoke).toHaveBeenCalledWith('connect_computer_connection_target', {
       id: 'computer-a',
+    });
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      connectionStatus: 'disconnected',
+      robotName: 'Robot 11',
+      connectionPolicy: { target: { type: 'manager_robot', id: '11' } },
+    });
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'client_connection_authority_changed', revision: 4, present: true },
+      snapshot: runtimeSnapshot({ lifecycle: 'joined_office', snapshot_revision: 2 }),
+      connection: {
+        present: true,
+        revision: 4,
+        context: {
+          profile_name: 'manager:11',
+          url: 'https://smcp.example.com',
+          office_id: 'office-a',
+          computer_name: 'A',
+          connected_at: '2026-07-17T00:00:00Z',
+          source_type: 'manager_robot',
+          employee_id: 11,
+        },
+      },
     });
     expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connected');
 
@@ -687,6 +1279,15 @@ describe('computerStore', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('disconnect_computer_connection_target', {
       id: 'computer-a',
     });
+    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connected');
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'client_connection_authority_changed', revision: 5, present: false },
+      snapshot: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 3 }),
+      connection: { present: false, revision: 5, context: null },
+    });
     expect(useComputerStore.getState().instances[0].connectionStatus).toBe('disconnected');
+    expect(mockedInvoke).toHaveBeenCalledTimes(3);
   });
 });

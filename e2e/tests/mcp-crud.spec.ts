@@ -6,7 +6,7 @@ test.describe('MCP Server CRUD', () => {
     await setupInvokeMock(page);
     await page.goto('/');
     await page.locator('.ant-layout-sider').getByText('Computer').click();
-    await page.getByText('Open Details').first().click();
+    await page.getByRole('button', { name: 'Computer A', exact: true }).click();
     await page.getByRole('tab', { name: /MCP Servers/ }).click();
   });
 
@@ -25,6 +25,8 @@ test.describe('MCP Server CRUD', () => {
   });
 
   test('shows Start All and Stop All buttons', async ({ page }) => {
+    await page.locator('.ant-tabs-nav-more').click();
+    await page.getByText('Runtime', { exact: true }).last().click();
     await expect(page.getByText('Start All')).toBeVisible();
     await expect(page.getByText('Stop All')).toBeVisible();
   });
@@ -36,13 +38,12 @@ test.describe('MCP Server CRUD', () => {
 
   test('add server opens modal', async ({ page }) => {
     await page.getByText('Add Server').click();
-    await expect(page.locator('.ant-modal')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Add Server' })).toBeVisible();
   });
 
   test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
     await page.getByText('Back to Computers').click();
-    await page.getByText('Second Computer').click();
-    await page.getByText('Open Details').nth(1).click();
+    await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
     await page.getByRole('tab', { name: /MCP Servers/ }).click();
 
     await expect(page.getByText('Robot B')).toBeVisible();

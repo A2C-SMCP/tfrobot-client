@@ -28,8 +28,7 @@ test('sidebar shows all menu items', async ({ page }) => {
 
 test('clicking Computer navigates to Computer page', async ({ page }) => {
   await page.locator('.ant-layout-sider').getByText('Computer').click();
-  await expect(page.getByText('Computer A')).toBeVisible();
-  await expect(page.getByText('Open Details')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Computer A', exact: true })).toBeVisible();
 });
 
 test('clicking Settings navigates to settings page', async ({ page }) => {

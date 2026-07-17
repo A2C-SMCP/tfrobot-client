@@ -138,13 +138,19 @@ export function preferRuntimeEventSnapshot(
 export function acceptAuthoritativeRuntimeSnapshot(
   instanceId: string,
   incoming: ComputerRuntimeSnapshot,
+  options?: { allowDeletedRediscovery?: boolean },
 ): { accepted: boolean; previous: ComputerRuntimeSnapshot | undefined } {
   const previous = authoritativeSnapshots.get(instanceId);
   const deletedIncarnation = deletedIncarnations.get(instanceId);
   if (deletedIncarnation !== undefined) {
-    if (incoming.incarnation <= deletedIncarnation) {
+    if (
+      !options?.allowDeletedRediscovery
+      || incoming.incarnation <= deletedIncarnation
+    ) {
       return { accepted: false, previous };
     }
+    // Explicit deletion is a durable event fence. Only a trusted status response issued after
+    // deletion (for example create/list reconciliation) may admit a newly created incarnation.
     deletedIncarnations.delete(instanceId);
   }
   const retiredIncarnation = retiredIncarnations.get(instanceId);
@@ -217,4 +223,18 @@ export function forgetAuthoritativeRuntimeSnapshot(instanceId: string) {
 
 export function isRuntimeSnapshotInstanceDeleted(instanceId: string): boolean {
   return deletedIncarnations.has(instanceId);
+}
+
+export function canProjectRuntimeIncarnation(
+  instanceId: string,
+  incarnation: number,
+): boolean {
+  const deletedIncarnation = deletedIncarnations.get(instanceId);
+  // Unlike a retired runtime handle, an explicitly deleted instance must not be revived by any
+  // queued event, even if that event carries an incarnation unknown to the UI at deletion time.
+  if (deletedIncarnation !== undefined) return false;
+  const retiredIncarnation = retiredIncarnations.get(instanceId);
+  if (retiredIncarnation !== undefined && incarnation <= retiredIncarnation) return false;
+  const currentIncarnation = authoritativeSnapshots.get(instanceId)?.incarnation;
+  return currentIncarnation === undefined || incarnation >= currentIncarnation;
 }

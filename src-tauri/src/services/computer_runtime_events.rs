@@ -1,4 +1,6 @@
-use crate::services::computer::ComputerRuntimeActionCapabilities;
+use crate::services::computer::{
+    ClientConnectionAuthoritySnapshot, ComputerRuntimeActionCapabilities,
+};
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +72,7 @@ pub enum ComputerRuntimeEventCause {
     LifecycleChanged { state: LifecycleState },
     ConfigRevisionBumped { revision: u64 },
     CapabilityRevisionBumped { revision: u64 },
+    ClientConnectionAuthorityChanged { revision: u64, present: bool },
     ClientDiagnosticChanged { operation: String, has_error: bool },
     HandleReplaced { reason: String },
     ObservationAdvanced,
@@ -91,12 +94,19 @@ impl From<ComputerEvent> for ComputerRuntimeEventCause {
 }
 
 impl ComputerRuntimeEventCause {
-    fn matches_observation(&self, snapshot: &ComputerRuntimeSnapshot) -> bool {
+    fn matches_observation(
+        &self,
+        snapshot: &ComputerRuntimeSnapshot,
+        connection: &ClientConnectionAuthoritySnapshot,
+    ) -> bool {
         match self {
             Self::LifecycleChanged { state } => snapshot.lifecycle == *state,
             Self::ConfigRevisionBumped { revision } => snapshot.config_revision == *revision,
             Self::CapabilityRevisionBumped { revision } => {
                 snapshot.capability_revision == *revision
+            }
+            Self::ClientConnectionAuthorityChanged { revision, present } => {
+                connection.revision == *revision && connection.present == *present
             }
             Self::ClientDiagnosticChanged { has_error, .. } => {
                 snapshot.last_error.is_some() == *has_error
@@ -111,6 +121,7 @@ pub struct ComputerRuntimeStatusEvent {
     pub instance_id: String,
     pub cause: ComputerRuntimeEventCause,
     pub snapshot: ComputerRuntimeSnapshot,
+    pub connection: ClientConnectionAuthoritySnapshot,
 }
 
 impl ComputerRuntimeStatusEvent {
@@ -123,8 +134,9 @@ impl ComputerRuntimeStatusEvent {
         instance_id: String,
         cause: ComputerRuntimeEventCause,
         snapshot: ComputerRuntimeSnapshot,
+        connection: ClientConnectionAuthoritySnapshot,
     ) -> Self {
-        let cause = if cause.matches_observation(&snapshot) {
+        let cause = if cause.matches_observation(&snapshot, &connection) {
             cause
         } else {
             ComputerRuntimeEventCause::ObservationAdvanced
@@ -133,6 +145,7 @@ impl ComputerRuntimeStatusEvent {
             instance_id,
             cause,
             snapshot,
+            connection,
         }
     }
 }
@@ -156,6 +169,14 @@ mod tests {
             skills: 6,
             last_error: Some("runtime_error".to_string()),
             degraded_reason: None,
+        }
+    }
+
+    fn connection_authority(revision: u64, present: bool) -> ClientConnectionAuthoritySnapshot {
+        ClientConnectionAuthoritySnapshot {
+            present,
+            revision,
+            context: None,
         }
     }
 
@@ -235,8 +256,36 @@ mod tests {
                 sdk_snapshot(LifecycleState::JoinedOffice),
                 None,
             ),
+            connection_authority(0, false),
         );
 
         assert_eq!(event.cause, ComputerRuntimeEventCause::ObservationAdvanced);
+    }
+
+    #[test]
+    fn event_preserves_matching_connection_authority_cause() {
+        let event = ComputerRuntimeStatusEvent::from_observation(
+            "computer-a".to_string(),
+            ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                revision: 4,
+                present: true,
+            },
+            ComputerRuntimeSnapshot::from_sdk(
+                1,
+                1,
+                1,
+                sdk_snapshot(LifecycleState::JoinedOffice),
+                None,
+            ),
+            connection_authority(4, true),
+        );
+
+        assert_eq!(
+            event.cause,
+            ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                revision: 4,
+                present: true,
+            }
+        );
     }
 }

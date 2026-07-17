@@ -7,7 +7,8 @@ import {
   type UserInfo,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
-import { resetAllStores } from '../helpers/store';
+import { useComputerStore } from '@/stores/computerStore';
+import { resetAllStores, runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -172,10 +173,49 @@ describe('managerStore', () => {
     });
 
     it('invokes manager_connect_smcp with robotAccountId and returns the robot name', async () => {
+      useComputerStore.setState({
+        instances: [{
+          id: 'computer-a',
+          name: 'Computer A',
+          status: 'running',
+          connectionStatus: 'disconnected',
+          connectionPolicy: { target: null, auto_connect: false },
+          mcpServerCount: 0,
+          runtime: runtimeSnapshot({ lifecycle: 'started' }),
+        }],
+      });
       // 后端编排全路径（exchange + connect + 预刷新）为单条命令。
       mockedInvoke.mockResolvedValueOnce(undefined); // manager_connect_smcp
-      mockedInvoke.mockResolvedValueOnce([]); // list_computer_instances
-      mockedInvoke.mockResolvedValueOnce({ connected: true }); // get_connection_status
+      mockedInvoke.mockResolvedValueOnce([{
+        id: 'computer-a',
+        name: 'Computer A',
+        running: true,
+        runtime: runtimeSnapshot({ lifecycle: 'joined_office' }),
+        connected: true,
+        client_connection_present: true,
+        connection_revision: 9,
+        connection_context: {
+          profile_name: 'manager:11',
+          url: 'https://smcp.example.com',
+          office_id: 'office-a',
+          computer_name: 'Computer A',
+          connected_at: '2026-07-17T00:00:00Z',
+          source_type: 'manager_robot',
+          employee_id: 11,
+        },
+        mcp_server_count: 0,
+        robot_binding: {
+          employee_id: 11,
+          robot_id: 'robot-a',
+          robot_account_id: 4242,
+          namespace: 'ns-a',
+          robot_name: 'bot-one',
+        },
+        connection_policy: {
+          target: { type: 'manager_robot', id: '11', robotAccountId: 4242 },
+          auto_connect: false,
+        },
+      }]); // metadata-only reconciliation
 
       const ret = await useManagerStore.getState().selectEmployeeAndConnect('computer-a', 11);
 
@@ -190,12 +230,43 @@ describe('managerStore', () => {
         scope: null,
       });
       expect(mockedInvoke).toHaveBeenCalledWith('list_computer_instances');
-      expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', {
-        instanceId: 'computer-a',
+      expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
+      expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+      expect(useComputerStore.getState().instances[0]).toMatchObject({
+        connectionStatus: 'disconnected',
+        robotName: 'bot-one',
+        robotBinding: { employee_id: 11, robot_account_id: 4242 },
+        connectionPolicy: {
+          target: { type: 'manager_robot', id: '11', robotAccountId: 4242 },
+          auto_connect: false,
+        },
       });
       // 不再走 profile 构建/保存/connect_smcp 老路径。
       expect(mockedInvoke).not.toHaveBeenCalledWith('save_profile', expect.anything());
       expect(mockedInvoke).not.toHaveBeenCalledWith('connect_smcp', expect.anything());
+    });
+
+    it('surfaces a partial-success warning when Manager metadata refresh fails', async () => {
+      mockedInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce('metadata unavailable');
+
+      await expect(
+        useManagerStore.getState().selectEmployeeAndConnect('computer-a', 11),
+      ).rejects.toMatchObject({
+        kind: 'other',
+        detail: {
+          status: 0,
+          body: expect.stringContaining(
+            'Connection succeeded, but refreshing its saved binding and policy failed',
+          ),
+        },
+      });
+
+      expect(useManagerStore.getState().error).toMatchObject({
+        kind: 'other',
+        detail: { status: 0 },
+      });
     });
 
     it('rejects without calling the backend when robotAccountId is missing', async () => {

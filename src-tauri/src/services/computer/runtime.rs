@@ -99,6 +99,7 @@ impl ComputerInstanceRuntime {
             self.instance.id.clone(),
             cause,
             self.runtime_snapshot().await,
+            self.connection_authority_snapshot().await,
         );
         if let Err(error) = sink.emit(&event) {
             log::warn!(
@@ -129,6 +130,8 @@ impl ComputerInstanceRuntime {
         let instance_id = self.instance.id.clone();
         let incarnation = self.runtime_incarnation;
         let client_runtime_diagnostic = self.client_runtime_diagnostic.clone();
+        let connection = self.connection.clone();
+        let connection_authority_revision = self.connection_authority_revision.clone();
         let mut relay = self.runtime_event_task.lock().await;
         if self.is_retired()
             || generation != self.runtime_generation()
@@ -193,6 +196,13 @@ impl ComputerInstanceRuntime {
                     instance_id.clone(),
                     cause,
                     runtime_snapshot,
+                    {
+                        let connection = connection.read().await;
+                        ClientConnectionAuthoritySnapshot::from_connection(
+                            connection_authority_revision.load(Ordering::Acquire),
+                            connection.as_ref(),
+                        )
+                    },
                 );
                 if let Err(error) = sink.emit(&event) {
                     log::warn!(

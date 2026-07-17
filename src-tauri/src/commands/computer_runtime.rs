@@ -1,3 +1,4 @@
+use crate::services::computer::ClientConnectionAuthoritySnapshot;
 use crate::services::computer_runtime_events::{
     ComputerRuntimeEventSink, ComputerRuntimeSnapshot, ComputerRuntimeStatusEvent,
     COMPUTER_RUNTIME_STATUS_EVENT,
@@ -11,6 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 pub struct ComputerRuntimeSnapshotRecord {
     pub instance_id: String,
     pub snapshot: ComputerRuntimeSnapshot,
+    pub connection: ClientConnectionAuthoritySnapshot,
 }
 
 #[derive(Clone)]
@@ -29,13 +31,16 @@ impl ComputerRuntimeEventSink for TauriComputerRuntimeEventSink {
 async fn runtime_snapshot_records(state: &AppState) -> Vec<ComputerRuntimeSnapshotRecord> {
     state
         .computer_registry
-        .runtime_snapshots()
+        .runtime_observations()
         .await
         .into_iter()
-        .map(|(instance_id, snapshot)| ComputerRuntimeSnapshotRecord {
-            instance_id,
-            snapshot,
-        })
+        .map(
+            |(instance_id, snapshot, connection)| ComputerRuntimeSnapshotRecord {
+                instance_id,
+                snapshot,
+                connection,
+            },
+        )
         .collect()
 }
 

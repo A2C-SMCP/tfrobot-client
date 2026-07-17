@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info, warn, error as logError } from '@/utils/logger';
-import { useConnectionStore } from './connectionStore';
 import { useComputerStore } from './computerStore';
 
 /**
@@ -338,8 +337,9 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         scope: null,
       });
       info(`manager: connected via token-exchange employee=${employee.name}`);
-      await useComputerStore.getState().fetchInstances();
-      await useConnectionStore.getState().fetchStatus(instanceId);
+      // Connection status arrives through runtime events; reconcile the persisted robot binding
+      // and connection policy once after the command succeeds.
+      await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
       set({ loading: false });
       return { name: employee.name };
     } catch (e) {

@@ -86,6 +86,7 @@ describe('ComputerRuntime', () => {
           instance_id: 'computer-a',
           cause: { kind: 'config_revision_bumped', revision: 4 },
           snapshot: runtime,
+          connection: { present: false, revision: 0, context: null },
           received_at: '2026-07-17T10:00:00.000Z',
         }],
       },

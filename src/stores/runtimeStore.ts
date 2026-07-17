@@ -10,9 +10,13 @@ import { useSkillStore } from './skillStore';
 import {
   clearClientConnectionAuthority,
   resetClientConnectionAuthorities,
+  setClientConnectionAuthority,
+  type ClientConnectionAuthority,
 } from './connectionAuthority';
+import { useConnectionStore } from './connectionStore';
 import {
   acceptAuthoritativeRuntimeSnapshot,
+  canProjectRuntimeIncarnation,
   clearAuthoritativeRuntimeSnapshots,
   evictAuthoritativeRuntimeSnapshot,
   forgetAuthoritativeRuntimeSnapshot,
@@ -25,6 +29,7 @@ export type ComputerRuntimeEventCause =
   | { kind: 'lifecycle_changed'; state: ComputerRuntimeSnapshot['lifecycle'] }
   | { kind: 'config_revision_bumped'; revision: number }
   | { kind: 'capability_revision_bumped'; revision: number }
+  | { kind: 'client_connection_authority_changed'; revision: number; present: boolean }
   | { kind: 'client_diagnostic_changed'; operation: string; has_error: boolean }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
@@ -34,6 +39,7 @@ export interface ComputerRuntimeStatusEvent {
   instance_id: string;
   cause: ComputerRuntimeEventCause;
   snapshot: ComputerRuntimeSnapshot;
+  connection: ClientConnectionAuthority;
 }
 
 export interface ComputerRuntimeEventRecord extends ComputerRuntimeStatusEvent {
@@ -45,6 +51,7 @@ export const RUNTIME_EVENT_HISTORY_LIMIT = 50;
 interface ComputerRuntimeSnapshotRecord {
   instance_id: string;
   snapshot: ComputerRuntimeSnapshot;
+  connection: ClientConnectionAuthority;
 }
 
 interface RuntimeState {
@@ -57,7 +64,12 @@ interface RuntimeState {
   recover: () => Promise<void>;
   dispose: () => Promise<void>;
   receiveEvent: (event: ComputerRuntimeStatusEvent) => void;
-  receiveSnapshot: (instanceId: string, snapshot: ComputerRuntimeSnapshot) => void;
+  receiveSnapshot: (
+    instanceId: string,
+    snapshot: ComputerRuntimeSnapshot,
+    connection?: ClientConnectionAuthority,
+    options?: { allowDeletedRediscovery?: boolean },
+  ) => void;
   evictSnapshot: (instanceId: string, incarnation: number) => void;
   forgetSnapshot: (instanceId: string) => void;
   reset: () => void;
@@ -100,6 +112,22 @@ function applySnapshotToConsumers(instanceId: string, snapshot: ComputerRuntimeS
   useComputerStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useDashboardStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useComputerOverviewStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
+  useConnectionStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
+}
+
+function applyConnectionAuthority(
+  instanceId: string,
+  snapshot: ComputerRuntimeSnapshot,
+  connection: ClientConnectionAuthority,
+) {
+  if (!canProjectRuntimeIncarnation(instanceId, snapshot.incarnation)) return;
+  setClientConnectionAuthority(
+    instanceId,
+    connection.present,
+    connection.context,
+    connection.revision,
+    snapshot,
+  );
 }
 
 const initialState = {
@@ -118,8 +146,15 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     set(initialState);
   },
 
-  receiveSnapshot: (instanceId, snapshot) => {
-    const { accepted, previous } = acceptAuthoritativeRuntimeSnapshot(instanceId, snapshot);
+  receiveSnapshot: (instanceId, snapshot, connection, options) => {
+    const { accepted, previous } = acceptAuthoritativeRuntimeSnapshot(
+      instanceId,
+      snapshot,
+      options,
+    );
+    // Admission runs first so a trusted post-delete status can explicitly reopen the event fence
+    // before its independently versioned connection authority is projected.
+    if (connection) applyConnectionAuthority(instanceId, snapshot, connection);
     if (!accepted) {
       // A status response may carry a newer independent connection authority together with an
       // older SDK snapshot. Re-project the current SDK authority so that connection-only changes
@@ -144,11 +179,18 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   },
 
   receiveEvent: (event) => {
+    applyConnectionAuthority(event.instance_id, event.snapshot, event.connection);
     const { accepted, previous } = acceptAuthoritativeRuntimeSnapshot(
       event.instance_id,
       event.snapshot,
     );
-    if (!accepted) return;
+    if (!accepted) {
+      // Connection authority is versioned independently and has already been projected above.
+      // Event history deliberately remains a history of accepted runtime observations so a
+      // connection update paired with an older SDK snapshot cannot reintroduce stale snapshots.
+      if (previous) applySnapshotToConsumers(event.instance_id, previous);
+      return;
+    }
     const record: ComputerRuntimeEventRecord = {
       ...event,
       received_at: new Date().toISOString(),
@@ -172,6 +214,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   evictSnapshot: (instanceId, incarnation) => {
     evictAuthoritativeRuntimeSnapshot(instanceId, incarnation);
     clearClientConnectionAuthority(instanceId);
+    useConnectionStore.getState().forgetStatus(instanceId);
     set((state) => {
       const snapshots = { ...state.snapshots };
       const eventsByInstance = { ...state.eventsByInstance };
@@ -184,6 +227,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   forgetSnapshot: (instanceId) => {
     forgetAuthoritativeRuntimeSnapshot(instanceId);
     clearClientConnectionAuthority(instanceId);
+    useConnectionStore.getState().forgetStatus(instanceId);
     set((state) => {
       const snapshots = { ...state.snapshots };
       const eventsByInstance = { ...state.eventsByInstance };
@@ -224,7 +268,11 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
           return;
         }
         for (const record of records) {
-          useRuntimeStore.getState().receiveSnapshot(record.instance_id, record.snapshot);
+          useRuntimeStore.getState().receiveSnapshot(
+            record.instance_id,
+            record.snapshot,
+            record.connection,
+          );
         }
         set({ initialized: true, error: null });
       } catch (error) {
@@ -248,7 +296,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     try {
       const records = await invoke<ComputerRuntimeSnapshotRecord[]>('get_computer_runtime_snapshots');
       for (const record of records) {
-        get().receiveSnapshot(record.instance_id, record.snapshot);
+        get().receiveSnapshot(record.instance_id, record.snapshot, record.connection);
       }
       set({ error: null });
     } catch (error) {

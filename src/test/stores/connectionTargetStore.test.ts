@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useComputerStore } from '@/stores/computerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { resetClientConnectionAuthorities } from '@/stores/connectionAuthority';
 import {
   useConnectionTargetStore,
   type ManualSmcpTarget,
@@ -34,7 +35,12 @@ function resetStores() {
     loading: false,
     error: null,
     selectedInstanceId: null,
+    listRequestId: 0,
+    mutationEpoch: 0,
+    profileMutationVersions: {},
+    connectionMetadataRequestIds: {},
   });
+  resetClientConnectionAuthorities();
 }
 
 describe('connectionTargetStore', () => {
@@ -83,19 +89,41 @@ describe('connectionTargetStore', () => {
     expect(useConnectionTargetStore.getState().manualTargets).toEqual([]);
   });
 
-  it('connectTarget refreshes connection status and computer instances', async () => {
-    mockedInvoke.mockResolvedValueOnce(undefined);
-    mockedInvoke.mockResolvedValueOnce({
-      connected: true,
-      target_id: 'manual-a',
+  it('connectTarget delegates status projection to runtime events', async () => {
+    useComputerStore.setState({
+      instances: [{
+        id: 'computer-a',
+        name: 'Computer A',
+        status: 'running',
+        connectionStatus: 'disconnected',
+        connectionPolicy: { target: null, auto_connect: false },
+        mcpServerCount: 0,
+        runtime: runtimeSnapshot({ lifecycle: 'started' }),
+      }],
     });
+    mockedInvoke.mockResolvedValueOnce(undefined);
     mockedInvoke.mockResolvedValueOnce([
       {
         id: 'computer-a',
         name: 'Computer A',
         running: true,
-        runtime: runtimeSnapshot({ lifecycle: 'connected' }),
+        runtime: runtimeSnapshot({ lifecycle: 'joined_office' }),
         connected: true,
+        client_connection_present: true,
+        connection_revision: 7,
+        connection_context: {
+          profile_name: 'prod',
+          url: 'https://smcp.example.com',
+          office_id: 'office-1',
+          computer_name: 'Computer A',
+          connected_at: '2026-07-17T00:00:00Z',
+          source_type: 'manual_smcp',
+          target_id: 'manual-a',
+        },
+        connection_policy: {
+          target: { type: 'manual_smcp', id: 'manual-a' },
+          auto_connect: false,
+        },
         mcp_server_count: 0,
       },
     ]);
@@ -106,15 +134,16 @@ describe('connectionTargetStore', () => {
       instanceId: 'computer-a',
       targetId: 'manual-a',
     });
-    expect(mockedInvoke).toHaveBeenCalledWith('get_connection_status', {
-      instanceId: 'computer-a',
-    });
     expect(mockedInvoke).toHaveBeenCalledWith('list_computer_instances');
-    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({
-      connected: true,
-      target_id: 'manual-a',
+    expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
+    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+    expect(useComputerStore.getState().instances[0]).toMatchObject({
+      connectionStatus: 'disconnected',
+      connectionPolicy: {
+        target: { type: 'manual_smcp', id: 'manual-a' },
+        auto_connect: false,
+      },
     });
-    expect(useComputerStore.getState().instances).toHaveLength(1);
   });
 
   it('stores and rethrows backend errors', async () => {
@@ -126,5 +155,22 @@ describe('connectionTargetStore', () => {
 
     expect(useConnectionTargetStore.getState().error).toBe('connect failed');
     expect(useConnectionTargetStore.getState().loading).toBe(false);
+  });
+
+  it('surfaces a partial-success warning when post-connect metadata refresh fails', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce('metadata unavailable');
+
+    await expect(
+      useConnectionTargetStore.getState().connectTarget('computer-a', 'manual-a'),
+    ).rejects.toThrow(
+      'Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
+    );
+
+    expect(useConnectionTargetStore.getState()).toMatchObject({
+      loading: false,
+      error: 'Error: Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
+    });
   });
 });

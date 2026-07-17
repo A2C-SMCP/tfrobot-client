@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { useComputerStore } from './computerStore';
-import { useConnectionStore } from './connectionStore';
 
 export interface ManualSmcpTarget {
   id: string;
@@ -80,8 +79,9 @@ export const useConnectionTargetStore = create<ConnectionTargetState>((set, get)
     set({ loading: true, error: null });
     try {
       await invoke('connect_connection_target', { instanceId, targetId });
-      await useConnectionStore.getState().fetchStatus(instanceId);
-      await useComputerStore.getState().fetchInstances();
+      // The runtime event owns connection state. This one-shot reconciliation is only for the
+      // persisted connection policy changed by the command.
+      await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });

@@ -4,6 +4,8 @@ import { useComputerStore } from '@/stores/computerStore';
 import { useComputerOverviewStore } from '@/stores/computerOverviewStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
+import { useConnectionStore } from '@/stores/connectionStore';
+import { getClientConnectionAuthority } from '@/stores/connectionAuthority';
 import { useMcpStore } from '@/stores/mcpStore';
 import {
   COMPUTER_RUNTIME_STATUS_EVENT,
@@ -32,6 +34,7 @@ describe('runtimeStore', () => {
     useDashboardStore.getState().reset();
     useMcpStore.getState().reset();
     useDebugStore.getState().reset();
+    useConnectionStore.getState().reset();
     useSkillStore.getState().reset();
     mockedInvoke.mockReset();
     mockedListen.mockReset();
@@ -379,6 +382,74 @@ describe('runtimeStore', () => {
     );
   });
 
+  it('applies a newer connection authority even when its paired runtime snapshot is older', () => {
+    const current = runtimeSnapshot({
+      lifecycle: 'joined_office',
+      snapshot_revision: 5,
+    });
+    useRuntimeStore.getState().receiveSnapshot('computer-a', current);
+
+    const context = {
+      profile_name: 'prod',
+      url: 'https://smcp.example.com',
+      office_id: 'office-a',
+      computer_name: 'Computer A',
+      connected_at: '2026-07-17T00:00:00Z',
+      source_type: 'manager_robot',
+      employee_id: 42,
+    };
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'client_connection_authority_changed',
+        revision: 1,
+        present: true,
+      },
+      snapshot: runtimeSnapshot({
+        lifecycle: 'joined_office',
+        snapshot_revision: 4,
+      }),
+      connection: { present: true, revision: 1, context },
+    });
+
+    expect(useRuntimeStore.getState().snapshots['computer-a']).toEqual(current);
+    expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
+      connected: true,
+      profile_name: 'prod',
+      employee_id: 42,
+    });
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'client_connection_authority_changed',
+        revision: 2,
+        present: false,
+      },
+      snapshot: runtimeSnapshot({
+        lifecycle: 'started',
+        snapshot_revision: 6,
+      }),
+      connection: { present: false, revision: 2, context: null },
+    });
+    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'client_connection_authority_changed',
+        revision: 1,
+        present: true,
+      },
+      snapshot: runtimeSnapshot({
+        lifecycle: 'joined_office',
+        snapshot_revision: 5,
+      }),
+      connection: { present: true, revision: 1, context },
+    });
+    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+  });
+
   it('does not reuse raw connection authority across runtime incarnations', () => {
     const retiredRuntime = runtimeSnapshot({
       incarnation: 7,
@@ -440,6 +511,7 @@ describe('runtimeStore', () => {
           snapshot_revision: revision,
           config_revision: revision,
         }),
+        connection: { present: false, revision: 0, context: null },
       });
     }
 
@@ -459,6 +531,7 @@ describe('runtimeStore', () => {
       instance_id: 'computer-a',
       cause: { kind: 'config_revision_bumped', revision: 10 },
       snapshot: runtimeSnapshot({ snapshot_revision: 10, config_revision: 10 }),
+      connection: { present: false, revision: 0, context: null },
     });
     expect(useRuntimeStore.getState().eventsByInstance['computer-a']).toHaveLength(50);
 
@@ -466,6 +539,7 @@ describe('runtimeStore', () => {
       instance_id: 'computer-a',
       cause: { kind: 'handle_replaced', reason: 'reload' },
       snapshot: runtimeSnapshot({ incarnation: 2, snapshot_revision: 1 }),
+      connection: { present: false, revision: 0, context: null },
     });
     expect(useRuntimeStore.getState().eventsByInstance['computer-a']).toMatchObject([
       {
@@ -490,6 +564,70 @@ describe('runtimeStore', () => {
     expect(useRuntimeStore.getState().snapshots['computer-a']).toBeUndefined();
   });
 
+  it('clears connection status with runtime authority and rejects late tombstoned events', () => {
+    const connected = runtimeSnapshot({ lifecycle: 'joined_office' });
+    const connection = {
+      present: true,
+      revision: 1,
+      context: {
+        profile_name: 'prod',
+        url: 'https://smcp.example.com',
+        office_id: 'office-a',
+        computer_name: 'Computer A',
+        connected_at: '2026-07-17T00:00:00Z',
+        source_type: 'manual_smcp',
+      },
+    };
+    useRuntimeStore.getState().receiveSnapshot('computer-a', connected, connection);
+    expect(useConnectionStore.getState().statuses['computer-a']).toMatchObject({ connected: true });
+
+    useRuntimeStore.getState().evictSnapshot('computer-a', connected.incarnation);
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'client_connection_authority_changed', revision: 2, present: true },
+      snapshot: runtimeSnapshot({ snapshot_revision: 2 }),
+      connection: { ...connection, revision: 2 },
+    });
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+
+    const replacement = runtimeSnapshot({
+      incarnation: connected.incarnation + 1,
+      lifecycle: 'joined_office',
+    });
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'client_connection_authority_changed', revision: 1, present: true },
+      snapshot: replacement,
+      connection: { ...connection, revision: 1 },
+    });
+    expect(useRuntimeStore.getState().snapshots['computer-a']).toBeUndefined();
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+
+    useRuntimeStore.getState().receiveSnapshot('computer-a', replacement, {
+      ...connection,
+      revision: 1,
+    }, { allowDeletedRediscovery: true });
+    expect(useConnectionStore.getState().statuses['computer-a']).toMatchObject({ connected: true });
+
+    useRuntimeStore.getState().forgetSnapshot('computer-a');
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'client_connection_authority_changed', revision: 2, present: true },
+      snapshot: { ...replacement, snapshot_revision: 2 },
+      connection: { ...connection, revision: 2 },
+    });
+    expect(useConnectionStore.getState().statuses['computer-a']).toBeUndefined();
+    expect(getClientConnectionAuthority('computer-a')).toBeUndefined();
+  });
+
   it('subscribes before enabling backend events and hydrates initial snapshots', async () => {
     const callOrder: string[] = [];
     let eventHandler: ((event: { payload: unknown }) => void) | undefined;
@@ -506,9 +644,14 @@ describe('runtimeStore', () => {
           instance_id: 'computer-a',
           cause: { kind: 'lifecycle_changed', state: 'started' },
           snapshot: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 2 }),
+          connection: { present: false, revision: 0, context: null },
         },
       });
-      return [{ instance_id: 'computer-a', snapshot: initialRuntime }];
+      return [{
+        instance_id: 'computer-a',
+        snapshot: initialRuntime,
+        connection: { present: false, revision: 0, context: null },
+      }];
     });
 
     await useRuntimeStore.getState().initialize();
@@ -523,6 +666,35 @@ describe('runtimeStore', () => {
       runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 2 }),
     );
     expect(useRuntimeStore.getState().initialized).toBe(true);
+  });
+
+  it('hydrates connection authority with the initial runtime observation', async () => {
+    const runtime = runtimeSnapshot({ lifecycle: 'joined_office' });
+    mockedInvoke.mockResolvedValueOnce([{
+      instance_id: 'computer-a',
+      snapshot: runtime,
+      connection: {
+        present: true,
+        revision: 3,
+        context: {
+          profile_name: 'manager:42',
+          url: 'https://smcp.example.com',
+          office_id: 'office-a',
+          computer_name: 'Computer A',
+          connected_at: '2026-07-17T00:00:00Z',
+          source_type: 'manager_robot',
+          employee_id: 42,
+        },
+      },
+    }]);
+
+    await useRuntimeStore.getState().initialize();
+
+    expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
+      connected: true,
+      profile_name: 'manager:42',
+      employee_id: 42,
+    });
   });
 
   it('cancels stale StrictMode initialization without leaking its listener', async () => {

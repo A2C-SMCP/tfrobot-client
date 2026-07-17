@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useEffect } from 'react';
 import {
   App,
   Card,
@@ -21,7 +21,6 @@ import {
   CheckCircleOutlined,
 } from '@ant-design/icons';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
-import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import {
   useManagerStore,
@@ -88,36 +87,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
     clearError,
     dismissPaymentRequired,
   } = useManagerStore();
-  const fetchConnectionStatus = useConnectionStore((s) => s.fetchStatus);
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
   const selectedConnectionStatus = useConnectionStore((s) =>
     instanceId ? s.statuses[instanceId] : undefined,
   );
   const connectionEnabled = Boolean(instanceId);
   const connectionStatus = selectedConnectionStatus ?? DISCONNECTED_STATUS;
-
-  const refreshConnectionStatus = useCallback(() => {
-    if (!instanceId) return Promise.resolve();
-    return fetchConnectionStatus(instanceId);
-  }, [fetchConnectionStatus, instanceId]);
-
-  useEffect(() => {
-    refreshConnectionStatus().catch(() => {
-      /* noop */
-    });
-  }, [refreshConnectionStatus]);
-
-  // 后端在连接 / 断开 / 后台预刷新重连时 emit 'connection'，据此刷新连接状态徽标（TFRC-11）。
-  useEffect(() => {
-    const unlisten = listen('connection', () => {
-      refreshConnectionStatus().catch(() => {
-        /* noop */
-      });
-    });
-    return () => {
-      unlisten.then((off) => off()).catch(() => {});
-    };
-  }, [refreshConnectionStatus]);
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
@@ -148,8 +123,6 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
       const res = await selectEmployeeAndConnect(instanceId, employee.id);
       if (res) {
         message.success(t('managerAccount.employees.connectSuccess', { name: res.name }));
-        // 刷新连接状态，让 UI 上"已连接"标识立即生效
-        await refreshConnectionStatus();
       }
     } catch (e) {
       const err = e as ManagerError;

@@ -692,7 +692,6 @@ async fn establish_manager_connection(
             ManagerConnectionDecision::AlreadyConnected
         ) {
             persist_robot_binding(state, instance_id, &params.robot_binding).await?;
-            emit_connection_changed(app);
             return Ok(());
         }
         runtime
@@ -758,7 +757,6 @@ async fn establish_manager_connection(
         None,
         Some(instance_id),
     );
-    emit_connection_changed(app);
     Ok(())
 }
 
@@ -867,7 +865,6 @@ fn spawn_refresh_task(
                         None,
                         Some(&instance_id),
                     );
-                    emit_connection_changed(&app);
                     expires_in = new_ttl;
                 }
                 // session 失效：通知前端重新登录，停止刷新。
@@ -999,11 +996,6 @@ pub async fn try_install_refreshed_client(
     } else {
         SwapResult::Stale
     }
-}
-
-/// 通知前端连接状态变化（前端据此 refetch `get_connection_status`）。
-fn emit_connection_changed(app: &AppHandle) {
-    let _ = app.emit("connection", ());
 }
 
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {

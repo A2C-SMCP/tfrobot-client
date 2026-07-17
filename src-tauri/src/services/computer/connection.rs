@@ -15,8 +15,19 @@ pub struct ConnectionStateSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClientConnectionAuthoritySnapshot {
+    pub present: bool,
     pub revision: u64,
     pub context: Option<ConnectionStateSummary>,
+}
+
+impl ClientConnectionAuthoritySnapshot {
+    pub(super) fn from_connection(revision: u64, connection: Option<&ConnectionState>) -> Self {
+        Self {
+            present: connection.is_some(),
+            revision,
+            context: connection.map(ConnectionStateSummary::from),
+        }
+    }
 }
 
 impl From<&ConnectionState> for ConnectionStateSummary {
@@ -144,25 +155,21 @@ impl ComputerInstanceRuntime {
         }
         self.set_client_runtime_diagnostic("reconnect", None).await;
 
-        let mut guard = self.connection.write().await;
-        match guard.as_mut() {
-            Some(connection) if connection.generation == generation => {
-                connection.connected_at = chrono::Utc::now();
-                self.advance_connection_authority_revision();
-                Ok(SmcpReconnectOutcome::Reconnected { expires_in })
-            }
-            _ => {
-                if let Err(error) = self.disconnect_smcp_socketio_inner().await {
-                    self.set_client_runtime_diagnostic(
-                        "reconnect",
-                        Some("SMCP reconnect failed; retrying".to_string()),
-                    )
-                    .await;
-                    return Err(error);
-                }
-                Ok(SmcpReconnectOutcome::Stale)
-            }
+        if self
+            .refresh_connection_timestamp_for_generation(generation)
+            .await
+        {
+            return Ok(SmcpReconnectOutcome::Reconnected { expires_in });
         }
+        if let Err(error) = self.disconnect_smcp_socketio_inner().await {
+            self.set_client_runtime_diagnostic(
+                "reconnect",
+                Some("SMCP reconnect failed; retrying".to_string()),
+            )
+            .await;
+            return Err(error);
+        }
+        Ok(SmcpReconnectOutcome::Stale)
     }
 
     pub async fn set_refresh_task(&self, task: tokio::task::JoinHandle<()>) {
@@ -209,10 +216,10 @@ impl ComputerInstanceRuntime {
     /// holding the same lock writers use to publish connection changes.
     pub async fn connection_authority_snapshot(&self) -> ClientConnectionAuthoritySnapshot {
         let connection = self.connection.read().await;
-        ClientConnectionAuthoritySnapshot {
-            revision: self.connection_authority_revision.load(Ordering::Acquire),
-            context: connection.as_ref().map(ConnectionStateSummary::from),
-        }
+        ClientConnectionAuthoritySnapshot::from_connection(
+            self.connection_authority_revision.load(Ordering::Acquire),
+            connection.as_ref(),
+        )
     }
 
     pub async fn connection_state_snapshot(&self) -> Option<ConnectionState> {
@@ -225,14 +232,26 @@ impl ComputerInstanceRuntime {
 
     pub async fn refresh_connection_timestamp_for_generation(&self, generation: u64) -> bool {
         let mut connection = self.connection.write().await;
-        match connection.as_mut() {
+        let refreshed = match connection.as_mut() {
             Some(connection) if connection.generation == generation => {
                 connection.connected_at = chrono::Utc::now();
                 self.advance_connection_authority_revision();
                 true
             }
             _ => false,
+        };
+        drop(connection);
+        if refreshed {
+            let revision = self.connection_authority_revision.load(Ordering::Acquire);
+            self.publish_runtime_status(
+                ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    revision,
+                    present: true,
+                },
+            )
+            .await;
         }
+        refreshed
     }
 
     #[cfg(debug_assertions)]
@@ -250,8 +269,18 @@ impl ComputerInstanceRuntime {
             );
         }
         *connection = Some(state);
-        self.connection_authority_revision
-            .fetch_add(1, Ordering::AcqRel);
+        let revision = self
+            .connection_authority_revision
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        drop(connection);
+        self.publish_runtime_status(
+            ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                revision,
+                present: true,
+            },
+        )
+        .await;
         Ok(())
     }
 
@@ -259,8 +288,18 @@ impl ComputerInstanceRuntime {
         let mut connection = self.connection.write().await;
         let previous = connection.take();
         if previous.is_some() {
-            self.connection_authority_revision
-                .fetch_add(1, Ordering::AcqRel);
+            let revision = self
+                .connection_authority_revision
+                .fetch_add(1, Ordering::AcqRel)
+                + 1;
+            drop(connection);
+            self.publish_runtime_status(
+                ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    revision,
+                    present: false,
+                },
+            )
+            .await;
         }
         previous
     }
@@ -340,6 +379,9 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    // TODO(A2C-SMCP/rust-sdk#148): the pinned SDK does not await the underlying transport
+    // disconnect. Keep this raw-client teardown compatibility boundary private, and remove it
+    // once the upgraded high-level disconnect API guarantees relay-side transport completion.
     pub(super) async fn disconnect_smcp_socketio_inner(&self) -> Result<(), String> {
         if let Err(error) = self.computer.read().await.leave_office().await {
             log::warn!(

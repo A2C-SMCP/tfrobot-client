@@ -1280,6 +1280,9 @@ impl ComputerInstanceRuntime {
             .await
     }
 
+    // TODO(A2C-SMCP/rust-sdk#148): start/stop currently bumps SDK capability state without
+    // synchronizing server:update_tool_list. Delete this private compatibility emit after the
+    // upgraded SDK owns tool-list synchronization for connected Computers.
     async fn emit_sdk_tool_list_update_if_connected(&self) {
         let socketio_ref = self.computer.read().await.get_socketio_client();
         let client = socketio_ref.read().await.clone();
@@ -1918,6 +1921,10 @@ mod tests {
     }
 
     impl RecordingRuntimeEventSink {
+        fn event_count(&self) -> usize {
+            self.events.lock().unwrap().len()
+        }
+
         async fn wait_for(
             &self,
             predicate: impl Fn(&ComputerRuntimeStatusEvent) -> bool,
@@ -2355,6 +2362,107 @@ mod tests {
             1
         );
         assert_eq!(runtime.runtime_snapshot().await.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn connection_authority_changes_publish_versioned_runtime_events() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let sink = Arc::new(RecordingRuntimeEventSink::default());
+        registry.set_runtime_event_sink(sink.clone()).await;
+        let runtime = registry.runtime("one").await.unwrap();
+
+        let initial_connected_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: initial_connected_at,
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("target-a".to_string()),
+                target_name: Some("Target A".to_string()),
+                employee_id: None,
+                generation: 7,
+            })
+            .await
+            .unwrap();
+
+        let installed = sink
+            .wait_for(|event| {
+                matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                        revision: 1,
+                        present: true,
+                    }
+                )
+            })
+            .await;
+        assert!(installed.connection.present);
+        assert_eq!(installed.connection.revision, 1);
+        assert_eq!(
+            installed
+                .connection
+                .context
+                .as_ref()
+                .and_then(|context| context.target_id.as_deref()),
+            Some("target-a")
+        );
+
+        assert!(runtime.refresh_connection_timestamp_for_generation(7).await);
+        let refreshed = sink
+            .wait_for(|event| {
+                matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                        revision: 2,
+                        present: true,
+                    }
+                )
+            })
+            .await;
+        assert_eq!(refreshed.connection.revision, 2);
+        assert!(refreshed.connection.present);
+        let refreshed_at = chrono::DateTime::parse_from_rfc3339(
+            &refreshed.connection.context.as_ref().unwrap().connected_at,
+        )
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+        assert!(refreshed_at > initial_connected_at);
+
+        let event_count = sink.event_count();
+        assert!(
+            !runtime
+                .refresh_connection_timestamp_for_generation(99)
+                .await
+        );
+        assert_eq!(sink.event_count(), event_count);
+        assert_eq!(runtime.connection_authority_snapshot().await.revision, 2);
+
+        runtime.take_connection_state().await;
+        let removed = sink
+            .wait_for(|event| {
+                matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                        revision: 3,
+                        present: false,
+                    }
+                )
+            })
+            .await;
+        assert!(!removed.connection.present);
+        assert_eq!(removed.connection.revision, 3);
+        assert!(removed.connection.context.is_none());
+
+        let event_count = sink.event_count();
+        assert!(!runtime.refresh_connection_timestamp_for_generation(7).await);
+        assert_eq!(sink.event_count(), event_count);
+        assert_eq!(runtime.connection_authority_snapshot().await.revision, 3);
     }
 
     #[tokio::test]

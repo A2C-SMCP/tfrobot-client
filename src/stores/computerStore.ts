@@ -3,7 +3,6 @@ import { create } from 'zustand';
 import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 import {
   getClientConnectionAuthority,
-  setClientConnectionAuthority,
   type ConnectionStateSummary,
 } from './connectionAuthority';
 import {
@@ -103,10 +102,15 @@ interface ComputerState {
   loading: boolean;
   error: string | null;
   selectedInstanceId: string | null;
+  pendingMutationCount: number;
   listRequestId: number;
   mutationEpoch: number;
+  mutationCompletionRevision: number;
+  deletionRevision: number;
   profileMutationVersions: Record<string, number>;
+  connectionMetadataRequestIds: Record<string, number>;
   fetchInstances: () => Promise<void>;
+  reconcileConnectionMetadata: (id: string) => Promise<void>;
   createInstance: (values: ComputerFormValues) => Promise<ComputerInstance>;
   updateInstance: (id: string, values: ComputerFormValues) => Promise<ComputerInstance>;
   duplicateInstance: (values: DuplicateComputerValues) => Promise<ComputerInstance>;
@@ -132,10 +136,29 @@ const initialState = {
   loading: false,
   error: null as string | null,
   selectedInstanceId: null as string | null,
+  pendingMutationCount: 0,
   listRequestId: 0,
   mutationEpoch: 0,
+  mutationCompletionRevision: 0,
+  deletionRevision: 0,
   profileMutationVersions: {} as Record<string, number>,
+  connectionMetadataRequestIds: {} as Record<string, number>,
 };
+
+function mergeConnectionMetadata(
+  instance: ComputerInstance,
+  status: ComputerInstanceStatus,
+): ComputerInstance {
+  const robotBinding = status.robot_binding === undefined
+    ? instance.robotBinding
+    : status.robot_binding;
+  return {
+    ...instance,
+    robotBinding,
+    robotName: robotBinding?.robot_name,
+    connectionPolicy: status.connection_policy ?? instance.connectionPolicy,
+  };
+}
 
 function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
   const runtime = status.runtime;
@@ -175,33 +198,47 @@ function normalizeFormValues(values: ComputerFormValues): ComputerFormValues {
   };
 }
 
-async function ingestStatus(status: ComputerInstanceStatus): Promise<ComputerInstance> {
+async function ingestStatus(
+  status: ComputerInstanceStatus,
+  options?: { allowDeletedRediscovery?: boolean },
+): Promise<ComputerInstance> {
   const { useRuntimeStore } = await import('./runtimeStore');
   const connectionContext = status.connection_context ?? status.connection ?? null;
-  setClientConnectionAuthority(
+  useRuntimeStore.getState().receiveSnapshot(
     status.id,
-    status.client_connection_present ?? (connectionContext ? true : status.connected),
-    connectionContext,
-    status.connection_revision ?? 0,
     status.runtime,
+    {
+      present: status.client_connection_present ?? (connectionContext ? true : status.connected),
+      context: connectionContext,
+      revision: status.connection_revision ?? 0,
+    },
+    options,
   );
-  useRuntimeStore.getState().receiveSnapshot(status.id, status.runtime);
   return toComputerInstance(status);
 }
 
-async function ingestStatuses(statuses: ComputerInstanceStatus[]): Promise<void> {
+async function ingestStatuses(
+  statuses: ComputerInstanceStatus[],
+  canIngest: () => boolean,
+): Promise<boolean> {
   const { useRuntimeStore } = await import('./runtimeStore');
+  // The import above yields. Revalidate after it and immediately before any trusted
+  // allowDeletedRediscovery side effect so a deletion committed in that window wins.
+  if (!canIngest()) return false;
   for (const status of statuses) {
     const connectionContext = status.connection_context ?? status.connection ?? null;
-    setClientConnectionAuthority(
+    useRuntimeStore.getState().receiveSnapshot(
       status.id,
-      status.client_connection_present ?? (connectionContext ? true : status.connected),
-      connectionContext,
-      status.connection_revision ?? 0,
       status.runtime,
+      {
+        present: status.client_connection_present ?? (connectionContext ? true : status.connected),
+        context: connectionContext,
+        revision: status.connection_revision ?? 0,
+      },
+      { allowDeletedRediscovery: true },
     );
-    useRuntimeStore.getState().receiveSnapshot(status.id, status.runtime);
   }
+  return true;
 }
 
 function requireInstance(instances: ComputerInstance[], id: string): ComputerInstance {
@@ -289,11 +326,24 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
   fetchInstances: async () => {
     const listRequestId = get().listRequestId + 1;
     const mutationEpoch = get().mutationEpoch;
+    const mutationCompletionRevision = get().mutationCompletionRevision;
+    const deletionRevision = get().deletionRevision;
+    const isCurrent = () => (
+      get().listRequestId === listRequestId
+      && get().mutationEpoch === mutationEpoch
+      && get().mutationCompletionRevision === mutationCompletionRevision
+      && get().deletionRevision === deletionRevision
+    );
+    const releaseStaleListLoading = () => set((state) => (
+      state.listRequestId === listRequestId
+        ? { loading: state.pendingMutationCount > 0 }
+        : {}
+    ));
     set({ loading: true, error: null, listRequestId });
     try {
       const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
-      if (get().listRequestId !== listRequestId || get().mutationEpoch !== mutationEpoch) {
-        set((state) => state.listRequestId === listRequestId ? { loading: false } : {});
+      if (!isCurrent()) {
+        releaseStaleListLoading();
         return;
       }
       const statusIds = new Set(statuses.map((status) => status.id));
@@ -302,44 +352,140 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         .map((instance) => instance.id);
       if (missingIds.length > 0) {
         const { useRuntimeStore } = await import('./runtimeStore');
+        if (!isCurrent()) {
+          releaseStaleListLoading();
+          return;
+        }
         for (const id of missingIds) useRuntimeStore.getState().forgetSnapshot(id);
       }
-      await ingestStatuses(statuses);
+      if (!(await ingestStatuses(statuses, isCurrent))) {
+        releaseStaleListLoading();
+        return;
+      }
       set((state) => {
-        if (state.listRequestId !== listRequestId || state.mutationEpoch !== mutationEpoch) {
-          return state.listRequestId === listRequestId ? { loading: false } : {};
+        if (
+          state.listRequestId !== listRequestId
+          || state.mutationEpoch !== mutationEpoch
+          || state.mutationCompletionRevision !== mutationCompletionRevision
+          || state.deletionRevision !== deletionRevision
+        ) {
+          return state.listRequestId === listRequestId
+            ? { loading: state.pendingMutationCount > 0 }
+            : {};
         }
         const instances = reconcileInstances(state.instances, statuses);
         return {
           instances,
-          loading: false,
+          loading: state.pendingMutationCount > 0,
           selectedInstanceId: instances.some((instance) => instance.id === state.selectedInstanceId)
             ? state.selectedInstanceId
             : instances[0]?.id ?? null,
         };
       });
     } catch (e) {
-      set((state) => state.listRequestId === listRequestId
-        ? { error: String(e), loading: false }
-        : {});
+      set((state) => {
+        if (state.listRequestId !== listRequestId) return {};
+        if (
+          state.mutationEpoch !== mutationEpoch
+          || state.mutationCompletionRevision !== mutationCompletionRevision
+          || state.deletionRevision !== deletionRevision
+          || state.pendingMutationCount > 0
+        ) return { loading: state.pendingMutationCount > 0 };
+        return { error: String(e), loading: false };
+      });
+    }
+  },
+
+  reconcileConnectionMetadata: async (id) => {
+    const requestId = (get().connectionMetadataRequestIds[id] ?? 0) + 1;
+    const profileVersion = (get().profileMutationVersions[id] ?? 0) + 1;
+    // Metadata persisted by a completed connection command is a profile mutation. Advance the
+    // start fence so older list/profile responses cannot restore the previous binding or policy.
+    // shared epoch so any list/profile response issued before this reconciliation cannot restore
+    // the old binding or policy after the new metadata has been applied.
+    const nextMutationEpoch = get().mutationEpoch + 1;
+    set((state) => ({
+      mutationEpoch: nextMutationEpoch,
+      // This reconciliation is the newest profile observation for the instance. Invalidate
+      // earlier rename/policy/skill-home responses that carry an older whole-status payload.
+      profileMutationVersions: {
+        ...state.profileMutationVersions,
+        [id]: profileVersion,
+      },
+      connectionMetadataRequestIds: {
+        ...state.connectionMetadataRequestIds,
+        [id]: requestId,
+      },
+    }));
+    try {
+      const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
+      const status = statuses.find((candidate) => candidate.id === id);
+      set((state) => {
+        if (
+          state.profileMutationVersions[id] !== profileVersion
+          || state.connectionMetadataRequestIds[id] !== requestId
+        ) return {};
+        if (!status) return {};
+        return {
+          instances: state.instances.map((instance) => instance.id === id
+            ? mergeConnectionMetadata(instance, status)
+            : instance),
+        };
+      });
+    } catch (error) {
+      const current = (
+        get().profileMutationVersions[id] === profileVersion
+        && get().connectionMetadataRequestIds[id] === requestId
+      );
+      if (!current) return;
+      const reconciliationError = new Error(
+        `Connection succeeded, but refreshing its saved binding and policy failed: ${String(error)}`,
+      );
+      set((state) => (
+        state.profileMutationVersions[id] === profileVersion
+        && state.connectionMetadataRequestIds[id] === requestId
+      ) ? { error: reconciliationError.message } : {});
+      throw reconciliationError;
+    } finally {
+      // Reconciliation is itself a profile mutation. Invalidate any list that began while its
+      // authoritative metadata request was in flight, regardless of success or failure.
+      set((state) => ({
+        mutationCompletionRevision: state.mutationCompletionRevision + 1,
+      }));
     }
   },
 
   createInstance: async (values) => {
-    set((state) => ({ loading: true, error: null, mutationEpoch: state.mutationEpoch + 1 }));
+    set((state) => ({
+      loading: true,
+      error: null,
+      mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
-      const created = await ingestStatus(await invoke<ComputerInstanceStatus>('create_computer_instance', {
-        request: normalizeFormValues(values),
-      }));
+      const created = await ingestStatus(
+        await invoke<ComputerInstanceStatus>('create_computer_instance', {
+          request: normalizeFormValues(values),
+        }),
+        { allowDeletedRediscovery: true },
+      );
       set((state) => ({
         instances: upsertInstance(state.instances, created),
         selectedInstanceId: created.id,
-        loading: false,
       }));
       return requireInstance(get().instances, created.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({ error: formatRuntimeActionError(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
@@ -349,6 +495,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       loading: true,
       error: null,
       mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
       profileMutationVersions: { ...state.profileMutationVersions, [id]: profileVersion },
     }));
     try {
@@ -358,17 +505,32 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       set((state) => state.profileMutationVersions[id] === profileVersion ? {
         instances: upsertInstance(state.instances, updated),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
-      } : { loading: false });
+      } : {});
       return requireInstance(get().instances, updated.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set((state) => state.profileMutationVersions[id] === profileVersion
+        ? { error: formatRuntimeActionError(e) }
+        : {});
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   duplicateInstance: async (values) => {
-    set((state) => ({ loading: true, error: null, mutationEpoch: state.mutationEpoch + 1 }));
+    set((state) => ({
+      loading: true,
+      error: null,
+      mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       const request = {
         sourceId: values.sourceId,
@@ -377,30 +539,55 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         connectionTargetId: values.connectionTargetId || undefined,
         skillHomeMode: values.skillHomeMode,
       };
-      const duplicated = await ingestStatus(await invoke<ComputerInstanceStatus>('duplicate_computer_instance', {
-        request,
-      }));
+      const duplicated = await ingestStatus(
+        await invoke<ComputerInstanceStatus>('duplicate_computer_instance', { request }),
+        { allowDeletedRediscovery: true },
+      );
       set((state) => ({
         instances: upsertInstance(state.instances, duplicated),
         selectedInstanceId: duplicated.id,
-        loading: false,
       }));
       return requireInstance(get().instances, duplicated.id);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: String(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   deleteInstance: async (id) => {
     const deletedIncarnation = requireInstance(get().instances, id).runtime.incarnation;
+    const profileVersion = (get().profileMutationVersions[id] ?? 0) + 1;
     set((state) => ({
       loading: true,
       error: null,
       mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
+      profileMutationVersions: {
+        ...state.profileMutationVersions,
+        [id]: profileVersion,
+      },
     }));
     try {
       await invoke('delete_computer_instance', { id });
+      // Commit a second fence after the backend deletion succeeds. A list/profile request that
+      // started while deletion was in flight must not be trusted to rediscover the instance.
+      set((state) => ({
+        mutationEpoch: state.mutationEpoch + 1,
+        deletionRevision: state.deletionRevision + 1,
+        profileMutationVersions: {
+          ...state.profileMutationVersions,
+          [id]: (state.profileMutationVersions[id] ?? profileVersion) + 1,
+        },
+      }));
       const { useRuntimeStore } = await import('./runtimeStore');
       useRuntimeStore.getState().evictSnapshot(id, deletedIncarnation);
       set((state) => {
@@ -410,76 +597,132 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
           selectedInstanceId: state.selectedInstanceId === id
             ? instances[0]?.id ?? null
             : state.selectedInstanceId,
-          loading: false,
         };
       });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: String(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   startInstance: async (id) => {
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       const started = await ingestStatus(await invoke<ComputerInstanceStatus>('start_computer_instance', { id }));
       set((state) => ({
         instances: upsertRuntimeAction(state.instances, started),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
       }));
       return requireInstance(get().instances, started.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({ error: formatRuntimeActionError(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   stopInstance: async (id) => {
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       const stopped = await ingestStatus(await invoke<ComputerInstanceStatus>('stop_computer_instance', { id }));
       set((state) => ({
         instances: upsertRuntimeAction(state.instances, stopped),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
       }));
       return requireInstance(get().instances, stopped.id);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: String(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   restartInstance: async (id) => {
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       const restarted = await ingestStatus(await invoke<ComputerInstanceStatus>('restart_computer_instance', { id }));
       set((state) => ({
         instances: upsertRuntimeAction(state.instances, restarted),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
       }));
       return requireInstance(get().instances, restarted.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({ error: formatRuntimeActionError(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   reloadRuntime: async (id) => {
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       const reloaded = await ingestStatus(await invoke<ComputerInstanceStatus>('reload_computer_runtime', { id }));
       set((state) => ({
         instances: upsertRuntimeAction(state.instances, reloaded),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
       }));
       return requireInstance(get().instances, reloaded.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({ error: formatRuntimeActionError(e) });
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
@@ -495,6 +738,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       loading: true,
       error: null,
       mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
       profileMutationVersions: { ...state.profileMutationVersions, [id]: profileVersion },
     }));
     try {
@@ -508,12 +752,22 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       set((state) => state.profileMutationVersions[id] === profileVersion ? {
         instances: upsertInstance(state.instances, updated),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
-      } : { loading: false });
+      } : {});
       return requireInstance(get().instances, updated.id);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set((state) => state.profileMutationVersions[id] === profileVersion
+        ? { error: String(e) }
+        : {});
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
@@ -523,6 +777,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       loading: true,
       error: null,
       mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
       profileMutationVersions: { ...state.profileMutationVersions, [id]: profileVersion },
     }));
     try {
@@ -535,68 +790,69 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       set((state) => state.profileMutationVersions[id] === profileVersion ? {
         instances: upsertInstance(state.instances, updated),
         selectedInstanceId: state.selectedInstanceId,
-        loading: false,
-      } : { loading: false });
+      } : {});
       return requireInstance(get().instances, updated.id);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set((state) => state.profileMutationVersions[id] === profileVersion
+        ? { error: String(e) }
+        : {});
       throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
     }
   },
 
   connectSelectedTarget: async (id) => {
-    const mutationEpoch = get().mutationEpoch;
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       await invoke('connect_computer_connection_target', { id });
-      const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
-      if (get().mutationEpoch !== mutationEpoch) {
-        set({ loading: false });
-        return;
-      }
-      await ingestStatuses(statuses);
+      await get().reconcileConnectionMetadata(id);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    } finally {
       set((state) => {
-        if (state.mutationEpoch !== mutationEpoch) return { loading: false };
-        const instances = reconcileInstances(state.instances, statuses);
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
         return {
-          instances,
-          selectedInstanceId: instances.some((instance) => instance.id === state.selectedInstanceId)
-            ? state.selectedInstanceId
-            : instances[0]?.id ?? null,
-          loading: false,
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
         };
       });
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
     }
   },
 
   disconnectConnection: async (id) => {
-    const mutationEpoch = get().mutationEpoch;
-    set({ loading: true, error: null });
+    set((state) => ({
+      loading: true,
+      error: null,
+      pendingMutationCount: state.pendingMutationCount + 1,
+    }));
     try {
       await invoke('disconnect_computer_connection_target', { id });
-      const statuses = await invoke<ComputerInstanceStatus[]>('list_computer_instances');
-      if (get().mutationEpoch !== mutationEpoch) {
-        set({ loading: false });
-        return;
-      }
-      await ingestStatuses(statuses);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    } finally {
       set((state) => {
-        if (state.mutationEpoch !== mutationEpoch) return { loading: false };
-        const instances = reconcileInstances(state.instances, statuses);
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
         return {
-          instances,
-          selectedInstanceId: instances.some((instance) => instance.id === state.selectedInstanceId)
-            ? state.selectedInstanceId
-            : instances[0]?.id ?? null,
-          loading: false,
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
         };
       });
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
     }
   },
 
