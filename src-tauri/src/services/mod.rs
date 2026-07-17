@@ -1,5 +1,6 @@
 pub mod client_computers;
 pub mod computer;
+pub mod computer_runtime_events;
 pub mod config;
 pub mod config_migration;
 pub mod connection_targets;

@@ -5,8 +5,10 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
-    ComputerInstance, ComputerInstanceId, ConnectionStateSummary, RobotBindingMetadata,
+    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ConnectionStateSummary,
+    RobotBindingMetadata,
 };
+use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -22,7 +24,11 @@ pub struct ComputerInstanceStatus {
     pub local_skills_root: Option<PathBuf>,
     pub effective_skill_home: PathBuf,
     pub running: bool,
+    pub runtime: ComputerRuntimeSnapshot,
     pub connected: bool,
+    pub client_connection_present: bool,
+    pub connection_revision: u64,
+    pub connection_context: Option<ConnectionStateSummary>,
     pub mcp_server_count: usize,
     pub robot_binding: Option<RobotBindingMetadata>,
     pub connection_policy: ComputerConnectionPolicy,
@@ -100,13 +106,10 @@ pub async fn list_computer_instances_core(
         .collect::<HashSet<_>>();
     for runtime in state.computer_registry.list_runtimes().await {
         if !discovered_ids.contains(&runtime.instance.id) {
-            if let Some(removed) = state
+            state
                 .computer_registry
                 .remove_runtime(&runtime.instance.id)
-                .await
-            {
-                removed.shutdown().await;
-            }
+                .await?;
         }
     }
     let mut statuses = Vec::with_capacity(config.instances.len());
@@ -198,7 +201,7 @@ pub async fn create_computer_instance_core(
     let runtime = state
         .computer_registry
         .upsert_runtime(instance.clone())
-        .await;
+        .await?;
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -322,7 +325,7 @@ pub async fn duplicate_computer_instance_core(
     let runtime = state
         .computer_registry
         .upsert_runtime(instance.clone())
-        .await;
+        .await?;
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -341,23 +344,62 @@ pub async fn delete_computer_instance_core(
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_storage_root = state.config.computer_instance_storage_root(&id);
-    if let Some(runtime) = state.computer_registry.runtime(&id).await {
-        runtime.shutdown().await;
-    }
-    let quarantined_storage = quarantine_computer_instance_storage(&instance_storage_root).await?;
+    let persisted_instance = state.config.get_computer_instance(&id).ok();
+    let prepared_removal = state.computer_registry.prepare_runtime_removal(&id).await?;
+    let quarantined_storage =
+        match quarantine_computer_instance_storage(&instance_storage_root).await {
+            Ok(quarantined_storage) => quarantined_storage,
+            Err(error) => {
+                drop(prepared_removal);
+                return Err(error);
+            }
+        };
     if let Err(error) = state.config.remove_computer_instance(&id) {
+        let mut rollback_errors = Vec::new();
         if let Some(quarantined) = quarantined_storage.as_ref() {
-            restore_quarantined_computer_storage(quarantined, &instance_storage_root)
-                .await
-                .map_err(|restore_error| {
-                    format!(
-                        "Failed to remove Computer profile: {error}; additionally failed to restore SDK storage: {restore_error}"
-                    )
-                })?;
+            if let Err(restore_error) =
+                restore_quarantined_computer_storage(quarantined, &instance_storage_root).await
+            {
+                rollback_errors.push(format!("restore SDK storage: {restore_error}"));
+            }
         }
-        return Err(error.to_string());
+        drop(prepared_removal);
+        if rollback_errors.is_empty() {
+            return Err(error.to_string());
+        }
+        return Err(format!(
+            "Failed to remove Computer profile: {error}; additionally failed to rollback: {}",
+            rollback_errors.join("; ")
+        ));
     }
-    state.computer_registry.remove_runtime(&id).await;
+    if let Some(prepared_removal) = prepared_removal {
+        if let Err(error) = state
+            .computer_registry
+            .commit_runtime_removal(prepared_removal)
+            .await
+        {
+            let mut rollback_errors = Vec::new();
+            if let Some(instance) = persisted_instance {
+                if let Err(restore_error) = state.config.add_computer_instance(instance) {
+                    rollback_errors.push(format!("restore Computer profile: {restore_error}"));
+                }
+            }
+            if let Some(quarantined) = quarantined_storage.as_ref() {
+                if let Err(restore_error) =
+                    restore_quarantined_computer_storage(quarantined, &instance_storage_root).await
+                {
+                    rollback_errors.push(format!("restore SDK storage: {restore_error}"));
+                }
+            }
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(format!(
+                "Failed to shutdown Computer runtime: {error}; additionally failed to rollback: {}",
+                rollback_errors.join("; ")
+            ));
+        }
+    }
     cleanup_quarantined_computer_storage(quarantined_storage).await;
 
     Ok(())
@@ -390,6 +432,10 @@ pub async fn start_computer_instance_core(
         .update_runtime_instance(instance.clone())
         .await
         .map_err(RuntimeActionError::runtime)?;
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Start)
+        .await
+        .map_err(RuntimeActionError::from)?;
     runtime.start().await.map_err(RuntimeActionError::from)?;
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -432,7 +478,102 @@ pub async fn stop_computer_instance_core(
         .runtime(&id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
-    runtime.shutdown().await;
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Stop)
+        .await
+        .map_err(|error| error.to_string())?;
+    runtime.try_shutdown().await?;
+
+    Ok(status_from_instance(&instance, &runtime).await)
+}
+
+#[tauri::command]
+pub async fn restart_computer_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    restart_computer_instance_core(Some(&app), &state, id).await
+}
+
+pub async fn restart_computer_instance_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance = state
+        .config
+        .get_computer_instance(&id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let instance = state
+        .hydrate_computer_instance(instance)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(instance.clone())
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Restart)
+        .await
+        .map_err(RuntimeActionError::from)?;
+    runtime.restart().await.map_err(RuntimeActionError::from)?;
+    if instance.connection_policy.auto_connect {
+        if let Some(target) = instance.connection_policy.target.as_ref() {
+            connect_computer_connection_target_by_policy(app, state, &id, target)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
+        }
+    }
+
+    Ok(status_from_instance(&instance, &runtime).await)
+}
+
+#[tauri::command]
+pub async fn reload_computer_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    reload_computer_runtime_core(Some(&app), &state, id).await
+}
+
+pub async fn reload_computer_runtime_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance = state
+        .config
+        .get_computer_instance(&id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let instance = state
+        .hydrate_computer_instance(instance)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let runtime = state
+        .computer_registry
+        .update_runtime_instance(instance.clone())
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Reload)
+        .await
+        .map_err(RuntimeActionError::from)?;
+    runtime.reload().await.map_err(RuntimeActionError::from)?;
+    if runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Connect)
+        .await
+        .is_ok()
+        && instance.connection_policy.auto_connect
+    {
+        if let Some(target) = instance.connection_policy.target.as_ref() {
+            connect_computer_connection_target_by_policy(app, state, &id, target)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
+        }
+    }
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -519,14 +660,6 @@ pub async fn connect_computer_connection_target_core(
         .config
         .get_computer_instance(&id)
         .map_err(|error| error.to_string())?;
-    let runtime = state
-        .computer_registry
-        .runtime(&id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {id}"))?;
-    if !runtime.is_running().await {
-        return Err("Computer must be running before connecting".to_string());
-    }
     let target = instance
         .connection_policy
         .target
@@ -608,18 +741,29 @@ async fn status_from_instance(
     instance: &ComputerInstance,
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> ComputerInstanceStatus {
+    let runtime_snapshot = runtime.runtime_snapshot().await;
+    let mcp_server_count = runtime_snapshot.mcp_servers;
+    let connection_authority = runtime.connection_authority_snapshot().await;
+    let connection_context = connection_authority.context;
+    let connected = runtime_snapshot.lifecycle
+        == crate::services::computer::ComputerRuntimeState::JoinedOffice
+        && connection_context.is_some();
     ComputerInstanceStatus {
         id: instance.id.clone(),
         name: instance.name.clone(),
         description: instance.description.clone(),
         local_skills_root: instance.local_skills_root.clone(),
         effective_skill_home: runtime.sdk_skill_home().await,
-        running: runtime.is_running().await,
-        connected: runtime.is_connected().await,
-        mcp_server_count: runtime.mcp_server_inventory_count().await,
+        running: runtime_snapshot.is_running(),
+        runtime: runtime_snapshot,
+        connected,
+        client_connection_present: connection_context.is_some(),
+        connection_revision: connection_authority.revision,
+        connection_context: connection_context.clone(),
+        mcp_server_count,
         robot_binding: instance.robot_binding.clone(),
         connection_policy: instance.connection_policy.clone(),
-        connection: runtime.connection_status().await,
+        connection: connected.then_some(connection_context).flatten(),
     }
 }
 
@@ -972,7 +1116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn computer_status_counts_sdk_snapshot_servers_not_legacy_profile_servers() {
+    async fn computer_status_counts_only_servers_materialized_into_the_sdk_handle() {
         let (state, _dir) = test_state();
         state
             .sdk_config
@@ -994,9 +1138,14 @@ mod tests {
             .mcp_servers
             .is_empty());
 
-        let status = get_computer_instance_status_core(&state, "computer-a".to_string())
+        let before_reload = get_computer_instance_status_core(&state, "computer-a".to_string())
             .await
             .unwrap();
-        assert_eq!(status.mcp_server_count, 1);
+        assert_eq!(before_reload.mcp_server_count, 0);
+
+        let after_reload = reload_computer_runtime_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(after_reload.mcp_server_count, 1);
     }
 }

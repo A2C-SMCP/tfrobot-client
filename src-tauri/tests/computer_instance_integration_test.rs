@@ -4,7 +4,7 @@ mod common;
 use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
 use common::create_test_app_state;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tfrobot_client_lib::commands::computer::{
@@ -30,11 +30,16 @@ const LEGACY_INSTANCE_ID: &str = "default";
 struct ToggleReadFailureSecretStore {
     secrets: Mutex<HashMap<String, String>>,
     fail_reads: AtomicBool,
+    read_count: AtomicUsize,
 }
 
 impl ToggleReadFailureSecretStore {
     fn fail_reads(&self) {
         self.fail_reads.store(true, Ordering::SeqCst);
+    }
+
+    fn read_count(&self) -> usize {
+        self.read_count.load(Ordering::SeqCst)
     }
 }
 
@@ -48,6 +53,7 @@ impl SecretStore for ToggleReadFailureSecretStore {
     }
 
     fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+        self.read_count.fetch_add(1, Ordering::SeqCst);
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(KeychainError::Store(
                 "injected Keychain read failure".to_string(),
@@ -196,50 +202,56 @@ async fn created_instances_use_uuid_based_ids() {
 }
 
 #[tokio::test]
-async fn create_rolls_back_profile_when_keychain_hydration_fails() {
+async fn create_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
     create_computer_with_global_input(&state, "Existing").await;
+    let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
-    let error = create_computer_instance_core(
+    let created = create_computer_instance_core(
         &state,
         CreateComputerInstanceRequest {
-            name: "Should Roll Back".to_string(),
+            name: "Created Without Keychain Reads".to_string(),
             description: None,
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("injected Keychain read failure"));
     let persisted = state.config.load_computer_instances().unwrap();
-    assert_eq!(persisted.instances.len(), 1);
-    assert_eq!(persisted.instances[0].name, "Existing");
+    assert_eq!(persisted.instances.len(), 2);
+    assert!(persisted
+        .instances
+        .iter()
+        .any(|instance| instance.id == created.id));
+    assert!(state.computer_registry.runtime(&created.id).await.is_some());
+    assert_eq!(secrets.read_count(), read_count_before);
 }
 
 #[tokio::test]
-async fn rename_restores_profile_when_keychain_hydration_fails() {
+async fn rename_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
     let id = create_computer_with_global_input(&state, "Original").await;
+    let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
-    let error = rename_computer_instance_core(
+    let renamed = rename_computer_instance_core(
         &state,
         RenameComputerInstanceRequest {
             id: id.clone(),
-            name: "Should Roll Back".to_string(),
+            name: "Renamed Without Keychain Reads".to_string(),
             description: None,
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("reverted persisted config"));
+    assert_eq!(renamed.name, "Renamed Without Keychain Reads");
     assert_eq!(
         state.config.get_computer_instance(&id).unwrap().name,
-        "Original"
+        "Renamed Without Keychain Reads"
     );
     assert_eq!(
         state
@@ -249,26 +261,24 @@ async fn rename_restores_profile_when_keychain_hydration_fails() {
             .unwrap()
             .instance
             .name,
-        "Original"
+        "Renamed Without Keychain Reads"
     );
+    assert_eq!(secrets.read_count(), read_count_before);
 }
 
 #[tokio::test]
-async fn duplicate_rolls_back_profile_and_sdk_storage_when_keychain_hydration_fails() {
+async fn duplicate_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
     let source_id = create_computer_with_global_input(&state, "Source").await;
-    let storage_root = state.config.computer_skill_home_base();
-    let storage_count_before = std::fs::read_dir(&storage_root)
-        .map(|entries| entries.filter_map(Result::ok).count())
-        .unwrap_or_default();
+    let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
-    let error = duplicate_computer_instance_core(
+    let duplicated = duplicate_computer_instance_core(
         &state,
         DuplicateComputerInstanceRequest {
             source_id: source_id.clone(),
-            name: "Should Roll Back".to_string(),
+            name: "Duplicated Without Keychain Reads".to_string(),
             description: None,
             copy_robot_binding: false,
             connection_target_id: None,
@@ -276,16 +286,28 @@ async fn duplicate_rolls_back_profile_and_sdk_storage_when_keychain_hydration_fa
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("injected Keychain read failure"));
     let persisted = state.config.load_computer_instances().unwrap();
-    assert_eq!(persisted.instances.len(), 1);
-    assert_eq!(persisted.instances[0].id, source_id);
-    let storage_count_after = std::fs::read_dir(&storage_root)
-        .map(|entries| entries.filter_map(Result::ok).count())
-        .unwrap_or_default();
-    assert_eq!(storage_count_after, storage_count_before);
+    assert_eq!(persisted.instances.len(), 2);
+    assert!(persisted
+        .instances
+        .iter()
+        .any(|instance| instance.id == source_id));
+    assert!(persisted
+        .instances
+        .iter()
+        .any(|instance| instance.id == duplicated.id));
+    assert!(state
+        .computer_registry
+        .runtime(&duplicated.id)
+        .await
+        .is_some());
+    assert!(state
+        .config
+        .computer_instance_storage_root(&duplicated.id)
+        .exists());
+    assert_eq!(secrets.read_count(), read_count_before);
 }
 
 #[tokio::test]
@@ -815,6 +837,116 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
 }
 
 #[tokio::test]
+async fn delete_closes_activity_admission_before_shutting_down_runtime() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let created = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Busy".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, created.id.clone())
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(&created.id)
+        .await
+        .expect("runtime should exist");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let activity_runtime = runtime.clone();
+    let activity_task = tokio::spawn(async move {
+        activity_runtime
+            .hold_activity_for_test(started_tx, release_rx)
+            .await
+    });
+    started_rx.await.expect("activity should start");
+
+    let delete_state = state.clone();
+    let instance_id = created.id.clone();
+    let delete_task =
+        tokio::spawn(
+            async move { delete_computer_instance_core(&delete_state, instance_id).await },
+        );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !runtime.is_retired_for_test() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("delete did not close runtime activity admission");
+
+    assert!(
+        runtime.is_running().await,
+        "busy runtime shut down before activity drained"
+    );
+    assert!(!runtime.can_begin_activity_for_test());
+    assert!(!delete_task.is_finished());
+
+    release_tx.send(()).expect("release activity");
+    activity_task.await.unwrap().unwrap();
+    delete_task.await.unwrap().unwrap();
+
+    assert!(state.computer_registry.runtime(&created.id).await.is_none());
+    assert!(state.config.get_computer_instance(&created.id).is_err());
+}
+
+#[tokio::test]
+async fn failed_delete_preserves_the_authoritative_runtime_incarnation() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let created = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Rollback".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, created.id.clone())
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(&created.id)
+        .await
+        .expect("runtime should exist");
+    let previous_incarnation = runtime.runtime_snapshot().await.incarnation;
+    let storage_root = state.config.computer_instance_storage_root(&created.id);
+    std::fs::create_dir_all(&storage_root).unwrap();
+    std::fs::write(
+        storage_root.parent().unwrap().join(".trash"),
+        b"block trash directory creation",
+    )
+    .unwrap();
+
+    let error = delete_computer_instance_core(&state, created.id.clone())
+        .await
+        .expect_err("quarantine should fail");
+
+    assert!(error.contains("Failed to create Computer storage trash"));
+    let restored = state
+        .computer_registry
+        .runtime(&created.id)
+        .await
+        .expect("failed deletion should restore a runtime");
+    assert_eq!(
+        restored.runtime_snapshot().await.incarnation,
+        previous_incarnation,
+        "reversible deletion failure must not replace the connected runtime"
+    );
+    assert!(!restored.is_retired_for_test());
+    assert!(restored.is_running().await);
+    assert!(state.config.get_computer_instance(&created.id).is_ok());
+}
+
+#[tokio::test]
 async fn status_reads_reconcile_runtime_inputs_from_global_storage() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
@@ -867,7 +999,8 @@ async fn legacy_default_id_instance_is_a_normal_instance() {
                 .get_computer_instance(LEGACY_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
 
     let list = list_computer_instances_core(&state).await.unwrap();
     assert!(list
@@ -906,7 +1039,8 @@ async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
                 .get_computer_instance(LEGACY_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     let second = create_computer_instance_core(
         &state,
         CreateComputerInstanceRequest {

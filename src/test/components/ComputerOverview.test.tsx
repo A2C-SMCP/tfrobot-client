@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { ComputerOverview } from '@/components/Computer/ComputerOverview';
 import { useComputerOverviewStore } from '@/stores/computerOverviewStore';
+import { runtimeSnapshot } from '../helpers/store';
 
 const mockFetchOverview = vi.fn();
 const mockOpenTab = vi.fn();
@@ -21,6 +22,13 @@ const mockOverviewData = {
   id: 'computer-a',
   name: 'Computer A',
   running: true,
+  runtime: runtimeSnapshot({
+    lifecycle: 'connected',
+    mcp_servers: 3,
+    active_mcp_servers: 2,
+    tools: 10,
+    skills: 4,
+  }),
   connected: true,
   connection_url: 'https://smcp.example.com',
   connection_profile: 'prod',
@@ -49,10 +57,11 @@ describe('ComputerOverview', () => {
     render(<ComputerOverview instanceId="computer-a" onOpenTab={mockOpenTab} />);
 
     expect(mockFetchOverview).toHaveBeenCalledWith('computer-a');
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.getAllByText('Connected').length).toBeGreaterThan(0);
     expect(screen.getByText('prod — https://smcp.example.com')).toBeInTheDocument();
     expect(screen.getByText('Bound robot: Robot A')).toBeInTheDocument();
     expect(screen.getByText('10')).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'Skills 4' })).toBeInTheDocument();
     expect(screen.getByText('Server started')).toBeInTheDocument();
   });
 

@@ -1,6 +1,8 @@
 {
   "app": {
-    "name": "TFRobot 客户端"
+    "name": "TFRobot 客户端",
+    "runtimeEventsUnavailable": "运行时状态更新不可用",
+    "retryRuntimeEvents": "重试"
   },
   "common": {
     "add": "添加",
@@ -8,6 +10,7 @@
     "saved": "已保存",
     "cancel": "取消",
     "delete": "删除",
+    "configuration": "配置",
     "edit": "编辑",
     "update": "更新",
     "refresh": "刷新",
@@ -58,6 +61,49 @@
       "disconnected": "未连接"
     },
     "runtime": {
+      "title": "运行时",
+      "statusTitle": "运行时状态",
+      "lifecycle": "生命周期",
+      "generation": "运行时世代",
+      "snapshotRevision": "快照 Revision",
+      "connection": "连接",
+      "configRevision": "配置 Revision",
+      "capabilityRevision": "能力 Revision",
+      "activeMcpServers": "活跃 MCP 服务器",
+      "mcpLifecycle": "MCP 运行时",
+      "restart": "重启",
+      "reload": "重载",
+      "lastError": "运行时错误",
+      "degraded": "运行时降级",
+      "recentEvents": "最近运行时事件",
+      "noEvents": "尚未收到运行时事件",
+      "eventRevision": "快照 Revision {{revision}} · {{receivedAt}}",
+      "eventCauses": {
+        "lifecycleChanged": "生命周期变更为 {{state}}",
+        "configRevisionBumped": "配置 Revision 变更为 {{revision}}",
+        "capabilityRevisionBumped": "能力 Revision 变更为 {{revision}}",
+        "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
+        "diagnosticFailed": "失败",
+        "diagnosticCleared": "已清除",
+        "handleReplaced": "运行时句柄已替换：{{reason}}",
+        "observationAdvanced": "运行时观测已推进到触发事件之后",
+        "resync": "跳过 {{count}} 个事件后已重新同步运行时状态"
+      },
+      "lifecycleStates": {
+        "created": "已创建",
+        "starting": "启动中",
+        "started": "已启动",
+        "connecting": "连接中",
+        "connected": "已连接",
+        "joined_office": "已加入 Office",
+        "syncing": "同步中",
+        "degraded": "已降级",
+        "disconnecting": "断开中",
+        "stopping": "停止中",
+        "stopped": "已停止",
+        "shutdown": "已关闭",
+        "error": "错误"
+      },
       "policyTitle": "连接策略",
       "instance": "Computer",
       "connectionTarget": "连接目标",
@@ -78,6 +124,10 @@
       "skillHomeConfirmTitle": "确认重建 Computer？",
       "skillHomeConfirmDescription": "修改 Skill Home 会保存新的能力治理根目录，并重建当前 Computer runtime。Marketplace、Plugin、MCP Server 和 Skill 会按新的 Skill Home 重新解析；当前连接和运行态可能被刷新。",
       "skillHomeConfirmOk": "确认重建"
+    },
+    "actionGroups": {
+      "profile": "Profile 与配置",
+      "runtime": "运行态"
     },
     "connectionActions": {
       "targetTitle": "连接目标",
@@ -113,7 +163,9 @@
       "duplicated": "Computer 已复制",
       "deleted": "Computer 已删除",
       "started": "Computer 已启动",
-      "stopped": "Computer 已停止"
+      "stopped": "Computer 已停止",
+      "restarted": "Computer 已重启",
+      "reloaded": "Computer 运行时已重载"
     }
   },
   "skills": {

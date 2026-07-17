@@ -1,4 +1,4 @@
-import { Layout, Menu, Typography, Button, Space } from 'antd';
+import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
   FileTextOutlined,
@@ -20,6 +20,7 @@ import { Computer } from './components/Computer';
 import { toComputerDetailTab } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
 import { useManagerStore } from './stores/managerStore';
+import { useRuntimeStore } from './stores/runtimeStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -37,11 +38,24 @@ function App() {
     restoreSession,
     handleAuthExpired,
   } = useManagerStore();
+  const initializeRuntimeEvents = useRuntimeStore((state) => state.initialize);
+  const disposeRuntimeEvents = useRuntimeStore((state) => state.dispose);
+  const recoverRuntimeEvents = useRuntimeStore((state) => state.recover);
+  const runtimeEventsError = useRuntimeStore((state) => state.error);
 
   // Initialize theme from persisted settings
   useEffect(() => {
     initFromSettings();
-  }, []);
+  }, [initFromSettings]);
+
+  useEffect(() => {
+    initializeRuntimeEvents().catch(() => {
+      /* initialization errors are stored in runtime store */
+    });
+    return () => {
+      void disposeRuntimeEvents();
+    };
+  }, [disposeRuntimeEvents, initializeRuntimeEvents]);
 
   // Manager authentication is app-wide state: restore it before any page-level
   // connection action can need the Manager JWT.
@@ -196,6 +210,24 @@ function App() {
         </Sider>
         <Content className={styles.content}>
           <div className={styles.contentInner}>
+            {runtimeEventsError && (
+              <Alert
+                type="error"
+                showIcon
+                message={t('app.runtimeEventsUnavailable')}
+                description={runtimeEventsError}
+                action={(
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => { void recoverRuntimeEvents().catch(() => undefined); }}
+                  >
+                    {t('app.retryRuntimeEvents')}
+                  </Button>
+                )}
+                style={{ marginBottom: 16 }}
+              />
+            )}
             {renderContent()}
           </div>
         </Content>

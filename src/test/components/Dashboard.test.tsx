@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Dashboard } from '@/components/Dashboard';
+import { runtimeSnapshot } from '../helpers/store';
 
 const mockFetchDashboard = vi.fn();
 
@@ -34,6 +35,15 @@ const mockDashboardData = {
       id: 'computer-a',
       name: 'Computer A',
       running: true,
+      runtime: runtimeSnapshot({
+        lifecycle: 'connected',
+        config_revision: 2,
+        mcp_servers: 5,
+        active_mcp_servers: 4,
+        capability_revision: 3,
+        tools: 9,
+        skills: 4,
+      }),
       connected: true,
       mcp_server_count: 5,
       robot_name: 'Robot A',
@@ -43,6 +53,10 @@ const mockDashboardData = {
       id: 'computer-b',
       name: 'Computer B',
       running: false,
+      runtime: runtimeSnapshot({
+        lifecycle: 'shutdown',
+        mcp_servers: 2,
+      }),
       connected: false,
       mcp_server_count: 2,
     },
@@ -104,6 +118,10 @@ describe('Dashboard', () => {
     expect(screen.getAllByText('Connection failed').length).toBeGreaterThan(0);
     expect(screen.getByText('Node.js')).toBeInTheDocument();
     expect(screen.getByText('Python')).toBeInTheDocument();
+    expect(screen.getByText('Config Revision: 2')).toBeInTheDocument();
+    expect(screen.getByText('Capability Revision: 3')).toBeInTheDocument();
+    expect(screen.getByText('Tools: 9')).toBeInTheDocument();
+    expect(screen.getByText('Skills: 4')).toBeInTheDocument();
   });
 
   it('shows runtime availability status', () => {

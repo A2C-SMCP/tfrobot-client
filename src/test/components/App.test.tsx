@@ -7,6 +7,17 @@ const managerStoreMock = vi.hoisted(() => ({
   handleAuthExpired: vi.fn(),
 }));
 
+const runtimeStoreMock = vi.hoisted(() => ({
+  error: null as string | null,
+  initialize: vi.fn().mockResolvedValue(undefined),
+  dispose: vi.fn().mockResolvedValue(undefined),
+  recover: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/stores/runtimeStore', () => ({
+  useRuntimeStore: (selector: (state: typeof runtimeStoreMock) => unknown) => selector(runtimeStoreMock),
+}));
+
 vi.mock('@/stores/themeStore', () => ({
   useThemeStore: vi.fn(() => ({
     resolved: 'light',
@@ -51,6 +62,21 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     managerStoreMock.restoreSession.mockResolvedValue(null);
+    runtimeStoreMock.error = null;
+    runtimeStoreMock.initialize.mockResolvedValue(undefined);
+    runtimeStoreMock.dispose.mockResolvedValue(undefined);
+    runtimeStoreMock.recover.mockResolvedValue(undefined);
+  });
+
+  it('shows runtime event initialization failures and retries recovery', async () => {
+    runtimeStoreMock.error = 'event bridge unavailable';
+    render(<App />);
+
+    expect(screen.getByText('Runtime status updates are unavailable')).toBeInTheDocument();
+    expect(screen.getByText('event bridge unavailable')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(runtimeStoreMock.recover).toHaveBeenCalledOnce());
   });
 
   it('restores Manager session at app startup', async () => {

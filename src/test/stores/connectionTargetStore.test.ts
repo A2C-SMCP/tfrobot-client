@@ -5,6 +5,7 @@ import {
   useConnectionTargetStore,
   type ManualSmcpTarget,
 } from '@/stores/connectionTargetStore';
+import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -93,6 +94,7 @@ describe('connectionTargetStore', () => {
         id: 'computer-a',
         name: 'Computer A',
         running: true,
+        runtime: runtimeSnapshot({ lifecycle: 'connected' }),
         connected: true,
         mcp_server_count: 0,
       },

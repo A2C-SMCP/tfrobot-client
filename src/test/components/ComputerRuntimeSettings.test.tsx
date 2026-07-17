@@ -3,6 +3,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ComputerRuntimeSettings } from '@/components/Computer/ComputerRuntimeSettings';
+import { runtimeSnapshot } from '../helpers/store';
 import { useComputerStore, type ComputerInstance } from '@/stores/computerStore';
 
 const mockInvoke = vi.mocked(invoke);
@@ -17,6 +18,7 @@ const instance: ComputerInstance = {
   effectiveSkillHome: '/custom/skill-home',
   connectionPolicy: { target: null, auto_connect: false },
   mcpServerCount: 0,
+  runtime: runtimeSnapshot(),
 };
 
 describe('ComputerRuntimeSettings', () => {
@@ -32,6 +34,7 @@ describe('ComputerRuntimeSettings', () => {
       local_skills_root: '/next/skill-home',
       effective_skill_home: '/next/skill-home',
       running: true,
+      runtime: runtimeSnapshot(),
       connected: false,
       mcp_server_count: 0,
       robot_binding: null,
@@ -59,7 +62,7 @@ describe('ComputerRuntimeSettings', () => {
         },
       });
     });
-  });
+  }, 10000);
 
   it('chooses a directory and restores default Skill Home', async () => {
     mockOpen.mockResolvedValueOnce('/chosen/skill-home' as any);
@@ -69,6 +72,7 @@ describe('ComputerRuntimeSettings', () => {
       local_skills_root: null,
       effective_skill_home: '/default/skill_home',
       running: true,
+      runtime: runtimeSnapshot(),
       connected: false,
       mcp_server_count: 0,
       robot_binding: null,

@@ -1,3 +1,5 @@
+use crate::services::computer::{ComputerRuntimeState, ConnectionStateSummary};
+use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::logger::LogFilter;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,11 @@ pub struct DashboardComputerSummary {
     pub id: String,
     pub name: String,
     pub running: bool,
+    pub runtime: ComputerRuntimeSnapshot,
     pub connected: bool,
+    pub client_connection_present: bool,
+    pub connection_revision: u64,
+    pub connection_context: Option<ConnectionStateSummary>,
     pub mcp_server_count: usize,
     pub robot_name: Option<String>,
     pub connection_profile: Option<String>,
@@ -37,7 +43,11 @@ pub struct ComputerOverviewData {
     pub id: String,
     pub name: String,
     pub running: bool,
+    pub runtime: ComputerRuntimeSnapshot,
     pub connected: bool,
+    pub client_connection_present: bool,
+    pub connection_revision: u64,
+    pub connection_context: Option<ConnectionStateSummary>,
     pub connection_url: Option<String>,
     pub connection_profile: Option<String>,
     pub robot_name: Option<String>,
@@ -75,25 +85,36 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
     let mut computers = Vec::with_capacity(runtimes.len());
 
     for runtime in runtimes {
-        let running = runtime.is_running().await;
+        let runtime_snapshot = runtime.runtime_snapshot().await;
+        let running = runtime_snapshot.is_running();
         if running {
             computer_running += 1;
         }
-        let connected = runtime.is_connected().await;
+        let connection_authority = runtime.connection_authority_snapshot().await;
+        let connection_context = connection_authority.context;
+        let connected = runtime_snapshot.lifecycle == ComputerRuntimeState::JoinedOffice
+            && connection_context.is_some();
         if connected {
             computer_connected += 1;
         }
-        let connection_profile = runtime
-            .connection_status()
-            .await
-            .map(|connection| connection.profile_name);
+        let connection_profile = connected
+            .then(|| {
+                connection_context
+                    .as_ref()
+                    .map(|connection| connection.profile_name.clone())
+            })
+            .flatten();
 
         computers.push(DashboardComputerSummary {
             id: runtime.instance.id.clone(),
             name: runtime.instance.name.clone(),
             running,
+            runtime: runtime_snapshot.clone(),
             connected,
-            mcp_server_count: runtime.mcp_server_inventory_count().await,
+            client_connection_present: connection_context.is_some(),
+            connection_revision: connection_authority.revision,
+            connection_context,
+            mcp_server_count: runtime_snapshot.mcp_servers,
             robot_name: runtime
                 .instance
                 .robot_binding
@@ -154,16 +175,22 @@ pub async fn get_computer_overview_data_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    let running = runtime.is_running().await;
-    let connected = runtime.is_connected().await;
-    let connection = runtime.connection_status().await;
-    let connection_url = connection.as_ref().map(|c| c.url.clone());
-    let connection_profile = connection.as_ref().map(|c| c.profile_name.clone());
+    let runtime_snapshot = runtime.runtime_snapshot().await;
+    let running = runtime_snapshot.is_running();
+    let connection_authority = runtime.connection_authority_snapshot().await;
+    let connection_context = connection_authority.context;
+    let connected = runtime_snapshot.lifecycle == ComputerRuntimeState::JoinedOffice
+        && connection_context.is_some();
+    let connection_url = connected
+        .then(|| connection_context.as_ref().map(|c| c.url.clone()))
+        .flatten();
+    let connection_profile = connected
+        .then(|| connection_context.as_ref().map(|c| c.profile_name.clone()))
+        .flatten();
 
-    let mcp_total = runtime.mcp_server_inventory_count().await;
-    let statuses = runtime.mcp_server_statuses().await;
-    let mcp_running = statuses.iter().filter(|(_, running, _)| *running).count();
-    let tools_count = runtime.available_tools().await.unwrap_or_default().len();
+    let mcp_total = runtime_snapshot.mcp_servers;
+    let mcp_running = runtime_snapshot.active_mcp_servers;
+    let tools_count = runtime_snapshot.tools;
     let mcp_stopped = mcp_total.saturating_sub(mcp_running);
 
     let recent_logs = state
@@ -179,7 +206,11 @@ pub async fn get_computer_overview_data_core(
         id: runtime.instance.id.clone(),
         name: runtime.instance.name.clone(),
         running,
+        runtime: runtime_snapshot,
         connected,
+        client_connection_present: connection_context.is_some(),
+        connection_revision: connection_authority.revision,
+        connection_context,
         connection_url,
         connection_profile,
         robot_name: runtime
@@ -235,6 +266,14 @@ mod tests {
                     })),
                 )],
             )
+            .unwrap();
+        state
+            .computer_registry
+            .runtime("computer-a")
+            .await
+            .unwrap()
+            .reload()
+            .await
             .unwrap();
         state
             .computer_registry

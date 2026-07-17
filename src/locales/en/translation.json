@@ -1,6 +1,8 @@
 {
   "app": {
-    "name": "TFRobot Client"
+    "name": "TFRobot Client",
+    "runtimeEventsUnavailable": "Runtime status updates are unavailable",
+    "retryRuntimeEvents": "Retry"
   },
   "common": {
     "add": "Add",
@@ -8,6 +10,7 @@
     "saved": "Saved",
     "cancel": "Cancel",
     "delete": "Delete",
+    "configuration": "Configuration",
     "edit": "Edit",
     "update": "Update",
     "refresh": "Refresh",
@@ -58,6 +61,49 @@
       "disconnected": "Disconnected"
     },
     "runtime": {
+      "title": "Runtime",
+      "statusTitle": "Runtime Status",
+      "lifecycle": "Lifecycle",
+      "generation": "Runtime Generation",
+      "snapshotRevision": "Snapshot Revision",
+      "connection": "Connection",
+      "configRevision": "Config Revision",
+      "capabilityRevision": "Capability Revision",
+      "activeMcpServers": "Active MCP Servers",
+      "mcpLifecycle": "MCP Runtime",
+      "restart": "Restart",
+      "reload": "Reload",
+      "lastError": "Runtime Error",
+      "degraded": "Runtime Degraded",
+      "recentEvents": "Recent Runtime Events",
+      "noEvents": "No runtime events received",
+      "eventRevision": "Snapshot revision {{revision}} · {{receivedAt}}",
+      "eventCauses": {
+        "lifecycleChanged": "Lifecycle changed to {{state}}",
+        "configRevisionBumped": "Config revision changed to {{revision}}",
+        "capabilityRevisionBumped": "Capability revision changed to {{revision}}",
+        "clientDiagnosticChanged": "{{operation}} diagnostic {{status}}",
+        "diagnosticFailed": "failed",
+        "diagnosticCleared": "cleared",
+        "handleReplaced": "Runtime handle replaced: {{reason}}",
+        "observationAdvanced": "Runtime observation advanced beyond its triggering event",
+        "resync": "Runtime events resynchronized after {{count}} skipped events"
+      },
+      "lifecycleStates": {
+        "created": "Created",
+        "starting": "Starting",
+        "started": "Started",
+        "connecting": "Connecting",
+        "connected": "Connected",
+        "joined_office": "Joined Office",
+        "syncing": "Syncing",
+        "degraded": "Degraded",
+        "disconnecting": "Disconnecting",
+        "stopping": "Stopping",
+        "stopped": "Stopped",
+        "shutdown": "Shutdown",
+        "error": "Error"
+      },
       "policyTitle": "Connection Policy",
       "instance": "Computer",
       "connectionTarget": "Connection target",
@@ -78,6 +124,10 @@
       "skillHomeConfirmTitle": "Rebuild this Computer?",
       "skillHomeConfirmDescription": "Changing Skill Home saves a new capability governance root and rebuilds the current Computer runtime. Marketplace, plugin, MCP server, and skill views will be resolved from the new Skill Home; current connection and runtime state may refresh.",
       "skillHomeConfirmOk": "Rebuild"
+    },
+    "actionGroups": {
+      "profile": "Profile & Configuration",
+      "runtime": "Runtime"
     },
     "connectionActions": {
       "targetTitle": "Connection Target",
@@ -113,7 +163,9 @@
       "duplicated": "Computer duplicated",
       "deleted": "Computer deleted",
       "started": "Computer started",
-      "stopped": "Computer stopped"
+      "stopped": "Computer stopped",
+      "restarted": "Computer restarted",
+      "reloaded": "Computer runtime reloaded"
     }
   },
   "skills": {

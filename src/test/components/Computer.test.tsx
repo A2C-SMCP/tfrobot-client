@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { Computer } from '@/components/Computer';
 import { useComputerStore } from '@/stores/computerStore';
 import { useInputStore } from '@/stores/inputStore';
+import { useRuntimeStore } from '@/stores/runtimeStore';
+import { runtimeSnapshot } from '../helpers/store';
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -15,6 +17,11 @@ const mockComputerInstances = [
     name: 'prod',
     description: 'Production computer',
     running: true,
+    runtime: runtimeSnapshot({
+      lifecycle: 'connected',
+      mcp_servers: 5,
+      active_mcp_servers: 5,
+    }),
     connected: true,
     mcp_server_count: 5,
     robot_binding: {
@@ -50,6 +57,7 @@ const twoComputerInstances = [
     id: 'computer-b',
     name: 'Second Computer',
     connected: false,
+    runtime: runtimeSnapshot(),
     mcp_server_count: 2,
     connection: null,
   },
@@ -82,6 +90,9 @@ vi.mock('@/components/LogViewer', () => ({
 vi.mock('@/components/Computer/ComputerRuntimeSettings', () => ({
   ComputerRuntimeSettings: ({ instance }: { instance: { id: string } }) => <div data-testid="runtime-settings">RuntimeSettings:{instance.id}</div>,
 }));
+vi.mock('@/components/Computer/ComputerRuntime', () => ({
+  ComputerRuntime: ({ instance }: { instance: { id: string } }) => <div data-testid="computer-runtime">ComputerRuntime:{instance.id}</div>,
+}));
 vi.mock('@/components/Computer/ComputerOverview', () => ({
   ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
 }));
@@ -113,6 +124,7 @@ describe('Computer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFetchManualTargets.mockReset();
+    useRuntimeStore.getState().reset();
     useComputerStore.getState().reset();
     useInputStore.getState().reset();
     mockInvoke.mockResolvedValue(mockComputerInstances);
@@ -135,6 +147,11 @@ describe('Computer', () => {
             auto_connect: false,
           },
           mcpServerCount: 5,
+          runtime: runtimeSnapshot({
+            lifecycle: 'connected',
+            mcp_servers: 5,
+            active_mcp_servers: 5,
+          }),
         },
       ],
     });
@@ -171,7 +188,8 @@ describe('Computer', () => {
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
     expect(screen.getByText('Logs')).toBeInTheDocument();
-    expect(screen.getByText('Runtime')).toBeInTheDocument();
+    expect(screen.getByText('Profile & Configuration')).toBeInTheDocument();
+    expect(screen.getAllByText('Runtime').length).toBeGreaterThan(0);
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
   }, 20000);
 
@@ -192,8 +210,15 @@ describe('Computer', () => {
     expect(screen.getByTestId('marketplace-tab')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Input Variables'));
     expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
-    fireEvent.click(screen.getByText('Runtime'));
-    expect(screen.getByTestId('runtime-settings')).toHaveTextContent('computer-b');
+  }, 20000);
+
+  it('opens configuration and runtime views directly even when tabs overflow', async () => {
+    const configuration = render(<Computer initialView="detail" initialTab="configuration" />);
+    expect(await screen.findByTestId('runtime-settings')).toHaveTextContent('computer-a');
+    configuration.unmount();
+
+    render(<Computer initialView="detail" initialTab="runtime" />);
+    expect(await screen.findByTestId('computer-runtime')).toHaveTextContent('computer-a');
   }, 20000);
 
   it('can render the detail view directly', async () => {
@@ -226,6 +251,7 @@ describe('Computer', () => {
       id: 'computer-a',
       name: 'prod',
       running: false,
+      runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
       connected: false,
       mcp_server_count: 0,
       robot_binding: null,
@@ -243,6 +269,7 @@ describe('Computer', () => {
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,
+      runtime: runtimeSnapshot(),
       connection: null,
       connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
     };
@@ -257,6 +284,7 @@ describe('Computer', () => {
     const disconnectedInstance = {
       ...mockComputerInstances[0],
       connected: false,
+      runtime: runtimeSnapshot(),
       connection: null,
       connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     };
@@ -274,6 +302,7 @@ describe('Computer', () => {
           connectionStatus: 'disconnected',
           connectionPolicy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
           mcpServerCount: 0,
+          runtime: runtimeSnapshot(),
         },
       ],
     });
@@ -293,6 +322,7 @@ describe('Computer', () => {
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,
+      runtime: runtimeSnapshot(),
       connection: null,
       connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
     };
@@ -312,6 +342,7 @@ describe('Computer', () => {
           name: 'New Computer',
           description: 'New description',
           running: false,
+          runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
           connected: false,
           mcp_server_count: 0,
           robot_binding: null,
@@ -338,8 +369,18 @@ describe('Computer', () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === 'list_computer_instances') return mockComputerInstances;
       if (cmd === 'rename_computer_instance') return { ...mockComputerInstances[0], name: 'Updated Computer', description: 'Updated description' };
-      if (cmd === 'duplicate_computer_instance') return { ...mockComputerInstances[0], id: 'computer-copy', name: 'prod Copy', running: false };
-      if (cmd === 'stop_computer_instance') return { ...mockComputerInstances[0], running: false };
+      if (cmd === 'duplicate_computer_instance') return {
+        ...mockComputerInstances[0],
+        id: 'computer-copy',
+        name: 'prod Copy',
+        running: false,
+        runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
+      };
+      if (cmd === 'stop_computer_instance') return {
+        ...mockComputerInstances[0],
+        running: false,
+        runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
+      };
       if (cmd === 'start_computer_instance') return { ...mockComputerInstances[0], running: true };
       if (cmd === 'delete_computer_instance') return null;
       return null;
@@ -382,7 +423,12 @@ describe('Computer', () => {
   }, 80000);
 
   it('prompts for consecutive missing values and retries only the original start action', async () => {
-    const stopped = { ...mockComputerInstances[0], running: false, connected: false };
+    const stopped = {
+      ...mockComputerInstances[0],
+      running: false,
+      connected: false,
+      runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
+    };
     let startAttempts = 0;
     mockInvoke.mockImplementation(async (cmd, args) => {
       if (cmd === 'list_computer_instances') return [stopped];
@@ -404,7 +450,11 @@ describe('Computer', () => {
             message: 'Required input is unresolved',
           };
         }
-        return { ...stopped, running: true };
+        return {
+          ...stopped,
+          running: true,
+          runtime: runtimeSnapshot({ snapshot_revision: 2 }),
+        };
       }
       if (cmd === 'get_input') {
         const inputId = (args as { id?: string } | undefined)?.id;

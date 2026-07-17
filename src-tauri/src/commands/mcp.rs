@@ -1,5 +1,5 @@
 use crate::commands::runtime_error::RuntimeActionError;
-use crate::services::computer::McpServerManagedBy;
+use crate::services::computer::{ComputerRuntimeAction, McpServerManagedBy};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use serde::{Deserialize, Serialize};
@@ -398,11 +398,10 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
 async fn ensure_computer_started(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> Result<(), String> {
-    if runtime.is_running().await {
-        Ok(())
-    } else {
-        Err("请先启动 Computer".to_string())
-    }
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::ManageMcp)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn ensure_user_managed_server(

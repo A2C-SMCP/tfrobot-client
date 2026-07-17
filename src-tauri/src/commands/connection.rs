@@ -1,7 +1,7 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstanceRuntime,
-    ComputerRuntimeState, RobotBindingMetadata, SmcpReconnectOutcome,
+    ComputerRuntimeAction, ComputerRuntimeState, RobotBindingMetadata, SmcpReconnectOutcome,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -150,8 +150,8 @@ pub async fn delete_manual_smcp_target(
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     for runtime in state.computer_registry.list_runtimes().await {
-        let guard = runtime.connection.read().await;
-        if guard
+        let connection = runtime.connection_state_snapshot().await;
+        if connection
             .as_ref()
             .and_then(|connection| connection.target_id.as_deref())
             == Some(target_id.as_str())
@@ -212,10 +212,6 @@ pub(crate) async fn connect_connection_target_locked(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    if !runtime.is_running().await {
-        return Err("Computer must be running before connecting".to_string());
-    }
-
     {
         let _guard = state.connection_establish_lock.lock().await;
         if matches!(
@@ -226,6 +222,11 @@ pub(crate) async fn connect_connection_target_locked(
         ) {
             return Ok(());
         }
+
+        runtime
+            .ensure_runtime_action(ComputerRuntimeAction::Connect)
+            .await
+            .map_err(|error| error.to_string())?;
 
         clear_unhealthy_connection_snapshot(&runtime).await?;
 
@@ -257,17 +258,10 @@ pub(crate) async fn connect_connection_target_locked(
             generation: next_generation(),
         };
 
-        let mut runtime_conn = runtime.connection.write().await;
-        if runtime_conn.is_some() {
-            return Err(
-                "Computer instance already has a connection snapshot; disconnect before reconnecting"
-                    .to_string(),
-            );
-        }
-        *runtime_conn = Some(new_connection);
+        runtime.install_connection_state(new_connection).await?;
     }
     if let Err(error) = persist_manual_connection_target(state, instance_id, &target.id).await {
-        let existing_connection = runtime.connection.write().await.take();
+        let existing_connection = runtime.take_connection_state().await;
         if let Some(connection) = existing_connection {
             let _ = close_smcp_connection(&runtime, connection).await;
         }
@@ -315,11 +309,11 @@ async fn check_connection_target_allowed(
     let runtimes = state.computer_registry.list_runtimes().await;
     for runtime in runtimes {
         let runtime_state = runtime.runtime_state().await;
-        let guard = runtime.connection.read().await;
-        let Some(connection) = guard.as_ref() else {
+        let connection = runtime.connection_state_snapshot().await;
+        let Some(connection) = connection.as_ref() else {
             continue;
         };
-        if !connection_snapshot_blocks_target(runtime_state) {
+        if !connection_snapshot_blocks_target(runtime_state, runtime.instance.id == instance_id) {
             continue;
         }
 
@@ -342,17 +336,22 @@ async fn check_connection_target_allowed(
     Ok(ManagerConnectionDecision::Proceed)
 }
 
-fn connection_snapshot_blocks_target(state: ComputerRuntimeState) -> bool {
-    !matches!(
+fn connection_snapshot_blocks_target(state: ComputerRuntimeState, same_instance: bool) -> bool {
+    matches!(
         state,
-        ComputerRuntimeState::Created | ComputerRuntimeState::Stopped | ComputerRuntimeState::Error
-    )
+        ComputerRuntimeState::Connecting
+            | ComputerRuntimeState::Connected
+            | ComputerRuntimeState::JoinedOffice
+            | ComputerRuntimeState::Syncing
+            | ComputerRuntimeState::Degraded
+            | ComputerRuntimeState::Disconnecting
+    ) || (state == ComputerRuntimeState::Started && !same_instance)
 }
 
 async fn clear_unhealthy_connection_snapshot(
     runtime: &ComputerInstanceRuntime,
 ) -> Result<(), String> {
-    let has_snapshot = runtime.connection.read().await.is_some();
+    let has_snapshot = runtime.has_connection_state().await;
     if has_snapshot && !runtime.is_connected().await {
         runtime.clear_smcp_connection().await?;
     }
@@ -388,7 +387,12 @@ pub(crate) async fn disconnect_smcp_locked(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    let existing_connection = runtime.connection.read().await.as_ref().cloned();
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Disconnect)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let existing_connection = runtime.connection_state_snapshot().await;
     if let Some(connection) = existing_connection {
         close_smcp_connection(&runtime, connection).await?;
     }
@@ -691,6 +695,10 @@ async fn establish_manager_connection(
             emit_connection_changed(app);
             return Ok(());
         }
+        runtime
+            .ensure_runtime_action(ComputerRuntimeAction::Connect)
+            .await
+            .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
         clear_unhealthy_connection_snapshot(&runtime)
             .await
             .map_err(ManagerError::InvalidResponse)?;
@@ -705,7 +713,6 @@ async fn establish_manager_connection(
         let refresh_task = spawn_refresh_task(
             app,
             state,
-            runtime.connection.clone(),
             runtime.clone(),
             params.clone(),
             instance_id.to_string(),
@@ -727,18 +734,14 @@ async fn establish_manager_connection(
             generation,
         };
 
-        let mut runtime_conn = runtime.connection.write().await;
-        if runtime_conn.is_some() {
-            return Err(ManagerError::InvalidResponse(
-                "Computer instance already has a connection snapshot; disconnect before reconnecting"
-                    .to_string(),
-            ));
-        }
-        *runtime_conn = Some(new_connection);
+        runtime
+            .install_connection_state(new_connection)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
     }
 
     if let Err(error) = persist_robot_binding(state, instance_id, &params.robot_binding).await {
-        let existing_connection = runtime.connection.write().await.take();
+        let existing_connection = runtime.take_connection_state().await;
         if let Some(connection) = existing_connection {
             let _ = close_smcp_connection(&runtime, connection).await;
         }
@@ -822,7 +825,6 @@ fn manager_connection_decision(
 fn spawn_refresh_task(
     app: &AppHandle,
     state: &AppState,
-    connection: Arc<RwLock<Option<ConnectionState>>>,
     runtime: ComputerInstanceRuntime,
     params: ManagerConnectionParams,
     instance_id: String,
@@ -831,6 +833,7 @@ fn spawn_refresh_task(
 ) -> tokio::task::JoinHandle<()> {
     let manager_client = state.manager_client.clone();
     let log_service = state.log_service.clone();
+    let connection_establish_lock = state.connection_establish_lock.clone();
     let app = app.clone();
 
     tokio::spawn(async move {
@@ -846,7 +849,15 @@ fn spawn_refresh_task(
             let wait = refresh_wait_secs(expires_in);
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
-            match refresh_cycle(&manager_client, &connection, &runtime, &params, generation).await {
+            match refresh_cycle(
+                &manager_client,
+                &connection_establish_lock,
+                &runtime,
+                &params,
+                generation,
+            )
+            .await
+            {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
                     let _ = log_service.write_for_instance(
@@ -902,7 +913,7 @@ pub enum RefreshOutcome {
 /// 只做决策、不做 emit/log 副作用（交调用方按 [`RefreshOutcome`] 处理），便于无 AppHandle 环境测试。
 async fn refresh_cycle(
     manager_client: &Arc<ManagerClient>,
-    connection: &Arc<RwLock<Option<ConnectionState>>>,
+    connection_establish_lock: &Arc<Mutex<()>>,
     runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
@@ -923,18 +934,19 @@ async fn refresh_cycle(
             return RefreshOutcome::Stop;
         }
     };
-    reconnect_with_token(connection, runtime, params, generation, &token).await
+    let _establish_guard = connection_establish_lock.lock().await;
+    reconnect_with_token(runtime, params, generation, &token).await
 }
 
 /// 用已拿到的短 JWT 重建连接：runtime lifecycle lock 内断开旧 SDK Socket.IO → 重连 → 成功刷新快照。
 ///
 /// **不依赖 AppHandle / ManagerClient**（emit/log 留给调用方），便于集成测试 build 失败路径。
 /// 顺序 **disconnect-first**：同机器人重连必须先释放 room，否则 server 拒绝重复实例
-/// （同 `(office_id, connection.computer_name)`）。build 失败返回 Retry，同时 runtime 进入 Error 状态，
-/// 避免业务层把已断开的 socket 误判为健康连接。`generation` 守卫防与用户手动断开/改连竞态。
+/// （同 `(office_id, connection.computer_name)`）。build 失败返回 Retry；SDK lifecycle 回到 Started，
+/// client runtime diagnostic 则保留失败原因，避免业务层把已断开的 socket 误判为健康连接。
+/// `generation` 守卫防与用户手动断开/改连竞态。
 /// `pub` 供集成测试。
 pub async fn reconnect_with_token(
-    connection: &Arc<RwLock<Option<ConnectionState>>>,
     runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
@@ -942,8 +954,8 @@ pub async fn reconnect_with_token(
 ) -> RefreshOutcome {
     let auth_payload = serde_json::json!({ "token": token.access_token });
     let computer_name = {
-        let guard = connection.read().await;
-        match guard.as_ref() {
+        let connection = runtime.connection_state_snapshot().await;
+        match connection.as_ref() {
             Some(connection) if connection.generation == generation => {
                 connection.computer_name.clone()
             }
@@ -952,7 +964,6 @@ pub async fn reconnect_with_token(
     };
     match runtime
         .reconnect_smcp_socketio_for_generation(
-            connection,
             generation,
             &params.url,
             Some(auth_payload),
@@ -977,16 +988,16 @@ pub async fn reconnect_with_token(
 /// 返回 [`SwapResult::Replaced`] 或 [`SwapResult::Stale`]（连接已被换/断）。
 /// `pub` 供集成测试验证 generation 守卫。
 pub async fn try_install_refreshed_client(
-    connection: &Arc<RwLock<Option<ConnectionState>>>,
+    runtime: &ComputerInstanceRuntime,
     generation: u64,
 ) -> SwapResult {
-    let mut guard = connection.write().await;
-    match guard.as_mut() {
-        Some(cs) if cs.generation == generation => {
-            cs.connected_at = chrono::Utc::now();
-            SwapResult::Replaced
-        }
-        _ => SwapResult::Stale,
+    if runtime
+        .refresh_connection_timestamp_for_generation(generation)
+        .await
+    {
+        SwapResult::Replaced
+    } else {
+        SwapResult::Stale
     }
 }
 
@@ -1159,5 +1170,17 @@ mod tests {
         assert!(
             matches!(err, ManagerError::InvalidResponse(message) if message.contains("Computer B"))
         );
+    }
+
+    #[test]
+    fn failed_refresh_reserves_target_for_other_instances_but_allows_owner_recovery() {
+        assert!(connection_snapshot_blocks_target(
+            ComputerRuntimeState::Started,
+            false
+        ));
+        assert!(!connection_snapshot_blocks_target(
+            ComputerRuntimeState::Started,
+            true
+        ));
     }
 }

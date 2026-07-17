@@ -489,7 +489,11 @@ async fn start_registered_plugin_servers_if_running(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
     hooks: &MarketplaceMcpHooks,
 ) -> Result<(), String> {
-    if !runtime.is_running().await {
+    if runtime
+        .ensure_runtime_action(crate::services::computer::ComputerRuntimeAction::ManageMcp)
+        .await
+        .is_err()
+    {
         return Ok(());
     }
 
@@ -994,7 +998,11 @@ mod tests {
             .config
             .get_computer_instance(TEST_INSTANCE_ID)
             .unwrap();
-        state.computer_registry.upsert_runtime(instance).await;
+        state
+            .computer_registry
+            .upsert_runtime(instance)
+            .await
+            .unwrap();
         let hooks = MarketplaceMcpHooks::for_plugin(
             &state,
             TEST_INSTANCE_ID,

@@ -55,7 +55,8 @@ async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
                 .get_computer_instance(TEST_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     state
 }
 
@@ -209,7 +210,7 @@ async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
         .await
         .expect("connect mock robot");
 
-    *runtime.connection.write().await = Some(ConnectionState {
+    *runtime.connection_handle_for_test().write_owned().await = Some(ConnectionState {
         profile_name: "mock-robot".to_string(),
         url: server_url.to_string(),
         office_id: TEST_OFFICE_ID.to_string(),
@@ -335,7 +336,8 @@ async fn test_mcp_commands_are_instance_scoped() {
     state
         .computer_registry
         .upsert_runtime(state.config.get_computer_instance("second").unwrap())
-        .await;
+        .await
+        .unwrap();
 
     mcp::add_mcp_server_core(&state, "second", echo_server_config("second-only"))
         .await
@@ -497,7 +499,10 @@ async fn test_mcp_lifecycle_requires_started_computer() {
         start_all_err.to_string(),
         stop_all_err,
     ] {
-        assert_eq!(err, "请先启动 Computer");
+        assert_eq!(
+            err,
+            "runtime action 'manage_mcp' is unavailable while lifecycle is 'created'"
+        );
     }
 }
 
@@ -1001,7 +1006,8 @@ async fn test_config_io_import_export_are_instance_scoped() {
     state
         .computer_registry
         .upsert_runtime(state.config.get_computer_instance("second").unwrap())
-        .await;
+        .await
+        .unwrap();
 
     let import_path = tmp.path().join("import.json");
     let export_path = tmp.path().join("export.json");

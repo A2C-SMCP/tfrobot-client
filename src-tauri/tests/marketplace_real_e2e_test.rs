@@ -118,7 +118,8 @@ async fn create_marketplace_real_test_app_state(path: &std::path::Path) -> AppSt
     state
         .computer_registry
         .upsert_runtime(state.config.get_computer_instance(INSTANCE_ID).unwrap())
-        .await;
+        .await
+        .unwrap();
     state
 }
 

@@ -31,6 +31,9 @@ pub enum SkillCommandError {
     InstanceNotFound {
         instance_id: String,
     },
+    RuntimeUnavailable {
+        message: String,
+    },
     SkillNotFound {
         name: String,
     },
@@ -66,7 +69,10 @@ pub async fn list_skills_core(
     instance_id: &str,
 ) -> Result<Vec<A2CSkillRef>, SkillCommandError> {
     let runtime = runtime_for_instance(state, instance_id).await?;
-    Ok(runtime.sdk_skills().await)
+    let reader = runtime
+        .sdk_skill_reader()
+        .map_err(|message| SkillCommandError::RuntimeUnavailable { message })?;
+    Ok(reader.skills().await)
 }
 
 #[tauri::command]
@@ -86,16 +92,19 @@ pub async fn get_skill_core(
     rel_path: Option<&str>,
 ) -> Result<SkillResourceResponse, SkillCommandError> {
     let runtime = runtime_for_instance(state, instance_id).await?;
+    let reader = runtime
+        .sdk_skill_reader()
+        .map_err(|message| SkillCommandError::RuntimeUnavailable { message })?;
     let name = require_non_empty("skill name", name)?;
     let skill_ref =
-        runtime
-            .sdk_skill_ref(name)
+        reader
+            .skill_ref(name)
             .await
             .ok_or_else(|| SkillCommandError::SkillNotFound {
                 name: name.to_string(),
             })?;
-    let view = runtime
-        .sdk_read_skill_resource(&skill_ref, rel_path)
+    let view = reader
+        .read_skill_resource(&skill_ref, rel_path)
         .await
         .map_err(|error| SkillCommandError::ResourceNotAccessible {
             reason: error.reason.to_string(),
@@ -166,7 +175,10 @@ pub async fn local_user_skills_root(
     instance_id: &str,
 ) -> Result<PathBuf, SkillCommandError> {
     let runtime = runtime_for_instance(state, instance_id).await?;
-    Ok(runtime.sdk_skill_home().await.join("user"))
+    let reader = runtime
+        .sdk_skill_reader()
+        .map_err(|message| SkillCommandError::RuntimeUnavailable { message })?;
+    Ok(reader.skill_home().await.join("user"))
 }
 
 async fn runtime_for_instance(

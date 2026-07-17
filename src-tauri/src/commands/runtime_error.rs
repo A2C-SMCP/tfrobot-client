@@ -1,4 +1,4 @@
-use crate::services::computer::ComputerRuntimeStartError;
+use crate::services::computer::{ComputerRuntimeActionUnavailable, ComputerRuntimeStartError};
 use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
 use serde::Serialize;
@@ -21,8 +21,19 @@ pub enum RuntimeActionError {
     },
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
+    #[error("runtime action '{action}' is unavailable while lifecycle is '{lifecycle}'")]
+    ActionUnavailable { action: String, lifecycle: String },
     #[error("{message}")]
     RuntimeError { message: String },
+}
+
+impl From<ComputerRuntimeActionUnavailable> for RuntimeActionError {
+    fn from(error: ComputerRuntimeActionUnavailable) -> Self {
+        Self::ActionUnavailable {
+            action: error.action.to_string(),
+            lifecycle: error.lifecycle.to_string(),
+        }
+    }
 }
 
 impl RuntimeActionError {
@@ -112,6 +123,23 @@ mod tests {
                 "code": "resolver_failed",
                 "input_id": "region",
                 "message": "secret store unavailable"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_unavailable_actions_with_the_current_lifecycle() {
+        let error = RuntimeActionError::from(ComputerRuntimeActionUnavailable {
+            action: "connect",
+            lifecycle: a2c_smcp::smcp_computer::LifecycleState::Connecting,
+        });
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "action_unavailable",
+                "action": "connect",
+                "lifecycle": "connecting"
             })
         );
     }

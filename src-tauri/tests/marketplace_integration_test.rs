@@ -45,7 +45,8 @@ async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
                 .get_computer_instance(TEST_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     state
 }
 
@@ -1168,7 +1169,8 @@ async fn plugin_enable_state_is_isolated_per_computer_instance() {
                 .get_computer_instance(TEST_SECOND_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     let repo = tmp.path().join("marketplace-repo");
     build_marketplace_repo(&repo);
     let git_url = format!("file://{}", repo.display());
@@ -1253,7 +1255,8 @@ async fn plugin_install_materializes_mcp_and_skills_only_for_current_instance() 
                 .get_computer_instance(FIRST_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     state
         .config
         .add_computer_instance(ComputerInstance::new(SECOND_INSTANCE_ID, "TF45 Computer B"))
@@ -1266,7 +1269,8 @@ async fn plugin_install_materializes_mcp_and_skills_only_for_current_instance() 
                 .get_computer_instance(SECOND_INSTANCE_ID)
                 .unwrap(),
         )
-        .await;
+        .await
+        .unwrap();
     let repo = tmp.path().join("marketplace-repo");
     build_tf45_isolation_marketplace_repo(&repo);
 

@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Button, Card, Col, List, Row, Space, Spin, Statistic, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Descriptions, List, Row, Space, Spin, Statistic, Tag, Typography } from 'antd';
 import {
   ApiOutlined,
   CloudServerOutlined,
@@ -47,7 +47,36 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
         </Button>
       </div>
 
+      {(data.runtime.last_error || data.runtime.degraded_reason) && (
+        <Alert
+          type={data.runtime.last_error ? 'error' : 'warning'}
+          showIcon
+          message={data.runtime.last_error ? t('computer.runtime.lastError') : t('computer.runtime.degraded')}
+          description={data.runtime.last_error ?? data.runtime.degraded_reason}
+        />
+      )}
+
       <Row gutter={[16, 16]}>
+        <Col xs={24}>
+          <Card title={t('computer.runtime.statusTitle')}>
+            <Descriptions column={{ xs: 1, sm: 3 }} size="small">
+              <Descriptions.Item label={t('computer.runtime.lifecycle')}>
+                <Tag color={data.runtime.lifecycle === 'degraded' ? 'orange' : data.running ? 'green' : 'default'}>
+                  {t(`computer.runtime.lifecycleStates.${data.runtime.lifecycle}`)}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label={t('computer.runtime.configRevision')}>
+                {data.runtime.config_revision}
+              </Descriptions.Item>
+              <Descriptions.Item label={t('computer.runtime.capabilityRevision')}>
+                {data.runtime.capability_revision}
+              </Descriptions.Item>
+              <Descriptions.Item label={t('skills.title')}>
+                {data.runtime.skills}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+        </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card title={<><CloudServerOutlined /> {t('dashboard.connection')}</>}>
             <Tag color={data.connected ? 'green' : 'default'}>

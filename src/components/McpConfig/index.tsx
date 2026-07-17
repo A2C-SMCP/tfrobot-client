@@ -19,6 +19,8 @@ const { Title } = Typography;
 
 interface McpConfigProps {
   instanceId: string;
+  mode?: 'config' | 'runtime';
+  runtimeDisabled?: boolean;
 }
 
 function runtimeActionSuccess(action: McpRuntimeAction) {
@@ -38,7 +40,7 @@ function runtimeActionSuccess(action: McpRuntimeAction) {
   }
 }
 
-export function McpConfig({ instanceId }: McpConfigProps) {
+export function McpConfig({ instanceId, mode = 'config', runtimeDisabled = false }: McpConfigProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -157,39 +159,41 @@ export function McpConfig({ instanceId }: McpConfigProps) {
           >
             {t('common.refresh')}
           </Button>
-          <Button
+          {mode === 'runtime' && <Button
             icon={<PlayCircleOutlined />}
             onClick={handleStartAll}
+            disabled={runtimeDisabled}
             loading={loading}
           >
             {t('mcp.startAll')}
-          </Button>
-          <Button
+          </Button>}
+          {mode === 'runtime' && <Button
             icon={<PauseCircleOutlined />}
             onClick={handleStopAll}
+            disabled={runtimeDisabled}
             loading={loading}
           >
             {t('mcp.stopAll')}
-          </Button>
-          <Button
+          </Button>}
+          {mode === 'config' && <Button
             icon={<ImportOutlined />}
             onClick={handleImport}
           >
             {t('mcp.importConfig')}
-          </Button>
-          <Button
+          </Button>}
+          {mode === 'config' && <Button
             icon={<ExportOutlined />}
             onClick={handleExport}
           >
             {t('mcp.exportConfig')}
-          </Button>
-          <Button
+          </Button>}
+          {mode === 'config' && <Button
             type="primary"
             icon={<PlusOutlined />}
             onClick={handleAdd}
           >
             {t('mcp.addServer')}
-          </Button>
+          </Button>}
         </Space>
       </div>
 
@@ -206,6 +210,8 @@ export function McpConfig({ instanceId }: McpConfigProps) {
 
       <McpServerList
         servers={servers}
+        mode={mode}
+        actionsDisabled={runtimeDisabled}
         loading={loading}
         onStop={(name) => stopServer(instanceId, name)}
         onEdit={handleEdit}
@@ -213,7 +219,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         onStart={(name) => runtimeActions.run({ kind: 'start', name })}
       />
 
-      <Modal
+      {mode === 'config' && <Modal
         title={editingServer ? t('mcp.editServer') : t('mcp.addServer')}
         open={formVisible}
         onCancel={() => setFormVisible(false)}
@@ -227,7 +233,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
           onCancel={() => setFormVisible(false)}
           loading={loading}
         />
-      </Modal>
+      </Modal>}
       {runtimeActions.pending && (
         <RuntimeInputPrompt
           key={`${instanceId}:${runtimeActions.pending.error.input_id}`}

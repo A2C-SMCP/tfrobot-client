@@ -104,14 +104,23 @@ describe('McpConfig', () => {
     expect(mockStore.fetchServers).toHaveBeenCalledWith(instanceId);
   });
 
-  it('renders title and action buttons', () => {
+  it('keeps configuration CRUD and import/export out of runtime controls', () => {
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('MCP Servers')).toBeInTheDocument();
     expect(screen.getByText('Add Server')).toBeInTheDocument();
-    expect(screen.getByText('Start All')).toBeInTheDocument();
-    expect(screen.getByText('Stop All')).toBeInTheDocument();
     expect(screen.getByText('Import Config')).toBeInTheDocument();
     expect(screen.getByText('Export Config')).toBeInTheDocument();
+    expect(screen.queryByText('Start All')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
+  });
+
+  it('shows only lifecycle actions in runtime mode', () => {
+    render(<McpConfig instanceId={instanceId} mode="runtime" runtimeDisabled />);
+    expect(screen.getByRole('button', { name: /Start All$/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Stop All$/ })).toBeDisabled();
+    expect(screen.queryByText('Add Server')).not.toBeInTheDocument();
+    expect(screen.queryByText('Import Config')).not.toBeInTheDocument();
+    expect(screen.queryByText('Export Config')).not.toBeInTheDocument();
   });
 
   it('renders error alert when error exists', () => {
@@ -135,9 +144,18 @@ describe('McpConfig', () => {
 
     expect(screen.getByText('plugin-tools')).toBeInTheDocument();
     expect(screen.getByText('desktop-tools@tf-market')).toBeInTheDocument();
-    expect(screen.getByTitle('Start')).toBeDisabled();
     expect(screen.getByTitle('Edit')).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
+  });
+
+  it('disables plugin-managed lifecycle actions in runtime mode', () => {
+    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockPluginServers } as any);
+
+    render(<McpConfig instanceId={instanceId} mode="runtime" />);
+
+    expect(screen.getByTitle('Start')).toBeDisabled();
+    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Remove')).not.toBeInTheDocument();
   });
 
   it('prompts for a missing input and retries the original MCP reload action', async () => {

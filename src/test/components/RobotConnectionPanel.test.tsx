@@ -4,6 +4,7 @@ import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { useComputerStore } from '@/stores/computerStore';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 import { useManagerStore } from '@/stores/managerStore';
+import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -26,6 +27,7 @@ describe('RobotConnectionPanel', () => {
           connectionStatus: 'disconnected',
           connectionPolicy: { target: null, auto_connect: false },
           mcpServerCount: 0,
+          runtime: runtimeSnapshot(),
         },
       ],
       loading: false,
@@ -131,6 +133,7 @@ describe('RobotConnectionPanel', () => {
           running: true,
           connected: false,
           mcp_server_count: 0,
+          runtime: runtimeSnapshot(),
           robot_binding: null,
           connection_policy: {
             target: request.target,
@@ -172,6 +175,7 @@ describe('RobotConnectionPanel', () => {
             auto_connect: false,
           },
           mcpServerCount: 0,
+          runtime: runtimeSnapshot(),
         },
       ],
       loading: false,
@@ -228,6 +232,7 @@ describe('RobotConnectionPanel', () => {
             auto_connect: false,
           },
           mcpServerCount: 0,
+          runtime: runtimeSnapshot(),
         },
       ],
       loading: false,
@@ -255,6 +260,7 @@ describe('RobotConnectionPanel', () => {
           running: true,
           connected: false,
           mcp_server_count: 0,
+          runtime: runtimeSnapshot(),
           robot_binding: null,
           connection_policy: {
             target: request.target,
@@ -315,6 +321,7 @@ describe('RobotConnectionPanel', () => {
           running: true,
           connected: false,
           mcp_server_count: 0,
+          runtime: runtimeSnapshot(),
           robot_binding: null,
           connection_policy: {
             target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },
@@ -371,6 +378,7 @@ describe('RobotConnectionPanel', () => {
           running: true,
           connected: false,
           mcp_server_count: 0,
+          runtime: runtimeSnapshot(),
           robot_binding: null,
           connection_policy: {
             target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },
@@ -411,6 +419,7 @@ describe('RobotConnectionPanel', () => {
             auto_connect: false,
           },
           mcpServerCount: 0,
+          runtime: runtimeSnapshot(),
         },
       ],
       loading: false,
@@ -441,6 +450,7 @@ describe('RobotConnectionPanel', () => {
           running: true,
           connected: false,
           mcp_server_count: 0,
+          runtime: runtimeSnapshot(),
           robot_binding: null,
           connection_policy: {
             target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },

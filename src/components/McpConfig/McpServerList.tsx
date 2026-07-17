@@ -11,15 +11,19 @@ import type { McpServerStatus } from '@/stores/mcpStore';
 
 interface McpServerListProps {
   servers: McpServerStatus[];
+  mode?: 'config' | 'runtime';
+  actionsDisabled?: boolean;
   loading?: boolean;
-  onStart: (name: string) => Promise<void>;
-  onStop: (name: string) => Promise<void>;
-  onEdit: (name: string) => void;
-  onRemove: (name: string) => Promise<void>;
+  onStart?: (name: string) => Promise<void>;
+  onStop?: (name: string) => Promise<void>;
+  onEdit?: (name: string) => void;
+  onRemove?: (name: string) => Promise<void>;
 }
 
 export function McpServerList({
   servers,
+  mode = 'config',
+  actionsDisabled = false,
   loading,
   onStart,
   onStop,
@@ -30,12 +34,12 @@ export function McpServerList({
   const { message } = App.useApp();
 
   const handleStart = async (name: string) => {
-    await onStart(name);
+    await onStart?.(name);
   };
 
   const handleStop = async (name: string) => {
     try {
-      await onStop(name);
+      await onStop?.(name);
       message.success(t('mcp.messages.stopped', { name }));
     } catch (e) {
       message.error(String(e));
@@ -44,7 +48,7 @@ export function McpServerList({
 
   const handleRemove = async (name: string) => {
     try {
-      await onRemove(name);
+      await onRemove?.(name);
       message.success(t('mcp.messages.removed', { name }));
     } catch (e) {
       message.error(String(e));
@@ -106,7 +110,7 @@ export function McpServerList({
       key: 'actions',
       render: (_: unknown, record: McpServerStatus) => (
         <Space size="small">
-          {record.running ? (
+          {mode === 'runtime' && (record.running ? (
             <Tooltip title={pluginLifecycleMessage(record)}>
               <span>
                 <Button
@@ -114,7 +118,7 @@ export function McpServerList({
                   icon={<PauseCircleOutlined />}
                   onClick={() => handleStop(record.name)}
                   title={t('mcp.actions.stop')}
-                  disabled={isPluginOwned(record)}
+                  disabled={actionsDisabled || isPluginOwned(record)}
                 />
               </span>
             </Tooltip>
@@ -126,23 +130,23 @@ export function McpServerList({
                   icon={<PlayCircleOutlined />}
                   onClick={() => handleStart(record.name)}
                   title={t('mcp.actions.start')}
-                  disabled={isPluginOwned(record)}
+                  disabled={actionsDisabled || isPluginOwned(record)}
                 />
               </span>
             </Tooltip>
-          )}
-          <Tooltip title={pluginLifecycleMessage(record)}>
+          ))}
+          {mode === 'config' && <Tooltip title={pluginLifecycleMessage(record)}>
             <span>
               <Button
                 type="text"
                 icon={<EditOutlined />}
-                onClick={() => onEdit(record.name)}
+                onClick={() => onEdit?.(record.name)}
                 title={t('mcp.actions.edit')}
                 disabled={isPluginOwned(record)}
               />
             </span>
-          </Tooltip>
-          <Popconfirm
+          </Tooltip>}
+          {mode === 'config' && <Popconfirm
             title={t('mcp.confirmRemove')}
             onConfirm={() => handleRemove(record.name)}
             okText={t('common.yes')}
@@ -160,7 +164,7 @@ export function McpServerList({
                 />
               </span>
             </Tooltip>
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       ),
     },

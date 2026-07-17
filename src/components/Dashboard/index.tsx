@@ -24,7 +24,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
   useEffect(() => {
     fetchDashboard();
-  }, []);
+  }, [fetchDashboard]);
 
   if (loading && !data) {
     return <Spin style={{ display: 'block', marginTop: 100, textAlign: 'center' }} />;
@@ -86,14 +86,21 @@ export function Dashboard({ onNavigate }: DashboardProps) {
                   description={(
                     <Space wrap size={[8, 8]}>
                       <Tag color={computer.running ? 'green' : 'default'}>
-                        {computer.running ? t('computer.status.running') : t('computer.status.stopped')}
+                        {t(`computer.runtime.lifecycleStates.${computer.runtime.lifecycle}`)}
                       </Tag>
+                      <Tag>{t('computer.runtime.configRevision')}: {computer.runtime.config_revision}</Tag>
+                      <Tag>{t('computer.runtime.capabilityRevision')}: {computer.runtime.capability_revision}</Tag>
                       <Tag color={computer.connected ? 'green' : 'default'}>
                         {computer.connected ? t('connection.connected') : t('connection.disconnected')}
                       </Tag>
                       <Tag>{t('computer.mcpServers', { count: computer.mcp_server_count })}</Tag>
+                      <Tag>{t('dashboard.tools')}: {computer.runtime.tools}</Tag>
+                      <Tag>{t('skills.title')}: {computer.runtime.skills}</Tag>
                       {computer.robot_name && <Text type="secondary">{computer.robot_name}</Text>}
                       {computer.connection_profile && <Text type="secondary">{computer.connection_profile}</Text>}
+                      {(computer.runtime.last_error || computer.runtime.degraded_reason) && (
+                        <Text type="danger">{computer.runtime.last_error ?? computer.runtime.degraded_reason}</Text>
+                      )}
                     </Space>
                   )}
                 />
