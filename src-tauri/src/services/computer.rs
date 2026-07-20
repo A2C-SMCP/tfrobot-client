@@ -901,19 +901,6 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    pub async fn add_or_update_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active_computer()?;
-        let name = server.name().to_string();
-        self.computer
-            .read()
-            .await
-            .add_or_update_server(normalize_mcp_server_tool_meta(server))
-            .await?;
-        self.sdk_server_names.write().await.insert(name);
-        Ok(())
-    }
-
     pub async fn add_or_update_plugin_server(
         &self,
         server: MCPServerConfig,
@@ -936,33 +923,6 @@ impl ComputerInstanceRuntime {
             .write()
             .await
             .insert(name, managed_by);
-        Ok(())
-    }
-
-    pub async fn remove_server(&self, name: &str) -> Result<(), String> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
-        let was_running = self.is_running().await;
-        let computer = self.computer.read().await;
-        let bundle_id = computer
-            .list_mcp_servers_with_metadata()
-            .await
-            .into_iter()
-            .find(|server| server.name == name)
-            .map(|server| server.bundle_id)
-            .ok_or_else(|| format!("MCP server not found: {name}"))?;
-        computer
-            .remove_server(&bundle_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        drop(computer);
-        self.sdk_server_names.write().await.remove(name);
-        self.plugin_server_owners.write().await.remove(name);
-        if was_running {
-            let remounted_server_names = self.reconcile_sdk_governance_inner().await?;
-            self.start_mcp_servers_inner(&remounted_server_names)
-                .await?;
-        }
         Ok(())
     }
 
@@ -1427,19 +1387,6 @@ impl ComputerInstanceRuntime {
             );
         }
         Ok(hooks.registered_server_names().await)
-    }
-
-    async fn start_mcp_servers_inner(&self, names: &[String]) -> Result<(), String> {
-        for name in names {
-            if let Err(error) = self.computer.read().await.start_mcp_client(name).await {
-                self.emit_sdk_tool_list_update_if_connected().await;
-                return Err(error.to_string());
-            }
-        }
-        if !names.is_empty() {
-            self.emit_sdk_tool_list_update_if_connected().await;
-        }
-        Ok(())
     }
 
     async fn replace_sdk_computer(&self, was_running: bool, reason: &str) -> Result<(), String> {
@@ -1985,20 +1932,6 @@ mod tests {
         .unwrap()
     }
 
-    fn disabled_server_config(name: &str) -> MCPServerConfig {
-        serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": name,
-            "disabled": true,
-            "server_parameters": {
-                "command": "node",
-                "args": ["server.js"],
-                "env": {}
-            }
-        }))
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn failed_plugin_server_unmount_preserves_tracking_for_retry() {
         let sdk_server_names = Arc::new(RwLock::new(HashSet::from(["plugin-mcp".to_string()])));
@@ -2097,75 +2030,6 @@ mod tests {
             runtime.sdk_skill_home().await,
             default_local_skills_root(&skill_home_base, "instance/one")
         );
-    }
-
-    #[tokio::test]
-    async fn sdk_config_writes_are_scoped_to_the_computer_instance() {
-        let temp = tempfile::tempdir().unwrap();
-        let skill_home_base = temp.path().join("computer_instances");
-        let runtime =
-            ComputerInstanceRuntime::new(instance("computer-a", "One"), skill_home_base.clone());
-
-        runtime
-            .add_or_update_server(disabled_server_config("isolated-server"))
-            .await
-            .unwrap();
-
-        let instance_config = skill_home_base
-            .join("computer-a")
-            .join("sdk_config")
-            .join(".tfrobot")
-            .join("mcp.local.json");
-        assert!(instance_config.exists());
-        let persisted = std::fs::read_to_string(instance_config).unwrap();
-        assert!(persisted.contains("isolated-server"));
-        assert!(!temp.path().join(".tfrobot").exists());
-
-        let restarted =
-            ComputerInstanceRuntime::new(instance("computer-a", "One"), skill_home_base);
-        assert!(restarted
-            .sdk_mcp_server_names()
-            .await
-            .contains("isolated-server"));
-        restarted.start().await.unwrap();
-        assert!(restarted
-            .mcp_server_statuses()
-            .await
-            .iter()
-            .any(|(name, _, _)| name == "isolated-server"));
-    }
-
-    #[tokio::test]
-    async fn remove_server_resolves_explicit_bundle_id_from_sdk_inventory() {
-        let temp = tempfile::tempdir().unwrap();
-        let skill_home_base = temp.path().join("computer_instances");
-        let runtime =
-            ComputerInstanceRuntime::new(instance("computer-a", "One"), skill_home_base.clone());
-        let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "Stdio",
-            "name": "display-name",
-            "bundle_id": "stable-bundle-id",
-            "server_parameters": {
-                "command": "node",
-                "args": ["server.js"],
-                "env": {}
-            }
-        }))
-        .unwrap();
-
-        runtime.add_or_update_server(config).await.unwrap();
-        runtime.remove_server("display-name").await.unwrap();
-
-        assert!(!runtime
-            .sdk_mcp_server_names()
-            .await
-            .contains("display-name"));
-        let restarted =
-            ComputerInstanceRuntime::new(instance("computer-a", "One"), skill_home_base);
-        assert!(!restarted
-            .sdk_mcp_server_names()
-            .await
-            .contains("display-name"));
     }
 
     #[tokio::test]

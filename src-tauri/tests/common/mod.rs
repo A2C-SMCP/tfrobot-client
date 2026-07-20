@@ -148,3 +148,124 @@ pub fn everything_server_config_with_forbidden_tools(
     }))
     .expect("Failed to build server-everything config")
 }
+
+/// Compatibility helpers for runtime-focused integration tests.
+///
+/// Production config CRUD is intentionally exposed only through `commands::sdk_config`. These
+/// test-only composites retain the old setup ergonomics while making the config mutation and the
+/// subsequent runtime reload explicit outside the production command surface.
+#[allow(dead_code)]
+pub mod mcp {
+    #[allow(unused_imports)]
+    pub use tfrobot_client_lib::commands::mcp::*;
+
+    use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+    use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
+    use tfrobot_client_lib::AppState;
+
+    pub fn get_mcp_server_config_core(
+        state: &AppState,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<MCPServerConfig, String> {
+        state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| error.to_string())?;
+        state
+            .sdk_config
+            .sanitize_snapshot_for_view(state.sdk_config.load(instance_id))
+            .map_err(|error| error.to_string())?
+            .mcp
+            .servers
+            .into_iter()
+            .map(|server| server.config)
+            .find(|config| config.name() == name)
+            .ok_or_else(|| format!("Server not found: {name}"))
+    }
+
+    pub async fn add_mcp_server_core(
+        state: &AppState,
+        instance_id: &str,
+        config: MCPServerConfig,
+    ) -> Result<(), RuntimeActionError> {
+        update_runtime_server_for_test(state, instance_id, config).await
+    }
+
+    pub async fn update_mcp_server_core(
+        state: &AppState,
+        instance_id: &str,
+        config: MCPServerConfig,
+    ) -> Result<(), RuntimeActionError> {
+        update_runtime_server_for_test(state, instance_id, config).await
+    }
+
+    async fn update_runtime_server_for_test(
+        state: &AppState,
+        instance_id: &str,
+        config: MCPServerConfig,
+    ) -> Result<(), RuntimeActionError> {
+        state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+        let runtime = state
+            .computer_registry
+            .runtime(instance_id)
+            .await
+            .ok_or_else(|| RuntimeActionError::runtime("Computer runtime not found"))?;
+        if runtime
+            .plugin_mcp_server_owner(config.name())
+            .await
+            .is_some()
+        {
+            return Err(RuntimeActionError::runtime(format!(
+                "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+                config.name()
+            )));
+        }
+        tfrobot_client_lib::commands::sdk_config::upsert_computer_mcp_config_core(
+            state,
+            instance_id,
+            config,
+        )
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+        runtime.reload().await.map_err(RuntimeActionError::from)
+    }
+
+    pub async fn remove_mcp_server_core(
+        state: &AppState,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| error.to_string())?;
+        let runtime = state
+            .computer_registry
+            .runtime(instance_id)
+            .await
+            .ok_or_else(|| "Computer runtime not found".to_string())?;
+        if runtime.plugin_mcp_server_owner(name).await.is_some() {
+            return Err(format!(
+                "MCP server '{name}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace"
+            ));
+        }
+        tfrobot_client_lib::commands::sdk_config::remove_computer_mcp_config_core(
+            state,
+            instance_id,
+            name,
+        )
+        .await?;
+        runtime.reload().await.map_err(|error| error.to_string())?;
+        if runtime.plugin_mcp_server_owner(name).await.is_some() {
+            runtime
+                .start_mcp_server(name)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}

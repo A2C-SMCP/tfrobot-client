@@ -1,6 +1,8 @@
+use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
+use a2c_smcp::smcp_computer::settings::SettingsValidationError;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -34,6 +36,7 @@ pub struct SdkMcpConfigView {
 pub struct SdkMcpServerView {
     pub name: String,
     pub origin: String,
+    pub writable: bool,
     pub trusted_origin: bool,
     pub bundled: bool,
     pub config: MCPServerConfig,
@@ -91,6 +94,20 @@ pub struct SdkRuntimeDefaultsView {
     pub extra: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkConfigValidationView {
+    pub valid: bool,
+    pub errors: Vec<SettingsValidationError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkConfigStateView {
+    pub snapshot: SdkConfigSnapshotView,
+    pub validation: SdkConfigValidationView,
+}
+
 impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
     fn from(snapshot: ComputerConfigSnapshot) -> Self {
         Self {
@@ -101,12 +118,16 @@ impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
                     .mcp
                     .servers
                     .into_iter()
-                    .map(|server| SdkMcpServerView {
-                        name: server.name,
-                        origin: provenance_scope_name(server.origin).to_string(),
-                        trusted_origin: server.trusted_origin,
-                        bundled: server.bundled,
-                        config: server.config,
+                    .map(|server| {
+                        let origin = server.origin;
+                        SdkMcpServerView {
+                            name: server.name,
+                            origin: provenance_scope_name(origin).to_string(),
+                            writable: is_writable_provenance(origin),
+                            trusted_origin: server.trusted_origin,
+                            bundled: server.bundled,
+                            config: server.config,
+                        }
                     })
                     .collect(),
             },
@@ -175,19 +196,97 @@ fn provenance_scope_name(scope: ProvenanceScope) -> &'static str {
     }
 }
 
-/// Returns the SDK-owned, reconciled config projection including revision and provenance.
+/// Returns snapshot and schema validation from one serialized configuration read transaction.
 #[tauri::command]
-pub fn get_computer_config_snapshot(
+pub async fn get_computer_config_state(
     state: State<'_, AppState>,
     instance_id: String,
-) -> Result<SdkConfigSnapshotView, String> {
-    get_computer_config_snapshot_core(&state, &instance_id)
+) -> Result<SdkConfigStateView, String> {
+    get_computer_config_state_core(&state, &instance_id).await
 }
 
-pub fn get_computer_config_snapshot_core(
+pub async fn get_computer_config_state_core(
     state: &AppState,
     instance_id: &str,
-) -> Result<SdkConfigSnapshotView, String> {
+) -> Result<SdkConfigStateView, String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance(state, instance_id)?;
+    let (snapshot, report) = state
+        .sdk_config
+        .load_with_validation(instance_id)
+        .map_err(|error| error.to_string())?;
+    let snapshot = state
+        .sdk_config
+        .sanitize_snapshot_for_view(snapshot)
+        .map_err(|error| error.to_string())?;
+    Ok(SdkConfigStateView {
+        snapshot: snapshot.into(),
+        validation: validation_view(report),
+    })
+}
+
+/// Creates or updates one SDK-owned MCP declaration without resolving or reloading runtime state.
+#[tauri::command]
+pub async fn upsert_computer_mcp_config(
+    state: State<'_, AppState>,
+    instance_id: String,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    upsert_computer_mcp_config_core(&state, &instance_id, config).await
+}
+
+pub async fn upsert_computer_mcp_config_core(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance(state, instance_id)?;
+    state
+        .sdk_config
+        .upsert_mcp_configs(instance_id, &[config])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Removes one SDK-owned MCP declaration without stopping or reloading runtime state.
+#[tauri::command]
+pub async fn remove_computer_mcp_config(
+    state: State<'_, AppState>,
+    instance_id: String,
+    name: String,
+) -> Result<(), String> {
+    remove_computer_mcp_config_core(&state, &instance_id, &name).await
+}
+
+pub async fn remove_computer_mcp_config_core(
+    state: &AppState,
+    instance_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance(state, instance_id)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("name is required".to_string());
+    }
+    state
+        .sdk_config
+        .remove_mcp_config(instance_id, name)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validation_view(
+    report: a2c_smcp::smcp_computer::settings::config::ValidationReport,
+) -> SdkConfigValidationView {
+    SdkConfigValidationView {
+        valid: report.is_valid(),
+        errors: report.errors,
+    }
+}
+
+fn require_instance<'a>(state: &AppState, instance_id: &'a str) -> Result<&'a str, String> {
     let instance_id = instance_id.trim();
     if instance_id.is_empty() {
         return Err("instance_id is required".to_string());
@@ -196,7 +295,7 @@ pub fn get_computer_config_snapshot_core(
         .config
         .get_computer_instance(instance_id)
         .map_err(|error| error.to_string())?;
-    Ok(state.sdk_config.load(instance_id).into())
+    Ok(instance_id)
 }
 
 #[cfg(test)]
@@ -285,6 +384,7 @@ mod tests {
 
         assert_eq!(value["revision"], "sha256:stable");
         assert_eq!(value["mcp"]["servers"][0]["trustedOrigin"], false);
+        assert_eq!(value["mcp"]["servers"][0]["writable"], true);
         assert!(value["mcp"]["servers"][0].get("trusted_origin").is_none());
         assert_eq!(value["skills"]["skillHome"], "/tmp/skills");
         assert!(value["skills"].get("skill_home").is_none());
@@ -295,5 +395,23 @@ mod tests {
             value["provenance"]["pluginEnablement:audit@acme"],
             "project"
         );
+    }
+
+    #[test]
+    fn client_snapshot_marks_only_sdk_writable_origins_as_writable() {
+        for origin in [
+            ProvenanceScope::User,
+            ProvenanceScope::Project,
+            ProvenanceScope::Local,
+        ] {
+            assert!(is_writable_provenance(origin));
+        }
+        for origin in [
+            ProvenanceScope::Flag,
+            ProvenanceScope::Policy,
+            ProvenanceScope::Intent,
+        ] {
+            assert!(!is_writable_provenance(origin));
+        }
     }
 }

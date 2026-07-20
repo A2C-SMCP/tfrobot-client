@@ -930,10 +930,13 @@ async fn failed_delete_commit_preserves_connection_refresh_profile_and_storage()
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
     runtime.start().await.expect("start runtime");
-    runtime
-        .add_or_update_server(common::echo_server_config("commit-echo"))
-        .await
-        .expect("register MCP server");
+    common::mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        common::echo_server_config("commit-echo"),
+    )
+    .await
+    .expect("register MCP server");
     runtime
         .start_mcp_server("commit-echo")
         .await
@@ -1042,10 +1045,13 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
     runtime.start().await.expect("start runtime");
-    runtime
-        .add_or_update_server(common::echo_server_config("cleanup-echo"))
-        .await
-        .expect("register cleanup MCP server");
+    common::mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        common::echo_server_config("cleanup-echo"),
+    )
+    .await
+    .expect("register cleanup MCP server");
     runtime
         .start_mcp_server("cleanup-echo")
         .await

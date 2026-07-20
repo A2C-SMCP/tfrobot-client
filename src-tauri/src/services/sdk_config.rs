@@ -1,14 +1,16 @@
 use crate::services::config::ConfigService;
 use crate::services::storage::write_json_atomically;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{
     delete_config, duplicate_config, export_config, import_config, init_config, load_config,
     load_project_config_doc, migrate_config, save_config, update_config, validate_config,
-    ComputerConfigSnapshot, ConfigContext, ConfigCrudError, ConfigEdit, ProjectConfigDoc,
-    ValidationReport,
+    ComputerConfigSnapshot, ConfigContext, ConfigCrudError, ConfigEdit, ConfigEntity, EditIntent,
+    EntityKey, ProjectConfigDoc, ProvenanceScope, ValidationReport, WriteScope, WriteTargetError,
 };
 use a2c_smcp::smcp_computer::settings::{
-    resolve_mcp_config, EnvMap, ResolveMcpConfigArgs, ResolvedMcpConfig, SettingsValidationError,
-    MANAGED_MCP_FILENAME, TFROBOT_DIRNAME, XDG_CONFIG_HOME_ENV,
+    resolve_mcp_config, resolve_settings, EnvMap, ResolveMcpConfigArgs, ResolveSettingsArgs,
+    ResolvedMcpConfig, SettingsValidationError, MANAGED_MCP_FILENAME, TFROBOT_DIRNAME,
+    XDG_CONFIG_HOME_ENV,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -47,17 +49,22 @@ struct RawRestoreTransaction {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SdkConfigExportError {
+pub enum SdkConfigPortabilityError {
     #[error("Cannot export invalid SDK MCP configuration: {details}")]
     InvalidSource {
         errors: Vec<SettingsValidationError>,
+        details: String,
+    },
+    #[error("Portable SDK MCP configuration contains plaintext in a sensitive field: {details}")]
+    UnsafePlaintext {
+        fields: Vec<String>,
         details: String,
     },
     #[error(transparent)]
     Crud(#[from] ConfigCrudError),
 }
 
-impl SdkConfigExportError {
+impl SdkConfigPortabilityError {
     fn invalid_source(errors: Vec<SettingsValidationError>) -> Self {
         let details = errors
             .iter()
@@ -72,6 +79,11 @@ impl SdkConfigExportError {
             .collect::<Vec<_>>()
             .join("; ");
         Self::InvalidSource { errors, details }
+    }
+
+    fn unsafe_plaintext(fields: Vec<String>) -> Self {
+        let details = fields.join("; ");
+        Self::UnsafePlaintext { fields, details }
     }
 }
 
@@ -126,6 +138,24 @@ impl InstanceConfigContext {
 
     pub(crate) fn load(&self) -> ComputerConfigSnapshot {
         load_config(&self.sdk_context())
+    }
+
+    fn validate(&self) -> ValidationReport {
+        let mut errors = resolve_settings(ResolveSettingsArgs {
+            cwd: Some(&self.project_anchor),
+            env: Some(&self.env),
+            ..Default::default()
+        })
+        .errors;
+        errors.extend(
+            resolve_mcp_config(ResolveMcpConfigArgs {
+                cwd: Some(&self.project_anchor),
+                env: Some(&self.env),
+                ..Default::default()
+            })
+            .errors,
+        );
+        ValidationReport { errors }
     }
 
     pub(crate) fn project_anchor(&self) -> &Path {
@@ -185,6 +215,29 @@ impl SdkConfigService {
         self.context(instance_id).load()
     }
 
+    pub fn load_with_validation(
+        &self,
+        instance_id: &str,
+    ) -> Result<(ComputerConfigSnapshot, ValidationReport), ConfigCrudError> {
+        let context = self.context(instance_id);
+        for _ in 0..3 {
+            let snapshot_before = context.load();
+            let validation_before = context.validate();
+            let snapshot_after = context.load();
+            let validation_after = context.validate();
+            if snapshot_before.revision == snapshot_after.revision
+                && validation_before == validation_after
+            {
+                return Ok((snapshot_after, validation_after));
+            }
+        }
+        Err(ConfigCrudError::Io {
+            path: context.project_anchor().to_path_buf(),
+            reason: "SDK configuration changed repeatedly while reading snapshot and validation"
+                .to_string(),
+        })
+    }
+
     pub fn save(
         &self,
         instance_id: &str,
@@ -202,8 +255,169 @@ impl SdkConfigService {
         update_config(&context.sdk_context(), edits)
     }
 
+    /// Upserts MCP declarations into SDK-owned config without touching runtime state.
+    ///
+    /// Configuration CRUD must not resolve commands, paths, inputs, or secrets. Those checks are
+    /// deferred to runtime reload/preflight/start. New declarations use the client's local scope;
+    /// existing declarations update at their writable origin through the SDK write-target resolver.
+    pub fn upsert_mcp_configs(
+        &self,
+        instance_id: &str,
+        servers: &[MCPServerConfig],
+    ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
+        let servers = self.prepare_portable_mcp_configs(servers)?;
+        let context = self.context(instance_id);
+        let mut sdk_context = context.sdk_context();
+        sdk_context.opts.upsert_new_scope = WriteScope::Local;
+        let edits = servers
+            .iter()
+            .map(|server| {
+                let name = server.name().to_string();
+                let value = serde_json::to_value(server).map_err(|error| ConfigCrudError::Io {
+                    path: context.project_anchor().to_path_buf(),
+                    reason: format!("failed to serialize MCP server '{name}': {error}"),
+                })?;
+                let body =
+                    canonical_mcp_server_body(value).map_err(|reason| ConfigCrudError::Io {
+                        path: context.project_anchor().to_path_buf(),
+                        reason: format!("invalid MCP server '{name}': {reason}"),
+                    })?;
+                Ok(ConfigEdit::new(
+                    ConfigEntity::McpServer(name),
+                    EditIntent::Upsert(Value::Object(body)),
+                ))
+            })
+            .collect::<Result<Vec<_>, ConfigCrudError>>()?;
+        Ok(update_config(&sdk_context, &edits)?)
+    }
+
+    /// Atomically merges an imported set of MCP declarations into the SDK local scope.
+    ///
+    /// The SDK's entity-edit executor intentionally does not roll back earlier edits when a later
+    /// edit fails. Import therefore prepares one complete `mcp.local.json` document and persists
+    /// it through one SDK `save_config` call. Existing project/user declarations are shadowed by
+    /// the imported local declarations; read-only reconciled origins are rejected before writing.
+    pub fn import_mcp_configs_atomically(
+        &self,
+        instance_id: &str,
+        servers: &[MCPServerConfig],
+    ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
+        let context = self.context(instance_id);
+        let Some(document) = self.prepare_local_mcp_import_document(instance_id, servers)? else {
+            return Ok(context.load());
+        };
+        save_config(context.project_anchor(), &document)?;
+        Ok(context.load())
+    }
+
+    /// Verifies the complete local-scope merge before a client crash-recovery journal is created.
+    /// This catches deterministic read-only provenance, malformed target shape, schema, and
+    /// serialization failures without mutating either the SDK config or client input definitions.
+    pub fn preflight_import_mcp_configs(
+        &self,
+        instance_id: &str,
+        servers: &[MCPServerConfig],
+    ) -> Result<(), SdkConfigPortabilityError> {
+        self.prepare_local_mcp_import_document(instance_id, servers)?;
+        Ok(())
+    }
+
+    fn prepare_local_mcp_import_document(
+        &self,
+        instance_id: &str,
+        servers: &[MCPServerConfig],
+    ) -> Result<Option<ProjectConfigDoc>, SdkConfigPortabilityError> {
+        let servers = self.prepare_portable_mcp_configs(servers)?;
+        if servers.is_empty() {
+            return Ok(None);
+        }
+        let context = self.context(instance_id);
+        let snapshot = context.load();
+
+        for server in &servers {
+            let entity = EntityKey::Mcp(server.name().to_string());
+            if let Some(origin) = snapshot.provenance.get(&entity).copied() {
+                if !is_writable_provenance(origin) {
+                    return Err(
+                        ConfigCrudError::WriteTarget(WriteTargetError::ReadOnlyOrigin {
+                            entity: entity.to_string(),
+                            origin,
+                        })
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        let document = load_project_config_doc(context.project_anchor())?;
+        let mut local_mcp = document.mcp_local.unwrap_or_default();
+        let mut local_servers = match local_mcp.remove("servers") {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(servers)) => servers,
+            Some(_) => {
+                return Err(ConfigCrudError::Io {
+                    path: context.project_anchor().to_path_buf(),
+                    reason: "local MCP 'servers' must be a JSON object".to_string(),
+                }
+                .into());
+            }
+        };
+
+        for server in &servers {
+            let name = server.name().to_string();
+            let value = serde_json::to_value(server).map_err(|error| ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason: format!("failed to serialize imported MCP server '{name}': {error}"),
+            })?;
+            let body = canonical_mcp_server_body(value).map_err(|reason| ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason: format!("invalid imported MCP server '{name}': {reason}"),
+            })?;
+            local_servers.insert(name, Value::Object(body));
+        }
+
+        local_mcp.insert("servers".to_string(), Value::Object(local_servers));
+        let mut merged_document = load_project_config_doc(context.project_anchor())?;
+        merged_document.mcp_local = Some(local_mcp.clone());
+        let report = validate_config(&merged_document);
+        if !report.is_valid() {
+            return Err(SdkConfigPortabilityError::invalid_source(report.errors));
+        }
+        Ok(Some(ProjectConfigDoc {
+            mcp_local: Some(local_mcp),
+            ..Default::default()
+        }))
+    }
+
+    /// Removes one MCP declaration from SDK-owned config without touching runtime state.
+    pub fn remove_mcp_config(
+        &self,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<ComputerConfigSnapshot, ConfigCrudError> {
+        self.update(
+            instance_id,
+            &[ConfigEdit::new(
+                ConfigEntity::McpServer(name.to_string()),
+                EditIntent::Remove,
+            )],
+        )
+    }
+
     pub fn validate(&self, document: &ProjectConfigDoc) -> ValidationReport {
         validate_config(document)
+    }
+
+    /// Validates every SDK scope resolved for one Computer instance.
+    ///
+    /// This deliberately reuses the SDK settings and MCP resolvers' schema diagnostics. It does
+    /// not resolve inputs or secrets and never probes commands, paths, marketplaces, plugins, or
+    /// MCP server availability.
+    pub fn validate_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<ValidationReport, ConfigCrudError> {
+        Ok(self.context(instance_id).validate())
     }
 
     pub fn migrate(&self, instance_id: &str) -> Result<bool, ConfigCrudError> {
@@ -343,53 +557,29 @@ impl SdkConfigService {
     pub fn export_cli_native_mcp(
         &self,
         instance_id: &str,
-    ) -> Result<ProjectConfigDoc, SdkConfigExportError> {
+    ) -> Result<ProjectConfigDoc, SdkConfigPortabilityError> {
         let context = self.context(instance_id);
         let source_anchor = context.project_anchor.clone();
-        let staging = tempfile::tempdir().map_err(|error| ConfigCrudError::Io {
+        let resolution_staging = tempfile::tempdir().map_err(|error| ConfigCrudError::Io {
             path: source_anchor.clone(),
             reason: format!("failed to create CLI-native export staging directory: {error}"),
         })?;
-        let mut resolved = resolve_portable_mcp_without_policy(&context, staging.path());
+        let mut resolved = resolve_portable_mcp_without_policy(&context, resolution_staging.path());
         let export_errors = std::mem::take(&mut resolved.errors)
             .into_iter()
             .filter(|error| error.field != "inputs" && !error.field.starts_with("inputs."))
             .collect::<Vec<_>>();
         if !export_errors.is_empty() {
-            return Err(SdkConfigExportError::invalid_source(export_errors));
+            return Err(SdkConfigPortabilityError::invalid_source(export_errors));
         }
 
-        let mut servers = Map::new();
-        for (name, server) in resolved.servers {
-            let value =
-                serde_json::to_value(server.config).map_err(|error| ConfigCrudError::Io {
-                    path: source_anchor.clone(),
-                    reason: format!(
-                        "failed to serialize MCP server '{}' for CLI-native export: {error}",
-                        name
-                    ),
-                })?;
-            let mut body = value
-                .as_object()
-                .cloned()
-                .ok_or_else(|| ConfigCrudError::Io {
-                    path: source_anchor.clone(),
-                    reason: format!("serialized MCP server '{}' is not a JSON object", name),
-                })?;
-            body.remove("name");
-            servers.insert(name, Value::Object(body));
-        }
-
-        let mut mcp = Map::new();
-        mcp.insert("servers".to_string(), Value::Object(servers));
-        save_config(
-            staging.path(),
-            &ProjectConfigDoc {
-                mcp: Some(mcp),
-                ..Default::default()
-            },
-        )?;
-        Ok(export_config(staging.path())?)
+        let servers = resolved
+            .servers
+            .into_values()
+            .map(|server| server.config)
+            .collect::<Vec<_>>();
+        let sanitized = self.prepare_portable_mcp_configs(&servers)?;
+        Ok(project_document_from_servers(&sanitized)?)
     }
 
     pub fn import(
@@ -400,10 +590,342 @@ impl SdkConfigService {
         import_config(&self.project_anchor(instance_id), document)
     }
 
+    /// Applies the SDK import boundary in an isolated staging directory.
+    ///
+    /// The client import UX has merge semantics, so it cannot replace the live project document
+    /// wholesale through `import_config`. Staging delegates known secret-surface redaction,
+    /// local-scope exclusion, and schema validation to the SDK. The client then rejects plaintext
+    /// that remains in structured sensitive arguments or URL query parameters before merging.
+    pub fn prepare_import(
+        &self,
+        document: &ProjectConfigDoc,
+    ) -> Result<(ProjectConfigDoc, ValidationReport), SdkConfigPortabilityError> {
+        // Reject structured plaintext before even creating the staging directory: the SDK
+        // sanitizer deliberately does not own CLI arguments or URL query parameters.
+        ensure_portable_secret_references(document)?;
+        let staging = tempfile::tempdir().map_err(|error| ConfigCrudError::Io {
+            path: PathBuf::from("<config-import-staging>"),
+            reason: format!("failed to create config import staging directory: {error}"),
+        })?;
+        let report = import_config(staging.path(), document)?;
+        let sanitized = export_config(staging.path())?;
+        ensure_portable_secret_references(&sanitized)?;
+        Ok((sanitized, report))
+    }
+
+    /// Converts MCP declarations through the one SDK-owned portability boundary used by every
+    /// client persistence entry point.
+    ///
+    /// The preflight guard rejects sensitive CLI/query plaintext before the SDK staging write;
+    /// the SDK then redacts env, headers, URL userinfo, and password defaults and validates only
+    /// the configuration schema. Callers receive typed, canonicalized declarations that are safe
+    /// to persist in SDK config or in the client's crash-recovery journal.
+    pub fn prepare_portable_mcp_configs(
+        &self,
+        servers: &[MCPServerConfig],
+    ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
+        let document = project_document_from_servers(servers)?;
+        let (sanitized, report) = self.prepare_import(&document)?;
+        if !report.is_valid() {
+            return Err(SdkConfigPortabilityError::invalid_source(report.errors));
+        }
+        Ok(mcp_configs_from_project_document(sanitized)?)
+    }
+
+    /// Decodes an SDK portable document through the same canonical typed boundary used by import.
+    pub fn mcp_configs_from_portable_document(
+        document: ProjectConfigDoc,
+    ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
+        Ok(mcp_configs_from_project_document(document)?)
+    }
+
+    /// Redacts the MCP part of a reconciled snapshot before it crosses the Tauri/UI boundary.
+    /// Existing legacy plaintext is never echoed to the WebView; unsafe CLI/query plaintext makes
+    /// the read fail closed instead of exposing the value.
+    pub fn sanitize_snapshot_for_view(
+        &self,
+        mut snapshot: ComputerConfigSnapshot,
+    ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
+        let configs = snapshot
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.config.clone())
+            .collect::<Vec<_>>();
+        let mut sanitized = self
+            .prepare_portable_mcp_configs(&configs)?
+            .into_iter()
+            .map(|config| (config.name().to_string(), config))
+            .collect::<std::collections::HashMap<_, _>>();
+        for server in &mut snapshot.mcp.servers {
+            server.config = sanitized
+                .remove(&server.name)
+                .ok_or_else(|| ConfigCrudError::Io {
+                    path: PathBuf::from("<in-memory-mcp-config>"),
+                    reason: format!(
+                        "SDK portability sanitizer omitted MCP server '{}'",
+                        server.name
+                    ),
+                })?;
+        }
+        Ok(snapshot)
+    }
+
     pub fn owns_path(&self, instance_id: &str, path: &Path) -> bool {
         path.starts_with(self.project_anchor(instance_id))
             || path.starts_with(self.skill_home(instance_id))
     }
+}
+
+/// The SDK sanitizer owns known secret-bearing value fields (env, headers, URL userinfo, and
+/// password input defaults). This guard covers the remaining structured locations where a client
+/// can identify secret intent without guessing whether arbitrary command text is sensitive.
+fn ensure_portable_secret_references(
+    document: &ProjectConfigDoc,
+) -> Result<(), SdkConfigPortabilityError> {
+    let Some(servers) = document
+        .mcp
+        .as_ref()
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+
+    let mut unsafe_fields = Vec::new();
+    for (name, server) in servers {
+        let Some(parameters) = server.get("server_parameters").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(args) = parameters.get("args").and_then(Value::as_array) {
+            let args = args.iter().map(Value::as_str).collect::<Vec<_>>();
+            collect_unsafe_argument_fields(
+                &format!("servers.{name}.server_parameters.args"),
+                &args,
+                &mut unsafe_fields,
+            );
+        }
+        if let Some(raw_url) = parameters.get("url").and_then(Value::as_str) {
+            collect_unsafe_query_fields(
+                &format!("servers.{name}.server_parameters.url"),
+                raw_url,
+                &mut unsafe_fields,
+            );
+        }
+    }
+
+    if unsafe_fields.is_empty() {
+        Ok(())
+    } else {
+        Err(SdkConfigPortabilityError::unsafe_plaintext(unsafe_fields))
+    }
+}
+
+fn collect_unsafe_argument_fields(
+    field_prefix: &str,
+    args: &[Option<&str>],
+    unsafe_fields: &mut Vec<String>,
+) {
+    for (index, argument) in args.iter().enumerate() {
+        let Some(argument) = argument else {
+            continue;
+        };
+        collect_unsafe_query_fields(&format!("{field_prefix}[{index}]"), argument, unsafe_fields);
+        if let Some((flag, value)) = argument.split_once('=') {
+            if is_sensitive_identifier(flag) && !is_portable_secret_reference(value) {
+                unsafe_fields.push(format!("{field_prefix}[{index}] ({flag})"));
+            }
+            continue;
+        }
+        if !argument.starts_with('-') || !is_sensitive_identifier(argument) {
+            continue;
+        }
+        let Some(Some(value)) = args.get(index + 1) else {
+            continue;
+        };
+        if !is_portable_secret_reference(value) {
+            unsafe_fields.push(format!(
+                "{field_prefix}[{}] (value for {argument})",
+                index + 1
+            ));
+        }
+    }
+}
+
+pub(crate) fn ensure_portable_cli_arguments(
+    field_prefix: &str,
+    args: &[String],
+) -> Result<(), SdkConfigPortabilityError> {
+    let args = args
+        .iter()
+        .map(|argument| Some(argument.as_str()))
+        .collect::<Vec<_>>();
+    let mut unsafe_fields = Vec::new();
+    collect_unsafe_argument_fields(field_prefix, &args, &mut unsafe_fields);
+    if unsafe_fields.is_empty() {
+        Ok(())
+    } else {
+        Err(SdkConfigPortabilityError::unsafe_plaintext(unsafe_fields))
+    }
+}
+
+fn collect_unsafe_query_fields(field_prefix: &str, raw_url: &str, unsafe_fields: &mut Vec<String>) {
+    let before_fragment = raw_url.split_once('#').map_or(raw_url, |(url, _)| url);
+    let Some((_, query)) = before_fragment.split_once('?') else {
+        return;
+    };
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if !value.is_empty() && !is_portable_secret_reference(&value) {
+            unsafe_fields.push(format!("{field_prefix} query parameter '{key}'"));
+        }
+    }
+}
+
+pub(crate) fn is_writable_provenance(scope: ProvenanceScope) -> bool {
+    matches!(
+        scope,
+        ProvenanceScope::User | ProvenanceScope::Project | ProvenanceScope::Local
+    )
+}
+
+fn is_sensitive_identifier(raw: &str) -> bool {
+    let normalized = raw
+        .trim_start_matches('-')
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "authorization",
+        "auth",
+        "apikey",
+        "accesskey",
+        "privatekey",
+        "clientsecret",
+        "signature",
+        "sig",
+    ]
+    .iter()
+    .any(|suffix| normalized == *suffix || normalized.ends_with(suffix))
+}
+
+fn is_portable_secret_reference(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut remaining = value;
+    while let Some(token) = remaining.strip_prefix("${") {
+        let Some(end) = token.find('}') else {
+            return false;
+        };
+        let reference = &token[..end];
+        if reference != "REDACTED"
+            && reference
+                .strip_prefix("input:")
+                .is_none_or(|name| name.is_empty())
+            && reference
+                .strip_prefix("env:")
+                .is_none_or(|name| name.is_empty())
+        {
+            return false;
+        }
+        remaining = &token[end + 1..];
+    }
+    remaining.is_empty()
+}
+
+fn canonical_mcp_server_body(value: Value) -> Result<Map<String, Value>, String> {
+    let mut body = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "serialized config must be an object".to_string())?;
+    body.remove("name");
+    if let Some(Value::String(server_type)) = body.get_mut("type") {
+        *server_type = match server_type.as_str() {
+            "Stdio" | "STDIO" => "stdio",
+            "Sse" | "SSE" => "sse",
+            "Http" | "HTTP" | "http" => "streamable",
+            other => other,
+        }
+        .to_string();
+    }
+    Ok(body)
+}
+
+fn project_document_from_servers(
+    servers: &[MCPServerConfig],
+) -> Result<ProjectConfigDoc, ConfigCrudError> {
+    let mut portable_servers = Map::new();
+    for server in servers {
+        let name = server.name().to_string();
+        let value = serde_json::to_value(server).map_err(|error| ConfigCrudError::Io {
+            path: PathBuf::from("<in-memory-mcp-config>"),
+            reason: format!("failed to serialize MCP server '{name}': {error}"),
+        })?;
+        let body = canonical_mcp_server_body(value).map_err(|reason| ConfigCrudError::Io {
+            path: PathBuf::from("<in-memory-mcp-config>"),
+            reason: format!("invalid MCP server '{name}': {reason}"),
+        })?;
+        portable_servers.insert(name, Value::Object(body));
+    }
+    Ok(ProjectConfigDoc {
+        mcp: Some(Map::from_iter([(
+            "servers".to_string(),
+            Value::Object(portable_servers),
+        )])),
+        ..Default::default()
+    })
+}
+
+fn mcp_configs_from_project_document(
+    document: ProjectConfigDoc,
+) -> Result<Vec<MCPServerConfig>, ConfigCrudError> {
+    let Some(mcp) = document.mcp else {
+        return Ok(Vec::new());
+    };
+    let Some(servers) = mcp.get("servers") else {
+        return Ok(Vec::new());
+    };
+    let servers = servers.as_object().ok_or_else(|| ConfigCrudError::Io {
+        path: PathBuf::from("<portable-sdk-config>"),
+        reason: "portable SDK mcp.servers must be an object".to_string(),
+    })?;
+
+    let mut configs = servers
+        .iter()
+        .map(|(name, value)| {
+            let mut body = value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| ConfigCrudError::Io {
+                    path: PathBuf::from("<portable-sdk-config>"),
+                    reason: format!("portable SDK MCP server '{name}' must be an object"),
+                })?;
+            if let Some(explicit_name) = body.get("name") {
+                if explicit_name.as_str() != Some(name) {
+                    return Err(ConfigCrudError::Io {
+                        path: PathBuf::from("<portable-sdk-config>"),
+                        reason: format!(
+                            "portable SDK MCP server key '{name}' conflicts with its name field"
+                        ),
+                    });
+                }
+            }
+            body.insert("name".to_string(), Value::String(name.clone()));
+            serde_json::from_value(Value::Object(body)).map_err(|error| ConfigCrudError::Io {
+                path: PathBuf::from("<portable-sdk-config>"),
+                reason: format!("invalid portable SDK MCP server '{name}': {error}"),
+            })
+        })
+        .collect::<Result<Vec<MCPServerConfig>, ConfigCrudError>>()?;
+    configs.sort_by(|left, right| left.name().cmp(right.name()));
+    Ok(configs)
 }
 
 fn raw_restore_transaction_root(anchor: &Path) -> Result<PathBuf, ConfigCrudError> {
@@ -723,7 +1245,7 @@ mod tests {
         let error = sdk_config.export_cli_native_mcp("source").unwrap_err();
 
         match error {
-            SdkConfigExportError::InvalidSource { errors, .. } => {
+            SdkConfigPortabilityError::InvalidSource { errors, .. } => {
                 assert!(errors.iter().any(|error| {
                     error.field == "<file>" && error.source_path.as_deref() == source_mcp.to_str()
                 }));
@@ -764,7 +1286,7 @@ mod tests {
         let error = sdk_config.export_cli_native_mcp("source").unwrap_err();
 
         match error {
-            SdkConfigExportError::InvalidSource { errors, .. } => {
+            SdkConfigPortabilityError::InvalidSource { errors, .. } => {
                 assert!(errors.iter().any(|error| error.field == "servers.broken"));
             }
             other => panic!("expected invalid source error, got {other:?}"),
@@ -962,6 +1484,155 @@ mod tests {
         let report = sdk_config.import("imported", &exported).unwrap();
         assert!(report.is_valid());
         assert_eq!(sdk_config.load("imported").mcp.servers[0].name, "audit");
+    }
+
+    #[test]
+    fn portability_guard_rejects_sensitive_argument_and_query_plaintext() {
+        let document = ProjectConfigDoc {
+            mcp: Some(
+                json!({
+                    "servers": {
+                        "stdio-secret": {
+                            "type": "stdio",
+                            "server_parameters": {
+                                "command": "node",
+                                "args": [
+                                    "server.js",
+                                    "--api-key",
+                                    "sk-live",
+                                    "--auth",
+                                    "-still-plaintext"
+                                ]
+                            }
+                        },
+                        "http-secret": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "https://example.com/mcp?access_token=plain-token"
+                            }
+                        },
+                        "relative-http-secret": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "mcp?client_secret=relative-plain-secret"
+                            }
+                        },
+                        "ordinary-query-literal": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "mcp?mode=debug"
+                            }
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            ..Default::default()
+        };
+
+        let error = ensure_portable_secret_references(&document).unwrap_err();
+
+        match error {
+            SdkConfigPortabilityError::UnsafePlaintext { fields, .. } => {
+                assert!(fields
+                    .iter()
+                    .any(|field| field.contains("args[2]") && field.contains("--api-key")));
+                assert!(fields
+                    .iter()
+                    .any(|field| field.contains("args[4]") && field.contains("--auth")));
+                assert!(fields.iter().any(|field| {
+                    field.contains("server_parameters.url") && field.contains("access_token")
+                }));
+                assert!(fields.iter().any(|field| {
+                    field.contains("relative-http-secret") && field.contains("client_secret")
+                }));
+                assert!(fields.iter().any(|field| {
+                    field.contains("ordinary-query-literal") && field.contains("mode")
+                }));
+            }
+            other => panic!("expected unsafe plaintext error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_import_rejects_sensitive_plaintext_before_sdk_staging_validation() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        let document = ProjectConfigDoc {
+            mcp: Some(
+                json!({
+                    "servers": {
+                        "invalid-and-sensitive": {
+                            "type": "unsupported-transport",
+                            "server_parameters": {
+                                "args": ["--token", "plain-before-staging"]
+                            }
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            sdk_config.prepare_import(&document),
+            Err(SdkConfigPortabilityError::UnsafePlaintext { .. })
+        ));
+    }
+
+    #[test]
+    fn portability_guard_allows_references_and_non_sensitive_literals() {
+        let document = ProjectConfigDoc {
+            mcp: Some(
+                json!({
+                    "servers": {
+                        "portable": {
+                            "type": "stdio",
+                            "server_parameters": {
+                                "command": "node",
+                                "args": [
+                                    "server.js",
+                                    "--port=3000",
+                                    "--token",
+                                    "${input:api-token}",
+                                    "--client-secret=${env:CLIENT_SECRET}"
+                                ]
+                            }
+                        },
+                        "http-portable": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "https://example.com/mcp?token=%24%7Binput%3Aapi-token%7D&mode=%24%7Binput%3Amode%7D"
+                            }
+                        },
+                        "relative-http-portable": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "mcp?client_secret=%24%7Benv%3ACLIENT_SECRET%7D"
+                            }
+                        },
+                        "fragment-is-not-query": {
+                            "type": "streamable",
+                            "server_parameters": {
+                                "url": "mcp#fragment?client_secret=not-a-query-value"
+                            }
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            ..Default::default()
+        };
+
+        ensure_portable_secret_references(&document).unwrap();
     }
 
     #[test]

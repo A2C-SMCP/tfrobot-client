@@ -51,6 +51,8 @@ pub enum AppStateInitError {
     Config(#[from] services::config::ConfigError),
     #[error("failed to load Computer input values from Keychain: {0}")]
     Keychain(#[from] services::keychain::KeychainError),
+    #[error("failed to recover an interrupted configuration import: {0}")]
+    ConfigImportRecovery(String),
 }
 
 impl AppState {
@@ -102,8 +104,21 @@ impl AppState {
             settings_service.as_ref(),
             secret_store.as_ref(),
         )?;
-        let instances =
-            hydrate_computer_instances(config.load_computer_instances()?, secret_store.as_ref())?;
+        let stored_instances = config.load_computer_instances()?;
+        commands::config_io::recover_pending_config_imports(
+            config.as_ref(),
+            sdk_config.as_ref(),
+            secret_store.as_ref(),
+            stored_instances
+                .instances
+                .iter()
+                .map(|instance| instance.id.clone()),
+        )
+        .map_err(AppStateInitError::ConfigImportRecovery)?;
+        // Recovery may update global input definitions. Reload the profiles so every runtime is
+        // hydrated from the recovered storage state rather than the pre-recovery discovery copy.
+        let stored_instances = config.load_computer_instances()?;
+        let instances = hydrate_computer_instances(stored_instances, secret_store.as_ref())?;
         let computer_registry = ComputerRegistry::from_config_with_skill_home_base_and_secret_store(
             instances,
             config.computer_skill_home_base(),
@@ -289,11 +304,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // MCP server management
             commands::mcp::get_mcp_servers,
-            commands::mcp::get_mcp_server_config,
-            commands::mcp::add_mcp_server,
-            commands::mcp::remove_mcp_server,
-            commands::mcp::update_mcp_server,
-            commands::sdk_config::get_computer_config_snapshot,
+            commands::sdk_config::get_computer_config_state,
+            commands::sdk_config::upsert_computer_mcp_config,
+            commands::sdk_config::remove_computer_mcp_config,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::start_all_servers,

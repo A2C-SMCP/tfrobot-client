@@ -22,7 +22,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { McpConfig } from '@/components/McpConfig';
+import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 import { isRuntimeRunning, type ComputerInstance } from '@/stores/computerStore';
 import {
   useRuntimeStore,
@@ -238,10 +238,9 @@ export function ComputerRuntime({
       </Card>
 
       <Card title={t('computer.runtime.mcpLifecycle')}>
-        <McpConfig
+        <McpRuntimeControls
           instanceId={instance.id}
-          mode="runtime"
-          runtimeDisabled={!actions.can_manage_mcp}
+          disabled={!actions.can_manage_mcp}
         />
       </Card>
     </Space>

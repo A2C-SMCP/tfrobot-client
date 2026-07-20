@@ -4,9 +4,9 @@ import type { ComputerInstance } from '@/stores/computerStore';
 import { useRuntimeStore } from '@/stores/runtimeStore';
 import { runtimeSnapshot } from '../helpers/store';
 
-vi.mock('@/components/McpConfig', () => ({
-  McpConfig: ({ mode, runtimeDisabled }: { mode: string; runtimeDisabled: boolean }) => (
-    <div data-testid="runtime-mcp" data-mode={mode} data-disabled={String(runtimeDisabled)} />
+vi.mock('@/components/McpConfig/McpRuntimeControls', () => ({
+  McpRuntimeControls: ({ disabled }: { disabled: boolean }) => (
+    <div data-testid="runtime-mcp" data-disabled={String(disabled)} />
   ),
 }));
 
@@ -60,7 +60,6 @@ describe('ComputerRuntime', () => {
     expect(screen.getByRole('cell', { name: 'Runtime Generation 2' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Config Revision 4' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Capability Revision 7' })).toBeInTheDocument();
-    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-mode', 'runtime');
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
 
     fireEvent.click(screen.getByRole('button', { name: /Stop$/ }));

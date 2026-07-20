@@ -2,34 +2,22 @@ import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { McpConfig } from '@/components/McpConfig';
 
-const mockStore = {
-  servers: [],
+const mockSdkStore = {
+  snapshot: null,
+  validation: null,
   loading: false,
+  validating: false,
   error: null,
-  fetchServers: vi.fn(),
-  addServer: vi.fn(),
-  updateServer: vi.fn(),
+  fetchConfig: vi.fn(),
+  validateConfig: vi.fn(),
+  upsertServer: vi.fn(),
   removeServer: vi.fn(),
-  startServer: vi.fn(),
-  stopServer: vi.fn(),
-  startAll: vi.fn(),
-  stopAll: vi.fn(),
-  getServerConfig: vi.fn(),
   importConfig: vi.fn(),
   exportConfig: vi.fn(),
 };
 
-const { getInput, setValue } = vi.hoisted(() => ({
-  getInput: vi.fn(),
-  setValue: vi.fn(),
-}));
-
-vi.mock('@/stores/mcpStore', () => ({
-  useMcpStore: vi.fn(() => mockStore),
-}));
-
-vi.mock('@/stores/inputStore', () => ({
-  useInputStore: (selector: (state: unknown) => unknown) => selector({ getInput, setValue }),
+vi.mock('@/stores/sdkConfigStore', () => ({
+  useSdkConfigStore: vi.fn(() => mockSdkStore),
 }));
 
 vi.mock('@/components/McpConfig/McpServerForm', () => ({
@@ -49,37 +37,38 @@ vi.mock('@/components/McpConfig/McpServerForm', () => ({
   ),
 }));
 
-import { useMcpStore } from '@/stores/mcpStore';
-const mockUseMcpStore = vi.mocked(useMcpStore);
+import { useSdkConfigStore } from '@/stores/sdkConfigStore';
+const mockUseSdkConfigStore = vi.mocked(useSdkConfigStore);
 
-const mockServers = [
+const configServers = [
   {
     name: 'test-stdio',
-    running: true,
-    status_message: 'Running',
-    disabled: false,
-    managedBy: { type: 'user' },
+    origin: 'local',
+    writable: true,
+    trustedOrigin: false,
+    bundled: false,
+    config: {
+      type: 'Stdio',
+      name: 'test-stdio',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      server_parameters: { command: 'node', args: [], env: {} },
+    },
   },
-  {
-    name: 'test-http',
-    running: false,
-    status_message: 'Stopped',
-    disabled: false,
-    managedBy: { type: 'user' },
-  },
-];
-
-const mockPluginServers = [
   {
     name: 'plugin-tools',
-    running: false,
-    status_message: 'Stopped',
-    disabled: false,
-    managedBy: {
-      type: 'plugin',
-      marketplace: 'tf-market',
-      plugin: 'desktop-tools',
-      pluginId: 'plugin-1',
+    origin: 'project',
+    writable: true,
+    trustedOrigin: true,
+    bundled: true,
+    config: {
+      type: 'Stdio',
+      name: 'plugin-tools',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      server_parameters: { command: 'plugin', args: [], env: {} },
     },
   },
 ];
@@ -89,100 +78,118 @@ describe('McpConfig', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    getInput.mockResolvedValue({
-      type: 'PromptString',
-      id: 'api-key',
-      label: 'API Key',
-      password: true,
-    });
-    setValue.mockResolvedValue(undefined);
-    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: [] } as any);
+    mockSdkStore.upsertServer.mockResolvedValue(undefined);
+    mockUseSdkConfigStore.mockReturnValue({ ...mockSdkStore } as any);
   });
 
-  it('calls fetchServers on mount', () => {
+  it('loads the SDK config snapshot and validation on mount', () => {
     render(<McpConfig instanceId={instanceId} />);
-    expect(mockStore.fetchServers).toHaveBeenCalledWith(instanceId);
+    expect(mockSdkStore.fetchConfig).toHaveBeenCalledWith(instanceId);
   });
 
-  it('keeps configuration CRUD and import/export out of runtime controls', () => {
+  it('keeps configuration CRUD, import/export, and schema validation out of runtime controls', () => {
     render(<McpConfig instanceId={instanceId} />);
-    expect(screen.getByText('MCP Servers')).toBeInTheDocument();
+    expect(screen.getByText('MCP Configuration')).toBeInTheDocument();
     expect(screen.getByText('Add Server')).toBeInTheDocument();
     expect(screen.getByText('Import Config')).toBeInTheDocument();
     expect(screen.getByText('Export Config')).toBeInTheDocument();
+    expect(screen.getByText('Validate Schema')).toBeInTheDocument();
+    expect(screen.getByText(/does not check commands, paths, secrets/)).toBeInTheDocument();
     expect(screen.queryByText('Start All')).not.toBeInTheDocument();
     expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
   });
 
-  it('shows only lifecycle actions in runtime mode', () => {
-    render(<McpConfig instanceId={instanceId} mode="runtime" runtimeDisabled />);
-    expect(screen.getByRole('button', { name: /Start All$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Stop All$/ })).toBeDisabled();
-    expect(screen.queryByText('Add Server')).not.toBeInTheDocument();
-    expect(screen.queryByText('Import Config')).not.toBeInTheDocument();
-    expect(screen.queryByText('Export Config')).not.toBeInTheDocument();
-  });
-
   it('renders error alert when error exists', () => {
-    mockUseMcpStore.mockReturnValue({ ...mockStore, error: 'Something broke' } as any);
+    mockUseSdkConfigStore.mockReturnValue({ ...mockSdkStore, error: 'Something broke' } as any);
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('Something broke')).toBeInTheDocument();
   });
 
-  it('renders server list with servers', () => {
-    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockServers } as any);
+  it('renders SDK config revision, provenance, and schema result without runtime status', () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: configServers },
+        provenance: {},
+      },
+      validation: { valid: true, errors: [] },
+    } as any);
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('test-stdio')).toBeInTheDocument();
-    expect(screen.getByText('test-http')).toBeInTheDocument();
-    expect(screen.getAllByText('User').length).toBeGreaterThan(0);
+    expect(screen.getByText('sha256:config')).toBeInTheDocument();
+    expect(screen.getByText('local')).toBeInTheDocument();
+    expect(screen.getByText('The SDK configuration schema is valid.')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
   });
 
-  it('shows plugin source and disables plugin-managed row actions', () => {
-    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockPluginServers } as any);
+  it('shows validation errors but keeps bundled-name config declarations editable', () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: configServers },
+        provenance: {},
+      },
+      validation: {
+        valid: false,
+        errors: [{
+          scope: 'project',
+          source_path: 'mcp.json',
+          field: 'servers.bad',
+          reason: 'invalid transport',
+        }],
+      },
+    } as any);
 
     render(<McpConfig instanceId={instanceId} />);
 
     expect(screen.getByText('plugin-tools')).toBeInTheDocument();
-    expect(screen.getByText('desktop-tools@tf-market')).toBeInTheDocument();
-    expect(screen.getByTitle('Edit')).toBeDisabled();
+    expect(screen.getByText('mcp.json:servers.bad: invalid transport')).toBeInTheDocument();
+    expect(screen.getAllByTitle('Edit')[1]).toBeEnabled();
+    expect(screen.getAllByTitle('Remove')[1]).toBeEnabled();
+  });
+
+  it('disables config mutations for declarations from read-only SDK origins', async () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:policy',
+        mcp: {
+          servers: [{
+            ...configServers[0],
+            name: 'policy-server',
+            origin: 'policy',
+            writable: false,
+            config: { ...configServers[0].config, name: 'policy-server' },
+          }],
+        },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} />);
+
+    const editButton = screen.getByTitle('Edit');
+    expect(editButton).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
+    fireEvent.mouseOver(editButton.parentElement!);
+    expect(await screen.findByText(/read-only policy scope/)).toBeInTheDocument();
   });
 
-  it('disables plugin-managed lifecycle actions in runtime mode', () => {
-    mockUseMcpStore.mockReturnValue({ ...mockStore, servers: mockPluginServers } as any);
-
-    render(<McpConfig instanceId={instanceId} mode="runtime" />);
-
-    expect(screen.getByTitle('Start')).toBeDisabled();
-    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Remove')).not.toBeInTheDocument();
-  });
-
-  it('prompts for a missing input and retries the original MCP reload action', async () => {
-    const missing = {
-      code: 'missing_secret',
-      input_id: 'api-key',
-      env_hint: 'A2C_INPUT_API_KEY',
-      message: 'Required secret input is unresolved',
-    };
-    mockStore.addServer
-      .mockRejectedValueOnce(missing)
-      .mockResolvedValueOnce(undefined);
-
+  it('persists a declaration through config CRUD without requesting runtime inputs', async () => {
     render(<McpConfig instanceId={instanceId} />);
     fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
 
-    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
-    const input = await screen.findByPlaceholderText('Enter value');
-    fireEvent.change(input, { target: { value: 'top-secret' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(mockStore.addServer).toHaveBeenCalledTimes(2));
-    expect(setValue).toHaveBeenCalledWith(instanceId, 'api-key', 'top-secret');
-    expect(mockStore.addServer.mock.calls[1]).toEqual(mockStore.addServer.mock.calls[0]);
-    await waitFor(() => {
-      expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
-    });
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledOnce());
+    expect(mockSdkStore.upsertServer).toHaveBeenCalledWith(instanceId, expect.objectContaining({
+      name: 'runtime-server',
+    }));
+    expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
   }, 10000);
 });

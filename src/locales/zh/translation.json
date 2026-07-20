@@ -273,6 +273,9 @@
   },
   "mcp": {
     "servers": "MCP 服务器",
+    "configTitle": "MCP 配置",
+    "runtimeTitle": "MCP 运行时",
+    "configRevision": "配置修订",
     "addServer": "添加服务器",
     "editServer": "编辑服务器",
     "startAll": "全部启动",
@@ -281,6 +284,15 @@
     "confirmRemove": "确定要删除此服务器吗？",
     "importConfig": "导入配置",
     "exportConfig": "导出配置",
+    "validateConfig": "校验 Schema",
+    "bundledConfigHint": "该声明与已安装插件的 bundled server 同名，但配置声明仍可编辑。",
+    "readOnlyConfigHint": "该声明来自只读的 {{origin}} scope，无法在此处编辑。",
+    "validation": {
+      "schemaOnlyTitle": "仅校验配置 Schema",
+      "schemaOnlyDescription": "校验只检查 SDK-owned 配置结构，不检查命令、路径、secret、input、marketplace、plugin 或 MCP server 的运行可用性。",
+      "valid": "SDK 配置 Schema 有效。",
+      "invalid": "SDK 配置存在 {{count}} 个 Schema 错误。"
+    },
     "status": {
       "running": "运行中",
       "stopped": "已停止",
@@ -289,12 +301,15 @@
     "table": {
       "name": "名称",
       "source": "来源",
+      "transport": "传输类型",
       "status": "状态",
       "message": "消息",
       "actions": "操作"
     },
     "source": {
-      "user": "用户"
+      "user": "用户",
+      "bundled": "插件托管",
+      "trusted": "可信来源"
     },
     "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在 Marketplace 中管理其生命周期。",
     "actions": {

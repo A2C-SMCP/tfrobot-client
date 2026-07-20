@@ -201,7 +201,8 @@ impl ConfigService {
 
     pub fn load_global_inputs(&self) -> Result<GlobalInputsConfig, ConfigError> {
         let path = self.global_config_path(GlobalConfigFile::Inputs);
-        let config: GlobalInputsConfig = load_new_artifact_or_default(&path)?;
+        let mut config: GlobalInputsConfig = load_new_artifact_or_default(&path)?;
+        sanitize_global_inputs_config(&mut config);
         validate_global_inputs_config(&config)?;
         Ok(config)
     }
@@ -211,8 +212,10 @@ impl ConfigService {
     }
 
     pub fn save_global_inputs(&self, config: &GlobalInputsConfig) -> Result<(), ConfigError> {
-        validate_global_inputs_config(config)?;
-        save_json_file(&self.global_config_path(GlobalConfigFile::Inputs), config)
+        let mut config = config.clone();
+        sanitize_global_inputs_config(&mut config);
+        validate_global_inputs_config(&config)?;
+        save_json_file(&self.global_config_path(GlobalConfigFile::Inputs), &config)
     }
 
     pub fn load_global_manual_targets(&self) -> Result<GlobalManualTargetsConfig, ConfigError> {
@@ -930,6 +933,19 @@ fn validate_global_inputs_config(config: &GlobalInputsConfig) -> Result<(), Conf
     Ok(())
 }
 
+fn sanitize_global_inputs_config(config: &mut GlobalInputsConfig) {
+    for input in &mut config.inputs {
+        if let GlobalInputDefinition::PromptString {
+            default, password, ..
+        } = input
+        {
+            if *password == Some(true) {
+                *default = None;
+            }
+        }
+    }
+}
+
 fn validate_global_manual_targets_config(
     config: &GlobalManualTargetsConfig,
 ) -> Result<(), ConfigError> {
@@ -1302,8 +1318,8 @@ mod tests {
     }
 
     #[test]
-    fn global_inputs_reject_password_default_plaintext() {
-        let (svc, _tmp) = setup_empty();
+    fn global_inputs_strip_password_default_plaintext() {
+        let (svc, tmp) = setup_empty();
         let inputs = GlobalInputsConfig {
             schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
             inputs: vec![GlobalInputDefinition::PromptString {
@@ -1315,9 +1331,24 @@ mod tests {
             }],
         };
 
+        svc.save_global_inputs(&inputs).unwrap();
+        let stored =
+            std::fs::read_to_string(tmp.path().join("client_computers/global/inputs.json"))
+                .unwrap();
+        assert!(!stored.contains("plaintext-secret"));
         assert!(matches!(
-            svc.save_global_inputs(&inputs).unwrap_err(),
-            ConfigError::SecretPlaintextInGlobalInput { input_id } if input_id == "api-key"
+            svc.load_global_inputs().unwrap().inputs.as_slice(),
+            [GlobalInputDefinition::PromptString { default: None, .. }]
+        ));
+
+        std::fs::write(
+            tmp.path().join("client_computers/global/inputs.json"),
+            serde_json::to_vec_pretty(&inputs).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            svc.load_global_inputs().unwrap().inputs.as_slice(),
+            [GlobalInputDefinition::PromptString { default: None, .. }]
         ));
     }
 

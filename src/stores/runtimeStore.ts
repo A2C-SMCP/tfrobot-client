@@ -6,6 +6,7 @@ import { useComputerOverviewStore } from './computerOverviewStore';
 import { useDashboardStore } from './dashboardStore';
 import { useDebugStore } from './debugStore';
 import { useMcpStore } from './mcpStore';
+import { useSdkConfigStore } from './sdkConfigStore';
 import { useSkillStore } from './skillStore';
 import {
   clearClientConnectionAuthority,
@@ -94,6 +95,11 @@ function refreshRevisionConsumers(
   if (configChanged || capabilityChanged) {
     const mcp = useMcpStore.getState();
     if (mcp.activeInstanceId === instanceId) void mcp.fetchServers(instanceId);
+  }
+
+  if (configChanged) {
+    const sdkConfig = useSdkConfigStore.getState();
+    if (sdkConfig.activeInstanceId === instanceId) void sdkConfig.fetchConfig(instanceId);
   }
 
   if (capabilityChanged) {

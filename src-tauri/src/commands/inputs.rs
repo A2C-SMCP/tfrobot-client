@@ -1,4 +1,5 @@
 use crate::services::keychain;
+use crate::services::sdk_config::ensure_portable_cli_arguments;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -61,6 +62,40 @@ impl InputDefinition {
     }
 }
 
+/// Applies the single client-owned portability boundary for input definitions.
+/// Command arguments are checked before persistence and password defaults are always removed so
+/// secret values can exist only in the Keychain namespace, never in definitions or API responses.
+pub(crate) fn prepare_portable_input_definitions(
+    inputs: &[InputDefinition],
+) -> Result<Vec<InputDefinition>, String> {
+    for input in inputs {
+        if let InputDefinition::Command {
+            id,
+            args: Some(args),
+            ..
+        } = input
+        {
+            ensure_portable_cli_arguments(&format!("inputs.{id}.args"), args)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(inputs
+        .iter()
+        .cloned()
+        .map(|mut input| {
+            if let InputDefinition::PromptString {
+                default, password, ..
+            } = &mut input
+            {
+                if *password == Some(true) {
+                    *default = None;
+                }
+            }
+            input
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InputValueView {
     pub configured: bool,
@@ -75,16 +110,52 @@ struct StoredInputSnapshot {
     secret: Option<String>,
 }
 
+pub(crate) struct InputDefinitionsConfigSnapshot {
+    definitions: Vec<InputDefinition>,
+    stored_values: Vec<StoredInputSnapshot>,
+}
+
+#[derive(Debug)]
+pub(crate) enum InputDefinitionsConfigMutationError {
+    Unchanged(String),
+    Reverted(String),
+    OutcomeUncertain(String),
+}
+
+impl InputDefinitionsConfigMutationError {
+    pub(crate) fn is_safe_to_abort(&self) -> bool {
+        matches!(self, Self::Unchanged(_) | Self::Reverted(_))
+    }
+}
+
+impl std::fmt::Display for InputDefinitionsConfigMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unchanged(message)
+            | Self::Reverted(message)
+            | Self::OutcomeUncertain(message) => formatter.write_str(message),
+        }
+    }
+}
+
 /// List all input variable definitions
 #[tauri::command]
 pub async fn list_inputs(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<Vec<InputDefinition>, String> {
-    state
+    list_inputs_core(&state, &instance_id)
+}
+
+pub fn list_inputs_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<InputDefinition>, String> {
+    let inputs = state
         .config
-        .load_inputs_for_instance(require_instance_id(&instance_id)?)
-        .map_err(|e| e.to_string())
+        .load_inputs_for_instance(require_instance_id(instance_id)?)
+        .map_err(|e| e.to_string())?;
+    prepare_portable_input_definitions(&inputs)
 }
 
 /// Get a single input definition by ID
@@ -94,11 +165,21 @@ pub async fn get_input(
     instance_id: String,
     id: String,
 ) -> Result<Option<InputDefinition>, String> {
+    get_input_core(&state, &instance_id, &id)
+}
+
+pub fn get_input_core(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
+) -> Result<Option<InputDefinition>, String> {
     let inputs = state
         .config
-        .load_inputs_for_instance(require_instance_id(&instance_id)?)
+        .load_inputs_for_instance(require_instance_id(instance_id)?)
         .map_err(|e| e.to_string())?;
-    Ok(inputs.into_iter().find(|i| i.id() == id))
+    Ok(prepare_portable_input_definitions(&inputs)?
+        .into_iter()
+        .find(|i| i.id() == id))
 }
 
 /// Add or update an input variable definition
@@ -116,6 +197,10 @@ pub async fn add_or_update_input_core(
     instance_id: &str,
     input: InputDefinition,
 ) -> Result<(), String> {
+    let input = prepare_portable_input_definitions(std::slice::from_ref(&input))?
+        .into_iter()
+        .next()
+        .expect("one input definition was prepared");
     let instance_id = require_instance_id(instance_id)?;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
@@ -132,6 +217,7 @@ pub async fn add_or_update_input_core(
     let previous_value = snapshot_input_storage(state, &id)?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
+    let inputs = prepare_portable_input_definitions(&inputs)?;
     state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
@@ -199,6 +285,7 @@ pub async fn remove_input_core(
         return Err(format!("Input not found: {}", id));
     }
 
+    let inputs = prepare_portable_input_definitions(&inputs)?;
     state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
@@ -398,13 +485,22 @@ pub async fn import_inputs(
     instance_id: String,
     path: String,
 ) -> Result<usize, String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    import_inputs_core(&state, &instance_id, &path).await
+}
+
+pub async fn import_inputs_core(
+    state: &AppState,
+    instance_id: &str,
+    path: &str,
+) -> Result<usize, String> {
+    let instance_id = require_instance_id(instance_id)?;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
-    require_existing_instance(&state, instance_id)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    require_existing_instance(state, instance_id)?;
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let imported: Vec<InputDefinition> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let imported = prepare_portable_input_definitions(&imported)?;
     let count = imported.len();
 
     let mut inputs = state
@@ -418,13 +514,14 @@ pub async fn import_inputs(
         .collect::<std::collections::HashSet<_>>();
     let previous_values = imported_ids
         .iter()
-        .map(|id| snapshot_input_storage(&state, id))
+        .map(|id| snapshot_input_storage(state, id))
         .collect::<Result<Vec<_>, _>>()?;
     for input in imported {
         let id = input.id().to_string();
         inputs.retain(|i| i.id() != id);
         inputs.push(input);
     }
+    let inputs = prepare_portable_input_definitions(&inputs)?;
     state
         .config
         .save_inputs_for_instance(instance_id, &inputs)
@@ -438,7 +535,7 @@ pub async fn import_inputs(
             new_definition,
         ) {
             return Err(rollback_input_mutation(
-                &state,
+                state,
                 instance_id,
                 Some(&previous_inputs),
                 &previous_values,
@@ -447,9 +544,9 @@ pub async fn import_inputs(
             .await);
         }
     }
-    if let Err(error) = sync_all_computer_runtimes(&state).await {
+    if let Err(error) = sync_all_computer_runtimes(state).await {
         return Err(rollback_input_mutation(
-            &state,
+            state,
             instance_id,
             Some(&previous_inputs),
             &previous_values,
@@ -499,41 +596,24 @@ pub(crate) async fn replace_global_input_definitions_with_parts_locked(
     instance_id: &str,
     definitions: &[InputDefinition],
 ) -> Result<(), String> {
-    let previous = config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|error| error.to_string())?;
-    let affected_ids = previous
-        .iter()
-        .chain(definitions.iter())
-        .map(|definition| definition.id().to_string())
-        .collect::<std::collections::HashSet<_>>();
-    let previous_values = affected_ids
-        .iter()
-        .map(|id| snapshot_input_storage_with_store(secret_store, id))
-        .collect::<Result<Vec<_>, _>>()?;
-    config
-        .save_inputs_for_instance(instance_id, definitions)
-        .map_err(|error| error.to_string())?;
-    let storage_result = affected_ids.iter().try_for_each(|id| {
-        reconcile_definition_storage(
-            secret_store,
-            previous.iter().find(|definition| definition.id() == id),
-            definitions.iter().find(|definition| definition.id() == id),
-        )
-    });
-    let sync_result = match storage_result {
-        Ok(()) => sync_all_computer_runtimes_with_parts(config, registry, secret_store).await,
-        Err(error) => Err(error),
-    };
-    if let Err(primary_error) = sync_result {
+    let snapshot = replace_input_definitions_config_only_locked(
+        config,
+        secret_store,
+        instance_id,
+        definitions,
+    )
+    .map_err(|error| error.to_string())?;
+    if let Err(primary_error) =
+        sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
+    {
         let mut rollback_errors = Vec::new();
-        if let Err(error) = config.save_inputs_for_instance(instance_id, &previous) {
-            rollback_errors.push(format!("restore global input definitions: {error}"));
-        }
-        for snapshot in &previous_values {
-            if let Err(error) = restore_input_storage_with_store(secret_store, snapshot) {
-                rollback_errors.push(format!("restore Keychain input '{}': {error}", snapshot.id));
-            }
+        if let Err(error) = restore_input_definitions_config_only_locked(
+            config,
+            secret_store,
+            instance_id,
+            &snapshot,
+        ) {
+            rollback_errors.push(error);
         }
         if let Err(error) =
             sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
@@ -554,6 +634,111 @@ pub(crate) async fn replace_global_input_definitions_with_parts_locked(
     Ok(())
 }
 
+/// Replaces client-owned input definitions without rebuilding or reloading any runtime.
+///
+/// Configuration import uses this boundary so definition persistence remains independent from
+/// runtime availability. The returned snapshot can roll the change back if the paired SDK config
+/// mutation fails.
+pub(crate) fn replace_input_definitions_config_only_locked(
+    config: &crate::services::config::ConfigService,
+    secret_store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
+    definitions: &[InputDefinition],
+) -> Result<InputDefinitionsConfigSnapshot, InputDefinitionsConfigMutationError> {
+    let definitions = prepare_portable_input_definitions(definitions)
+        .map_err(InputDefinitionsConfigMutationError::Unchanged)?;
+    let previous = config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|error| InputDefinitionsConfigMutationError::Unchanged(error.to_string()))?;
+    let affected_ids = previous
+        .iter()
+        .chain(definitions.iter())
+        .map(|definition| definition.id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let stored_values = affected_ids
+        .iter()
+        .map(|id| snapshot_input_storage_with_store(secret_store, id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(InputDefinitionsConfigMutationError::Unchanged)?;
+    let snapshot = InputDefinitionsConfigSnapshot {
+        definitions: previous,
+        stored_values,
+    };
+
+    if let Err(primary_error) = config.save_inputs_for_instance(instance_id, &definitions) {
+        return Err(
+            match restore_input_definitions_config_only_locked(
+                config,
+                secret_store,
+                instance_id,
+                &snapshot,
+            ) {
+                Ok(()) => InputDefinitionsConfigMutationError::Reverted(format!(
+                    "Failed to update input definitions; changes were reverted: {primary_error}"
+                )),
+                Err(rollback_error) => {
+                    InputDefinitionsConfigMutationError::OutcomeUncertain(format!(
+                        "Failed to update input definitions: {primary_error}; rollback also failed: {rollback_error}"
+                    ))
+                }
+            },
+        );
+    }
+    let reconcile_result = affected_ids.iter().try_for_each(|id| {
+        reconcile_definition_storage(
+            secret_store,
+            snapshot
+                .definitions
+                .iter()
+                .find(|definition| definition.id() == id),
+            definitions.iter().find(|definition| definition.id() == id),
+        )
+    });
+    if let Err(primary_error) = reconcile_result {
+        let rollback_error = restore_input_definitions_config_only_locked(
+            config,
+            secret_store,
+            instance_id,
+            &snapshot,
+        )
+        .err();
+        return Err(match rollback_error {
+            Some(rollback_error) => InputDefinitionsConfigMutationError::OutcomeUncertain(
+                format!(
+                    "Failed to update input definition storage: {primary_error}; rollback also failed: {rollback_error}"
+                ),
+            ),
+            None => InputDefinitionsConfigMutationError::Reverted(format!(
+                "Failed to update input definition storage; changes were reverted: {primary_error}"
+            )),
+        });
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn restore_input_definitions_config_only_locked(
+    config: &crate::services::config::ConfigService,
+    secret_store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
+    snapshot: &InputDefinitionsConfigSnapshot,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    let definitions = prepare_portable_input_definitions(&snapshot.definitions)?;
+    if let Err(error) = config.save_inputs_for_instance(instance_id, &definitions) {
+        errors.push(format!("restore input definitions: {error}"));
+    }
+    for stored in &snapshot.stored_values {
+        if let Err(error) = restore_input_storage_with_store(secret_store, stored) {
+            errors.push(format!("restore input '{}': {error}", stored.id));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 async fn rollback_input_mutation(
     state: &AppState,
     instance_id: &str,
@@ -563,8 +748,15 @@ async fn rollback_input_mutation(
 ) -> String {
     let mut rollback_errors = Vec::new();
     if let Some(inputs) = previous_inputs {
-        if let Err(error) = state.config.save_inputs_for_instance(instance_id, inputs) {
-            rollback_errors.push(format!("restore global input definitions: {error}"));
+        match prepare_portable_input_definitions(inputs) {
+            Ok(inputs) => {
+                if let Err(error) = state.config.save_inputs_for_instance(instance_id, &inputs) {
+                    rollback_errors.push(format!("restore global input definitions: {error}"));
+                }
+            }
+            Err(error) => {
+                rollback_errors.push(format!("sanitize global input definitions: {error}"));
+            }
         }
     }
     for snapshot in previous_values {

@@ -7,6 +7,7 @@ import { useDebugStore } from '@/stores/debugStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { getClientConnectionAuthority } from '@/stores/connectionAuthority';
 import { useMcpStore } from '@/stores/mcpStore';
+import { useSdkConfigStore } from '@/stores/sdkConfigStore';
 import {
   COMPUTER_RUNTIME_STATUS_EVENT,
   useRuntimeStore,
@@ -33,6 +34,7 @@ describe('runtimeStore', () => {
     useComputerOverviewStore.getState().reset();
     useDashboardStore.getState().reset();
     useMcpStore.getState().reset();
+    useSdkConfigStore.getState().reset();
     useDebugStore.getState().reset();
     useConnectionStore.getState().reset();
     useSkillStore.getState().reset();
@@ -166,9 +168,11 @@ describe('runtimeStore', () => {
 
   it('routes config and capability revisions to only their dependent consumers', () => {
     useMcpStore.setState({ activeInstanceId: 'computer-a' });
+    useSdkConfigStore.setState({ activeInstanceId: 'computer-a' });
     useDebugStore.setState({ activeInstanceId: 'computer-a' });
     useSkillStore.setState({ activeInstanceId: 'computer-a' });
     const fetchServers = vi.spyOn(useMcpStore.getState(), 'fetchServers').mockResolvedValue();
+    const fetchConfig = vi.spyOn(useSdkConfigStore.getState(), 'fetchConfig').mockResolvedValue();
     const fetchTools = vi.spyOn(useDebugStore.getState(), 'fetchTools').mockResolvedValue();
     const fetchSkills = vi.spyOn(useSkillStore.getState(), 'fetchSkills').mockResolvedValue();
     const fetchMarketplace = vi
@@ -180,6 +184,7 @@ describe('runtimeStore', () => {
       runtimeSnapshot({ config_revision: 1, capability_revision: 1 }),
     );
     fetchServers.mockClear();
+    fetchConfig.mockClear();
     fetchTools.mockClear();
     fetchSkills.mockClear();
     fetchMarketplace.mockClear();
@@ -193,11 +198,13 @@ describe('runtimeStore', () => {
       }),
     );
     expect(fetchServers).toHaveBeenCalledOnce();
+    expect(fetchConfig).toHaveBeenCalledOnce();
     expect(fetchTools).not.toHaveBeenCalled();
     expect(fetchSkills).not.toHaveBeenCalled();
     expect(fetchMarketplace).not.toHaveBeenCalled();
 
     fetchServers.mockClear();
+    fetchConfig.mockClear();
     useRuntimeStore.getState().receiveSnapshot(
       'computer-a',
       runtimeSnapshot({
@@ -207,11 +214,13 @@ describe('runtimeStore', () => {
       }),
     );
     expect(fetchServers).toHaveBeenCalledOnce();
+    expect(fetchConfig).not.toHaveBeenCalled();
     expect(fetchTools).toHaveBeenCalledOnce();
     expect(fetchSkills).toHaveBeenCalledOnce();
     expect(fetchMarketplace).toHaveBeenCalledOnce();
 
     fetchServers.mockClear();
+    fetchConfig.mockClear();
     fetchTools.mockClear();
     fetchSkills.mockClear();
     fetchMarketplace.mockClear();
@@ -225,6 +234,7 @@ describe('runtimeStore', () => {
       }),
     );
     expect(fetchServers).not.toHaveBeenCalled();
+    expect(fetchConfig).not.toHaveBeenCalled();
     expect(fetchTools).not.toHaveBeenCalled();
     expect(fetchSkills).not.toHaveBeenCalled();
     expect(fetchMarketplace).not.toHaveBeenCalled();
@@ -239,6 +249,7 @@ describe('runtimeStore', () => {
       }),
     );
     expect(fetchServers).toHaveBeenCalledOnce();
+    expect(fetchConfig).toHaveBeenCalledOnce();
     expect(fetchTools).toHaveBeenCalledOnce();
     expect(fetchSkills).toHaveBeenCalledOnce();
     expect(fetchMarketplace).toHaveBeenCalledOnce();

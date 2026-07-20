@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{create_test_app_state, echo_server_config};
+use common::{create_test_app_state, echo_server_config, mcp};
 use tfrobot_client_lib::commands::{
     computer::start_computer_instance_core,
     marketplace::{
@@ -15,7 +15,7 @@ use tfrobot_client_lib::commands::{
         remove_marketplace_core, uninstall_plugin_core, AddMarketplaceRequest,
         PluginLifecycleRequest,
     },
-    mcp, skills,
+    skills,
 };
 use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
 use tfrobot_client_lib::AppState;

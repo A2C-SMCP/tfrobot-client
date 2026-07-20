@@ -74,7 +74,6 @@ or the business connection state:
 - `start`
 - `shutdown`
 - `sync_runtime`
-- MCP server add/update/remove
 - MCP server start/stop
 - Socket.IO connect/disconnect/reconnect
 - resources/window reads that depend on MCP clients
@@ -84,10 +83,11 @@ does not hold a global registry write lock.
 
 ## SDK Configuration And MCP Server Management
 
-MCP command handlers persist SDK-owned server config through SDK `Computer` high-level APIs, then
-synchronize the target `ComputerInstanceRuntime`. The `Computer` is configured with the same
-instance-scoped config/home/env context used by `SdkConfigService`. `ConfigService` does not persist
-the SDK MCP source of truth.
+MCP configuration command handlers persist SDK-owned declarations through `SdkConfigService`
+without requiring, rebuilding, or reloading a runtime. Runtime reload/start/preflight commands are
+the explicit boundary that resolves declarations, inputs, secrets, commands, and paths into a
+`ComputerInstanceRuntime`. The runtime uses the same instance-scoped config/home/env context as
+`SdkConfigService`; `ConfigService` does not persist the SDK MCP source of truth.
 
 `SdkConfigService` wraps the SDK config lifecycle (`init`, `load`, `save`, `update`, `validate`,
 `migrate`, `delete`, `duplicate`, `import`, and `export`) with an isolated config/home/env context

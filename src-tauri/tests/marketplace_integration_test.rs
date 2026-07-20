@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{create_test_app_state, echo_server_config, echo_server_path};
+use common::{create_test_app_state, echo_server_config, echo_server_path, mcp};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -23,7 +23,7 @@ use tfrobot_client_lib::commands::{
         update_marketplace_core, AddMarketplaceRequest, PluginLifecycleRequest,
         UpdateMarketplaceRequest,
     },
-    mcp, skills,
+    sdk_config, skills,
 };
 use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
 use tfrobot_client_lib::AppState;
@@ -417,12 +417,40 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
             .unwrap_err();
     assert!(add_error.to_string().contains("Marketplace plugin"));
 
+    let import_path = tmp.path().join("plugin-name-collision-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [echo_server_config("audit-mcp")],
+            "inputs": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let imported = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .expect("config import must not depend on enabled plugin runtime ownership");
+    assert_eq!(imported.servers_imported, 1);
+    assert!(imported.servers_skipped.is_empty());
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "audit-mcp")
+        .await
+        .unwrap();
+
     disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap();
-    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
-        .await
-        .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("audit-mcp"),
+    )
+    .await
+    .unwrap();
 
     let stored = state.sdk_config.load(TEST_INSTANCE_ID);
     assert!(stored
@@ -430,6 +458,23 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         .servers
         .iter()
         .any(|server| server.name == "audit-mcp" && server.bundled));
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("audit-mcp"),
+    )
+    .await
+    .expect("bundled name hints must not block editing a config declaration");
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "audit-mcp")
+        .await
+        .expect("bundled name hints must not block removing a config declaration");
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("audit-mcp"),
+    )
+    .await
+    .unwrap();
 
     let restarted = create_test_app_state(tmp.path());
     let restarted_status =
@@ -731,7 +776,7 @@ async fn plugin_install_rejects_user_owned_mcp_server_before_recording_intent() 
 }
 
 #[tokio::test]
-async fn config_import_skips_dynamic_plugin_owned_mcp_server() {
+async fn config_import_is_independent_from_dynamic_plugin_runtime_ownership() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("marketplace-repo");
@@ -784,8 +829,8 @@ async fn config_import_skips_dynamic_plugin_owned_mcp_server() {
     .await
     .unwrap();
 
-    assert_eq!(result.servers_imported, 0);
-    assert_eq!(result.servers_skipped, vec!["audit-mcp".to_string()]);
+    assert_eq!(result.servers_imported, 1);
+    assert!(result.servers_skipped.is_empty());
     let claude_path = tmp.path().join("claude-import.json");
     fs::write(
         &claude_path,
@@ -809,8 +854,15 @@ async fn config_import_skips_dynamic_plugin_owned_mcp_server() {
     )
     .await
     .unwrap();
-    assert_eq!(claude_result.servers_imported, 0);
-    assert_eq!(claude_result.servers_skipped, vec!["audit-mcp".to_string()]);
+    assert_eq!(claude_result.servers_imported, 1);
+    assert!(claude_result.servers_skipped.is_empty());
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "audit-mcp"));
 
     let rows = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
@@ -818,7 +870,7 @@ async fn config_import_skips_dynamic_plugin_owned_mcp_server() {
     let audit = rows
         .iter()
         .find(|server| server.name == "audit-mcp")
-        .expect("plugin server remains visible");
+        .expect("plugin runtime server remains visible");
     assert!(matches!(
         audit.managed_by,
         McpServerManagedBy::Plugin { .. }

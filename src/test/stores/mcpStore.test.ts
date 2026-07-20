@@ -23,21 +23,6 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-// Helper to create test configs in the correct internally tagged format
-function makeStdioConfig(overrides?: Partial<McpServerConfig & { server_parameters: Record<string, unknown> }>): McpServerConfig {
-  return {
-    type: 'Stdio',
-    name: 'test',
-    disabled: false,
-    forbidden_tools: [],
-    tool_meta: {},
-    default_tool_meta: null,
-    vrl: null,
-    server_parameters: { command: 'node', args: [], env: {}, cwd: null },
-    ...overrides,
-  } as McpServerConfig;
-}
-
 describe('mcpStore', () => {
   const instanceId = 'computer-a';
 
@@ -150,54 +135,6 @@ describe('mcpStore', () => {
     });
   });
 
-  describe('addServer', () => {
-    it('invokes add_mcp_server and refreshes', async () => {
-      const config = makeStdioConfig();
-      mockedInvoke.mockResolvedValueOnce(undefined); // add_mcp_server
-      mockedInvoke.mockResolvedValueOnce([]);         // fetchServers
-
-      await useMcpStore.getState().addServer(instanceId, config);
-
-      expect(mockedInvoke).toHaveBeenCalledWith('add_mcp_server', { instanceId, config });
-    });
-
-    it('sets error and re-throws on failure', async () => {
-      mockedInvoke.mockRejectedValueOnce('duplicate');
-
-      await expect(
-        useMcpStore.getState().addServer(instanceId, makeStdioConfig({ name: 'x' }))
-      ).rejects.toBe('duplicate');
-
-      expect(useMcpStore.getState().error).toBe('duplicate');
-    });
-
-    it('preserves structured runtime errors for the retry UI', async () => {
-      const error = {
-        code: 'missing_secret',
-        input_id: 'api-key',
-        env_hint: 'A2C_INPUT_API_KEY',
-        message: 'Required secret input is unresolved',
-      };
-      mockedInvoke.mockRejectedValueOnce(error);
-
-      await expect(
-        useMcpStore.getState().addServer(instanceId, makeStdioConfig()),
-      ).rejects.toBe(error);
-      expect(useMcpStore.getState().error).toBe(error.message);
-    });
-  });
-
-  describe('removeServer', () => {
-    it('invokes remove_mcp_server and refreshes', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      mockedInvoke.mockResolvedValueOnce([]);
-
-      await useMcpStore.getState().removeServer(instanceId, 'test');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('remove_mcp_server', { instanceId, name: 'test' });
-    });
-  });
-
   describe('startServer / stopServer', () => {
     it('start invokes start_mcp_server', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
@@ -238,34 +175,6 @@ describe('mcpStore', () => {
     });
   });
 
-  describe('importConfig / exportConfig', () => {
-    it('importConfig returns result and refreshes', async () => {
-      const result = { servers_imported: 2, inputs_imported: 1, servers_skipped: [] };
-      mockedInvoke.mockResolvedValueOnce(result); // import_config
-      mockedInvoke.mockResolvedValueOnce([]);     // fetchServers
-
-      const ret = await useMcpStore.getState().importConfig(instanceId, '/path/to/config.json');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('import_config', { path: '/path/to/config.json', instanceId, format: null });
-      expect(ret).toEqual(result);
-    });
-
-    it('exportConfig invokes export_config', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-
-      await useMcpStore.getState().exportConfig(instanceId, '/out.json', ['srv1']);
-
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', instanceId, serverNames: ['srv1'] });
-    });
-
-    it('exportConfig passes null when no server names', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-
-      await useMcpStore.getState().exportConfig(instanceId, '/out.json');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', instanceId, serverNames: null });
-    });
-  });
 });
 
 describe('mcpStore helpers', () => {

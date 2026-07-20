@@ -88,12 +88,6 @@ export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse'
   return config.type.toLowerCase() as 'stdio' | 'http' | 'sse';
 }
 
-export interface ImportResult {
-  servers_imported: number;
-  inputs_imported: number;
-  servers_skipped: string[];
-}
-
 interface McpServerState {
   servers: McpServerStatus[];
   loading: boolean;
@@ -102,16 +96,10 @@ interface McpServerState {
   serversRequestId: number;
 
   fetchServers: (instanceId: string) => Promise<void>;
-  addServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
-  updateServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
-  removeServer: (instanceId: string, name: string) => Promise<void>;
   startServer: (instanceId: string, name: string) => Promise<void>;
   stopServer: (instanceId: string, name: string) => Promise<void>;
   startAll: (instanceId: string) => Promise<void>;
   stopAll: (instanceId: string) => Promise<void>;
-  getServerConfig: (instanceId: string, name: string) => Promise<McpServerConfig>;
-  importConfig: (instanceId: string, path: string) => Promise<ImportResult>;
-  exportConfig: (instanceId: string, path: string, serverNames?: string[]) => Promise<void>;
   reset: () => void;
 }
 
@@ -146,41 +134,6 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
         return;
       }
       set({ error: formatRuntimeActionError(e), loading: false });
-    }
-  },
-
-  addServer: async (instanceId: string, config: McpServerConfig) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('add_mcp_server', { instanceId, config });
-      info(`MCP server added: ${config.name}`);
-      await get().fetchServers(instanceId);
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
-      throw e;
-    }
-  },
-
-  updateServer: async (instanceId: string, config: McpServerConfig) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('update_mcp_server', { instanceId, config });
-      await get().fetchServers(instanceId);
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
-      throw e;
-    }
-  },
-
-  removeServer: async (instanceId: string, name: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('remove_mcp_server', { instanceId, name });
-      info(`MCP server removed: ${name}`);
-      await get().fetchServers(instanceId);
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
-      throw e;
     }
   },
 
@@ -232,32 +185,5 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     }
   },
 
-  getServerConfig: async (instanceId: string, name: string) => {
-    return await invoke<McpServerConfig>('get_mcp_server_config', { instanceId, name });
-  },
-
-  importConfig: async (instanceId: string, path: string) => {
-    set({ loading: true, error: null });
-    try {
-      const result = await invoke<ImportResult>('import_config', { path, instanceId, format: null });
-      await get().fetchServers(instanceId);
-      return result;
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
-      throw e;
-    }
-  },
-
   reset: () => set(initialState),
-
-  exportConfig: async (instanceId: string, path: string, serverNames?: string[]) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('export_config', { path, instanceId, serverNames: serverNames || null });
-      set({ loading: false });
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
-      throw e;
-    }
-  },
 }));

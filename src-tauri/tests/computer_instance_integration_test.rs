@@ -2,7 +2,7 @@
 mod common;
 
 use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
-use common::create_test_app_state;
+use common::{create_test_app_state, mcp};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,6 @@ use tfrobot_client_lib::commands::computer::{
 };
 use tfrobot_client_lib::commands::connection::connect_connection_target_core;
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
-use tfrobot_client_lib::commands::mcp;
 use tfrobot_client_lib::services::computer::{ComputerInstance, RobotBindingMetadata};
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;

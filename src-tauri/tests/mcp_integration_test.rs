@@ -7,7 +7,7 @@ use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
     create_test_app_state, echo_server_config, everything_server_config,
-    everything_server_config_with_forbidden_tools, multi_tool_server_config,
+    everything_server_config_with_forbidden_tools, mcp, multi_tool_server_config,
     slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::Full;
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
-use tfrobot_client_lib::commands::{config_io, debug, inputs, mcp};
+use tfrobot_client_lib::commands::{config_io, debug, inputs, sdk_config};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -114,10 +114,6 @@ impl SmcpSyncStats {
 
     fn update_config_events(&self) -> usize {
         self.update_config_events.load(Ordering::SeqCst)
-    }
-
-    fn update_tool_list_events(&self) -> usize {
-        self.update_tool_list_events.load(Ordering::SeqCst)
     }
 }
 
@@ -339,9 +335,13 @@ async fn test_mcp_commands_are_instance_scoped() {
         .await
         .unwrap();
 
-    mcp::add_mcp_server_core(&state, "second", echo_server_config("second-only"))
-        .await
-        .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        "second",
+        echo_server_config("second-only"),
+    )
+    .await
+    .unwrap();
 
     let default_configs = state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers;
     let second_configs = state.sdk_config.load("second").mcp.servers;
@@ -350,8 +350,10 @@ async fn test_mcp_commands_are_instance_scoped() {
     assert!(default_configs.is_empty());
     assert_eq!(second_configs.len(), 1);
     assert_eq!(second_configs[0].name, "second-only");
-    assert_eq!(second_statuses.len(), 1);
-    assert_eq!(second_statuses[0].name, "second-only");
+    assert!(
+        second_statuses.is_empty(),
+        "config-only changes must not appear in runtime inventory before reload"
+    );
 }
 
 #[tokio::test]
@@ -507,7 +509,7 @@ async fn test_mcp_lifecycle_requires_started_computer() {
 }
 
 #[tokio::test]
-async fn test_adding_server_while_running_preserves_active_sdk_server() {
+async fn test_config_only_add_stays_out_of_runtime_until_reload() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -528,7 +530,7 @@ async fn test_adding_server_while_running_preserves_active_sdk_server() {
         .await
         .unwrap();
 
-    mcp::add_mcp_server_core(
+    sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
         slow_echo_server_config("newly-added"),
@@ -543,20 +545,32 @@ async fn test_adding_server_while_running_preserves_active_sdk_server() {
         .iter()
         .find(|status| status.name == "already-running")
         .expect("active server status should exist");
-    let added = statuses
-        .iter()
-        .find(|status| status.name == "newly-added")
-        .expect("added server status should exist");
-
     assert!(active.running, "active server should remain running");
     assert!(
-        !added.running,
-        "new server should be registered but not auto-started"
+        statuses.iter().all(|status| status.name != "newly-added"),
+        "config-only additions must not be synthesized into runtime status"
     );
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "newly-added")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Server not found: newly-added"));
+
+    state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .reload()
+        .await
+        .unwrap();
+    let reloaded = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(reloaded.iter().any(|status| status.name == "newly-added"));
 }
 
 #[tokio::test]
-async fn test_connected_computer_syncs_mcp_changes_to_robot_via_sdk() {
+async fn test_connected_config_crud_does_not_sync_or_reload_runtime() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -568,53 +582,32 @@ async fn test_connected_computer_syncs_mcp_changes_to_robot_via_sdk() {
     })
     .await;
 
-    mcp::add_mcp_server_core(
+    let config_events_before = stats.update_config_events();
+    sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
         everything_server_config("everything-sync"),
     )
     .await
     .unwrap();
-    wait_for_sync_event("add should emit server:update_config to robot", || {
-        stats.update_config_events() >= 1
-    })
-    .await;
-
-    mcp::update_mcp_server_core(
+    sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
         everything_server_config_with_forbidden_tools("everything-sync", &["echo"]),
     )
     .await
     .unwrap();
-    wait_for_sync_event("update should emit server:update_config to robot", || {
-        stats.update_config_events() >= 2
-    })
-    .await;
-
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        stats.update_config_events(),
+        config_events_before,
+        "config-only CRUD must not synchronize or reload runtime"
+    );
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "everything-sync")
         .await
         .unwrap();
-    wait_for_sync_event("start should emit server:update_tool_list to robot", || {
-        stats.update_tool_list_events() >= 1
-    })
-    .await;
-
-    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
-        .await
-        .unwrap();
-    wait_for_sync_event("stop should emit server:update_tool_list to robot", || {
-        stats.update_tool_list_events() >= 2
-    })
-    .await;
-
-    mcp::remove_mcp_server_core(&state, TEST_INSTANCE_ID, "everything-sync")
-        .await
-        .unwrap();
-    wait_for_sync_event("remove should emit server:update_config to robot", || {
-        stats.update_config_events() >= 3
-    })
-    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(stats.update_config_events(), config_events_before);
 }
 
 #[tokio::test]
@@ -629,6 +622,14 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
     state
         .computer_registry
         .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .reload()
         .await
         .unwrap();
     mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
@@ -993,6 +994,26 @@ async fn test_config_io_requires_instance_id() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("instance_id is required"));
+
+    let import_path = tmp.path().join("orphan-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec(&serde_json::json!({
+            "servers": [echo_server_config("orphan")],
+            "inputs": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let missing = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        "missing-computer".to_string(),
+        None,
+    )
+    .await;
+    assert!(missing.is_err());
+    assert!(!state.sdk_config.project_anchor("missing-computer").exists());
 }
 
 #[tokio::test]
@@ -1080,7 +1101,10 @@ async fn test_config_io_import_export_are_instance_scoped() {
     assert!(second_configs
         .iter()
         .any(|server| server.name == "exported-second"));
-    assert!(second_sdk_servers.contains("imported-second"));
+    assert!(
+        !second_sdk_servers.contains("imported-second"),
+        "config import must not perform runtime reload or availability checks"
+    );
     let exported_names: std::collections::HashSet<_> = exported["servers"]
         .as_array()
         .unwrap()
@@ -1102,6 +1126,715 @@ async fn test_config_io_import_export_are_instance_scoped() {
     .unwrap();
     assert_eq!(round_trip.servers_imported, 2);
     assert_eq!(state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers.len(), 2);
+}
+
+#[tokio::test]
+async fn test_config_io_import_atomically_merges_all_servers_into_local_sdk_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp_local: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "existing-local": {
+                                "type": "stdio",
+                                "server_parameters": {
+                                    "command": "existing-command",
+                                    "args": [],
+                                    "env": {}
+                                }
+                            }
+                        },
+                        "clientMetadata": {"preserved": true}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let import_path = tmp.path().join("atomic-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [
+                echo_server_config("atomic-a"),
+                echo_server_config("atomic-b")
+            ],
+            "inputs": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.servers_imported, 2);
+    let document = a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
+        &state.sdk_config.project_anchor(TEST_INSTANCE_ID),
+    )
+    .unwrap();
+    let local_mcp = document.mcp_local.unwrap();
+    let local_servers = local_mcp["servers"].as_object().unwrap();
+    assert!(local_servers.contains_key("existing-local"));
+    assert!(local_servers.contains_key("atomic-a"));
+    assert!(local_servers.contains_key("atomic-b"));
+    assert_eq!(local_mcp["clientMetadata"]["preserved"], true);
+}
+
+#[tokio::test]
+async fn test_config_io_input_only_import_does_not_mutate_sdk_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let before_document = a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
+        &state.sdk_config.project_anchor(TEST_INSTANCE_ID),
+    )
+    .unwrap();
+    let before_revision = state.sdk_config.load(TEST_INSTANCE_ID).revision;
+    let import_path = tmp.path().join("input-only-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "input-only",
+                "label": "Input only",
+                "password": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let after_document = a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
+        &state.sdk_config.project_anchor(TEST_INSTANCE_ID),
+    )
+    .unwrap();
+    assert_eq!(result.servers_imported, 0);
+    assert_eq!(result.inputs_imported, 1);
+    assert_eq!(after_document, before_document);
+    assert_eq!(
+        state.sdk_config.load(TEST_INSTANCE_ID).revision,
+        before_revision
+    );
+}
+
+#[tokio::test]
+async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_export_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let import_path = tmp.path().join("unsafe-command-input.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [],
+            "inputs": [{
+                "type": "Command",
+                "id": "unsafe-command",
+                "label": "Unsafe command",
+                "command": "helper",
+                "args": ["https://example.com/run?access_token=plain-command-secret"]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let import_error = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(import_error.contains("inputs.unsafe-command.args[0]"));
+    assert!(import_error.contains("access_token"));
+    assert!(state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
+    assert!(!state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json")
+        .exists());
+
+    state
+        .config
+        .save_inputs_for_instance(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::Command {
+                id: "unsafe-command".to_string(),
+                label: "Unsafe command".to_string(),
+                command: "helper".to_string(),
+                args: Some(vec!["--api-key=plain-export-secret".to_string()]),
+            }],
+        )
+        .unwrap();
+    let export_path = tmp.path().join("unsafe-command-export.json");
+    std::fs::write(&export_path, "existing-target").unwrap();
+    let export_error = config_io::export_config_core(
+        &state,
+        export_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(export_error.contains("inputs.unsafe-command.args[0]"));
+    assert_eq!(
+        std::fs::read_to_string(export_path).unwrap(),
+        "existing-target"
+    );
+}
+
+#[tokio::test]
+async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let unsafe_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": "unsafe-crud-server",
+        "server_parameters": {
+            "command": "helper",
+            "args": ["--endpoint", "https://example.com/run?client_secret=plain-crud-secret"],
+            "env": {}
+        }
+    }))
+    .unwrap();
+
+    let server_error =
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, unsafe_server)
+            .await
+            .unwrap_err();
+    assert!(server_error.contains("server_parameters.args[1]"));
+    assert!(server_error.contains("client_secret"));
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .is_empty());
+
+    let secret_stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": "redacted-crud-stdio",
+        "server_parameters": {
+            "command": "helper",
+            "args": [],
+            "env": { "TOKEN": "literal-crud-env-secret" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_stdio)
+        .await
+        .unwrap();
+
+    let secret_http: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Http",
+        "name": "redacted-crud-http",
+        "server_parameters": {
+            "url": "https://user:password@example.com/mcp",
+            "headers": { "Authorization": "Bearer literal-crud-header-secret" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_http)
+        .await
+        .unwrap();
+
+    let persisted = std::fs::read_to_string(
+        state
+            .sdk_config
+            .project_anchor(TEST_INSTANCE_ID)
+            .join(".tfrobot/mcp.local.json"),
+    )
+    .unwrap();
+    assert!(!persisted.contains("literal-crud-env-secret"));
+    assert!(!persisted.contains("literal-crud-header-secret"));
+    assert!(!persisted.contains("user:password"));
+    assert!(persisted.contains("${REDACTED}"));
+
+    let view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let view_json = serde_json::to_string(&view).unwrap();
+    assert!(!view_json.contains("literal-crud-env-secret"));
+    assert!(!view_json.contains("literal-crud-header-secret"));
+    assert!(!view_json.contains("user:password"));
+    assert!(view_json.contains("${REDACTED}"));
+
+    // A legacy/on-disk declaration that predates the guarded CRUD boundary must still never be
+    // echoed to the WebView snapshot with its plaintext secret surfaces intact.
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "legacy-plaintext-http": {
+                                "type": "http",
+                                "server_parameters": {
+                                    "url": "https://legacy-user:legacy-password@example.com/mcp",
+                                    "headers": {
+                                        "Authorization": "Bearer legacy-header-secret"
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let legacy_raw = std::fs::read_to_string(
+        state
+            .sdk_config
+            .project_anchor(TEST_INSTANCE_ID)
+            .join(".tfrobot/mcp.json"),
+    )
+    .unwrap();
+    assert!(legacy_raw.contains("legacy-header-secret"));
+    let legacy_view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let legacy_view_json = serde_json::to_string(&legacy_view).unwrap();
+    assert!(!legacy_view_json.contains("legacy-header-secret"));
+    assert!(!legacy_view_json.contains("legacy-user:legacy-password"));
+    assert!(legacy_view_json.contains("${REDACTED}"));
+
+    let input_error = inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::Command {
+            id: "unsafe-crud-input".to_string(),
+            label: "Unsafe CRUD input".to_string(),
+            command: "helper".to_string(),
+            args: Some(vec!["https://example.com/run?mode=debug".to_string()]),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(input_error.contains("inputs.unsafe-crud-input.args[0]"));
+    assert!(input_error.contains("mode"));
+    assert!(state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_password_input_defaults_are_removed_from_crud_import_and_read_views() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "crud-password".to_string(),
+            label: "CRUD password".to_string(),
+            description: None,
+            default: Some("crud-plaintext-secret".to_string()),
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+
+    let import_path = tmp.path().join("password-inputs.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "type": "PromptString",
+            "id": "imported-password",
+            "label": "Imported password",
+            "default": "imported-plaintext-secret",
+            "password": true
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        inputs::import_inputs_core(
+            &state,
+            TEST_INSTANCE_ID,
+            import_path.to_string_lossy().as_ref()
+        )
+        .await
+        .unwrap(),
+        1
+    );
+
+    let listed = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
+    for id in ["crud-password", "imported-password"] {
+        assert!(matches!(
+            listed.iter().find(|input| input.id() == id),
+            Some(inputs::InputDefinition::PromptString {
+                default: None,
+                password: Some(true),
+                ..
+            })
+        ));
+        assert!(matches!(
+            inputs::get_input_core(&state, TEST_INSTANCE_ID, id).unwrap(),
+            Some(inputs::InputDefinition::PromptString {
+                default: None,
+                password: Some(true),
+                ..
+            })
+        ));
+    }
+    let persisted = std::fs::read_to_string(state.config.global_inputs_path()).unwrap();
+    assert!(!persisted.contains("crud-plaintext-secret"));
+    assert!(!persisted.contains("imported-plaintext-secret"));
+}
+
+#[tokio::test]
+async fn test_config_import_preflights_sdk_target_before_journal_or_input_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .save_inputs_for_instance(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PromptString {
+                id: "existing-input".to_string(),
+                label: "Existing".to_string(),
+                description: None,
+                default: None,
+                password: Some(false),
+            }],
+        )
+        .unwrap();
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "existing-invalid": { "type": "carrier-pigeon" }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let import_path = tmp.path().join("preflight-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [{
+                "type": "Stdio",
+                "name": "must-not-persist",
+                "server_parameters": { "command": "helper", "args": [], "env": {} }
+            }],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "must-not-persist-input",
+                "label": "Must not persist",
+                "password": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("servers.existing-invalid"), "{error}");
+    assert!(!state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json")
+        .exists());
+    let inputs = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].id(), "existing-input");
+}
+
+#[tokio::test]
+async fn test_startup_recovers_a_crash_interrupted_config_import_transaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let transaction_path = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json");
+    std::fs::create_dir_all(transaction_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transaction_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "instance_id": TEST_INSTANCE_ID,
+            "servers": [echo_server_config("recovered-server")],
+            "inputs": [{
+                "type": "Command",
+                "id": "recovered-command",
+                "label": "Recovered command",
+                "command": "helper",
+                "args": ["--token", "${env:RECOVERED_TOKEN}"]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    drop(state);
+
+    let recovered = create_test_app_state(tmp.path());
+
+    assert!(!transaction_path.exists());
+    assert!(recovered
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "recovered-server"));
+    assert_eq!(
+        recovered
+            .config
+            .load_inputs_for_instance(TEST_INSTANCE_ID)
+            .unwrap()[0]
+            .id(),
+        "recovered-command"
+    );
+    let runtime = recovered
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("startup should build the recovered Computer runtime");
+    assert!(runtime
+        .inputs
+        .read()
+        .await
+        .contains_key("recovered-command"));
+}
+
+#[test]
+fn test_startup_discards_an_aborted_config_import_transaction_without_replay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
+        .unwrap();
+    state
+        .config
+        .save_inputs_for_instance(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PromptString {
+                id: "existing-input".to_string(),
+                label: "Existing".to_string(),
+                description: None,
+                default: None,
+                password: Some(false),
+            }],
+        )
+        .unwrap();
+    let transaction_path = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json");
+    std::fs::create_dir_all(transaction_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transaction_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "phase": "aborted",
+            "instance_id": TEST_INSTANCE_ID,
+            "servers": [echo_server_config("must-not-replay")],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "must-not-replay-input",
+                "label": "Must not replay",
+                "password": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    drop(state);
+
+    let recovered = create_test_app_state(tmp.path());
+
+    assert!(!transaction_path.exists());
+    assert!(!recovered
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "must-not-replay"));
+    let persisted_inputs = recovered
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert_eq!(persisted_inputs.len(), 1);
+    assert_eq!(persisted_inputs[0].id(), "existing-input");
+}
+
+#[test]
+fn test_startup_rejects_an_unrecoverable_config_import_transaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
+        .unwrap();
+    let transaction_path = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json");
+    std::fs::create_dir_all(transaction_path.parent().unwrap()).unwrap();
+    std::fs::write(&transaction_path, b"{not-valid-json").unwrap();
+    drop(state);
+
+    let config =
+        tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
+    let log_service = tfrobot_client_lib::services::logger::LogService::new(tmp.path()).unwrap();
+    let settings_service =
+        tfrobot_client_lib::services::settings::SettingsService::new(tmp.path().to_path_buf());
+    let result = AppState::try_new_with_secret_store(
+        config,
+        log_service,
+        settings_service,
+        tfrobot_client_lib::services::keychain::InMemorySecretStore::shared(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(tfrobot_client_lib::AppStateInitError::ConfigImportRecovery(
+            _
+        ))
+    ));
+    assert!(transaction_path.exists());
+}
+
+#[test]
+fn test_startup_recovery_preflights_sdk_target_before_replaying_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
+        .unwrap();
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp_local: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "existing-invalid": { "type": "carrier-pigeon" }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let transaction_path = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json");
+    std::fs::create_dir_all(transaction_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transaction_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "instance_id": TEST_INSTANCE_ID,
+            "servers": [echo_server_config("must-not-recover")],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "must-not-replay-input",
+                "label": "Must not replay",
+                "password": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    drop(state);
+
+    let config =
+        tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
+    let log_service = tfrobot_client_lib::services::logger::LogService::new(tmp.path()).unwrap();
+    let settings_service =
+        tfrobot_client_lib::services::settings::SettingsService::new(tmp.path().to_path_buf());
+    let result = AppState::try_new_with_secret_store(
+        config,
+        log_service,
+        settings_service,
+        tfrobot_client_lib::services::keychain::InMemorySecretStore::shared(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(tfrobot_client_lib::AppStateInitError::ConfigImportRecovery(
+            _
+        ))
+    ));
+    assert!(transaction_path.exists());
+    let config =
+        tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
+    assert!(config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1246,6 +1979,509 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
 }
 
 #[tokio::test]
+async fn test_config_io_import_redacts_secret_surfaces_before_persisting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let import_path = tmp.path().join("secret-import.json");
+    let import_data = serde_json::json!({
+        "servers": [{
+            "type": "Stdio",
+            "name": "secret-import",
+            "disabled": true,
+            "forbidden_tools": [],
+            "tool_meta": {},
+            "server_parameters": {
+                "command": "node",
+                "args": [],
+                "env": {
+                    "TOKEN": "literal-import-secret",
+                    "TOKEN_REF": "${input:api-token}"
+                }
+            }
+        }],
+        "inputs": [{
+            "type": "PromptString",
+            "id": "api-token",
+            "label": "API token",
+            "default": "input-default-secret",
+            "password": true
+        }]
+    });
+    std::fs::write(
+        &import_path,
+        serde_json::to_string_pretty(&import_data).unwrap(),
+    )
+    .unwrap();
+
+    let result = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let snapshot = state.sdk_config.load(TEST_INSTANCE_ID);
+    let server = snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "secret-import")
+        .unwrap();
+    let persisted = serde_json::to_value(&server.config).unwrap();
+    assert_eq!(
+        persisted["server_parameters"]["env"]["TOKEN"],
+        "${REDACTED}"
+    );
+    assert_eq!(
+        persisted["server_parameters"]["env"]["TOKEN_REF"],
+        "${input:api-token}"
+    );
+    let imported_inputs = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert!(matches!(
+        imported_inputs.as_slice(),
+        [inputs::InputDefinition::PromptString {
+            default: None,
+            password: Some(true),
+            ..
+        }]
+    ));
+    assert_eq!(result.servers_imported, 1);
+    assert_eq!(result.inputs_imported, 1);
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("literal-import-secret"));
+}
+
+#[tokio::test]
+async fn test_config_io_export_rejects_sensitive_argument_plaintext_without_overwriting_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "unsafe-export": {
+                                "type": "stdio",
+                                "server_parameters": {
+                                    "command": "node",
+                                    "args": ["server.js", "--token", "plain-export-secret"]
+                                }
+                            },
+                            "unsafe-relative-export": {
+                                "type": "streamable",
+                                "server_parameters": {
+                                    "url": "mcp?client_secret=plain-relative-export-secret"
+                                }
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let export_path = tmp.path().join("unsafe-export.json");
+    std::fs::write(&export_path, "existing-target").unwrap();
+
+    let error = config_io::export_config_core(
+        &state,
+        export_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("plaintext in a sensitive field"));
+    assert!(error.contains("args[2]"));
+    assert!(error.contains("unsafe-relative-export"));
+    assert!(error.contains("client_secret"));
+    assert_eq!(
+        std::fs::read_to_string(export_path).unwrap(),
+        "existing-target"
+    );
+}
+
+#[tokio::test]
+async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .save_inputs_for_instance(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PickString {
+                id: "existing-input".to_string(),
+                label: "Existing input".to_string(),
+                description: None,
+                options: vec![inputs::PickOption {
+                    label: "Existing".to_string(),
+                    value: "existing".to_string(),
+                }],
+                default: Some("existing".to_string()),
+            }],
+        )
+        .unwrap();
+    let import_path = tmp.path().join("unsafe-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [
+                {
+                    "type": "Http",
+                    "name": "unsafe-import",
+                    "disabled": false,
+                    "forbidden_tools": [],
+                    "tool_meta": {},
+                    "server_parameters": {
+                        "url": "https://example.com/mcp?client_secret=plain-import-secret",
+                        "headers": {}
+                    }
+                },
+                {
+                    "type": "Http",
+                    "name": "unsafe-relative-import",
+                    "disabled": false,
+                    "forbidden_tools": [],
+                    "tool_meta": {},
+                    "server_parameters": {
+                        "url": "mcp?access_token=plain-relative-import-secret",
+                        "headers": {}
+                    }
+                }
+            ],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "new-input",
+                "label": "Must not persist",
+                "password": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("plaintext in a sensitive field"));
+    assert!(error.contains("client_secret"));
+    assert!(error.contains("unsafe-relative-import"));
+    assert!(error.contains("access_token"));
+    let inputs = state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].id(), "existing-input");
+    assert!(!state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "unsafe-import"));
+}
+
+#[tokio::test]
+async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .save_inputs_for_instance(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PromptString {
+                id: "shared-token".to_string(),
+                label: "Existing token".to_string(),
+                description: None,
+                default: None,
+                password: Some(true),
+            }],
+        )
+        .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_secret(
+        state.secret_store.as_ref(),
+        "shared-token",
+        "existing-secret",
+    )
+    .unwrap();
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "existing-server": {
+                                "type": "stdio",
+                                "server_parameters": {
+                                    "command": "existing-command",
+                                    "args": [],
+                                    "env": {}
+                                }
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let blocked_local_mcp = state
+        .sdk_config
+        .project_anchor(TEST_INSTANCE_ID)
+        .join(".tfrobot/mcp.local.json");
+    std::fs::create_dir_all(&blocked_local_mcp).unwrap();
+    let import_path = tmp.path().join("rollback-import.json");
+    std::fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [
+                echo_server_config("rollback-server-a"),
+                echo_server_config("rollback-server-b")
+            ],
+            "inputs": [{
+                "type": "PickString",
+                "id": "shared-token",
+                "label": "Replacement token",
+                "options": [{ "label": "One", "value": "one" }],
+                "default": "one"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().into_owned(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("mcp.local.json"), "{error}");
+    assert!(!state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("config_import_transaction.json")
+        .exists());
+    assert!(matches!(
+        state
+            .config
+            .load_inputs_for_instance(TEST_INSTANCE_ID)
+            .unwrap()
+            .as_slice(),
+        [inputs::InputDefinition::PromptString { label, .. }] if label == "Existing token"
+    ));
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            "shared-token",
+        )
+        .unwrap()
+        .as_deref(),
+        Some("existing-secret")
+    );
+    let snapshot = state.sdk_config.load(TEST_INSTANCE_ID);
+    assert!(snapshot
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "existing-server"));
+    assert!(!snapshot.mcp.servers.iter().any(|server| matches!(
+        server.name.as_str(),
+        "rollback-server-a" | "rollback-server-b"
+    )));
+}
+
+#[tokio::test]
+async fn test_validate_computer_config_is_schema_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": {
+                            "unavailable-command": {
+                                "type": "stdio",
+                                "server_parameters": {
+                                    "command": "this-command-does-not-exist-anywhere-xyzzy"
+                                }
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let valid = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .validation;
+    assert!(
+        valid.valid,
+        "schema validation must not probe command availability"
+    );
+
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                mcp: Some(
+                    serde_json::json!({
+                        "servers": { "invalid": { "type": "carrier-pigeon" } }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let invalid = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .validation;
+    assert!(!invalid.valid);
+    assert!(invalid
+        .errors
+        .iter()
+        .any(|error| error.field == "servers.invalid"));
+
+    let combined = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        combined.snapshot.revision,
+        state.sdk_config.load(TEST_INSTANCE_ID).revision.0
+    );
+    assert!(!combined.validation.valid);
+}
+
+#[tokio::test]
+async fn test_validate_computer_config_includes_sdk_user_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let user_mcp_path = state
+        .sdk_config
+        .project_anchor(TEST_INSTANCE_ID)
+        .join("a2c/mcp.json");
+    std::fs::create_dir_all(user_mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &user_mcp_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": {
+                "invalid-user": { "type": "carrier-pigeon" }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let validation = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .validation;
+
+    assert!(!validation.valid);
+    assert!(validation.errors.iter().any(|error| {
+        error.field == "servers.invalid-user"
+            && error.source_path.as_deref() == Some(user_mcp_path.to_string_lossy().as_ref())
+    }));
+}
+
+#[tokio::test]
+async fn test_sdk_config_crud_does_not_require_or_reload_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_test_app_state(tmp.path());
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
+        .unwrap();
+    assert!(state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .is_none());
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": "config-only",
+        "disabled": false,
+        "forbidden_tools": [],
+        "tool_meta": {},
+        "server_parameters": {
+            "command": "${input:missing-command}",
+            "args": [],
+            "env": { "TOKEN": "${input:missing-secret}" }
+        }
+    }))
+    .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, config)
+        .await
+        .unwrap();
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "config-only"));
+    assert!(state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .is_none());
+
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "config-only")
+        .await
+        .unwrap();
+    assert!(!state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "config-only"));
+}
+
+#[tokio::test]
 async fn test_config_io_export_rejects_unknown_selected_servers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1301,7 +2537,7 @@ async fn test_config_io_export_does_not_overwrite_target_when_source_is_corrupt(
 }
 
 #[tokio::test]
-async fn test_cli_native_import_syncs_inputs_before_servers_with_placeholders() {
+async fn test_cli_native_import_persists_inputs_and_server_without_runtime_resolution() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let import_path = tmp.path().join("import-with-input.json");
@@ -1353,10 +2589,24 @@ async fn test_cli_native_import_syncs_inputs_before_servers_with_placeholders() 
     assert_eq!(import_result.servers_imported, 1);
     assert_eq!(import_result.inputs_imported, 1);
     assert_eq!(imported_inputs[0].id(), "node-command");
-    assert!(runtime
-        .synced_sdk_server_names()
-        .await
-        .contains("input-backed-server"));
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "input-backed-server"));
+    assert!(
+        !runtime
+            .synced_sdk_server_names()
+            .await
+            .contains("input-backed-server"),
+        "config import must defer runtime rendering to reload/start"
+    );
+    assert!(
+        !runtime.inputs.read().await.contains_key("node-command"),
+        "config import must persist input definitions without synchronizing runtime sessions"
+    );
 }
 
 // ── SDK Computer MCP lifecycle (requires Node.js) ──
@@ -1778,7 +3028,7 @@ async fn test_input_definitions_crud() {
 }
 
 #[tokio::test]
-async fn test_mcp_reload_surfaces_missing_input_and_retries_after_keychain_update() {
+async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     inputs::add_or_update_input_core(
@@ -1797,25 +3047,32 @@ async fn test_mcp_reload_surfaces_missing_input_and_retries_after_keychain_updat
     let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "stdio",
         "name": "runtime-input-reload",
-        "disabled": true,
+        "disabled": false,
         "server_parameters": {
-            "command": "echo",
-            "args": ["${input:runtime-token}"],
-            "env": {}
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": {
+                "RUNTIME_TOKEN": "${input:runtime-token}"
+            }
         }
     }))
     .unwrap();
 
-    let error = mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, server.clone())
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "runtime-input-reload")
         .await
         .unwrap_err();
     assert!(matches!(
-        error,
-        RuntimeActionError::MissingInput {
-            input_id,
-            env_hint,
-            ..
-        } if input_id == "runtime-token" && env_hint == "A2C_INPUT_RUNTIME_TOKEN"
+        &error,
+        RuntimeActionError::RuntimeError { message }
+            if message.contains("Server not found: runtime-input-reload")
     ));
 
     inputs::set_input_value_core(
@@ -1826,7 +3083,15 @@ async fn test_mcp_reload_surfaces_missing_input_and_retries_after_keychain_updat
     )
     .await
     .unwrap();
-    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, server)
+    state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .reload()
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "runtime-input-reload")
         .await
         .unwrap();
 

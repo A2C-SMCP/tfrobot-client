@@ -14,6 +14,7 @@ import {
 } from '@/stores/computerStore';
 import { useSkillStore } from '@/stores/skillStore';
 import { useRuntimeStore } from '@/stores/runtimeStore';
+import { useSdkConfigStore } from '@/stores/sdkConfigStore';
 
 function runtimeActionsForTest(
   lifecycle: ComputerRuntimeSnapshot['lifecycle'],
@@ -73,6 +74,7 @@ export function resetAllStores() {
     useComputerStore,
     useSkillStore,
     useRuntimeStore,
+    useSdkConfigStore,
   ];
 
   for (const store of stores) {

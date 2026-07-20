@@ -273,6 +273,9 @@
   },
   "mcp": {
     "servers": "MCP Servers",
+    "configTitle": "MCP Configuration",
+    "runtimeTitle": "MCP Runtime",
+    "configRevision": "Config revision",
     "addServer": "Add Server",
     "editServer": "Edit Server",
     "startAll": "Start All",
@@ -281,6 +284,15 @@
     "confirmRemove": "Are you sure you want to remove this server?",
     "importConfig": "Import Config",
     "exportConfig": "Export Config",
+    "validateConfig": "Validate Schema",
+    "bundledConfigHint": "This declaration shares a name with an installed plugin bundle; its config declaration remains editable.",
+    "readOnlyConfigHint": "This declaration comes from the read-only {{origin}} scope and cannot be edited here.",
+    "validation": {
+      "schemaOnlyTitle": "Schema validation only",
+      "schemaOnlyDescription": "Validation checks the SDK-owned configuration structure. It does not check commands, paths, secrets, inputs, marketplaces, plugins, or MCP server runtime availability.",
+      "valid": "The SDK configuration schema is valid.",
+      "invalid": "The SDK configuration has {{count}} schema error(s)."
+    },
     "status": {
       "running": "Running",
       "stopped": "Stopped",
@@ -289,12 +301,15 @@
     "table": {
       "name": "Name",
       "source": "Source",
+      "transport": "Transport",
       "status": "Status",
       "message": "Message",
       "actions": "Actions"
     },
     "source": {
-      "user": "User"
+      "user": "User",
+      "bundled": "Bundled",
+      "trusted": "Trusted"
     },
     "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
     "actions": {
