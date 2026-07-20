@@ -12,15 +12,19 @@ use common::{
 };
 use http_body_util::Full;
 use hyper::body::Bytes;
-use socketioxide::extract::{AckSender, SocketRef};
+use socketioxide::extract::{AckSender, Data, SocketRef};
 use socketioxide::SocketIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
-use tfrobot_client_lib::commands::{config_io, debug, inputs, sdk_config};
+use tfrobot_client_lib::commands::{
+    config_io,
+    dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
+    debug, inputs, sdk_config,
+};
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -105,6 +109,7 @@ struct SmcpSyncStats {
     join_events: AtomicUsize,
     update_config_events: AtomicUsize,
     update_tool_list_events: AtomicUsize,
+    update_tool_list_computers: Mutex<Vec<String>>,
 }
 
 impl SmcpSyncStats {
@@ -114,6 +119,14 @@ impl SmcpSyncStats {
 
     fn update_config_events(&self) -> usize {
         self.update_config_events.load(Ordering::SeqCst)
+    }
+
+    fn update_tool_list_events(&self) -> usize {
+        self.update_tool_list_events.load(Ordering::SeqCst)
+    }
+
+    fn update_tool_list_computers(&self) -> Vec<String> {
+        self.update_tool_list_computers.lock().unwrap().clone()
     }
 }
 
@@ -137,11 +150,23 @@ async fn start_sync_capture_smcp_server() -> (String, Arc<SmcpSyncStats>) {
         });
 
         let tool_stats = connect_stats.clone();
-        socket.on(SERVER_UPDATE_TOOL_LIST, move || {
-            tool_stats
-                .update_tool_list_events
-                .fetch_add(1, Ordering::SeqCst);
-        });
+        socket.on(
+            SERVER_UPDATE_TOOL_LIST,
+            move |Data(data): Data<serde_json::Value>| {
+                let computer = data["computer"]
+                    .as_str()
+                    .expect("tool-list update should identify its Computer")
+                    .to_string();
+                tool_stats
+                    .update_tool_list_computers
+                    .lock()
+                    .unwrap()
+                    .push(computer);
+                tool_stats
+                    .update_tool_list_events
+                    .fetch_add(1, Ordering::SeqCst);
+            },
+        );
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -193,7 +218,9 @@ async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("runtime should exist");
-    runtime.start().await.expect("start runtime");
+    if !runtime.is_running().await {
+        runtime.start().await.expect("start runtime");
+    }
     runtime
         .connect_smcp_socketio(
             server_url,
@@ -608,6 +635,127 @@ async fn test_connected_config_crud_does_not_sync_or_reload_runtime() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(stats.update_config_events(), config_events_before);
+}
+
+#[tokio::test]
+async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    let initial_snapshot = runtime.runtime_snapshot().await;
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("full-chain-echo"),
+    )
+    .await
+    .unwrap();
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "full-chain-echo"));
+    assert!(!runtime
+        .sdk_mcp_server_names()
+        .await
+        .contains("full-chain-echo"));
+
+    runtime.reload().await.unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+        .await
+        .unwrap();
+    let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(tools
+        .iter()
+        .any(|tool| tool.name == "full-chain-echo__echo"));
+    let call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "full-chain-echo__echo",
+        serde_json::json!({ "message": "TFRC-67 full chain" }),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(call.success);
+
+    let (server_url, stats) = start_sync_capture_smcp_server().await;
+    connect_runtime_to_mock_robot(&state, &server_url).await;
+    wait_for_sync_event("mock robot never observed the SMCP join event", || {
+        stats.join_events() == 1
+    })
+    .await;
+    let tool_events_before_restart = stats.update_tool_list_events();
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+        .await
+        .unwrap();
+    wait_for_sync_event(
+        "MCP stop was not synchronized to the connected robot",
+        || stats.update_tool_list_events() > tool_events_before_restart,
+    )
+    .await;
+    let tool_events_after_stop = stats.update_tool_list_events();
+    assert!(
+        stats.update_tool_list_computers()[tool_events_before_restart..tool_events_after_stop]
+            .iter()
+            .all(|computer| computer == TEST_COMPUTER_NAME)
+    );
+
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+        .await
+        .unwrap();
+    wait_for_sync_event(
+        "MCP start was not synchronized to the connected robot",
+        || stats.update_tool_list_events() > tool_events_after_stop,
+    )
+    .await;
+    let tool_events_after_start = stats.update_tool_list_events();
+    assert!(
+        stats.update_tool_list_computers()[tool_events_after_stop..tool_events_after_start]
+            .iter()
+            .all(|computer| computer == TEST_COMPUTER_NAME)
+    );
+
+    let final_snapshot = runtime.runtime_snapshot().await;
+    assert!(final_snapshot.generation > initial_snapshot.generation);
+    assert!(final_snapshot.capability_revision > initial_snapshot.capability_revision);
+    assert_eq!(final_snapshot.active_mcp_servers, 1);
+    assert_eq!(final_snapshot.tools, 1);
+
+    let dashboard = get_dashboard_data_core(&state).await.unwrap();
+    let dashboard_computer = dashboard
+        .computers
+        .iter()
+        .find(|computer| computer.id == TEST_INSTANCE_ID)
+        .unwrap();
+    assert_eq!(dashboard_computer.runtime.tools, final_snapshot.tools);
+    assert_eq!(
+        dashboard_computer.runtime.capability_revision,
+        final_snapshot.capability_revision
+    );
+    let overview = get_computer_overview_data_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(overview.connected);
+    assert_eq!(overview.tools_count, final_snapshot.tools);
+    assert_eq!(
+        overview.runtime.config_revision,
+        final_snapshot.config_revision
+    );
+
+    runtime.disconnect_smcp_socketio().await.unwrap();
 }
 
 #[tokio::test]

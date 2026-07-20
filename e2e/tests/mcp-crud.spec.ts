@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { setupInvokeMock } from '../fixtures/mock-invoke';
 
-test.describe('MCP Server CRUD', () => {
+test.describe('MCP Server configuration', () => {
   test.beforeEach(async ({ page }) => {
     await setupInvokeMock(page);
     await page.goto('/');
@@ -15,7 +15,7 @@ test.describe('MCP Server CRUD', () => {
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({
-        cmd: 'get_mcp_servers',
+        cmd: 'get_computer_config_state',
         args: { instanceId: 'computer-a' },
       }));
   });
@@ -52,7 +52,7 @@ test.describe('MCP Server CRUD', () => {
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({
-        cmd: 'get_mcp_servers',
+        cmd: 'get_computer_config_state',
         args: { instanceId: 'computer-b' },
       }));
   });

@@ -108,6 +108,62 @@ const mockResponses: Record<string, unknown> = {
       },
     ],
   },
+  get_computer_config_state_by_instance: {
+    'computer-a': {
+      snapshot: {
+        version: 1,
+        revision: 'sha256:computer-a',
+        mcp: {
+          servers: [
+            {
+              name: 'computer-a-stdio-server',
+              origin: 'local',
+              writable: true,
+              trustedOrigin: false,
+              bundled: false,
+              config: {
+                type: 'Stdio',
+                name: 'computer-a-stdio-server',
+                disabled: false,
+                forbidden_tools: [],
+                tool_meta: {},
+                server_parameters: { command: 'node', args: [], env: {} },
+              },
+            },
+          ],
+        },
+        provenance: {},
+      },
+      validation: { valid: true, errors: [] },
+    },
+    'computer-b': {
+      snapshot: {
+        version: 1,
+        revision: 'sha256:computer-b',
+        mcp: {
+          servers: [
+            {
+              name: 'second-stdio-server',
+              origin: 'local',
+              writable: true,
+              trustedOrigin: false,
+              bundled: false,
+              config: {
+                type: 'Stdio',
+                name: 'second-stdio-server',
+                disabled: false,
+                forbidden_tools: [],
+                tool_meta: {},
+                server_parameters: { command: 'node', args: [], env: {} },
+              },
+            },
+          ],
+        },
+        provenance: {},
+      },
+      validation: { valid: true, errors: [] },
+    },
+  },
   get_dashboard_data: {
     computer_total: 2,
     computer_running: 2,
@@ -306,6 +362,13 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
           ? String((args as { instanceId: unknown }).instanceId)
           : 'computer-a';
         const byInstance = responses.get_mcp_servers_by_instance as Record<string, unknown> | undefined;
+        return byInstance?.[instanceId] ?? byInstance?.['computer-a'];
+      }
+      if (cmd === 'get_computer_config_state') {
+        const instanceId = typeof args === 'object' && args !== null && 'instanceId' in args
+          ? String((args as { instanceId: unknown }).instanceId)
+          : 'computer-a';
+        const byInstance = responses.get_computer_config_state_by_instance as Record<string, unknown> | undefined;
         return byInstance?.[instanceId] ?? byInstance?.['computer-a'];
       }
       return responses[cmd];
