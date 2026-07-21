@@ -1,7 +1,7 @@
 use crate::services::logger::{LogEntry, LogFilter};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    CallToolResult, Content, RawContent, Resource, Tool,
+    BundleId, CallToolResult, Content, RawContent, Resource, ServerName, Tool,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -20,6 +20,8 @@ pub struct ToolInfo {
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
     pub server: String,
+    #[serde(rename = "bundleId", skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<BundleId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +120,7 @@ pub async fn get_available_tools_core(
             let auto_apply = a2c_meta
                 .and_then(|m| m.get("auto_apply"))
                 .and_then(|v| v.as_bool());
+            let bundle_id = tool_bundle_id(&t, &running_servers);
 
             ToolInfo {
                 display_name: display_tool_name(t.name.as_ref()),
@@ -125,6 +128,7 @@ pub async fn get_available_tools_core(
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
                 server,
+                bundle_id,
                 tags,
                 auto_apply,
             }
@@ -146,19 +150,22 @@ fn display_tool_name(exposed_name: &str) -> String {
 pub async fn get_debug_resources(
     state: State<'_, AppState>,
     instance_id: String,
-    server_name: String,
+    bundle_id: BundleId,
     cursor: Option<String>,
 ) -> Result<DebugResourcesResponse, String> {
     let instance_id = require_instance_id(&instance_id)?.to_string();
-    let server_name = require_server_name(&server_name)?.to_string();
 
     let runtime = state
         .computer_registry
         .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let server_name = runtime
+        .mcp_server_display_name(&bundle_id)
+        .await
+        .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
-    let (resources, next_cursor) = runtime.resources(&server_name, cursor).await?;
+    let (resources, next_cursor) = runtime.resources(&bundle_id, cursor).await?;
 
     Ok(DebugResourcesResponse {
         resources: resources
@@ -437,24 +444,37 @@ fn redact_sensitive_line(line: &str) -> String {
     }
 }
 
-fn running_mcp_servers(statuses: Vec<(String, bool, String)>) -> Vec<String> {
+fn running_mcp_servers(
+    statuses: Vec<(BundleId, ServerName, bool, String)>,
+) -> Vec<(BundleId, ServerName)> {
     statuses
         .into_iter()
-        .filter_map(|(name, running, _)| running.then_some(name))
+        .filter_map(|(bundle_id, name, running, _)| running.then_some((bundle_id, name)))
         .collect()
 }
 
-fn tool_server(tool: &Tool, running_servers: &[String]) -> String {
+fn tool_server(tool: &Tool, running_servers: &[(BundleId, ServerName)]) -> String {
     tool.meta
         .as_ref()
         .and_then(|m| m.get("server_name"))
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
-        .or_else(|| (running_servers.len() == 1).then(|| running_servers[0].clone()))
+        .or_else(|| (running_servers.len() == 1).then(|| running_servers[0].1.clone()))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn resolve_tool_server(tools: &[Tool], running_servers: &[String], tool_name: &str) -> String {
+fn tool_bundle_id(tool: &Tool, running_servers: &[(BundleId, ServerName)]) -> Option<BundleId> {
+    tool.name
+        .split_once("__")
+        .and_then(|(raw, _)| BundleId::try_from(raw).ok())
+        .or_else(|| (running_servers.len() == 1).then(|| running_servers[0].0.clone()))
+}
+
+fn resolve_tool_server(
+    tools: &[Tool],
+    running_servers: &[(BundleId, ServerName)],
+    tool_name: &str,
+) -> String {
     tools
         .iter()
         .find(|tool| tool.name.as_ref() == tool_name)
@@ -468,14 +488,6 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
         return Err("instance_id is required".to_string());
     }
     Ok(instance_id)
-}
-
-fn require_server_name(server_name: &str) -> Result<&str, String> {
-    let server_name = server_name.trim();
-    if server_name.is_empty() {
-        return Err("server_name is required".to_string());
-    }
-    Ok(server_name)
 }
 
 /// Get tool call history

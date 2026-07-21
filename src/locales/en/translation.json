@@ -321,6 +321,9 @@
     "form": {
       "type": "Server Type",
       "name": "Server Name",
+      "bundleId": "Bundle ID",
+      "bundleIdHint": "Stable server identity. Leave blank to let the SDK derive it; it cannot be changed after creation.",
+      "bundleIdPlaceholder": "Optional, e.g. filesystem",
       "nameRequired": "Server name is required",
       "command": "Command",
       "commandRequired": "Command is required",
@@ -340,7 +343,6 @@
       "forbiddenToolsPlaceholder": "Enter tool names to disable",
       "defaultToolMeta": "Default Tool Metadata",
       "defaultToolMetaAutoApply": "Auto Apply",
-      "defaultToolMetaAlias": "Alias Prefix",
       "defaultToolMetaTags": "Tags",
       "defaultToolMetaTagsPlaceholder": "Enter tags",
       "toolMeta": "Per-Tool Metadata (JSON)",
@@ -498,6 +500,8 @@
     "noResources": "No resources available",
     "selectResourceServer": "Select resource server",
     "noRunningServers": "No running MCP servers",
+    "authorizationRequired": "Authorization required",
+    "toolErrorCode": "Tool error code: {{code}}",
     "loadMoreResources": "Load more"
   },
   "logs": {

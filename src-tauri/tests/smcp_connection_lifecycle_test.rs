@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use futures_util::FutureExt;
 use http_body_util::Full;
@@ -17,8 +18,7 @@ use socketioxide::SocketIo;
 use tf_rust_socketio::asynchronous::{Client, ClientBuilder};
 use tf_rust_socketio::{Payload, TransportType};
 use tfrobot_client_lib::commands::computer::{
-    delete_computer_instance_core, list_computer_instances_core, rename_computer_instance_core,
-    RenameComputerInstanceRequest,
+    delete_computer_instance_core, rename_computer_instance_core, RenameComputerInstanceRequest,
 };
 use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_connection_target_core, reconnect_with_token,
@@ -925,7 +925,7 @@ async fn failed_delete_quarantine_preserves_joined_runtime_and_connection() {
 }
 
 #[tokio::test]
-async fn failed_delete_commit_preserves_connection_refresh_profile_and_storage() {
+async fn delete_succeeds_while_socket_reference_is_shared() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
@@ -938,7 +938,7 @@ async fn failed_delete_commit_preserves_connection_refresh_profile_and_storage()
     .await
     .expect("register MCP server");
     runtime
-        .start_mcp_server("commit-echo")
+        .start_mcp_server(&BundleId::try_from("commit-echo").unwrap())
         .await
         .expect("start MCP server");
     assert!(
@@ -946,7 +946,7 @@ async fn failed_delete_commit_preserves_connection_refresh_profile_and_storage()
             .mcp_server_statuses()
             .await
             .iter()
-            .any(|(name, running, _)| name == "commit-echo" && *running),
+            .any(|(_bundle_id, name, running, _)| name == "commit-echo" && *running),
         "commit MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -979,64 +979,33 @@ async fn failed_delete_commit_preserves_connection_refresh_profile_and_storage()
     let held_socket = runtime
         .clone_sdk_socketio_client_for_test()
         .await
-        .expect("hold an SDK socket reference so commit teardown fails");
-    let incarnation = runtime.runtime_snapshot().await.incarnation;
+        .expect("hold an SDK socket reference across high-level teardown");
     let storage_root = state
         .config
         .computer_instance_storage_root(TEST_INSTANCE_ID);
     std::fs::create_dir_all(&storage_root).expect("create instance storage");
     std::fs::write(storage_root.join("marker.txt"), b"preserve me").expect("write storage marker");
 
-    let error = delete_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
+    delete_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
         .await
-        .expect_err("commit teardown should fail while socket is shared");
-    assert!(error.contains("still has shared references"));
-
-    let preserved = state
+        .expect("shared references must not block SDK-owned teardown");
+    assert!(state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
-        .expect("failed commit should preserve runtime");
-    assert_eq!(preserved.runtime_snapshot().await.incarnation, incarnation);
-    assert_eq!(
-        preserved.runtime_state().await,
-        ComputerRuntimeState::JoinedOffice,
-        "pre-commit deletion failure left the SDK office"
-    );
-    assert!(
-        preserved.is_connected().await,
-        "pre-commit deletion failure lost the business connection"
-    );
-    assert!(preserved
-        .connection_handle_for_test()
-        .read_owned()
-        .await
-        .is_some());
-    assert!(preserved.has_refresh_task_for_test().await);
-    assert!(
-        preserved
-            .mcp_server_statuses()
-            .await
-            .iter()
-            .any(|(name, running, _)| name == "commit-echo" && *running),
-        "pre-commit deletion failure stopped MCP servers"
-    );
-    assert!(state.config.get_computer_instance(TEST_INSTANCE_ID).is_ok());
-    assert_eq!(
-        std::fs::read(storage_root.join("marker.txt")).expect("read restored marker"),
-        b"preserve me"
-    );
-    assert_eq!(stats.active(), 1);
-    assert_eq!(
-        stats.leave_events(),
-        0,
-        "preflight failure emitted leave_office"
-    );
-
+        .is_none());
+    assert!(state
+        .config
+        .get_computer_instance(TEST_INSTANCE_ID)
+        .is_err());
+    assert!(!storage_root.exists());
+    wait_for(
+        "shared-reference delete left the SMCP socket active",
+        || stats.active() == 0,
+    )
+    .await;
+    assert_eq!(stats.leave_events(), 1);
     drop(held_socket);
-    delete_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
-        .await
-        .expect("cleanup delete");
 }
 
 #[tokio::test]
@@ -1053,7 +1022,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
     .await
     .expect("register cleanup MCP server");
     runtime
-        .start_mcp_server("cleanup-echo")
+        .start_mcp_server(&BundleId::try_from("cleanup-echo").unwrap())
         .await
         .expect("start cleanup MCP server");
     assert!(
@@ -1061,7 +1030,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
             .mcp_server_statuses()
             .await
             .iter()
-            .any(|(name, running, _)| name == "cleanup-echo" && *running),
+            .any(|(_bundle_id, name, running, _)| name == "cleanup-echo" && *running),
         "cleanup MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1136,7 +1105,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
 }
 
 #[tokio::test]
-async fn failed_close_preserves_retry_snapshot_but_not_business_connection() {
+async fn close_succeeds_while_socket_reference_is_shared() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
@@ -1177,110 +1146,22 @@ async fn failed_close_preserves_retry_snapshot_but_not_business_connection() {
     };
     *runtime.connection_handle_for_test().write_owned().await = Some(connection.clone());
 
-    let error = close_smcp_connection(&runtime, connection.clone())
-        .await
-        .expect_err("close should fail while another socket reference is held");
-
-    assert!(error.contains("still has shared references"));
-    assert!(
-        runtime
-            .connection_handle_for_test()
-            .read_owned()
-            .await
-            .is_some(),
-        "failed close must preserve the business connection snapshot"
-    );
-    assert!(!runtime.is_connected().await);
-    assert!(runtime.connection_status().await.is_none());
-    assert_eq!(stats.active(), 1);
-
-    let generation = runtime.runtime_generation();
-    let stop_error = runtime
-        .try_shutdown()
-        .await
-        .expect_err("stop must fail while the SDK socket is still shared");
-    assert!(stop_error.contains("still has shared references"));
-    assert_eq!(runtime.runtime_generation(), generation);
-    assert!(runtime
-        .connection_handle_for_test()
-        .read_owned()
-        .await
-        .is_some());
-    assert!(!runtime.is_connected().await);
-    assert!(runtime.connection_status().await.is_none());
-    assert_eq!(stats.active(), 1);
-
-    let _ = runtime.start().await;
-    assert_eq!(
-        runtime.runtime_generation(),
-        generation,
-        "start after a failed stop must not install a replacement runtime"
-    );
-    assert!(runtime
-        .connection_handle_for_test()
-        .read_owned()
-        .await
-        .is_some());
-    assert_eq!(stats.active(), 1);
-
-    let reload_error = runtime
-        .reload()
-        .await
-        .expect_err("reload must not replace a handle while its socket is still shared");
-    assert!(reload_error
-        .to_string()
-        .contains("Failed to clear SMCP connection before rebuilding SDK Computer"));
-    assert_eq!(runtime.runtime_generation(), generation);
-    assert!(runtime
-        .connection_handle_for_test()
-        .read_owned()
-        .await
-        .is_some());
-    assert!(!runtime.is_connected().await);
-    assert!(runtime.connection_status().await.is_none());
-
-    state
-        .config
-        .remove_computer_instance(TEST_INSTANCE_ID)
-        .expect("remove persisted Computer profile");
-    let reconcile_error = list_computer_instances_core(&state)
-        .await
-        .expect_err("reconciliation must retain a runtime whose socket cannot be closed");
-    assert!(reconcile_error.contains("still has shared references"));
-    assert!(
-        state
-            .computer_registry
-            .runtime(TEST_INSTANCE_ID)
-            .await
-            .is_some(),
-        "failed reconciliation must preserve the runtime for retry"
-    );
-
-    drop(held_socket);
     close_smcp_connection(&runtime, connection)
         .await
-        .expect("close should succeed after releasing shared socket reference");
+        .expect("shared references must not block SDK-owned disconnect");
     assert!(runtime
         .connection_handle_for_test()
         .read_owned()
         .await
         .is_none());
-    wait_for("SMCP socket should be disconnected after retry", || {
+    wait_for("SMCP socket should be disconnected", || {
         stats.active() == 0 && stats.disconnected() == 1
     })
     .await;
-    let statuses = list_computer_instances_core(&state)
+    drop(held_socket);
+    delete_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
         .await
-        .expect("reconciliation should succeed after socket cleanup");
-    assert!(statuses.is_empty());
-    assert!(
-        state
-            .computer_registry
-            .runtime(TEST_INSTANCE_ID)
-            .await
-            .is_none(),
-        "runtime should only be removed after confirmed shutdown"
-    );
+        .expect("cleanup delete");
 }
 
 #[tokio::test]

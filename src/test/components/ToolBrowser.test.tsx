@@ -32,6 +32,10 @@ vi.mock('@/components/DebugPanel/ToolCallTest', () => ({
   ToolCallTest: () => <div data-testid="tool-call-test" />,
 }));
 
+const { ToolCallResultView } = await vi.importActual<
+  typeof import('@/components/DebugPanel/ToolCallTest')
+>('@/components/DebugPanel/ToolCallTest');
+
 describe('ToolBrowser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -99,5 +103,20 @@ describe('ToolBrowser', () => {
     expect(screen.getAllByText('echo').length).toBeGreaterThan(0);
     expect(screen.queryByText('unknown')).not.toBeInTheDocument();
     expect(screen.queryByText('All Servers')).not.toBeInTheDocument();
+  });
+
+  it('renders OAuth authorization-required results from the SDK wire contract', () => {
+    render(<ToolCallResultView response={{
+      success: false,
+      duration_ms: 12,
+      result: {
+        isError: true,
+        _meta: { error_code: 4006, mcp_server: 'oauth-bundle' },
+        content: [{ type: 'text', text: 'Authorization required' }],
+      },
+    }} />);
+
+    expect(screen.getAllByText('Authorization required').length).toBeGreaterThan(0);
+    expect(screen.getByText('Tool error code: 4006')).toBeInTheDocument();
   });
 });

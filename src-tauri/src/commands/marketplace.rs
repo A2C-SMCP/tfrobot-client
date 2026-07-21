@@ -1,8 +1,8 @@
 use crate::commands::inputs::{InputDefinition, PickOption};
-use crate::services::computer::McpServerManagedBy;
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
-use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
+use a2c_smcp::smcp_computer::mcp_clients::model::{BundleId, MCPServerInput, ServerName};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
@@ -12,7 +12,7 @@ use a2c_smcp::smcp_computer::skills::{MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR};
 use a2c_smcp::smcp_computer::{GovernanceDiagnostic, MarketplaceStatus, PluginStatus};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
@@ -316,8 +316,8 @@ pub async fn install_plugin_core(
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
-    // Install is intentionally inactive, but the SDK still requires hooks to enforce its
-    // zero-mutation bundled MCP name-conflict gate before recording installation intent.
+    // Install is intentionally inactive, but the SDK still requires hooks to resolve existing
+    // bundle dependencies before recording installation intent.
     let hooks = MarketplaceMcpHooks::for_plugin(
         state,
         instance_id,
@@ -325,7 +325,7 @@ pub async fn install_plugin_core(
         &request.plugin,
         UserMcpConflictPolicy::Reject,
     )
-    .await;
+    .await?;
     runtime
         .sdk_install_plugin(
             &plugin_id,
@@ -369,7 +369,7 @@ pub async fn enable_plugin_core(
         &request.plugin,
         UserMcpConflictPolicy::KeepUserServer,
     )
-    .await;
+    .await?;
     runtime
         .sdk_enable_plugin(
             &plugin_id,
@@ -413,7 +413,7 @@ pub async fn disable_plugin_core(
         &request.plugin,
         UserMcpConflictPolicy::Reject,
     )
-    .await;
+    .await?;
     runtime
         .sdk_disable_plugin(
             &plugin_id,
@@ -426,6 +426,7 @@ pub async fn disable_plugin_core(
         )
         .await
         .map_err(|error| error.to_string())?;
+    hooks.reclaim_unowned_plugin_servers(&runtime).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
 }
@@ -456,7 +457,7 @@ pub async fn uninstall_plugin_core(
         &request.plugin,
         UserMcpConflictPolicy::Reject,
     )
-    .await;
+    .await?;
     runtime
         .sdk_uninstall_plugin(
             &plugin_id,
@@ -469,6 +470,7 @@ pub async fn uninstall_plugin_core(
         )
         .await
         .map_err(|error| error.to_string())?;
+    hooks.reclaim_unowned_plugin_servers(&runtime).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
 }
@@ -497,11 +499,20 @@ async fn start_registered_plugin_servers_if_running(
         return Ok(());
     }
 
-    for name in hooks.registered_server_names().await {
-        runtime
-            .start_mcp_server(&name)
-            .await
-            .map_err(|error| error.to_string())?;
+    let running: HashSet<BundleId> = runtime
+        .mcp_server_statuses()
+        .await
+        .into_iter()
+        .filter_map(|(bundle_id, _, is_running, _)| is_running.then_some(bundle_id))
+        .collect();
+    let mut seen = HashSet::new();
+    for bundle_id in hooks.registered_server_ids().await {
+        if seen.insert(bundle_id.clone()) && !running.contains(&bundle_id) {
+            runtime
+                .start_mcp_server(&bundle_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
     }
 
     Ok(())
@@ -681,10 +692,12 @@ struct MarketplaceMcpHooks {
     instance_id: String,
     marketplace: String,
     plugin: String,
-    plugin_id: String,
     user_conflict_policy: UserMcpConflictPolicy,
-    existing_server_names: HashSet<String>,
-    registered_server_names: Arc<tokio::sync::Mutex<Vec<String>>>,
+    existing_servers: HashMap<BundleId, ServerName>,
+    independent_server_ids: HashSet<BundleId>,
+    registered_server_ids: Arc<tokio::sync::Mutex<Vec<BundleId>>>,
+    mounted_server_ids: Arc<tokio::sync::Mutex<HashSet<BundleId>>>,
+    preserved_registration_counts: Arc<tokio::sync::Mutex<HashMap<BundleId, usize>>>,
 }
 
 impl MarketplaceMcpHooks {
@@ -694,32 +707,42 @@ impl MarketplaceMcpHooks {
         marketplace: &str,
         plugin: &str,
         user_conflict_policy: UserMcpConflictPolicy,
-    ) -> Self {
+    ) -> Result<Self, String> {
         debug_assert!(!marketplace.trim().is_empty());
         debug_assert!(!plugin.trim().is_empty());
-        // Every server in the SDK snapshot is a real user declaration. `bundled` only reports
-        // that an installed plugin contributes the same name; it is not ownership metadata.
-        let mut existing_server_names =
-            if matches!(user_conflict_policy, UserMcpConflictPolicy::Reject) {
-                state
-                    .sdk_config
-                    .load(instance_id)
-                    .mcp
-                    .servers
-                    .into_iter()
-                    .map(|server| server.name)
-                    .collect::<HashSet<_>>()
-            } else {
-                HashSet::new()
-            };
+        // The SDK snapshot now projects enabled plugin servers too. Only non-bundled entries are
+        // independent declarations that can satisfy a plugin's bundle dependency.
+        let mut existing_servers = state
+            .sdk_config
+            .load(instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .filter(|server| !server.bundled)
+            .map(|server| (resolve_bundle_id(&server.config), server.name))
+            .collect::<HashMap<_, _>>();
+        let mut independent_server_ids = existing_servers.keys().cloned().collect::<HashSet<_>>();
+        independent_server_ids.extend(state
+            .sdk_config
+            .project_mcp_bundle_ids(instance_id)
+            .map_err(|error| {
+                format!(
+                    "Failed to inspect independent MCP declarations for Computer '{instance_id}': {error}"
+                )
+            })?);
+        for bundle_id in &independent_server_ids {
+            existing_servers
+                .entry(bundle_id.clone())
+                .or_insert_with(|| bundle_id.as_str().to_string());
+        }
         if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
-            for name in runtime.sdk_mcp_server_names().await {
-                if runtime.plugin_mcp_server_owner(&name).await.is_some() {
-                    existing_server_names.insert(name);
+            for (bundle_id, name) in runtime.synced_sdk_servers().await {
+                if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
+                    existing_servers.insert(bundle_id, name);
                 }
             }
         }
-        Self {
+        Ok(Self {
             config: state.config.clone(),
             sdk_config: state.sdk_config.clone(),
             registry: state.computer_registry.clone(),
@@ -728,15 +751,44 @@ impl MarketplaceMcpHooks {
             instance_id: instance_id.to_string(),
             marketplace: marketplace.to_string(),
             plugin: plugin.to_string(),
-            plugin_id: format!("{plugin}@{marketplace}"),
             user_conflict_policy,
-            existing_server_names,
-            registered_server_names: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-        }
+            existing_servers,
+            independent_server_ids,
+            registered_server_ids: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            mounted_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            preserved_registration_counts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        })
     }
 
-    async fn registered_server_names(&self) -> Vec<String> {
-        self.registered_server_names.lock().await.clone()
+    async fn registered_server_ids(&self) -> Vec<BundleId> {
+        self.registered_server_ids.lock().await.clone()
+    }
+
+    async fn preserve_existing_registration(&self, bundle_id: BundleId) {
+        self.registered_server_ids
+            .lock()
+            .await
+            .push(bundle_id.clone());
+        *self
+            .preserved_registration_counts
+            .lock()
+            .await
+            .entry(bundle_id)
+            .or_default() += 1;
+    }
+
+    async fn reclaim_unowned_plugin_servers(
+        &self,
+        runtime: &crate::services::computer::ComputerInstanceRuntime,
+    ) -> Result<(), String> {
+        for bundle_id in runtime.tracked_plugin_mcp_server_ids().await {
+            if !self.independent_server_ids.contains(&bundle_id)
+                && runtime.plugin_mcp_server_owner(&bundle_id).await.is_none()
+            {
+                runtime.remove_plugin_server(&bundle_id).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -748,24 +800,39 @@ enum UserMcpConflictPolicy {
 
 #[async_trait]
 impl McpInstallHooks for MarketplaceMcpHooks {
-    fn existing_server_names(&self) -> HashSet<String> {
-        self.existing_server_names.clone()
+    fn existing_servers(&self) -> HashMap<BundleId, ServerName> {
+        self.existing_servers.clone()
     }
 
     async fn register_server(&self, cfg: MCPServerConfig) -> Result<(), McpHookError> {
         let name = cfg.name().to_string();
+        let bundle_id = resolve_bundle_id(&cfg);
+        if self.independent_server_ids.contains(&bundle_id)
+            && matches!(
+                self.user_conflict_policy,
+                UserMcpConflictPolicy::KeepUserServer
+            )
+        {
+            // The pre-enable snapshot is authoritative here: after the SDK writes
+            // enabledPlugins=true, its merged read projection may show the plugin origin even
+            // though this independent declaration already satisfied the dependency.
+            self.preserve_existing_registration(bundle_id).await;
+            return Ok(());
+        }
         if self
             .sdk_config
             .load(&self.instance_id)
             .mcp
             .servers
             .into_iter()
-            .any(|server| server.name == name)
+            .filter(|server| !server.bundled)
+            .any(|server| resolve_bundle_id(&server.config) == bundle_id)
         {
             if matches!(
                 self.user_conflict_policy,
                 UserMcpConflictPolicy::KeepUserServer
             ) {
+                self.preserve_existing_registration(bundle_id).await;
                 return Ok(());
             }
             return Err(McpHookError(format!(
@@ -775,28 +842,16 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                 self.marketplace,
             )));
         }
-        let managed_by = McpServerManagedBy::Plugin {
-            marketplace: self.marketplace.clone(),
-            plugin: self.plugin.clone(),
-            plugin_id: (!self.plugin_id.is_empty()).then(|| self.plugin_id.clone()),
-        };
         match self.registry.runtime(&self.instance_id).await {
             Some(runtime) => {
-                if runtime.sdk_mcp_server_names().await.contains(&name) {
-                    if let Some(owner) = runtime.plugin_mcp_server_owner(&name).await {
-                        if same_plugin_owner(&owner, &managed_by) {
-                            self.registered_server_names.lock().await.push(name);
-                            return Ok(());
-                        }
-                        return Err(McpHookError(format!(
-                            "MCP server '{}' is already managed by another Marketplace plugin",
-                            name
-                        )));
-                    }
-                    if matches!(
-                        self.user_conflict_policy,
-                        UserMcpConflictPolicy::KeepUserServer
-                    ) {
+                if runtime.sdk_mcp_server_ids().await.contains(&bundle_id) {
+                    if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some()
+                        || matches!(
+                            self.user_conflict_policy,
+                            UserMcpConflictPolicy::KeepUserServer
+                        )
+                    {
+                        self.preserve_existing_registration(bundle_id).await;
                         return Ok(());
                     }
                     return Err(McpHookError(format!(
@@ -806,19 +861,15 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                         self.marketplace,
                     )));
                 }
-                if let Some(owner) = runtime.plugin_mcp_server_owner(&name).await {
-                    if !same_plugin_owner(&owner, &managed_by) {
-                        return Err(McpHookError(format!(
-                            "MCP server '{}' is already managed by another Marketplace plugin",
-                            name
-                        )));
-                    }
-                }
                 runtime
-                    .add_or_update_plugin_server(cfg, managed_by)
+                    .add_or_update_plugin_server(cfg)
                     .await
                     .map_err(McpHookError)?;
-                self.registered_server_names.lock().await.push(name);
+                self.mounted_server_ids
+                    .lock()
+                    .await
+                    .insert(bundle_id.clone());
+                self.registered_server_ids.lock().await.push(bundle_id);
                 Ok(())
             }
             None => Err(McpHookError(format!(
@@ -828,12 +879,38 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         }
     }
 
-    async fn remove_server(&self, name: &str) -> Result<(), McpHookError> {
+    async fn remove_server(&self, bundle_id: &BundleId) -> Result<(), McpHookError> {
         match self.registry.runtime(&self.instance_id).await {
-            Some(runtime) => runtime
-                .remove_plugin_server(name)
-                .await
-                .map_err(McpHookError),
+            Some(runtime) => {
+                let mut preserved = self.preserved_registration_counts.lock().await;
+                if let Some(count) = preserved.get_mut(bundle_id) {
+                    *count -= 1;
+                    if *count == 0 {
+                        preserved.remove(bundle_id);
+                    }
+                    return Ok(());
+                }
+                drop(preserved);
+                if self.independent_server_ids.contains(bundle_id) {
+                    return Ok(());
+                }
+                if matches!(
+                    self.user_conflict_policy,
+                    UserMcpConflictPolicy::KeepUserServer
+                ) && !self.mounted_server_ids.lock().await.contains(bundle_id)
+                {
+                    return Ok(());
+                }
+                if !runtime.has_tracked_plugin_mcp_server(bundle_id).await {
+                    // This plugin only depended on an independently declared bundle. Disabling
+                    // the plugin must not unmount that declaration from the Computer runtime.
+                    return Ok(());
+                }
+                runtime
+                    .remove_plugin_server(bundle_id)
+                    .await
+                    .map_err(McpHookError)
+            }
             None => Err(McpHookError(format!(
                 "Computer instance not found while removing Marketplace MCP server: {}",
                 self.instance_id
@@ -873,21 +950,6 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         .await
         .map_err(McpHookError)?;
         Ok(())
-    }
-}
-
-fn same_plugin_owner(left: &McpServerManagedBy, right: &McpServerManagedBy) -> bool {
-    match (left, right) {
-        (
-            McpServerManagedBy::Plugin {
-                plugin_id: left_id, ..
-            },
-            McpServerManagedBy::Plugin {
-                plugin_id: right_id,
-                ..
-            },
-        ) => left_id == right_id,
-        _ => false,
     }
 }
 
@@ -937,6 +999,10 @@ mod tests {
     use crate::services::settings::SettingsService;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
+
+    fn audit_bundle_id() -> BundleId {
+        BundleId::try_from("audit-mcp").unwrap()
+    }
 
     fn test_state_without_runtime(path: &std::path::Path) -> AppState {
         let config = ConfigService::new(path.to_path_buf()).unwrap();
@@ -1010,7 +1076,8 @@ mod tests {
             "audit",
             UserMcpConflictPolicy::Reject,
         )
-        .await;
+        .await
+        .unwrap();
 
         hooks
             .register_server(server_config("audit-mcp"))
@@ -1028,16 +1095,20 @@ mod tests {
             .runtime(TEST_INSTANCE_ID)
             .await
             .unwrap();
-        assert!(runtime.plugin_mcp_server_owner("audit-mcp").await.is_some());
+        assert!(runtime
+            .has_tracked_plugin_mcp_server(&audit_bundle_id())
+            .await);
 
-        hooks.remove_server("audit-mcp").await.unwrap();
+        hooks.remove_server(&audit_bundle_id()).await.unwrap();
         assert!(state
             .sdk_config
             .load(TEST_INSTANCE_ID)
             .mcp
             .servers
             .is_empty());
-        assert!(runtime.plugin_mcp_server_owner("audit-mcp").await.is_none());
+        assert!(!runtime
+            .has_tracked_plugin_mcp_server(&audit_bundle_id())
+            .await);
     }
 
     #[tokio::test]
@@ -1052,7 +1123,8 @@ mod tests {
             "audit",
             UserMcpConflictPolicy::Reject,
         )
-        .await;
+        .await
+        .unwrap();
 
         let error = hooks
             .register_server(server_config("audit-mcp"))
@@ -1077,9 +1149,10 @@ mod tests {
             "audit",
             UserMcpConflictPolicy::Reject,
         )
-        .await;
+        .await
+        .unwrap();
 
-        let error = hooks.remove_server("audit-mcp").await.unwrap_err();
+        let error = hooks.remove_server(&audit_bundle_id()).await.unwrap_err();
 
         assert!(error
             .0
@@ -1099,9 +1172,10 @@ mod tests {
             "audit",
             UserMcpConflictPolicy::KeepUserServer,
         )
-        .await;
+        .await
+        .unwrap();
 
-        assert!(!hooks.existing_server_names().contains("audit-mcp"));
+        assert!(hooks.existing_servers().contains_key(&audit_bundle_id()));
         hooks
             .register_server(server_config("audit-mcp"))
             .await

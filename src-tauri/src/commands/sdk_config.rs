@@ -1,5 +1,6 @@
 use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
 use a2c_smcp::smcp_computer::settings::SettingsValidationError;
@@ -34,6 +35,7 @@ pub struct SdkMcpConfigView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SdkMcpServerView {
+    pub bundle_id: String,
     pub name: String,
     pub origin: String,
     pub writable: bool,
@@ -120,7 +122,9 @@ impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
                     .into_iter()
                     .map(|server| {
                         let origin = server.origin;
+                        let bundle_id = resolve_bundle_id(&server.config).into_string();
                         SdkMcpServerView {
+                            bundle_id,
                             name: server.name,
                             origin: provenance_scope_name(origin).to_string(),
                             writable: is_writable_provenance(origin),
@@ -187,9 +191,11 @@ impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
 
 fn provenance_scope_name(scope: ProvenanceScope) -> &'static str {
     match scope {
+        ProvenanceScope::Plugin => "plugin",
         ProvenanceScope::User => "user",
         ProvenanceScope::Project => "project",
         ProvenanceScope::Local => "local",
+        ProvenanceScope::Embed => "embed",
         ProvenanceScope::Flag => "flag",
         ProvenanceScope::Policy => "policy",
         ProvenanceScope::Intent => "intent",
@@ -407,6 +413,8 @@ mod tests {
             assert!(is_writable_provenance(origin));
         }
         for origin in [
+            ProvenanceScope::Plugin,
+            ProvenanceScope::Embed,
             ProvenanceScope::Flag,
             ProvenanceScope::Policy,
             ProvenanceScope::Intent,

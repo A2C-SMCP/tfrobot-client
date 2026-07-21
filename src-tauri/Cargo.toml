@@ -21,7 +21,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "91b5758bf4162c0a02308e8426114ddbda2bb003", features = ["computer"] }
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

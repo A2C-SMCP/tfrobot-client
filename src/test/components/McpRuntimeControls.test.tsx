@@ -4,6 +4,7 @@ import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 
 const mockStore = {
   servers: [{
+    bundleId: 'runtime-server-id',
     name: 'runtime-server',
     running: false,
     status_message: 'Stopped',
@@ -56,7 +57,7 @@ describe('McpRuntimeControls', () => {
     fireEvent.click(screen.getByTitle('Start'));
 
     await waitFor(() => {
-      expect(mockStore.startServer).toHaveBeenCalledWith('computer-a', 'runtime-server');
+      expect(mockStore.startServer).toHaveBeenCalledWith('computer-a', 'runtime-server-id');
     });
     expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
   });

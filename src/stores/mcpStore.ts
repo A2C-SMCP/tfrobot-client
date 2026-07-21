@@ -13,6 +13,7 @@ export interface ToolMeta {
 }
 
 export interface McpServerStatus {
+  bundleId: string;
   name: string;
   running: boolean;
   status_message: string;
@@ -45,6 +46,7 @@ export interface SseServerParameters {
 // Internally tagged discriminated union configs
 export interface StdioServerConfig {
   type: 'Stdio';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -56,6 +58,7 @@ export interface StdioServerConfig {
 
 export interface HttpServerConfig {
   type: 'Http';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -67,6 +70,7 @@ export interface HttpServerConfig {
 
 export interface SseServerConfig {
   type: 'Sse';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -96,8 +100,8 @@ interface McpServerState {
   serversRequestId: number;
 
   fetchServers: (instanceId: string) => Promise<void>;
-  startServer: (instanceId: string, name: string) => Promise<void>;
-  stopServer: (instanceId: string, name: string) => Promise<void>;
+  startServer: (instanceId: string, bundleId: string) => Promise<void>;
+  stopServer: (instanceId: string, bundleId: string) => Promise<void>;
   startAll: (instanceId: string) => Promise<void>;
   stopAll: (instanceId: string) => Promise<void>;
   reset: () => void;
@@ -137,11 +141,11 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     }
   },
 
-  startServer: async (instanceId: string, name: string) => {
+  startServer: async (instanceId: string, bundleId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('start_mcp_server', { instanceId, name });
-      info(`MCP server started: ${name}`);
+      await invoke('start_mcp_server', { instanceId, bundleId });
+      info(`MCP server started: ${bundleId}`);
       await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: formatRuntimeActionError(e), loading: false });
@@ -149,11 +153,11 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
     }
   },
 
-  stopServer: async (instanceId: string, name: string) => {
+  stopServer: async (instanceId: string, bundleId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('stop_mcp_server', { instanceId, name });
-      info(`MCP server stopped: ${name}`);
+      await invoke('stop_mcp_server', { instanceId, bundleId });
+      info(`MCP server stopped: ${bundleId}`);
       await get().fetchServers(instanceId);
     } catch (e) {
       set({ error: formatRuntimeActionError(e), loading: false });

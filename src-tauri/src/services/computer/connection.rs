@@ -379,9 +379,6 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    // TODO(A2C-SMCP/rust-sdk#148): the pinned SDK does not await the underlying transport
-    // disconnect. Keep this raw-client teardown compatibility boundary private, and remove it
-    // once the upgraded high-level disconnect API guarantees relay-side transport completion.
     pub(super) async fn disconnect_smcp_socketio_inner(&self) -> Result<(), String> {
         if let Err(error) = self.computer.read().await.leave_office().await {
             log::warn!(
@@ -389,35 +386,6 @@ impl ComputerInstanceRuntime {
                 self.instance.id,
                 error
             );
-        }
-        let socketio_ref = self.computer.read().await.get_socketio_client();
-        let client = {
-            let mut guard = socketio_ref.write().await;
-            guard.take()
-        };
-        if let Some(client) = client {
-            if Arc::strong_count(&client) > 1 {
-                let mut guard = socketio_ref.write().await;
-                *guard = Some(client);
-                return Err(format!(
-                    "SMCP socket for instance {} still has shared references; cannot confirm disconnect",
-                    self.instance.id
-                ));
-            }
-            match Arc::try_unwrap(client) {
-                Ok(client) => {
-                    client
-                        .disconnect()
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                Err(_) => {
-                    return Err(format!(
-                        "SMCP socket for instance {} still has shared references; cannot disconnect",
-                        self.instance.id
-                    ));
-                }
-            }
         }
         self.computer
             .read()

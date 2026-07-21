@@ -125,11 +125,11 @@ describe('debugStore', () => {
       };
       mockedInvoke.mockResolvedValueOnce(response);
 
-      await useDebugStore.getState().fetchResources(instanceId, 'fs-server');
+      await useDebugStore.getState().fetchResources(instanceId, 'fs-bundle');
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_debug_resources', {
         instanceId,
-        serverName: 'fs-server',
+        bundleId: 'fs-bundle',
         cursor: null,
       });
       expect(useDebugStore.getState().resources).toEqual(response.resources);
@@ -148,7 +148,7 @@ describe('debugStore', () => {
         next_cursor: null,
       });
 
-      await useDebugStore.getState().fetchResources(instanceId, 'fs-server', 'cursor-2');
+      await useDebugStore.getState().fetchResources(instanceId, 'fs-bundle', 'cursor-2');
 
       expect(useDebugStore.getState().resources.map((resource) => resource.uri)).toEqual([
         'file://a',
@@ -163,8 +163,8 @@ describe('debugStore', () => {
       mockedInvoke.mockReturnValueOnce(first.promise);
       mockedInvoke.mockReturnValueOnce(second.promise);
 
-      const firstFetch = useDebugStore.getState().fetchResources('computer-a', 'fs-server');
-      const secondFetch = useDebugStore.getState().fetchResources('computer-b', 'fs-server');
+      const firstFetch = useDebugStore.getState().fetchResources('computer-a', 'fs-bundle');
+      const secondFetch = useDebugStore.getState().fetchResources('computer-b', 'fs-bundle');
 
       second.resolve({ resources: [{ server: 'fs-server', uri: 'file://b', name: 'B' }] });
       await secondFetch;
@@ -183,7 +183,7 @@ describe('debugStore', () => {
     it('calls invoke and stores successful result', async () => {
       const mockResult = {
         success: true,
-        result: { content: [{ type: 'text', text: 'hello' }], is_error: false },
+        result: { content: [{ type: 'text', text: 'hello' }], isError: false },
         duration_ms: 42,
       };
       mockedInvoke.mockResolvedValueOnce(mockResult);  // execute_tool
@@ -239,7 +239,7 @@ describe('debugStore', () => {
 
       const result = {
         success: true,
-        result: { content: [{ type: 'text', text: 'hello' }], is_error: false },
+        result: { content: [{ type: 'text', text: 'hello' }], isError: false },
         duration_ms: 42,
       };
       execute.resolve(result);

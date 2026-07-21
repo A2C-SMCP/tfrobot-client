@@ -5,6 +5,7 @@
 
 mod common;
 
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use common::{create_test_app_state, echo_server_config, echo_server_path, mcp};
 use std::fs;
 use std::path::Path;
@@ -229,11 +230,17 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         .contains(&"audit:code-review".to_string()));
 
     let stored = state.sdk_config.load(TEST_INSTANCE_ID);
-    assert!(stored
+    let stored_plugin_server = stored
         .mcp
         .servers
         .iter()
-        .all(|server| server.name != "audit-mcp"));
+        .find(|server| server.name == "audit-mcp")
+        .expect("enabled plugin server must be projected by the SDK snapshot");
+    assert!(stored_plugin_server.bundled);
+    assert_eq!(
+        stored_plugin_server.origin,
+        a2c_smcp::smcp_computer::settings::config::ProvenanceScope::Plugin
+    );
     let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -384,7 +391,7 @@ async fn duplicate_copies_only_user_skills_and_keeps_plugin_governance_isolated(
 }
 
 #[tokio::test]
-async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
+async fn plugin_dependency_claims_bundle_only_while_enabled() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("marketplace-repo");
@@ -457,7 +464,7 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         .mcp
         .servers
         .iter()
-        .any(|server| server.name == "audit-mcp" && server.bundled));
+        .any(|server| server.name == "audit-mcp" && !server.bundled));
     sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
@@ -500,13 +507,35 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         .filter(|server| server.name == "audit-mcp")
         .collect();
     assert_eq!(audit_rows.len(), 1);
-    assert!(matches!(audit_rows[0].managed_by, McpServerManagedBy::User));
+    assert!(matches!(
+        audit_rows[0].managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
 
     start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
 
-    mcp::start_mcp_server_core(&restarted, TEST_INSTANCE_ID, "audit-mcp")
+    let audit_bundle_id = BundleId::try_from("audit-mcp").unwrap();
+    let start_error = mcp::start_mcp_server_core(&restarted, TEST_INSTANCE_ID, &audit_bundle_id)
+        .await
+        .unwrap_err();
+    assert!(start_error.to_string().contains("Marketplace plugin"));
+
+    disable_plugin_core(&restarted, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let disabled_rows = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(
+        disabled_rows.iter().any(|server| {
+            server.name == "audit-mcp" && matches!(server.managed_by, McpServerManagedBy::User)
+        }),
+        "independent declaration missing after disable: {disabled_rows:?}"
+    );
+
+    mcp::start_mcp_server_core(&restarted, TEST_INSTANCE_ID, &audit_bundle_id)
         .await
         .unwrap();
     assert!(mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
@@ -514,7 +543,7 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
         .unwrap()
         .iter()
         .any(|server| server.name == "audit-mcp" && server.running));
-    mcp::stop_mcp_server_core(&restarted, TEST_INSTANCE_ID, "audit-mcp")
+    mcp::stop_mcp_server_core(&restarted, TEST_INSTANCE_ID, &audit_bundle_id)
         .await
         .unwrap();
 
@@ -539,6 +568,9 @@ async fn plugin_mcp_servers_are_dynamic_and_user_servers_win_after_disable() {
     .unwrap();
 
     mcp::remove_mcp_server_core(&restarted, TEST_INSTANCE_ID, "audit-mcp")
+        .await
+        .unwrap();
+    enable_plugin_core(&restarted, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap();
     let remounted = wait_for_mcp_server_running(TEST_INSTANCE_ID, &restarted, "audit-mcp")
@@ -661,7 +693,7 @@ async fn plugin_disable_removes_skills_from_active_skill_registry() {
 }
 
 #[tokio::test]
-async fn plugin_install_rejects_duplicate_mcp_server_before_recording_intent() {
+async fn shared_plugin_dependency_hands_off_and_is_reclaimed_after_the_last_disable() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("marketplace-repo");
@@ -698,14 +730,16 @@ async fn plugin_install_rejects_duplicate_mcp_server_before_recording_intent() {
     .await
     .unwrap();
 
-    let duplicate = PluginLifecycleRequest {
+    let duplicate_request = PluginLifecycleRequest {
         marketplace: "acme".to_string(),
         plugin: "duplicate".to_string(),
     };
-    let error = install_plugin_core(&state, TEST_INSTANCE_ID, duplicate)
+    install_plugin_core(&state, TEST_INSTANCE_ID, duplicate_request.clone())
         .await
-        .unwrap_err();
-    assert!(error.contains("already exists and is not owned by this plugin"));
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, duplicate_request.clone())
+        .await
+        .unwrap();
 
     let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
         .await
@@ -715,7 +749,8 @@ async fn plugin_install_rejects_duplicate_mcp_server_before_recording_intent() {
         .iter()
         .find(|plugin| plugin.plugin == "duplicate")
         .expect("duplicate plugin should remain available in the catalog");
-    assert!(!duplicate.installed);
+    assert!(duplicate.installed);
+    assert!(duplicate.enabled);
 
     let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
@@ -725,14 +760,111 @@ async fn plugin_install_rejects_duplicate_mcp_server_before_recording_intent() {
         .filter(|server| server.name == "audit-mcp")
         .collect();
     assert_eq!(audit_rows.len(), 1);
-    match &audit_rows[0].managed_by {
-        McpServerManagedBy::Plugin { plugin, .. } => assert_eq!(plugin, "audit"),
-        other => panic!("expected audit plugin owner, got {other:?}"),
+    assert!(matches!(
+        audit_rows[0].managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+
+    disable_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let after_first_disable = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let shared = after_first_disable
+        .iter()
+        .find(|server| server.bundle_id.as_str() == "audit-mcp")
+        .expect("the remaining plugin dependency must keep the shared bundle mounted");
+    match &shared.managed_by {
+        McpServerManagedBy::Plugin { plugin, .. } => assert_eq!(plugin, "duplicate"),
+        other => panic!("expected ownership to hand off to duplicate, got {other:?}"),
     }
+
+    disable_plugin_core(&state, TEST_INSTANCE_ID, duplicate_request)
+        .await
+        .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .all(|server| server.bundle_id.as_str() != "audit-mcp"));
 }
 
 #[tokio::test]
-async fn plugin_install_rejects_user_owned_mcp_server_before_recording_intent() {
+async fn enabling_plugin_starts_a_stopped_independent_bundle_dependency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bundle_id = BundleId::try_from("audit-mcp").unwrap();
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id)
+        .await
+        .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| server.bundle_id.as_str() == "audit-mcp" && !server.running));
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let started = wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
+        .await
+        .expect("independent dependency should remain visible");
+    assert!(started.running);
+    assert!(matches!(
+        started.managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+
+    disable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let restored = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|server| server.bundle_id.as_str() == "audit-mcp")
+        .expect("disabling the plugin must preserve the independent declaration");
+    assert!(restored.running);
+    assert!(matches!(restored.managed_by, McpServerManagedBy::User));
+}
+
+#[tokio::test]
+async fn plugin_enable_claims_an_existing_user_bundle_dependency_until_disabled() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("marketplace-repo");
@@ -752,17 +884,16 @@ async fn plugin_install_rejects_user_owned_mcp_server_before_recording_intent() 
         .await
         .unwrap();
 
-    let error = install_plugin_core(
-        &state,
-        TEST_INSTANCE_ID,
-        PluginLifecycleRequest {
-            marketplace: "acme".to_string(),
-            plugin: "audit".to_string(),
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(error.contains("already exists and is not owned by this plugin"));
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
 
     let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
         .await
@@ -772,7 +903,31 @@ async fn plugin_install_rejects_user_owned_mcp_server_before_recording_intent() 
         .iter()
         .find(|plugin| plugin.plugin == "audit")
         .expect("audit plugin should remain available in the catalog");
-    assert!(!audit.installed);
+    assert!(audit.installed);
+    assert!(audit.enabled);
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers.iter().any(|server| {
+        server.name == "audit-mcp" && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })
+    }));
+    disable_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".to_string(),
+            plugin: "audit".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| {
+            server.name == "audit-mcp" && matches!(server.managed_by, McpServerManagedBy::User)
+        }));
 }
 
 #[tokio::test]

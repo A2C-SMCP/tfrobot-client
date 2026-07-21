@@ -53,8 +53,8 @@ async fn contract_computer_mcp_api_surface() {
     // We don't assert behavior, just compilation.
     let _statuses = computer.get_server_status().await;
     let _tools = computer.get_available_tools().await;
-    let _ = computer.start_mcp_client("all").await;
-    let _ = computer.stop_mcp_client("all").await;
+    let _ = computer.start_all_mcp_clients().await;
+    let _ = computer.stop_all_mcp_clients().await;
     let _ = computer.shutdown().await;
 }
 
@@ -69,7 +69,6 @@ fn contract_version_exists() {
 }
 
 #[tokio::test]
-#[ignore = "blocked by https://github.com/A2C-SMCP/rust-sdk/issues/144"]
 async fn contract_boot_surfaces_structured_missing_input() {
     let input = MCPServerInput::PromptString(PromptStringInput {
         id: "required-token".to_string(),
@@ -302,7 +301,7 @@ fn contract_computer_error_variants_exist() {
     assert!(e2.to_string().contains("runtime"));
 
     let e3 = ComputerError::ServerNotActive {
-        server_name: "srv".into(),
+        bundle_id: "srv".into(),
     };
     assert!(e3.to_string().contains("srv"));
 

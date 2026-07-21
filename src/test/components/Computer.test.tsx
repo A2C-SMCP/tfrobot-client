@@ -438,7 +438,7 @@ describe('Computer', () => {
           throw {
             code: 'missing_secret',
             input_id: 'secret-a',
-            env_hint: 'A2C_INPUT_SECRET_A',
+            env_hint: 'A2C_SMCP_secret_a',
             message: 'Required secret input is unresolved',
           };
         }
@@ -446,7 +446,7 @@ describe('Computer', () => {
           throw {
             code: 'missing_input',
             input_id: 'value-b',
-            env_hint: 'A2C_INPUT_VALUE_B',
+            env_hint: 'A2C_SMCP_value_b',
             message: 'Required input is unresolved',
           };
         }

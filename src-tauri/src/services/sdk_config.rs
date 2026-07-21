@@ -1,5 +1,6 @@
 use crate::services::config::ConfigService;
 use crate::services::storage::write_json_atomically;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{
     delete_config, duplicate_config, export_config, import_config, init_config, load_config,
@@ -14,6 +15,7 @@ use a2c_smcp::smcp_computer::settings::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -448,6 +450,38 @@ impl SdkConfigService {
         let anchor = self.project_anchor(instance_id);
         recover_raw_restore_transaction(&anchor)?;
         load_project_config_doc(&anchor)
+    }
+
+    /// Bundle identities declared in this Computer's durable project/local MCP files.
+    ///
+    /// The merged SDK snapshot can project an enabled plugin over an independent declaration
+    /// with the same bundle identity. Marketplace teardown still needs the lower durable layer so
+    /// disabling that plugin never unmounts the independent declaration it depended on.
+    pub(crate) fn project_mcp_bundle_ids(
+        &self,
+        instance_id: &str,
+    ) -> Result<HashSet<a2c_smcp::smcp_computer::mcp_clients::model::BundleId>, ConfigCrudError>
+    {
+        let document = self.load_raw_project_config(instance_id)?;
+        let mut bundle_ids = HashSet::new();
+        for mcp in [document.mcp, document.mcp_local].into_iter().flatten() {
+            let Some(Value::Object(servers)) = mcp.get("servers") else {
+                continue;
+            };
+            for (name, body) in servers {
+                let Value::Object(mut config) = body.clone() else {
+                    continue;
+                };
+                config
+                    .entry("name".to_string())
+                    .or_insert_with(|| Value::String(name.clone()));
+                if let Ok(config) = serde_json::from_value::<MCPServerConfig>(Value::Object(config))
+                {
+                    bundle_ids.insert(resolve_bundle_id(&config));
+                }
+            }
+        }
+        Ok(bundle_ids)
     }
 
     /// Replaces all four SDK project-anchor files from a raw same-machine snapshot.

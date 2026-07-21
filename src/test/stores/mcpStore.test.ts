@@ -142,7 +142,7 @@ describe('mcpStore', () => {
 
       await useMcpStore.getState().startServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { instanceId, name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { instanceId, bundleId: 'srv' });
     });
 
     it('stop invokes stop_mcp_server', async () => {
@@ -151,7 +151,7 @@ describe('mcpStore', () => {
 
       await useMcpStore.getState().stopServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { instanceId, name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { instanceId, bundleId: 'srv' });
     });
   });
 

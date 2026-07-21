@@ -96,4 +96,10 @@ describe('McpServerForm input attributes (issue #26)', () => {
     expect(command).toHaveAttribute('spellcheck', 'false');
     expect(command).toHaveAttribute('autocomplete', 'off');
   });
+
+  it('does not present default tool alias as a server-wide prefix', () => {
+    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+
+    expect(screen.queryByText('Alias Prefix')).not.toBeInTheDocument();
+  });
 });

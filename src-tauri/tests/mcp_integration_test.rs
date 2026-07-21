@@ -3,6 +3,8 @@
 
 mod common;
 
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
@@ -10,7 +12,7 @@ use common::{
     everything_server_config_with_forbidden_tools, mcp, multi_tool_server_config,
     slow_echo_server_config, stderr_flood_server_config,
 };
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 use socketioxide::SocketIo;
@@ -21,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
+    computer::start_computer_instance_core,
     config_io,
     dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
     debug, inputs, sdk_config,
@@ -38,6 +41,10 @@ const TEST_OFFICE_ID: &str = "office-mcp-sync";
 const SERVER_JOIN_OFFICE: &str = "server:join_office";
 const SERVER_UPDATE_CONFIG: &str = "server:update_config";
 const SERVER_UPDATE_TOOL_LIST: &str = "server:update_tool_list";
+
+fn bundle_id(value: &str) -> BundleId {
+    BundleId::try_from(value).unwrap()
+}
 
 async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
@@ -210,6 +217,99 @@ async fn wait_for_sync_event(timeout_message: &str, predicate: impl Fn() -> bool
         sleep(Duration::from_millis(100)).await;
     }
     panic!("{timeout_message}");
+}
+
+async fn start_oauth_rejecting_mcp_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let service = service_fn(|request: hyper::Request<hyper::body::Incoming>| async {
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("read request body")
+                        .to_bytes();
+                    let request: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or_default();
+                    let method = request
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let id = request
+                        .get("id")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    if method.starts_with("notifications/") {
+                        return Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::ACCEPTED)
+                                .body(Full::<Bytes>::from(Bytes::new()))
+                                .unwrap(),
+                        );
+                    }
+                    if method == "tools/call" {
+                        return Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::UNAUTHORIZED)
+                                .header("content-type", "text/plain")
+                                .header("www-authenticate", "Bearer realm=\"mcp\"")
+                                .body(Full::<Bytes>::from("Unauthorized"))
+                                .unwrap(),
+                        );
+                    }
+
+                    let result = match method {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion": "2024-11-05",
+                            "serverInfo": { "name": "oauth-mock", "version": "0.1.0" },
+                            "capabilities": { "tools": {} }
+                        }),
+                        "tools/list" => serde_json::json!({
+                            "tools": [{
+                                "name": "protected",
+                                "description": "Requires authorization",
+                                "inputSchema": { "type": "object" }
+                            }]
+                        }),
+                        _ => serde_json::json!({}),
+                    };
+                    let payload = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result
+                    });
+                    let mut response = hyper::Response::builder()
+                        .status(hyper::StatusCode::OK)
+                        .header("content-type", "application/json");
+                    if method == "initialize" {
+                        response = response.header("mcp-session-id", "oauth-contract-session");
+                    }
+                    Ok::<_, Infallible>(
+                        response
+                            .body(Full::<Bytes>::from(
+                                serde_json::to_vec(&payload).expect("serialize response"),
+                            ))
+                            .unwrap(),
+                    )
+                });
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .await;
+            });
+        }
+    });
+
+    url
 }
 
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
@@ -481,7 +581,7 @@ async fn test_start_stop_mcp_server_use_sdk_computer_runtime() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "sdk-single")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("sdk-single"))
         .await
         .unwrap();
     let started = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
@@ -490,7 +590,7 @@ async fn test_start_stop_mcp_server_use_sdk_computer_runtime() {
     assert_eq!(started[0].name, "sdk-single");
     assert!(started[0].running);
 
-    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "sdk-single")
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("sdk-single"))
         .await
         .unwrap();
     let stopped = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
@@ -509,10 +609,10 @@ async fn test_mcp_lifecycle_requires_started_computer() {
         .await
         .unwrap();
 
-    let start_err = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "not-started")
+    let start_err = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("not-started"))
         .await
         .unwrap_err();
-    let stop_err = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "not-started")
+    let stop_err = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("not-started"))
         .await
         .unwrap_err();
     let start_all_err = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
@@ -553,7 +653,7 @@ async fn test_config_only_add_stays_out_of_runtime_until_reload() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "already-running")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("already-running"))
         .await
         .unwrap();
 
@@ -577,7 +677,7 @@ async fn test_config_only_add_stays_out_of_runtime_until_reload() {
         statuses.iter().all(|status| status.name != "newly-added"),
         "config-only additions must not be synthesized into runtime status"
     );
-    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "newly-added")
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("newly-added"))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Server not found: newly-added"));
@@ -665,12 +765,12 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         .iter()
         .any(|server| server.name == "full-chain-echo"));
     assert!(!runtime
-        .sdk_mcp_server_names()
+        .sdk_mcp_server_ids()
         .await
-        .contains("full-chain-echo"));
+        .contains(&bundle_id("full-chain-echo")));
 
     runtime.reload().await.unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("full-chain-echo"))
         .await
         .unwrap();
     let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
@@ -698,30 +798,32 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
     .await;
     let tool_events_before_restart = stats.update_tool_list_events();
 
-    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("full-chain-echo"))
         .await
         .unwrap();
     wait_for_sync_event(
         "MCP stop was not synchronized to the connected robot",
-        || stats.update_tool_list_events() > tool_events_before_restart,
+        || stats.update_tool_list_events() == tool_events_before_restart + 1,
     )
     .await;
     let tool_events_after_stop = stats.update_tool_list_events();
+    assert_eq!(tool_events_after_stop, tool_events_before_restart + 1);
     assert!(
         stats.update_tool_list_computers()[tool_events_before_restart..tool_events_after_stop]
             .iter()
             .all(|computer| computer == TEST_COMPUTER_NAME)
     );
 
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "full-chain-echo")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("full-chain-echo"))
         .await
         .unwrap();
     wait_for_sync_event(
         "MCP start was not synchronized to the connected robot",
-        || stats.update_tool_list_events() > tool_events_after_stop,
+        || stats.update_tool_list_events() == tool_events_after_stop + 1,
     )
     .await;
     let tool_events_after_start = stats.update_tool_list_events();
+    assert_eq!(tool_events_after_start, tool_events_after_stop + 1);
     assert!(
         stats.update_tool_list_computers()[tool_events_after_stop..tool_events_after_start]
             .iter()
@@ -808,9 +910,9 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
         .await
         .unwrap();
     assert!(runtime
-        .synced_sdk_server_names()
+        .synced_sdk_servers()
         .await
-        .contains("remove-me"));
+        .contains_key(&bundle_id("remove-me")));
 
     mcp::remove_mcp_server_core(&state, TEST_INSTANCE_ID, "remove-me")
         .await
@@ -825,10 +927,13 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
 
     assert!(configs.is_empty());
     assert!(!runtime
-        .synced_sdk_server_names()
+        .synced_sdk_servers()
         .await
-        .contains("remove-me"));
-    assert!(!runtime.sdk_mcp_server_names().await.contains("remove-me"));
+        .contains_key(&bundle_id("remove-me")));
+    assert!(!runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("remove-me")));
 }
 
 #[tokio::test]
@@ -845,7 +950,7 @@ async fn test_debug_get_available_tools_uses_sdk_computer() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-tools")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("debug-tools"))
         .await
         .unwrap();
     let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
@@ -861,7 +966,7 @@ async fn test_debug_get_available_tools_uses_sdk_computer() {
 }
 
 #[tokio::test]
-async fn test_default_tool_meta_alias_is_scoped_by_bundle_id() {
+async fn test_default_tool_meta_alias_does_not_override_individual_tool_names() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -887,9 +992,23 @@ async fn test_default_tool_meta_alias_is_scoped_by_bundle_id() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "test")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("test"))
         .await
-        .expect("bundle-scoped tool identity should not collide globally");
+        .expect("default alias metadata must not collapse all tool names");
+    let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from([
+            "test__first-tool".to_string(),
+            "test__second-tool".to_string(),
+        ])
+    );
 }
 
 #[tokio::test]
@@ -919,7 +1038,7 @@ async fn test_blank_default_tool_meta_alias_does_not_collide_on_first_start() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "test")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("test"))
         .await
         .expect("blank aliases should be ignored before the SDK validates tool names");
 }
@@ -1038,7 +1157,7 @@ async fn test_debug_execute_tool_uses_sdk_computer_and_logs_redacted_history() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-exec")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("debug-exec"))
         .await
         .unwrap();
     let first = debug::execute_tool_core(
@@ -1099,7 +1218,7 @@ async fn test_debug_execute_tool_uses_sdk_timeout_result() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "debug-timeout")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("debug-timeout"))
         .await
         .unwrap();
     let response = debug::execute_tool_core(
@@ -1236,7 +1355,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
     let default_configs = state.sdk_config.load(TEST_INSTANCE_ID).mcp.servers;
     let second_configs = state.sdk_config.load("second").mcp.servers;
     let second_runtime = state.computer_registry.runtime("second").await.unwrap();
-    let second_sdk_servers = second_runtime.synced_sdk_server_names().await;
+    let second_sdk_servers = second_runtime.synced_sdk_servers().await;
     let exported: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&export_path).unwrap()).unwrap();
 
@@ -1250,7 +1369,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
         .iter()
         .any(|server| server.name == "exported-second"));
     assert!(
-        !second_sdk_servers.contains("imported-second"),
+        !second_sdk_servers.contains_key(&bundle_id("imported-second")),
         "config import must not perform runtime reload or availability checks"
     );
     let exported_names: std::collections::HashSet<_> = exported["servers"]
@@ -2746,9 +2865,9 @@ async fn test_cli_native_import_persists_inputs_and_server_without_runtime_resol
         .any(|server| server.name == "input-backed-server"));
     assert!(
         !runtime
-            .synced_sdk_server_names()
+            .synced_sdk_servers()
             .await
-            .contains("input-backed-server"),
+            .contains_key(&bundle_id("input-backed-server")),
         "config import must defer runtime rendering to reload/start"
     );
     assert!(
@@ -2783,7 +2902,7 @@ async fn test_sdk_computer_add_and_start_server() {
 
     let result = tokio::time::timeout(
         MCP_RUNTIME_TIMEOUT,
-        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "lifecycle-test"),
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("lifecycle-test")),
     )
     .await;
     match result {
@@ -2801,7 +2920,7 @@ async fn test_sdk_computer_add_and_start_server() {
         .expect("server status should exist");
     assert!(found.running, "Server should be running");
 
-    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "lifecycle-test")
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("lifecycle-test"))
         .await
         .unwrap();
 }
@@ -2827,7 +2946,7 @@ async fn test_sdk_computer_list_tools_after_start() {
 
     let result = tokio::time::timeout(
         MCP_RUNTIME_TIMEOUT,
-        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "tool-list-test"),
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("tool-list-test")),
     )
     .await;
     match result {
@@ -2846,7 +2965,7 @@ async fn test_sdk_computer_list_tools_after_start() {
     );
     assert!(tools.iter().any(|tool| tool.name == "tool-list-test__echo"));
 
-    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "tool-list-test")
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("tool-list-test"))
         .await
         .unwrap();
 }
@@ -2869,7 +2988,7 @@ async fn test_sdk_computer_execute_echo_tool() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "echo-call-test")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("echo-call-test"))
         .await
         .unwrap();
 
@@ -2885,6 +3004,60 @@ async fn test_sdk_computer_execute_echo_tool() {
 
     assert!(response.success);
     assert!(response.result.is_some());
+}
+
+#[tokio::test]
+async fn test_real_http_oauth_401_returns_structured_tool_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let url = start_oauth_rejecting_mcp_server().await;
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "Http",
+        "name": "oauth-contract",
+        "disabled": false,
+        "server_parameters": {
+            "url": url,
+            "headers": {}
+        }
+    }))
+    .unwrap();
+    let oauth_bundle_id = resolve_bundle_id(&config);
+    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, config)
+        .await
+        .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &oauth_bundle_id)
+        .await
+        .unwrap();
+    let protected_tool = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tool| tool.display_name == "protected")
+        .expect("HTTP mock tool must be active");
+    let response = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &protected_tool.name,
+        serde_json::json!({}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.success);
+    assert!(
+        response.error.is_none(),
+        "authorization is a structured tool result, got {:?}",
+        response.error
+    );
+    let result = serde_json::to_value(response.result.expect("structured result")).unwrap();
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["_meta"]["error_code"], 4006);
 }
 
 #[tokio::test]
@@ -2948,7 +3121,7 @@ async fn test_sdk_computer_start_nonexistent_fails() {
 
     let result = tokio::time::timeout(
         MCP_RUNTIME_TIMEOUT,
-        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "ghost-server"),
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("ghost-server")),
     )
     .await;
     match result {
@@ -2984,7 +3157,7 @@ async fn test_sdk_computer_invalid_command_fails() {
 
     let result = tokio::time::timeout(
         MCP_RUNTIME_TIMEOUT,
-        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "bad-server"),
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("bad-server")),
     )
     .await;
     match result {
@@ -3176,6 +3349,46 @@ async fn test_input_definitions_crud() {
 }
 
 #[tokio::test]
+async fn test_project_scope_enable_allowlist_is_rejected_with_actionable_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .sdk_config
+        .save(
+            TEST_INSTANCE_ID,
+            &ProjectConfigDoc {
+                settings: Some(
+                    serde_json::json!({
+                        "enabledMcpjsonServers": ["untrusted-project-server"]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let config_state = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!config_state.validation.valid);
+    let error = config_state
+        .validation
+        .errors
+        .iter()
+        .find(|error| error.field == "enabledMcpjsonServers")
+        .expect("project-scoped trusted field must be surfaced to the UI");
+    assert_eq!(error.scope.as_str(), "project");
+    assert!(
+        error.reason.contains("local") || error.reason.contains("user"),
+        "validation must explain the trusted destination: {}",
+        error.reason
+    );
+}
+
+#[tokio::test]
 async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -3209,19 +3422,20 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
         .await
         .unwrap();
-    state
-        .computer_registry
-        .start_runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "runtime-input-reload")
+    // Recreate the application/runtime so boot reads the persisted SDK configuration,
+    // matching the production cold-start path rather than an already-loaded runtime.
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap_err();
-    assert!(matches!(
-        &error,
-        RuntimeActionError::RuntimeError { message }
-            if message.contains("Server not found: runtime-input-reload")
-    ));
+    assert!(
+        matches!(
+            &error,
+            RuntimeActionError::MissingInput { input_id, env_hint, .. }
+                if input_id == "runtime-token" && env_hint == "A2C_SMCP_runtime_token"
+        ),
+        "unexpected boot error: {error:?}"
+    );
 
     inputs::set_input_value_core(
         &state,
@@ -3233,13 +3447,10 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     .unwrap();
     state
         .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap()
-        .reload()
+        .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "runtime-input-reload")
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-reload"))
         .await
         .unwrap();
 
@@ -3249,9 +3460,9 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
         .await
         .unwrap();
     assert!(runtime
-        .sdk_mcp_server_names()
+        .sdk_mcp_server_ids()
         .await
-        .contains("runtime-input-reload"));
+        .contains(&bundle_id("runtime-input-reload")));
 }
 
 #[tokio::test]
@@ -3329,9 +3540,9 @@ async fn test_input_commands_sync_runtime_definitions() {
         Some(serde_json::json!("runtime-key"))
     );
     assert!(runtime
-        .sdk_mcp_server_names()
+        .sdk_mcp_server_ids()
         .await
-        .contains("input-resolver-probe"));
+        .contains(&bundle_id("input-resolver-probe")));
 
     inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "api-key")
         .await
@@ -3510,7 +3721,7 @@ async fn test_sdk_computer_stderr_flood_does_not_block() {
     // Start the server — this itself may hang if stderr blocks during init.
     match tokio::time::timeout(
         STDERR_FLOOD_TIMEOUT,
-        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, "stderr-flood-test"),
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("stderr-flood-test")),
     )
     .await
     {
@@ -3546,7 +3757,12 @@ async fn test_sdk_computer_stderr_flood_does_not_block() {
                 ),
             }
 
-            let _ = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, "stderr-flood-test").await;
+            let _ = mcp::stop_mcp_server_core(
+                &state,
+                TEST_INSTANCE_ID,
+                &bundle_id("stderr-flood-test"),
+            )
+            .await;
         }
         Ok(Err(e)) => panic!("start_mcp_server failed: {e}"),
         Err(_) => panic!(

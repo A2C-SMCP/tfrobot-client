@@ -21,9 +21,13 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
     error,
     fetchResources,
   } = useDebugStore();
-  const [selectedServer, setSelectedServer] = useState<{ instanceId: string; name: string } | null>(null);
+  const [selectedServer, setSelectedServer] = useState<{
+    instanceId: string;
+    bundleId: string;
+    name: string;
+  } | null>(null);
   const [serversReady, setServersReady] = useState(false);
-  const selectedServerName = selectedServer?.instanceId === instanceId ? selectedServer.name : undefined;
+  const selectedBundleId = selectedServer?.instanceId === instanceId ? selectedServer.bundleId : undefined;
   const serversBelongToInstance = activeInstanceId === instanceId;
 
   const runningServers = useMemo(
@@ -53,33 +57,37 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
     if (!serversReady) {
       return;
     }
-    if (selectedServerName && !runningServers.some((server) => server.name === selectedServerName)) {
+    if (selectedBundleId && !runningServers.some((server) => server.bundleId === selectedBundleId)) {
       setSelectedServer(null);
       return;
     }
-    if (!selectedServerName && runningServers.length > 0) {
-      setSelectedServer({ instanceId, name: runningServers[0].name });
+    if (!selectedBundleId && runningServers.length > 0) {
+      setSelectedServer({
+        instanceId,
+        bundleId: runningServers[0].bundleId,
+        name: runningServers[0].name,
+      });
     }
-  }, [instanceId, runningServers, selectedServerName, serversReady]);
+  }, [instanceId, runningServers, selectedBundleId, serversReady]);
 
   useEffect(() => {
     if (
       serversReady &&
-      selectedServerName &&
-      runningServers.some((server) => server.name === selectedServerName)
+      selectedBundleId &&
+      runningServers.some((server) => server.bundleId === selectedBundleId)
     ) {
-      fetchResources(instanceId, selectedServerName);
+      fetchResources(instanceId, selectedBundleId);
     }
-  }, [fetchResources, instanceId, runningServers, selectedServerName, serversReady]);
+  }, [fetchResources, instanceId, runningServers, selectedBundleId, serversReady]);
 
   const handleRefresh = () => {
     setServersReady(false);
     fetchServers(instanceId).finally(() => setServersReady(true));
     if (
-      selectedServerName &&
-      runningServers.some((server) => server.name === selectedServerName)
+      selectedBundleId &&
+      runningServers.some((server) => server.bundleId === selectedBundleId)
     ) {
-      fetchResources(instanceId, selectedServerName);
+      fetchResources(instanceId, selectedBundleId);
     }
   };
 
@@ -90,12 +98,15 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
           <Select
             placeholder={t('debug.selectResourceServer')}
             style={{ minWidth: 220 }}
-            value={selectedServerName}
+            value={selectedBundleId}
             loading={serversLoading || !serversReady}
-            onChange={(name) => setSelectedServer(name ? { instanceId, name } : null)}
+            onChange={(bundleId) => {
+              const server = runningServers.find((candidate) => candidate.bundleId === bundleId);
+              setSelectedServer(server ? { instanceId, bundleId, name: server.name } : null);
+            }}
             options={runningServers.map((server) => ({
               label: server.name,
-              value: server.name,
+              value: server.bundleId,
             }))}
           />
           <Button
@@ -154,9 +165,13 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
               </List.Item>
             )}
           />
-          {resourcesNextCursor && selectedServerName && (
+          {resourcesNextCursor && (
             <Button
-              onClick={() => fetchResources(instanceId, selectedServerName, resourcesNextCursor)}
+              onClick={() => selectedBundleId && fetchResources(
+                instanceId,
+                selectedBundleId,
+                resourcesNextCursor,
+              )}
               loading={resourcesLoading}
             >
               {t('debug.loadMoreResources')}

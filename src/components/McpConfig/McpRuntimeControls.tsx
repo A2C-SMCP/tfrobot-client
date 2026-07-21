@@ -109,8 +109,11 @@ export function McpRuntimeControls({ instanceId, disabled = false }: McpRuntimeC
         mode="runtime"
         actionsDisabled={disabled}
         loading={loading}
-        onStop={(name) => stopServer(instanceId, name)}
-        onStart={(name) => runtimeActions.run({ kind: 'start', name })}
+        onStop={(bundleId) => stopServer(instanceId, bundleId)}
+        onStart={(bundleId) => {
+          const server = servers.find((candidate) => candidate.bundleId === bundleId);
+          return runtimeActions.run({ kind: 'start', bundleId, name: server?.name ?? bundleId });
+        }}
       />
 
       {runtimeActions.pending && (

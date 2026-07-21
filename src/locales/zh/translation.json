@@ -321,6 +321,9 @@
     "form": {
       "type": "服务器类型",
       "name": "服务器名称",
+      "bundleId": "Bundle ID",
+      "bundleIdHint": "稳定的服务器身份。留空时由 SDK 自动生成，创建后不可修改。",
+      "bundleIdPlaceholder": "可选，例如 filesystem",
       "nameRequired": "请输入服务器名称",
       "command": "命令",
       "commandRequired": "请输入命令",
@@ -340,7 +343,6 @@
       "forbiddenToolsPlaceholder": "输入要禁用的工具名称",
       "defaultToolMeta": "默认工具元数据",
       "defaultToolMetaAutoApply": "自动应用",
-      "defaultToolMetaAlias": "别名前缀",
       "defaultToolMetaTags": "标签",
       "defaultToolMetaTagsPlaceholder": "输入标签",
       "toolMeta": "工具元数据 (JSON)",
@@ -498,6 +500,8 @@
     "noResources": "暂无可用资源",
     "selectResourceServer": "选择资源服务器",
     "noRunningServers": "暂无运行中的 MCP 服务器",
+    "authorizationRequired": "需要授权",
+    "toolErrorCode": "工具错误码：{{code}}",
     "loadMoreResources": "加载更多"
   },
   "logs": {

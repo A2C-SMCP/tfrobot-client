@@ -125,6 +125,11 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       key: 'name',
     },
     {
+      title: t('mcp.form.bundleId'),
+      dataIndex: 'bundleId',
+      key: 'bundleId',
+    },
+    {
       title: t('mcp.table.transport'),
       key: 'transport',
       render: (_: unknown, record: SdkConfigServer) => record.config.type,
@@ -263,7 +268,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       <Table
         dataSource={snapshot?.mcp.servers ?? []}
         columns={columns}
-        rowKey="name"
+        rowKey="bundleId"
         loading={configLoading}
         pagination={false}
         size="middle"

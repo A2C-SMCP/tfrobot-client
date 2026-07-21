@@ -93,7 +93,7 @@ mod tests {
             InputResolutionError::Missing {
                 id: "api-key".to_string(),
                 kind: InputKind::Secret,
-                env_hint: "A2C_INPUT_API_KEY".to_string(),
+                env_hint: "A2C_SMCP_api_key".to_string(),
             },
         ));
 
@@ -102,7 +102,7 @@ mod tests {
             serde_json::json!({
                 "code": "missing_secret",
                 "input_id": "api-key",
-                "env_hint": "A2C_INPUT_API_KEY",
+                "env_hint": "A2C_SMCP_api_key",
                 "message": "Required secret input 'api-key' is unresolved"
             })
         );

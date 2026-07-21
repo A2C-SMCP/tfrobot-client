@@ -159,6 +159,8 @@ pub mod mcp {
     #[allow(unused_imports)]
     pub use tfrobot_client_lib::commands::mcp::*;
 
+    use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
+    use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
     use tfrobot_client_lib::AppState;
@@ -214,11 +216,8 @@ pub mod mcp {
             .runtime(instance_id)
             .await
             .ok_or_else(|| RuntimeActionError::runtime("Computer runtime not found"))?;
-        if runtime
-            .plugin_mcp_server_owner(config.name())
-            .await
-            .is_some()
-        {
+        let bundle_id = resolve_bundle_id(&config);
+        if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
             return Err(RuntimeActionError::runtime(format!(
                 "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
                 config.name()
@@ -248,7 +247,14 @@ pub mod mcp {
             .runtime(instance_id)
             .await
             .ok_or_else(|| "Computer runtime not found".to_string())?;
-        if runtime.plugin_mcp_server_owner(name).await.is_some() {
+        let bundle_id = runtime
+            .sdk_mcp_server_ownership()
+            .await
+            .into_iter()
+            .find(|server| server.name == name)
+            .and_then(|server| BundleId::try_from(server.bundle_id).ok())
+            .ok_or_else(|| format!("Server not found: {name}"))?;
+        if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
             return Err(format!(
                 "MCP server '{name}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace"
             ));
@@ -260,9 +266,9 @@ pub mod mcp {
         )
         .await?;
         runtime.reload().await.map_err(|error| error.to_string())?;
-        if runtime.plugin_mcp_server_owner(name).await.is_some() {
+        if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
             runtime
-                .start_mcp_server(name)
+                .start_mcp_server(&bundle_id)
                 .await
                 .map_err(|error| error.to_string())?;
         }

@@ -4,6 +4,7 @@ import type { McpServerConfig } from './mcpStore';
 import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 
 export interface SdkConfigServer {
+  bundleId: string;
   name: string;
   origin: string;
   writable: boolean;

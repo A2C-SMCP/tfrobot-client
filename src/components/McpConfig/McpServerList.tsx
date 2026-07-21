@@ -14,8 +14,8 @@ interface McpServerListProps {
   mode?: 'config' | 'runtime';
   actionsDisabled?: boolean;
   loading?: boolean;
-  onStart?: (name: string) => Promise<void>;
-  onStop?: (name: string) => Promise<void>;
+  onStart?: (bundleId: string) => Promise<void>;
+  onStop?: (bundleId: string) => Promise<void>;
   onEdit?: (name: string) => void;
   onRemove?: (name: string) => Promise<void>;
 }
@@ -33,13 +33,13 @@ export function McpServerList({
   const { t } = useTranslation();
   const { message } = App.useApp();
 
-  const handleStart = async (name: string) => {
-    await onStart?.(name);
+  const handleStart = async (bundleId: string) => {
+    await onStart?.(bundleId);
   };
 
-  const handleStop = async (name: string) => {
+  const handleStop = async (bundleId: string, name: string) => {
     try {
-      await onStop?.(name);
+      await onStop?.(bundleId);
       message.success(t('mcp.messages.stopped', { name }));
     } catch (e) {
       message.error(String(e));
@@ -116,7 +116,7 @@ export function McpServerList({
                 <Button
                   type="text"
                   icon={<PauseCircleOutlined />}
-                  onClick={() => handleStop(record.name)}
+                  onClick={() => handleStop(record.bundleId, record.name)}
                   title={t('mcp.actions.stop')}
                   disabled={actionsDisabled || isPluginOwned(record)}
                 />
@@ -128,7 +128,7 @@ export function McpServerList({
                 <Button
                   type="text"
                   icon={<PlayCircleOutlined />}
-                  onClick={() => handleStart(record.name)}
+                  onClick={() => handleStart(record.bundleId)}
                   title={t('mcp.actions.start')}
                   disabled={actionsDisabled || isPluginOwned(record)}
                 />
@@ -174,7 +174,7 @@ export function McpServerList({
     <Table
       dataSource={servers}
       columns={columns}
-      rowKey="name"
+      rowKey="bundleId"
       loading={loading}
       pagination={false}
       size="middle"

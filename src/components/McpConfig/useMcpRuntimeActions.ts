@@ -6,12 +6,12 @@ import {
 } from '@/utils/runtimeActionError';
 
 export type McpRuntimeAction =
-  | { kind: 'start'; name: string }
+  | { kind: 'start'; bundleId: string; name: string }
   | { kind: 'startAll' };
 
 interface UseMcpRuntimeActionsOptions {
   instanceId: string;
-  startServer: (instanceId: string, name: string) => Promise<void>;
+  startServer: (instanceId: string, bundleId: string) => Promise<void>;
   startAll: (instanceId: string) => Promise<void>;
   onError: (message: string) => void;
   onSuccess: (action: McpRuntimeAction) => void;
@@ -35,7 +35,7 @@ export function useMcpRuntimeActions({
     try {
       switch (action.kind) {
         case 'start':
-          await startServer(instanceId, action.name);
+          await startServer(instanceId, action.bundleId);
           break;
         case 'startAll':
           await startAll(instanceId);

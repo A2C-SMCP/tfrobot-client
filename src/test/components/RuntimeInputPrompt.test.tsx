@@ -32,7 +32,7 @@ describe('RuntimeInputPrompt', () => {
         error={{
           code: 'missing_secret',
           input_id: 'api-key',
-          env_hint: 'A2C_INPUT_API_KEY',
+          env_hint: 'A2C_SMCP_api_key',
           message: 'Required secret input is unresolved',
         }}
         onCancel={vi.fn()}
@@ -41,7 +41,7 @@ describe('RuntimeInputPrompt', () => {
     );
 
     expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
-    expect(screen.getByText(/A2C_INPUT_API_KEY/)).toBeInTheDocument();
+    expect(screen.getByText(/A2C_SMCP_api_key/)).toBeInTheDocument();
     const input = await screen.findByPlaceholderText('Enter value');
     expect(input).toHaveAttribute('type', 'password');
     fireEvent.change(input, { target: { value: 'top-secret' } });
@@ -74,7 +74,7 @@ describe('RuntimeInputPrompt', () => {
         error={{
           code: 'missing_secret',
           input_id: 'secret-a',
-          env_hint: 'A2C_INPUT_SECRET_A',
+          env_hint: 'A2C_SMCP_secret_a',
           message: 'Secret A is missing',
         }}
         onCancel={vi.fn()}
@@ -93,7 +93,7 @@ describe('RuntimeInputPrompt', () => {
         error={{
           code: 'missing_input',
           input_id: 'value-b',
-          env_hint: 'A2C_INPUT_VALUE_B',
+          env_hint: 'A2C_SMCP_value_b',
           message: 'Value B is missing',
         }}
         onCancel={vi.fn()}
@@ -117,7 +117,7 @@ describe('RuntimeInputPrompt', () => {
         error={{
           code: 'missing_secret',
           input_id: 'api-key',
-          env_hint: 'A2C_INPUT_API_KEY',
+          env_hint: 'A2C_SMCP_api_key',
           message: 'Required secret input is unresolved',
         }}
         onCancel={vi.fn()}
@@ -146,7 +146,7 @@ describe('RuntimeInputPrompt', () => {
         error={{
           code: 'missing_secret',
           input_id: 'api-key',
-          env_hint: 'A2C_INPUT_API_KEY',
+          env_hint: 'A2C_SMCP_api_key',
           message: 'Required secret input is unresolved',
         }}
         onCancel={vi.fn()}

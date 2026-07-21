@@ -11,9 +11,10 @@ use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
 use a2c_smcp::smcp_computer::inputs::run_command;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
-    ReadResourceResult, Resource, Tool, ToolMeta,
+    BundleId, CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
+    ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
@@ -34,7 +35,6 @@ use a2c_smcp::A2CSkillRef;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -687,8 +687,10 @@ pub struct ComputerInstanceRuntime {
     input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: PathBuf,
     sdk_auto_connect: Arc<RwLock<bool>>,
-    sdk_server_names: Arc<RwLock<HashSet<String>>>,
-    plugin_server_owners: Arc<RwLock<HashMap<String, McpServerManagedBy>>>,
+    sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
+    // Tracks only whether this client materialized a Marketplace dependency. Plugin ownership
+    // itself is SDK ledger-derived and may hand off between multiple enabled plugins.
+    plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     connection: Arc<RwLock<Option<ConnectionState>>>,
     connection_authority_revision: Arc<AtomicU64>,
     lifecycle_lock: Arc<Mutex<()>>,
@@ -741,7 +743,7 @@ impl ComputerInstanceRuntime {
         let inputs = input_definitions_to_mcp_map(&instance.inputs);
         let session = InstanceSession::new(instance.id.clone());
         let input_resolver = Arc::new(RuntimeInputResolver::new(secret_store));
-        let (computer, sdk_server_names) = build_sdk_computer(
+        let (computer, sdk_servers) = build_sdk_computer(
             &instance,
             &inputs,
             session.clone(),
@@ -757,8 +759,8 @@ impl ComputerInstanceRuntime {
             input_resolver,
             skill_home_base,
             sdk_auto_connect: Arc::new(RwLock::new(auto_connect)),
-            sdk_server_names: Arc::new(RwLock::new(sdk_server_names)),
-            plugin_server_owners: Arc::new(RwLock::new(HashMap::new())),
+            sdk_servers: Arc::new(RwLock::new(sdk_servers)),
+            plugin_mounted_server_ids: Arc::new(RwLock::new(HashSet::new())),
             connection: Arc::new(RwLock::new(None)),
             connection_authority_revision: Arc::new(AtomicU64::new(0)),
             lifecycle_lock: Arc::new(Mutex::new(())),
@@ -788,8 +790,8 @@ impl ComputerInstanceRuntime {
             input_resolver: self.input_resolver.clone(),
             skill_home_base: self.skill_home_base.clone(),
             sdk_auto_connect: self.sdk_auto_connect.clone(),
-            sdk_server_names: self.sdk_server_names.clone(),
-            plugin_server_owners: self.plugin_server_owners.clone(),
+            sdk_servers: self.sdk_servers.clone(),
+            plugin_mounted_server_ids: self.plugin_mounted_server_ids.clone(),
             connection: self.connection.clone(),
             connection_authority_revision: self.connection_authority_revision.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
@@ -889,11 +891,11 @@ impl ComputerInstanceRuntime {
                 )
             })?;
         let _ = rebuilt;
-        *self.sdk_server_names.write().await = self
+        *self.sdk_servers.write().await = self
             .sdk_user_mcp_server_config_map()
             .await
-            .keys()
-            .cloned()
+            .into_iter()
+            .map(|(bundle_id, config)| (bundle_id, config.name().to_string()))
             .collect();
         if was_running {
             self.reconcile_sdk_governance_inner().await?;
@@ -901,85 +903,91 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    pub async fn add_or_update_plugin_server(
-        &self,
-        server: MCPServerConfig,
-        managed_by: McpServerManagedBy,
-    ) -> Result<(), String> {
-        if !managed_by.is_plugin_owned() {
-            return Err("Plugin MCP server must have plugin ownership metadata".to_string());
-        }
+    pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         let name = server.name().to_string();
+        let bundle_id = resolve_bundle_id(&server);
         self.computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(server))
             .await
             .map_err(|error| error.to_string())?;
-        self.sdk_server_names.write().await.insert(name.clone());
-        self.plugin_server_owners
+        self.sdk_servers
             .write()
             .await
-            .insert(name, managed_by);
+            .insert(bundle_id.clone(), name);
+        self.plugin_mounted_server_ids
+            .write()
+            .await
+            .insert(bundle_id);
         Ok(())
     }
 
-    pub async fn remove_plugin_server(&self, name: &str) -> Result<(), String> {
+    pub async fn remove_plugin_server(&self, bundle_id: &BundleId) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         remove_tracked_plugin_server(
-            name,
-            &self.sdk_server_names,
-            &self.plugin_server_owners,
-            async {
-                self.computer
-                    .read()
-                    .await
-                    .unmount_server(name)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
+            bundle_id,
+            &self.sdk_servers,
+            &self.plugin_mounted_server_ids,
+            async { self.computer.read().await.unmount_server(bundle_id).await },
         )
         .await
     }
 
-    pub async fn mcp_server_statuses(&self) -> Vec<(String, bool, String)> {
+    pub async fn mcp_server_statuses(&self) -> Vec<(BundleId, ServerName, bool, String)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer
-            .read()
-            .await
-            .get_server_status()
+        self.computer.read().await.get_server_status().await
+    }
+
+    pub async fn mcp_server_display_name(&self, bundle_id: &BundleId) -> Option<ServerName> {
+        self.sdk_mcp_server_ownership()
             .await
             .into_iter()
-            .map(|(_bundle_id, name, running, status)| (name, running, status))
+            .find(|entry| entry.bundle_id == bundle_id.as_str())
+            .map(|entry| entry.name)
+    }
+
+    pub async fn plugin_mcp_server_owner(
+        &self,
+        bundle_id: &BundleId,
+    ) -> Option<McpServerManagedBy> {
+        self.plugin_mcp_server_owner_inner(bundle_id).await
+    }
+
+    pub(crate) async fn has_tracked_plugin_mcp_server(&self, bundle_id: &BundleId) -> bool {
+        self.plugin_mounted_server_ids
+            .read()
+            .await
+            .contains(bundle_id)
+    }
+
+    pub(crate) async fn tracked_plugin_mcp_server_ids(&self) -> Vec<BundleId> {
+        self.plugin_mounted_server_ids
+            .read()
+            .await
+            .iter()
+            .cloned()
             .collect()
     }
 
-    pub async fn plugin_mcp_server_owner(&self, name: &str) -> Option<McpServerManagedBy> {
-        self.plugin_mcp_server_owner_inner(name).await
-    }
-
-    pub async fn start_mcp_server(&self, name: &str) -> ComputerResult<()> {
+    pub async fn start_mcp_server(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
-        self.computer.read().await.start_mcp_client(name).await?;
-        self.emit_sdk_tool_list_update_if_connected().await;
-        Ok(())
+        self.computer.read().await.start_mcp_client(bundle_id).await
     }
 
-    pub async fn stop_mcp_server(&self, name: &str) -> Result<(), String> {
+    pub async fn stop_mcp_server(&self, bundle_id: &BundleId) -> Result<bool, String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         self.computer
             .read()
             .await
-            .stop_mcp_client(name)
+            .stop_mcp_client(bundle_id)
             .await
-            .map_err(|error| error.to_string())?;
-        self.emit_sdk_tool_list_update_if_connected().await;
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 
     pub async fn remount_enabled_plugin_servers(&self) -> Result<(), String> {
@@ -989,11 +997,20 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn start_all_mcp_servers(&self) -> ComputerResult<()> {
-        self.start_mcp_server("all").await
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active_computer()?;
+        self.computer.read().await.start_all_mcp_clients().await
     }
 
     pub async fn stop_all_mcp_servers(&self) -> Result<(), String> {
-        self.stop_mcp_server("all").await
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active()?;
+        self.computer
+            .read()
+            .await
+            .stop_all_mcp_clients()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn available_tools(&self) -> Result<Vec<Tool>, String> {
@@ -1008,7 +1025,7 @@ impl ComputerInstanceRuntime {
 
     pub async fn resources(
         &self,
-        server_name: &str,
+        bundle_id: &BundleId,
         cursor: Option<String>,
     ) -> Result<(Vec<Resource>, Option<String>), String> {
         let _guard = self.lifecycle_lock.lock().await;
@@ -1016,7 +1033,7 @@ impl ComputerInstanceRuntime {
         self.computer
             .read()
             .await
-            .get_resources(server_name, cursor)
+            .get_resources(bundle_id.as_str(), cursor)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1024,20 +1041,20 @@ impl ComputerInstanceRuntime {
     pub async fn desktop_windows(
         &self,
         window_uri: Option<&str>,
-    ) -> Result<Vec<(String, Resource)>, String> {
+    ) -> Result<Vec<(BundleId, ServerName, Resource, ReadResourceResult)>, String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         self.computer
             .read()
             .await
-            .list_all_windows(window_uri)
+            .get_windows_details(window_uri)
             .await
             .map_err(|error| error.to_string())
     }
 
     pub async fn window_detail(
         &self,
-        server_name: &str,
+        bundle_id: &BundleId,
         resource: Resource,
     ) -> Result<ReadResourceResult, String> {
         let _guard = self.lifecycle_lock.lock().await;
@@ -1045,7 +1062,7 @@ impl ComputerInstanceRuntime {
         self.computer
             .read()
             .await
-            .get_window_detail(server_name, resource)
+            .get_window_detail(bundle_id, resource)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1089,15 +1106,15 @@ impl ComputerInstanceRuntime {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn synced_sdk_server_names(&self) -> HashSet<String> {
-        self.sdk_server_names.read().await.clone()
+    pub async fn synced_sdk_servers(&self) -> HashMap<BundleId, ServerName> {
+        self.sdk_servers.read().await.clone()
     }
 
-    pub async fn sdk_mcp_server_names(&self) -> HashSet<String> {
+    pub async fn sdk_mcp_server_ids(&self) -> HashSet<BundleId> {
         self.sdk_mcp_server_config_map().await.into_keys().collect()
     }
 
-    pub async fn sdk_mcp_server_configs(&self) -> HashMap<String, MCPServerConfig> {
+    pub async fn sdk_mcp_server_configs(&self) -> HashMap<BundleId, MCPServerConfig> {
         self.sdk_mcp_server_config_map().await
     }
 
@@ -1240,23 +1257,6 @@ impl ComputerInstanceRuntime {
             .await
     }
 
-    // TODO(A2C-SMCP/rust-sdk#148): start/stop currently bumps SDK capability state without
-    // synchronizing server:update_tool_list. Delete this private compatibility emit after the
-    // upgraded SDK owns tool-list synchronization for connected Computers.
-    async fn emit_sdk_tool_list_update_if_connected(&self) {
-        let socketio_ref = self.computer.read().await.get_socketio_client();
-        let client = socketio_ref.read().await.clone();
-        if let Some(client) = client {
-            if let Err(error) = client.emit_update_tool_list().await {
-                log::warn!(
-                    "Failed to emit MCP tool list update for instance {}: {}",
-                    self.instance.id,
-                    error
-                );
-            }
-        }
-    }
-
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub async fn clone_sdk_socketio_client_for_test(
@@ -1285,54 +1285,41 @@ impl ComputerInstanceRuntime {
             .map_err(|error| error.to_string())
     }
 
-    async fn sdk_mcp_server_config_map(&self) -> HashMap<String, MCPServerConfig> {
+    async fn sdk_mcp_server_config_map(&self) -> HashMap<BundleId, MCPServerConfig> {
         self.computer
             .read()
             .await
             .list_mcp_servers()
             .await
             .iter()
-            .map(|server| (server.name().to_string(), server.clone()))
+            .map(|server| (resolve_bundle_id(server), server.clone()))
             .collect()
     }
 
-    async fn sdk_user_mcp_server_config_map(&self) -> HashMap<String, MCPServerConfig> {
-        let plugin_names: HashSet<String> = self
+    async fn sdk_user_mcp_server_config_map(&self) -> HashMap<BundleId, MCPServerConfig> {
+        let plugin_ids: HashSet<String> = self
             .sdk_mcp_server_ownership()
             .await
             .into_iter()
             .filter(|entry| matches!(entry.managed_by, McpOwnership::Plugin { .. }))
-            .map(|entry| entry.name)
+            .map(|entry| entry.bundle_id)
             .collect();
         self.sdk_mcp_server_config_map()
             .await
             .into_iter()
-            .filter(|(name, _)| !plugin_names.contains(name))
+            .filter(|(bundle_id, _)| !plugin_ids.contains(bundle_id.as_str()))
             .collect()
     }
 
     pub async fn sdk_mcp_server_ownership(&self) -> Vec<McpServerWithMetadata> {
-        let tracked_owners = self.plugin_server_owners.read().await.clone();
         let computer = self.computer.read().await;
-        let materialized_names: HashSet<String> = computer
-            .list_mcp_servers()
-            .await
-            .into_iter()
-            .map(|server| server.name().to_string())
-            .collect();
         let mut entries = computer.list_mcp_servers_with_metadata().await;
         drop(computer);
-        for entry in &mut entries {
-            if let Some(managed_by) = tracked_owners.get(&entry.name) {
-                entry.managed_by = client_managed_by_to_sdk(managed_by);
-            } else if materialized_names.contains(&entry.name) {
-                // SDK inventory intentionally joins plugin ownership by server name. The client
-                // tracks actual runtime mounts so a user server that wins an enable conflict is
-                // not mislabeled as plugin-owned merely because the plugin ledger is enabled.
-                entry.managed_by = McpOwnership::User;
-            }
-        }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.bundle_id.cmp(&right.bundle_id))
+        });
         entries
     }
 
@@ -1341,29 +1328,17 @@ impl ComputerInstanceRuntime {
     /// The inventory includes user-configured servers and MCP servers contributed by enabled
     /// plugins. Runtime status is intentionally tracked separately from this configuration view.
     pub async fn mcp_server_inventory_count(&self) -> usize {
-        let config_context = instance_config_context(&self.instance, &self.skill_home_base);
-        let mut server_names: HashSet<String> = config_context
-            .load()
-            .mcp
-            .servers
-            .into_iter()
-            .map(|server| server.name)
-            .collect();
-        server_names.extend(
-            self.sdk_mcp_server_ownership()
-                .await
-                .into_iter()
-                .filter(|server| matches!(server.managed_by, McpOwnership::Plugin { .. }))
-                .map(|server| server.name),
-        );
-        server_names.len()
+        self.sdk_mcp_server_ownership().await.len()
     }
 
-    async fn plugin_mcp_server_owner_inner(&self, name: &str) -> Option<McpServerManagedBy> {
+    async fn plugin_mcp_server_owner_inner(
+        &self,
+        bundle_id: &BundleId,
+    ) -> Option<McpServerManagedBy> {
         self.sdk_mcp_server_ownership()
             .await
             .into_iter()
-            .find(|entry| entry.name == name)
+            .find(|entry| entry.bundle_id == bundle_id.as_str())
             .and_then(|entry| sdk_managed_by_to_client(entry.managed_by))
             .filter(McpServerManagedBy::is_plugin_owned)
     }
@@ -1371,8 +1346,8 @@ impl ComputerInstanceRuntime {
     async fn reconcile_sdk_governance_inner(&self) -> Result<Vec<String>, String> {
         let config_context = instance_config_context(&self.instance, &self.skill_home_base);
         let declared = resolve_instance_settings(&config_context);
-        let existing_server_names = self.sdk_server_names.read().await.clone();
-        let hooks = RuntimeMcpHooks::new(self, existing_server_names).await?;
+        let existing_servers = self.sdk_servers.read().await.clone();
+        let hooks = RuntimeMcpHooks::new(self, existing_servers).await?;
         let report = self
             .computer
             .read()
@@ -1386,12 +1361,17 @@ impl ComputerInstanceRuntime {
                 self.instance.id
             );
         }
-        Ok(hooks.registered_server_names().await)
+        Ok(hooks
+            .registered_server_ids()
+            .await
+            .into_iter()
+            .map(BundleId::into_string)
+            .collect())
     }
 
     async fn replace_sdk_computer(&self, was_running: bool, reason: &str) -> Result<(), String> {
         let inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        let (new_computer, sdk_server_names) = build_sdk_computer(
+        let (new_computer, sdk_servers) = build_sdk_computer(
             &self.instance,
             &inputs,
             self.session.clone(),
@@ -1418,8 +1398,8 @@ impl ComputerInstanceRuntime {
             *computer = new_computer;
             self.shutdown_completed.store(false, Ordering::Release);
         }
-        *self.sdk_server_names.write().await = sdk_server_names;
-        self.plugin_server_owners.write().await.clear();
+        *self.sdk_servers.write().await = sdk_servers;
+        self.plugin_mounted_server_ids.write().await.clear();
         *self.sdk_auto_connect.write().await = self.instance.connection_policy.auto_connect;
         self.start_runtime_event_relay().await;
         self.publish_runtime_status(ComputerRuntimeEventCause::HandleReplaced {
@@ -1446,23 +1426,23 @@ impl ComputerInstanceRuntime {
 }
 
 async fn remove_tracked_plugin_server<F>(
-    name: &str,
-    sdk_server_names: &Arc<RwLock<HashSet<String>>>,
-    plugin_server_owners: &Arc<RwLock<HashMap<String, McpServerManagedBy>>>,
+    bundle_id: &BundleId,
+    sdk_servers: &Arc<RwLock<HashMap<BundleId, ServerName>>>,
+    plugin_mounted_server_ids: &Arc<RwLock<HashSet<BundleId>>>,
     unmount: F,
 ) -> Result<(), String>
 where
-    F: Future<Output = Result<(), String>>,
+    F: std::future::Future<Output = ComputerResult<bool>>,
 {
-    if !plugin_server_owners.read().await.contains_key(name) {
+    if !plugin_mounted_server_ids.read().await.contains(bundle_id) {
         return Ok(());
     }
 
     // Preserve ownership until the SDK confirms the runtime side was removed.
     // A failed unmount must remain observable and retryable by the caller.
-    unmount.await?;
-    plugin_server_owners.write().await.remove(name);
-    sdk_server_names.write().await.remove(name);
+    unmount.await.map_err(|error| error.to_string())?;
+    plugin_mounted_server_ids.write().await.remove(bundle_id);
+    sdk_servers.write().await.remove(bundle_id);
     Ok(())
 }
 
@@ -1472,7 +1452,7 @@ fn build_sdk_computer(
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: &Path,
-) -> (Computer<InstanceSession>, HashSet<String>) {
+) -> (Computer<InstanceSession>, HashMap<BundleId, ServerName>) {
     let instance_storage_root = skill_home_base.join(instance_storage_dir_name(&instance.id));
     let config_context = instance_config_context(instance, skill_home_base);
     let skill_home = config_context.skill_home().to_path_buf();
@@ -1483,7 +1463,10 @@ fn build_sdk_computer(
         .into_iter()
         .map(|server| (server.name, normalize_mcp_server_tool_meta(server.config)))
         .collect();
-    let sdk_server_names = mcp_servers.keys().cloned().collect();
+    let sdk_servers = mcp_servers
+        .values()
+        .map(|config| (resolve_bundle_id(config), config.name().to_string()))
+        .collect();
     let computer = Computer::new(
         instance.name.clone(),
         session,
@@ -1500,24 +1483,25 @@ fn build_sdk_computer(
         .with_config_dir(config_context.project_anchor())
         .with_config_env(config_context.env().clone())
         .with_blob_cache_root(instance_storage_root.join("blob"));
-    (computer, sdk_server_names)
+    (computer, sdk_servers)
 }
 
 struct RuntimeMcpHooks {
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
-    sdk_server_names: Arc<RwLock<HashSet<String>>>,
-    plugin_server_owners: Arc<RwLock<HashMap<String, McpServerManagedBy>>>,
-    existing_server_names: HashSet<String>,
-    bundled_owners: HashMap<String, McpServerManagedBy>,
+    sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
+    plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
+    existing_servers: HashMap<BundleId, ServerName>,
+    bundled_server_ids: HashSet<BundleId>,
     root_ownership: HashMap<PathBuf, (String, String)>,
-    registered_server_names: Arc<Mutex<Vec<String>>>,
+    registered_server_ids: Arc<Mutex<Vec<BundleId>>>,
+    preserved_registration_counts: Arc<Mutex<HashMap<BundleId, usize>>>,
 }
 
 impl RuntimeMcpHooks {
     async fn new(
         runtime: &ComputerInstanceRuntime,
-        existing_server_names: HashSet<String>,
+        existing_servers: HashMap<BundleId, ServerName>,
     ) -> Result<Self, String> {
         let snapshot = runtime
             .computer
@@ -1527,7 +1511,7 @@ impl RuntimeMcpHooks {
             .await
             .map_err(|error| format!("Failed to load SDK governance snapshot: {error}"))?;
         let mut root_ownership = HashMap::new();
-        let mut bundled_owners = HashMap::new();
+        let mut bundled_server_ids = HashSet::new();
         for plugin in snapshot
             .plugins
             .into_iter()
@@ -1539,75 +1523,88 @@ impl RuntimeMcpHooks {
                     (plugin.plugin.clone(), plugin.marketplace.clone()),
                 );
             }
-            for server_name in plugin.bundled_mcp_servers {
-                bundled_owners.insert(
-                    server_name,
-                    McpServerManagedBy::Plugin {
-                        marketplace: plugin.marketplace.clone(),
-                        plugin: plugin.plugin.clone(),
-                        plugin_id: Some(plugin.id.clone()),
-                    },
-                );
+            for raw_bundle_id in plugin.bundled_mcp_servers {
+                let bundle_id = BundleId::try_from(raw_bundle_id.as_str()).map_err(|error| {
+                    format!("Invalid bundled MCP server id '{raw_bundle_id}' in governance snapshot: {error}")
+                })?;
+                bundled_server_ids.insert(bundle_id);
             }
         }
         Ok(Self {
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
-            sdk_server_names: runtime.sdk_server_names.clone(),
-            plugin_server_owners: runtime.plugin_server_owners.clone(),
-            existing_server_names,
-            bundled_owners,
+            sdk_servers: runtime.sdk_servers.clone(),
+            plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
+            existing_servers,
+            bundled_server_ids,
             root_ownership,
-            registered_server_names: Arc::new(Mutex::new(Vec::new())),
+            registered_server_ids: Arc::new(Mutex::new(Vec::new())),
+            preserved_registration_counts: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    async fn registered_server_names(&self) -> Vec<String> {
-        self.registered_server_names.lock().await.clone()
+    async fn registered_server_ids(&self) -> Vec<BundleId> {
+        self.registered_server_ids.lock().await.clone()
     }
 }
 
 #[async_trait]
 impl McpInstallHooks for RuntimeMcpHooks {
-    fn existing_server_names(&self) -> HashSet<String> {
-        self.existing_server_names.clone()
+    fn existing_servers(&self) -> HashMap<BundleId, ServerName> {
+        self.existing_servers.clone()
     }
 
     async fn register_server(&self, cfg: MCPServerConfig) -> Result<(), McpHookError> {
         let name = cfg.name().to_string();
-        let owner = self.bundled_owners.get(&name).cloned().ok_or_else(|| {
-            McpHookError(format!(
-                "Missing plugin ownership metadata for bundled MCP server '{name}'"
-            ))
-        })?;
+        let bundle_id = resolve_bundle_id(&cfg);
+        if !self.bundled_server_ids.contains(&bundle_id) {
+            return Err(McpHookError(format!(
+                "Missing plugin ownership metadata for bundled MCP server '{bundle_id}'"
+            )));
+        }
+        if self.sdk_servers.read().await.contains_key(&bundle_id) {
+            *self
+                .preserved_registration_counts
+                .lock()
+                .await
+                .entry(bundle_id.clone())
+                .or_default() += 1;
+            self.registered_server_ids.lock().await.push(bundle_id);
+            return Ok(());
+        }
         self.computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(cfg))
             .await
             .map_err(|error| McpHookError(error.to_string()))?;
-        self.sdk_server_names.write().await.insert(name.clone());
-        self.plugin_server_owners
+        self.sdk_servers
             .write()
             .await
-            .insert(name.clone(), owner);
-        self.registered_server_names.lock().await.push(name);
+            .insert(bundle_id.clone(), name);
+        self.plugin_mounted_server_ids
+            .write()
+            .await
+            .insert(bundle_id.clone());
+        self.registered_server_ids.lock().await.push(bundle_id);
         Ok(())
     }
 
-    async fn remove_server(&self, name: &str) -> Result<(), McpHookError> {
+    async fn remove_server(&self, bundle_id: &BundleId) -> Result<(), McpHookError> {
+        let mut preserved = self.preserved_registration_counts.lock().await;
+        if let Some(count) = preserved.get_mut(bundle_id) {
+            *count -= 1;
+            if *count == 0 {
+                preserved.remove(bundle_id);
+            }
+            return Ok(());
+        }
+        drop(preserved);
         remove_tracked_plugin_server(
-            name,
-            &self.sdk_server_names,
-            &self.plugin_server_owners,
-            async {
-                self.computer
-                    .read()
-                    .await
-                    .unmount_server(name)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
+            bundle_id,
+            &self.sdk_servers,
+            &self.plugin_mounted_server_ids,
+            async { self.computer.read().await.unmount_server(bundle_id).await },
         )
         .await
         .map_err(McpHookError)
@@ -1676,23 +1673,6 @@ pub(crate) fn sdk_managed_by_to_client(managed_by: McpOwnership) -> Option<McpSe
             plugin,
             plugin_id: Some(plugin_id),
         }),
-    }
-}
-
-fn client_managed_by_to_sdk(managed_by: &McpServerManagedBy) -> McpOwnership {
-    match managed_by {
-        McpServerManagedBy::User => McpOwnership::User,
-        McpServerManagedBy::Plugin {
-            marketplace,
-            plugin,
-            plugin_id,
-        } => McpOwnership::Plugin {
-            marketplace: marketplace.clone(),
-            plugin: plugin.clone(),
-            plugin_id: plugin_id
-                .clone()
-                .unwrap_or_else(|| format!("{plugin}@{marketplace}")),
-        },
     }
 }
 
@@ -1934,40 +1914,41 @@ mod tests {
 
     #[tokio::test]
     async fn failed_plugin_server_unmount_preserves_tracking_for_retry() {
-        let sdk_server_names = Arc::new(RwLock::new(HashSet::from(["plugin-mcp".to_string()])));
-        let plugin_server_owners = Arc::new(RwLock::new(HashMap::from([(
-            "plugin-mcp".to_string(),
-            McpServerManagedBy::Plugin {
-                marketplace: "official".to_string(),
-                plugin: "audit".to_string(),
-                plugin_id: Some("official:audit".to_string()),
-            },
+        let bundle_id = BundleId::try_from("plugin-mcp").unwrap();
+        let sdk_servers = Arc::new(RwLock::new(HashMap::from([(
+            bundle_id.clone(),
+            "Plugin MCP".to_string(),
         )])));
+        let plugin_mounted_server_ids = Arc::new(RwLock::new(HashSet::from([bundle_id.clone()])));
 
         let error = remove_tracked_plugin_server(
-            "plugin-mcp",
-            &sdk_server_names,
-            &plugin_server_owners,
-            async { Err("injected unmount failure".to_string()) },
+            &bundle_id,
+            &sdk_servers,
+            &plugin_mounted_server_ids,
+            async {
+                Err(ComputerError::RuntimeError(
+                    "injected unmount failure".to_string(),
+                ))
+            },
         )
         .await
         .unwrap_err();
 
-        assert_eq!(error, "injected unmount failure");
-        assert!(sdk_server_names.read().await.contains("plugin-mcp"));
-        assert!(plugin_server_owners.read().await.contains_key("plugin-mcp"));
+        assert_eq!(error, "Runtime error: injected unmount failure");
+        assert!(sdk_servers.read().await.contains_key(&bundle_id));
+        assert!(plugin_mounted_server_ids.read().await.contains(&bundle_id));
 
         remove_tracked_plugin_server(
-            "plugin-mcp",
-            &sdk_server_names,
-            &plugin_server_owners,
-            async { Ok(()) },
+            &bundle_id,
+            &sdk_servers,
+            &plugin_mounted_server_ids,
+            async { Ok(true) },
         )
         .await
         .unwrap();
 
-        assert!(!sdk_server_names.read().await.contains("plugin-mcp"));
-        assert!(!plugin_server_owners.read().await.contains_key("plugin-mcp"));
+        assert!(!sdk_servers.read().await.contains_key(&bundle_id));
+        assert!(!plugin_mounted_server_ids.read().await.contains(&bundle_id));
     }
 
     #[test]
@@ -2549,7 +2530,7 @@ mod tests {
 
         registry.start_runtime("one").await.unwrap();
         let before = registry.runtime("one").await.unwrap();
-        assert!(before.sdk_mcp_server_names().await.is_empty());
+        assert!(before.sdk_mcp_server_ids().await.is_empty());
 
         let mut updated = instance("one", "Updated");
         updated.mcp_servers = vec![server_config("updated-server").into()];
@@ -2560,7 +2541,7 @@ mod tests {
         assert!(after.is_running().await);
         assert!(after.sdk_is_mcp_manager_initialized().await);
         assert_eq!(after.computer.read().await.name(), "Updated");
-        assert!(after.sdk_mcp_server_names().await.is_empty());
+        assert!(after.sdk_mcp_server_ids().await.is_empty());
     }
 
     #[tokio::test]
@@ -2619,8 +2600,9 @@ mod tests {
             .await
             .unwrap_err()
             .contains("has been retired"));
+        let retired_server = BundleId::try_from("retired-server").unwrap();
         assert!(previous
-            .resources("retired-server", None)
+            .resources(&retired_server, None)
             .await
             .unwrap_err()
             .contains("has been retired"));

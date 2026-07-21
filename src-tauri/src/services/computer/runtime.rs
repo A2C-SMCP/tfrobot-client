@@ -275,17 +275,6 @@ impl ComputerInstanceRuntime {
                 self.instance.id
             ));
         }
-        let socketio_ref = computer.get_socketio_client();
-        drop(computer);
-        let socket_guard = socketio_ref.read().await;
-        if let Some(client) = socket_guard.as_ref() {
-            if Arc::strong_count(client) > 1 {
-                return Err(format!(
-                    "SMCP socket for instance {} still has shared references; cannot confirm disconnect",
-                    self.instance.id
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -342,7 +331,7 @@ impl ComputerInstanceRuntime {
         }
         let computer = self.computer.read().await;
         if computer.is_mcp_manager_initialized().await {
-            computer.stop_mcp_client("all").await.map_err(|error| {
+            computer.stop_all_mcp_clients().await.map_err(|error| {
                 format!(
                     "Failed to stop SDK MCP clients before shutdown for instance {}: {}",
                     self.instance.id, error

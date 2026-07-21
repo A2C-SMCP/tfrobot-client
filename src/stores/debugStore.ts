@@ -7,6 +7,7 @@ export interface ToolInfo {
   description: string;
   inputSchema: Record<string, unknown>;
   server: string;
+  bundleId?: string;
   tags?: string[];
 }
 
@@ -20,8 +21,8 @@ export interface ContentItem {
 
 export interface CallToolResult {
   content: ContentItem[];
-  is_error: boolean;
-  meta?: Record<string, unknown>;
+  isError?: boolean;
+  _meta?: Record<string, unknown>;
 }
 
 export interface ToolCallResponse {
@@ -75,7 +76,7 @@ interface DebugState {
   executionRequestId: number;
 
   fetchTools: (instanceId: string) => Promise<void>;
-  fetchResources: (instanceId: string, serverName: string, cursor?: string | null) => Promise<void>;
+  fetchResources: (instanceId: string, bundleId: string, cursor?: string | null) => Promise<void>;
   selectTool: (tool: ToolInfo | null) => void;
   executeTool: (instanceId: string, toolName: string, params: Record<string, unknown>, timeout?: number) => Promise<ToolCallResponse>;
   fetchHistory: (instanceId: string) => Promise<void>;
@@ -134,7 +135,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     }
   },
 
-  fetchResources: async (instanceId, serverName, cursor = null) => {
+  fetchResources: async (instanceId, bundleId, cursor = null) => {
     const requestId = get().resourcesRequestId + 1;
     const switchingInstance = get().activeInstanceId !== instanceId;
     set({
@@ -151,7 +152,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     try {
       const response = await invoke<DebugResourcesResponse>('get_debug_resources', {
         instanceId,
-        serverName,
+        bundleId,
         cursor: cursor ?? null,
       });
       if (get().resourcesRequestId !== requestId || get().activeInstanceId !== instanceId) {

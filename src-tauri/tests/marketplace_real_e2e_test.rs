@@ -6,6 +6,7 @@
 
 mod common;
 
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use common::{create_test_app_state, echo_server_config, mcp};
 use tfrobot_client_lib::commands::{
     computer::start_computer_instance_core,
@@ -200,10 +201,11 @@ async fn assert_plugin_owned_mcp_server_visible_and_user_lifecycle_blocked(state
     let remove_err = mcp::remove_mcp_server_core(state, INSTANCE_ID, MCP_SERVER_NAME)
         .await
         .unwrap_err();
-    let start_err = mcp::start_mcp_server_core(state, INSTANCE_ID, MCP_SERVER_NAME)
+    let bundle_id = BundleId::try_from(MCP_SERVER_NAME).unwrap();
+    let start_err = mcp::start_mcp_server_core(state, INSTANCE_ID, &bundle_id)
         .await
         .unwrap_err();
-    let stop_err = mcp::stop_mcp_server_core(state, INSTANCE_ID, MCP_SERVER_NAME)
+    let stop_err = mcp::stop_mcp_server_core(state, INSTANCE_ID, &bundle_id)
         .await
         .unwrap_err();
 

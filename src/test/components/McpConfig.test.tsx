@@ -42,6 +42,7 @@ const mockUseSdkConfigStore = vi.mocked(useSdkConfigStore);
 
 const configServers = [
   {
+    bundleId: 'test-stdio',
     name: 'test-stdio',
     origin: 'local',
     writable: true,
@@ -57,6 +58,7 @@ const configServers = [
     },
   },
   {
+    bundleId: 'plugin-tools',
     name: 'plugin-tools',
     origin: 'project',
     writable: true,
@@ -117,12 +119,34 @@ describe('McpConfig', () => {
       validation: { valid: true, errors: [] },
     } as any);
     render(<McpConfig instanceId={instanceId} />);
-    expect(screen.getByText('test-stdio')).toBeInTheDocument();
+    expect(screen.getAllByText('test-stdio')).toHaveLength(2);
     expect(screen.getByText('sha256:config')).toBeInTheDocument();
     expect(screen.getByText('local')).toBeInTheDocument();
     expect(screen.getByText('The SDK configuration schema is valid.')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
     expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
+  });
+
+  it('keys same-name server rows by BundleId', () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:same-name',
+        mcp: {
+          servers: [
+            { ...configServers[0], bundleId: 'server-a', name: 'shared-name' },
+            { ...configServers[0], bundleId: 'server-b', name: 'shared-name' },
+          ],
+        },
+        provenance: {},
+      },
+    } as any);
+
+    const { container } = render(<McpConfig instanceId={instanceId} />);
+
+    expect(container.querySelector('tr[data-row-key="server-a"]')).toBeInTheDocument();
+    expect(container.querySelector('tr[data-row-key="server-b"]')).toBeInTheDocument();
   });
 
   it('shows validation errors but keeps bundled-name config declarations editable', () => {
@@ -147,7 +171,7 @@ describe('McpConfig', () => {
 
     render(<McpConfig instanceId={instanceId} />);
 
-    expect(screen.getByText('plugin-tools')).toBeInTheDocument();
+    expect(screen.getAllByText('plugin-tools')).toHaveLength(2);
     expect(screen.getByText('mcp.json:servers.bad: invalid transport')).toBeInTheDocument();
     expect(screen.getAllByTitle('Edit')[1]).toBeEnabled();
     expect(screen.getAllByTitle('Remove')[1]).toBeEnabled();

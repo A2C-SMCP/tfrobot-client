@@ -1,12 +1,15 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::{ComputerRuntimeAction, McpServerManagedBy};
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 /// Server status returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerStatus {
+    #[serde(rename = "bundleId")]
+    pub bundle_id: BundleId,
     pub name: String,
     pub running: bool,
     pub status_message: String,
@@ -17,6 +20,7 @@ pub struct McpServerStatus {
 
 #[derive(Debug, Clone)]
 struct McpServerRuntimeMetadata {
+    name: String,
     disabled: bool,
     managed_by: McpServerManagedBy,
 }
@@ -47,26 +51,31 @@ pub async fn get_mcp_servers_core(
         .mcp_server_statuses()
         .await
         .into_iter()
-        .map(|(name, running, status_message)| (name, (running, status_message)))
+        .map(|(bundle_id, _name, running, status_message)| (bundle_id, (running, status_message)))
         .collect();
     let mut statuses: Vec<_> = mcp_server_runtime_metadata(&runtime)
         .await
         .into_iter()
-        .map(|(name, metadata)| {
+        .map(|(bundle_id, metadata)| {
             let (running, status_message) = runtime_statuses
-                .get(&name)
+                .get(&bundle_id)
                 .cloned()
                 .unwrap_or_else(|| (false, "Stopped".to_string()));
             McpServerStatus {
                 disabled: metadata.disabled,
-                name,
+                bundle_id,
+                name: metadata.name,
                 running,
                 status_message,
                 managed_by: metadata.managed_by,
             }
         })
         .collect();
-    statuses.sort_by(|left, right| left.name.cmp(&right.name));
+    statuses.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.bundle_id.cmp(&right.bundle_id))
+    });
 
     Ok(statuses)
 }
@@ -75,19 +84,23 @@ pub async fn get_mcp_servers_core(
 pub async fn start_mcp_server(
     state: State<'_, AppState>,
     instance_id: String,
-    name: String,
+    bundle_id: BundleId,
 ) -> Result<(), RuntimeActionError> {
-    start_mcp_server_core(&state, &instance_id, &name).await
+    start_mcp_server_core(&state, &instance_id, &bundle_id).await
 }
 
 pub async fn start_mcp_server_core(
     state: &AppState,
     instance_id: &str,
-    name: &str,
+    bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
-    log::info!("Starting MCP server for instance {}: {}", instance_id, name);
+    log::info!(
+        "Starting MCP server for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
 
     let runtime = require_runtime(state, instance_id)
         .await
@@ -95,19 +108,26 @@ pub async fn start_mcp_server_core(
     ensure_computer_started(&runtime)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    ensure_user_managed_server(name, &runtime)
+    let server_name = ensure_user_managed_server(bundle_id, &runtime)
         .await
         .map_err(RuntimeActionError::runtime)?;
     runtime
-        .start_mcp_server(name)
+        .start_mcp_server(bundle_id)
         .await
         .map_err(RuntimeActionError::from)?;
 
-    log::info!("MCP server started for instance {}: {}", instance_id, name);
+    log::info!(
+        "MCP server started for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
     let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
-        &format!("Server started for instance {}: {}", instance_id, name),
+        &format!(
+            "Server started for instance {}: {}",
+            instance_id, server_name
+        ),
         None,
         Some(instance_id),
     );
@@ -118,29 +138,41 @@ pub async fn start_mcp_server_core(
 pub async fn stop_mcp_server(
     state: State<'_, AppState>,
     instance_id: String,
-    name: String,
+    bundle_id: BundleId,
 ) -> Result<(), String> {
-    stop_mcp_server_core(&state, &instance_id, &name).await
+    stop_mcp_server_core(&state, &instance_id, &bundle_id).await
 }
 
 pub async fn stop_mcp_server_core(
     state: &AppState,
     instance_id: &str,
-    name: &str,
+    bundle_id: &BundleId,
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?;
-    log::info!("Stopping MCP server for instance {}: {}", instance_id, name);
+    log::info!(
+        "Stopping MCP server for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
     let runtime = require_runtime(state, instance_id).await?;
     ensure_computer_started(&runtime).await?;
-    ensure_user_managed_server(name, &runtime).await?;
-    runtime.stop_mcp_server(name).await?;
+    let server_name = ensure_user_managed_server(bundle_id, &runtime).await?;
+    let stopped = runtime.stop_mcp_server(bundle_id).await?;
 
-    log::info!("MCP server stopped for instance {}: {}", instance_id, name);
+    log::info!(
+        "MCP server stop completed for instance {}: {} (changed={})",
+        instance_id,
+        bundle_id,
+        stopped
+    );
     let _ = state.log_service.write_for_instance(
         "info",
         "mcp",
-        &format!("Server stopped for instance {}: {}", instance_id, name),
+        &format!(
+            "Server stopped for instance {}: {}",
+            instance_id, server_name
+        ),
         None,
         Some(instance_id),
     );
@@ -169,9 +201,9 @@ pub async fn start_all_servers_core(
     ensure_computer_started(&runtime)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    for name in user_managed_server_names(&runtime).await {
+    for bundle_id in user_managed_server_ids(&runtime).await {
         runtime
-            .start_mcp_server(&name)
+            .start_mcp_server(&bundle_id)
             .await
             .map_err(RuntimeActionError::from)?;
     }
@@ -195,8 +227,8 @@ pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Resul
 
     let runtime = require_runtime(state, instance_id).await?;
     ensure_computer_started(&runtime).await?;
-    for name in user_managed_server_names(&runtime).await {
-        runtime.stop_mcp_server(&name).await?;
+    for bundle_id in user_managed_server_ids(&runtime).await {
+        runtime.stop_mcp_server(&bundle_id).await?;
     }
 
     log::info!("All MCP servers stopped for instance {}", instance_id);
@@ -221,15 +253,16 @@ async fn ensure_computer_started(
 }
 
 async fn ensure_user_managed_server(
-    name: &str,
+    bundle_id: &BundleId,
     runtime: &crate::services::computer::ComputerInstanceRuntime,
-) -> Result<(), String> {
-    match mcp_server_runtime_metadata(runtime).await.get(name) {
+) -> Result<String, String> {
+    match mcp_server_runtime_metadata(runtime).await.get(bundle_id) {
         Some(metadata) if metadata.managed_by.is_plugin_owned() => Err(format!(
-            "MCP server '{name}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace"
+            "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+            metadata.name
         )),
-        Some(_) => Ok(()),
-        None => Err(format!("Server not found: {name}")),
+        Some(metadata) => Ok(metadata.name.clone()),
+        None => Err(format!("Server not found: {bundle_id}")),
     }
 }
 
@@ -244,32 +277,34 @@ async fn require_runtime(
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))
 }
 
-async fn user_managed_server_names(
+async fn user_managed_server_ids(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
-) -> Vec<String> {
-    let mut names: Vec<_> = mcp_server_runtime_metadata(runtime)
+) -> Vec<BundleId> {
+    let mut ids: Vec<_> = mcp_server_runtime_metadata(runtime)
         .await
         .into_iter()
         .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned())
-        .map(|(name, _)| name)
+        .map(|(bundle_id, _)| bundle_id)
         .collect();
-    names.sort();
-    names
+    ids.sort();
+    ids
 }
 
 async fn mcp_server_runtime_metadata(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
-) -> std::collections::HashMap<String, McpServerRuntimeMetadata> {
+) -> std::collections::HashMap<BundleId, McpServerRuntimeMetadata> {
     runtime
         .sdk_mcp_server_ownership()
         .await
         .into_iter()
         .filter_map(|entry| {
+            let bundle_id = BundleId::try_from(entry.bundle_id.as_str()).ok()?;
             crate::services::computer::sdk_managed_by_to_client(entry.managed_by).map(
                 |managed_by| {
                     (
-                        entry.name,
+                        bundle_id,
                         McpServerRuntimeMetadata {
+                            name: entry.name,
                             disabled: entry.disabled,
                             managed_by,
                         },

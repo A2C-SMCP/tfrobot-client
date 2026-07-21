@@ -4,7 +4,7 @@ import { ResourceBrowser } from '@/components/DebugPanel/ResourceBrowser';
 import { useMcpStore } from '@/stores/mcpStore';
 
 interface MockMcpStore {
-  servers: Array<{ name: string; running: boolean; disabled: boolean; status_message: string }>;
+  servers: Array<{ bundleId: string; name: string; running: boolean; disabled: boolean; status_message: string }>;
   loading: boolean;
   activeInstanceId: string | null;
   fetchServers: ReturnType<typeof vi.fn<() => Promise<void>>>;
@@ -30,8 +30,8 @@ let mockDebugStore = makeDebugStore();
 function makeMcpStore(overrides?: Partial<MockMcpStore>): MockMcpStore {
   return {
     servers: [
-      { name: 'fs-server', running: true, disabled: false, status_message: 'Running' },
-      { name: 'stopped-server', running: false, disabled: false, status_message: 'Stopped' },
+      { bundleId: 'fs-bundle', name: 'fs-server', running: true, disabled: false, status_message: 'Running' },
+      { bundleId: 'stopped-bundle', name: 'stopped-server', running: false, disabled: false, status_message: 'Stopped' },
     ],
     loading: false,
     activeInstanceId: 'computer-a',
@@ -80,7 +80,7 @@ describe('ResourceBrowser', () => {
 
     await waitFor(() => {
       expect(mockMcpStore.fetchServers).toHaveBeenCalledWith('computer-a');
-      expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-server');
+      expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-bundle');
     });
 
     expect(screen.getByText('README.md')).toBeInTheDocument();
@@ -93,7 +93,7 @@ describe('ResourceBrowser', () => {
     const { rerender } = render(<ResourceBrowser instanceId="computer-a" />);
 
     await waitFor(() => {
-      expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-server');
+      expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-bundle');
     });
 
     mockMcpStore = makeMcpStore({
@@ -108,6 +108,9 @@ describe('ResourceBrowser', () => {
       expect(mockMcpStore.fetchServers).toHaveBeenCalledWith('computer-b');
     });
 
-    expect(mockDebugStore.fetchResources).not.toHaveBeenCalledWith('computer-b', 'fs-server');
+    expect(mockDebugStore.fetchResources).not.toHaveBeenCalledWith(
+      'computer-b',
+      'fs-bundle',
+    );
   });
 });
