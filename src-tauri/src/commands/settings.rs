@@ -89,6 +89,6 @@ pub struct AppInfo {
 pub async fn get_app_info() -> Result<AppInfo, String> {
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        smcp_computer_version: smcp_computer::VERSION.to_string(),
+        smcp_computer_version: a2c_smcp::smcp_computer::VERSION.to_string(),
     })
 }

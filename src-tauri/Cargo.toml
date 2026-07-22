@@ -18,13 +18,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-smcp-computer = "0.2.3"
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -39,9 +41,11 @@ keyring = "3"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
 
 # SQLite for log storage
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -58,15 +62,18 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Hashing for keychain key derivation (base_url → stable short hash)
 sha2 = "0.10"
 hex = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
+futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
+smcp-server-core = "0.2.3"
 socketioxide = { version = "0.16.3", features = ["state"] }
+tf-rust-socketio = "0.8.1"
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]

@@ -1,5 +1,9 @@
 # Phase 1: 核心基础 — 技术执行 Spec
 
+> 历史说明：本文档记录早期 Phase 1 设计与实现状态，包含旧 `MCPServerManager`
+> 主路径描述。SDK Computer 架构对齐后的当前实现以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 为准。
+
 > **状态**: ✅ 已完成
 > **对应 PRD**: 3.2 MCP 服务器管理（基础部分）
 

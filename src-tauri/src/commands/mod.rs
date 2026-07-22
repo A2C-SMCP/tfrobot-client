@@ -1,3 +1,5 @@
+pub mod computer;
+pub mod computer_runtime;
 pub mod config_io;
 pub mod connection;
 pub mod dashboard;
@@ -6,5 +8,10 @@ pub mod desktop;
 pub mod inputs;
 pub mod logs;
 pub mod manager;
+pub mod marketplace;
 pub mod mcp;
+pub mod runtime_error;
+pub mod runtime_sync;
+pub mod sdk_config;
 pub mod settings;
+pub mod skills;

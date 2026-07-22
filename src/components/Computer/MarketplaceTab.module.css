@@ -1,0 +1,192 @@
+.root {
+  width: 100%;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.title {
+  margin: 0 !important;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(260px, 1fr) minmax(300px, 1.1fr);
+  gap: 0;
+  align-items: stretch;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
+
+.columnCard {
+  min-width: 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.columnCard:not(:last-child) {
+  border-right: 1px solid #f0f0f0 !important;
+}
+
+.columnContent {
+  width: 100%;
+}
+
+.scrollList {
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.selectableItem,
+.selectedItem {
+  cursor: pointer;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  padding: 10px !important;
+}
+
+.selectableItem:hover {
+  background: #fafafa;
+}
+
+.selectedItem {
+  background: #f6ffed;
+}
+
+.listBody,
+.pluginCardBody,
+.detailSection {
+  width: 100%;
+  min-width: 0;
+}
+
+.pluginCardBody {
+  padding: 2px 0;
+}
+
+.marketplaceTitle {
+  display: flex;
+  max-width: 100%;
+}
+
+.marketplaceRow {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.marketplaceInfo {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.marketplaceName,
+.marketplaceUrl {
+  max-width: 100%;
+}
+
+.marketplaceActions {
+  flex: none;
+}
+
+.lastUpdated {
+  font-size: 12px;
+}
+
+.assetGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.assetCard,
+.selectedAssetCard {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  color: inherit;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  cursor: default;
+}
+
+button.assetCard {
+  cursor: pointer;
+}
+
+button.assetCard:hover {
+  border-color: #91caff;
+  background: #f5faff;
+}
+
+.selectedAssetCard {
+  border-color: #1677ff;
+  background: #e6f4ff;
+}
+
+.assetName,
+.assetDescription {
+  width: 100%;
+  max-width: 100%;
+}
+
+.assetDescription {
+  font-size: 12px;
+}
+
+.previewPane {
+  min-height: 220px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.skillPreview {
+  min-width: 0;
+}
+
+.previewCode {
+  overflow: auto;
+  background: #f5f5f5;
+  padding: 12px;
+  border-radius: 6px;
+}
+
+.previewList {
+  padding-left: 20px;
+}
+
+.previewParagraph {
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .scrollList,
+  .previewPane {
+    max-height: none;
+  }
+}

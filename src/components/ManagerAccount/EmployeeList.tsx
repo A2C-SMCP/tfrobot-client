@@ -21,7 +21,6 @@ import {
   CheckCircleOutlined,
 } from '@ant-design/icons';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
-import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import {
   useManagerStore,
@@ -29,9 +28,15 @@ import {
   type DigitalEmployeeBrief,
   type ManagerError,
 } from '@/stores/managerStore';
-import { useConnectionStore } from '@/stores/connectionStore';
+import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connectionStore';
 
 const { Title, Text } = Typography;
+
+const DISCONNECTED_STATUS: ConnectionStatusInfo = { connected: false };
+
+interface EmployeeListProps {
+  instanceId?: string;
+}
 
 function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
@@ -63,7 +68,7 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
   return (emp.status ?? 'running') === 'running';
 }
 
-export function EmployeeList() {
+export function EmployeeList({ instanceId }: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -82,27 +87,12 @@ export function EmployeeList() {
     clearError,
     dismissPaymentRequired,
   } = useManagerStore();
-  const connectionStatus = useConnectionStore((s) => s.status);
-  const fetchConnectionStatus = useConnectionStore((s) => s.fetchStatus);
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
-
-  useEffect(() => {
-    fetchConnectionStatus().catch(() => {
-      /* noop */
-    });
-  }, [fetchConnectionStatus]);
-
-  // 后端在连接 / 断开 / 后台预刷新重连时 emit 'connection'，据此刷新连接状态徽标（TFRC-11）。
-  useEffect(() => {
-    const unlisten = listen('connection', () => {
-      fetchConnectionStatus().catch(() => {
-        /* noop */
-      });
-    });
-    return () => {
-      unlisten.then((off) => off()).catch(() => {});
-    };
-  }, [fetchConnectionStatus]);
+  const selectedConnectionStatus = useConnectionStore((s) =>
+    instanceId ? s.statuses[instanceId] : undefined,
+  );
+  const connectionEnabled = Boolean(instanceId);
+  const connectionStatus = selectedConnectionStatus ?? DISCONNECTED_STATUS;
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
@@ -127,13 +117,12 @@ export function EmployeeList() {
   }, [setOnline]);
 
   const handleConnect = async (employee: DigitalEmployeeBrief) => {
+    if (!instanceId) return;
     clearError();
     try {
-      const res = await selectEmployeeAndConnect(employee.id);
+      const res = await selectEmployeeAndConnect(instanceId, employee.id);
       if (res) {
         message.success(t('managerAccount.employees.connectSuccess', { name: res.name }));
-        // 刷新连接状态，让 UI 上"已连接"标识立即生效
-        await fetchConnectionStatus();
       }
     } catch (e) {
       const err = e as ManagerError;
@@ -147,20 +136,19 @@ export function EmployeeList() {
 
   const handleDisconnectEmployee = async () => {
     try {
-      await disconnectSmcp();
+      if (!instanceId) return;
+      await disconnectSmcp(instanceId);
       message.success(t('managerAccount.employees.disconnectSuccess'));
     } catch (e) {
       message.error(String(e));
     }
   };
 
-  /** 判定某个 employee 是否正是当前 SMCP 连接的目标（按 office_id = robotId 匹配）。 */
-  const isConnectedEmployee = (emp: DigitalEmployeeBrief): boolean =>
-    !!(
-      connectionStatus?.connected &&
-      emp.robotId &&
-      connectionStatus.office_id === emp.robotId
-    );
+  const isConnectedEmployee = (emp: DigitalEmployeeBrief): boolean => {
+    if (!connectionStatus?.connected) return false;
+    if (connectionStatus.profile_name === `manager:${emp.id}`) return true;
+    return !!(emp.robotId && connectionStatus.office_id === emp.robotId);
+  };
 
   const handleLogout = async () => {
     try {
@@ -278,35 +266,39 @@ export function EmployeeList() {
               );
               return (
                 <List.Item
-                  actions={[
-                    isConnected ? (
-                      <Button
-                        key="disconnect"
-                        danger
-                        icon={<DisconnectOutlined />}
-                        loading={loading}
-                        onClick={handleDisconnectEmployee}
-                      >
-                        {t('managerAccount.employees.disconnect')}
-                      </Button>
-                    ) : noRobotAccount ? (
-                      <Tooltip
-                        key="connect"
-                        title={t('managerAccount.employees.noRobotAccount')}
-                      >
-                        <span>{connectButton}</span>
-                      </Tooltip>
-                    ) : (
-                      connectButton
-                    ),
-                  ]}
+                  actions={
+                    connectionEnabled
+                      ? [
+                          isConnected ? (
+                            <Button
+                              key="disconnect"
+                              danger
+                              icon={<DisconnectOutlined />}
+                              loading={loading}
+                              onClick={handleDisconnectEmployee}
+                            >
+                              {t('managerAccount.employees.disconnect')}
+                            </Button>
+                          ) : noRobotAccount ? (
+                            <Tooltip
+                              key="connect"
+                              title={t('managerAccount.employees.noRobotAccount')}
+                            >
+                              <span>{connectButton}</span>
+                            </Tooltip>
+                          ) : (
+                            connectButton
+                          ),
+                        ]
+                      : []
+                  }
                 >
                   <List.Item.Meta
                     avatar={<RobotOutlined style={{ fontSize: 24 }} />}
                     title={
                       <Space size={4} wrap>
                         <Text strong>{emp.name}</Text>
-                        {isConnected && (
+                        {connectionEnabled && isConnected && (
                           <Tag icon={<CheckCircleOutlined />} color="success">
                             {t('managerAccount.employees.connected')}
                           </Tag>

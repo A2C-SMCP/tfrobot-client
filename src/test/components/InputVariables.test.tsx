@@ -7,12 +7,12 @@ const mockStore = {
   values: {},
   loading: false,
   error: null,
-  fetchInputs: vi.fn(),
-  fetchValues: vi.fn(),
-  addOrUpdateInput: vi.fn(),
-  removeInput: vi.fn(),
-  setValue: vi.fn(),
-  clearValues: vi.fn(),
+  fetchInputs: vi.fn().mockResolvedValue(undefined),
+  fetchValues: vi.fn().mockResolvedValue(undefined),
+  addOrUpdateInput: vi.fn().mockResolvedValue(undefined),
+  removeInput: vi.fn().mockResolvedValue(undefined),
+  setValue: vi.fn().mockResolvedValue(undefined),
+  clearValues: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@/stores/inputStore', () => ({
@@ -35,13 +35,13 @@ describe('InputVariables', () => {
   });
 
   it('calls fetchInputs and fetchValues on mount', () => {
-    render(<InputVariables />);
-    expect(mockStore.fetchInputs).toHaveBeenCalled();
-    expect(mockStore.fetchValues).toHaveBeenCalled();
-  });
+    render(<InputVariables instanceId="computer-a" />);
+    expect(mockStore.fetchInputs).toHaveBeenCalledWith('computer-a');
+    expect(mockStore.fetchValues).toHaveBeenCalledWith('computer-a');
+  }, 10000);
 
   it('renders title and action buttons', () => {
-    render(<InputVariables />);
+    render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('Input Variables')).toBeInTheDocument();
     expect(screen.getByText('Add Variable')).toBeInTheDocument();
     expect(screen.getByText('Clear All Values')).toBeInTheDocument();
@@ -49,7 +49,7 @@ describe('InputVariables', () => {
 
   it('renders inputs table with data', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, inputs: mockInputs } as any);
-    render(<InputVariables />);
+    render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('api-key')).toBeInTheDocument();
     expect(screen.getByText('env')).toBeInTheDocument();
     expect(screen.getByText('cmd')).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe('InputVariables', () => {
 
   it('renders type tags', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, inputs: mockInputs } as any);
-    render(<InputVariables />);
+    render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('PromptString')).toBeInTheDocument();
     expect(screen.getByText('PickString')).toBeInTheDocument();
     expect(screen.getByText('Command')).toBeInTheDocument();
@@ -67,16 +67,20 @@ describe('InputVariables', () => {
     mockUseInputStore.mockReturnValue({
       ...mockStore,
       inputs: mockInputs,
-      values: { 'api-key': 'secret-123', env: 'dev' },
+      values: {
+        'api-key': { configured: true },
+        env: { configured: true, value: 'dev' },
+      },
     } as any);
-    render(<InputVariables />);
-    expect(screen.getByText('secret-123')).toBeInTheDocument();
+    render(<InputVariables instanceId="computer-a" />);
+    expect(screen.getByText('Configured secret')).toBeInTheDocument();
+    expect(screen.queryByText('secret-123')).not.toBeInTheDocument();
     expect(screen.getByText('dev')).toBeInTheDocument();
   });
 
   it('renders error alert', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, error: 'Load failed' } as any);
-    render(<InputVariables />);
+    render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('Load failed')).toBeInTheDocument();
   });
 });

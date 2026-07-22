@@ -6,13 +6,17 @@ import { useDebugStore } from '@/stores/debugStore';
 
 const { Text } = Typography;
 
-export function CallHistory() {
+interface CallHistoryProps {
+  instanceId: string;
+}
+
+export function CallHistory({ instanceId }: CallHistoryProps) {
   const { t } = useTranslation();
   const { history, historyLoading, fetchHistory, selectTool, tools } = useDebugStore();
 
   useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
+    fetchHistory(instanceId);
+  }, [fetchHistory, instanceId]);
 
   const handleReplay = (record: (typeof history)[0]) => {
     const tool = tools.find((t) => t.name === record.tool);
@@ -58,9 +62,10 @@ export function CallHistory() {
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchHistory()} loading={historyLoading}>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchHistory(instanceId)} loading={historyLoading}>
           {t('common.refresh')}
         </Button>
+        <Text type="secondary">Computer: {instanceId}</Text>
       </Space>
 
       {history.length === 0 && !historyLoading ? (

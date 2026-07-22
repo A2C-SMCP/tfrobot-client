@@ -1,43 +1,82 @@
-import { Layout, Menu, Typography, Button, Space } from 'antd';
+import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
-  ApiOutlined,
   FileTextOutlined,
-  CloudServerOutlined,
   DashboardOutlined,
-  FormOutlined,
-  BugOutlined,
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
-  UserOutlined,
+  ApiOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
-import { McpConfig } from './components/McpConfig';
-import { InputVariables } from './components/InputVariables';
-import { SmcpConnection } from './components/SmcpConnection';
-import { DebugPanel } from './components/DebugPanel';
-import { DesktopResources } from './components/DesktopResources';
 import { Dashboard } from './components/Dashboard';
 import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
-import { ManagerAccount } from './components/ManagerAccount';
+import { RobotConnections } from './components/RobotConnections';
+import { Computer } from './components/Computer';
+import { toComputerDetailTab } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
+import { useManagerStore } from './stores/managerStore';
+import { useRuntimeStore } from './stores/runtimeStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
+const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
 
 function App() {
   const { t, i18n } = useTranslation();
   const [selectedKey, setSelectedKey] = useState('dashboard');
+  const menuSelectedKey = selectedKey.startsWith('computer-detail') ? 'computer' : selectedKey;
   const { resolved, setMode, initFromSettings } = useThemeStore();
+  const {
+    session,
+    pendingAccountSelection,
+    restoreAttempted,
+    restoreSession,
+    handleAuthExpired,
+  } = useManagerStore();
+  const initializeRuntimeEvents = useRuntimeStore((state) => state.initialize);
+  const disposeRuntimeEvents = useRuntimeStore((state) => state.dispose);
+  const recoverRuntimeEvents = useRuntimeStore((state) => state.recover);
+  const runtimeEventsError = useRuntimeStore((state) => state.error);
 
   // Initialize theme from persisted settings
   useEffect(() => {
     initFromSettings();
-  }, []);
+  }, [initFromSettings]);
+
+  useEffect(() => {
+    initializeRuntimeEvents().catch(() => {
+      /* initialization errors are stored in runtime store */
+    });
+    return () => {
+      void disposeRuntimeEvents();
+    };
+  }, [disposeRuntimeEvents, initializeRuntimeEvents]);
+
+  // Manager authentication is app-wide state: restore it before any page-level
+  // connection action can need the Manager JWT.
+  useEffect(() => {
+    if (!session && !pendingAccountSelection && !restoreAttempted) {
+      restoreSession().catch(() => {
+        /* restore errors are stored in manager store */
+      });
+    }
+  }, [pendingAccountSelection, restoreAttempted, restoreSession, session]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<unknown>(AUTH_EXPIRED_EVENT, () => {
+      handleAuthExpired();
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {
+        /* noop */
+      });
+    };
+  }, [handleAuthExpired]);
 
   // Listen for system theme changes
   useEffect(() => {
@@ -63,44 +102,22 @@ function App() {
           icon: <DashboardOutlined />,
           label: t('nav.dashboard'),
         },
-      ],
-    },
-    {
-      key: 'config-group',
-      label: t('nav.config'),
-      type: 'group' as const,
-      children: [
         {
-          key: 'mcp',
-          icon: <ApiOutlined />,
-          label: t('mcp.servers'),
-        },
-        {
-          key: 'inputs',
-          icon: <FormOutlined />,
-          label: t('inputs.title'),
+          key: 'computer',
+          icon: <DesktopOutlined />,
+          label: t('computer.title'),
         },
       ],
     },
     {
       key: 'connection-group',
-      label: t('nav.connection'),
+      label: t('nav.connectionLayer'),
       type: 'group' as const,
       children: [
         {
-          key: 'manager',
-          icon: <UserOutlined />,
-          label: t('managerAccount.navLabel'),
-        },
-        {
-          key: 'smcp',
-          icon: <CloudServerOutlined />,
-          label: t('connection.smcpServer'),
-        },
-        {
-          key: 'resources',
-          icon: <DesktopOutlined />,
-          label: t('resources.title'),
+          key: 'robot-connections',
+          icon: <ApiOutlined />,
+          label: t('nav.robotConnections'),
         },
       ],
     },
@@ -109,11 +126,6 @@ function App() {
       label: t('nav.development'),
       type: 'group' as const,
       children: [
-        {
-          key: 'debug',
-          icon: <BugOutlined />,
-          label: t('nav.debugPanel'),
-        },
         {
           key: 'logs',
           icon: <FileTextOutlined />,
@@ -136,21 +148,25 @@ function App() {
   ];
 
   const renderContent = () => {
-    switch (selectedKey) {
+    const [pageKey, rawDetailTab] = selectedKey.split(':');
+    const detailTab = toComputerDetailTab(rawDetailTab);
+
+    switch (pageKey) {
       case 'dashboard':
         return <Dashboard onNavigate={setSelectedKey} />;
-      case 'mcp':
-        return <McpConfig />;
-      case 'inputs':
-        return <InputVariables />;
-      case 'manager':
-        return <ManagerAccount />;
-      case 'smcp':
-        return <SmcpConnection />;
-      case 'resources':
-        return <DesktopResources />;
-      case 'debug':
-        return <DebugPanel />;
+      case 'computer':
+        return <Computer key="computer-list" onNavigate={setSelectedKey} />;
+      case 'computer-detail':
+        return (
+          <Computer
+            key={`computer-detail-${detailTab}`}
+            initialView="detail"
+            initialTab={detailTab}
+            onNavigate={setSelectedKey}
+          />
+        );
+      case 'robot-connections':
+        return <RobotConnections />;
       case 'logs':
         return <LogViewer />;
       case 'settings':
@@ -186,7 +202,7 @@ function App() {
         <Sider width={200} className={styles.sider}>
           <Menu
             mode="inline"
-            selectedKeys={[selectedKey]}
+            selectedKeys={[menuSelectedKey]}
             items={menuItems}
             onClick={({ key }) => setSelectedKey(key)}
             className={styles.menu}
@@ -194,6 +210,24 @@ function App() {
         </Sider>
         <Content className={styles.content}>
           <div className={styles.contentInner}>
+            {runtimeEventsError && (
+              <Alert
+                type="error"
+                showIcon
+                message={t('app.runtimeEventsUnavailable')}
+                description={runtimeEventsError}
+                action={(
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => { void recoverRuntimeEvents().catch(() => undefined); }}
+                  >
+                    {t('app.retryRuntimeEvents')}
+                  </Button>
+                )}
+                style={{ marginBottom: 16 }}
+              />
+            )}
             {renderContent()}
           </div>
         </Content>

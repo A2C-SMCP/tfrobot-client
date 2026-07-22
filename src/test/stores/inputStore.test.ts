@@ -1,10 +1,29 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useInputStore, type InputDefinition } from '@/stores/inputStore';
+import { useInputStore, type InputDefinition, type InputValueView } from '@/stores/inputStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 function resetStore() {
-  useInputStore.setState({ inputs: [], values: {}, loading: false, error: null });
+  useInputStore.setState({
+    inputs: [],
+    values: {},
+    loading: false,
+    error: null,
+    activeInstanceId: null,
+    inputsRequestId: 0,
+    valuesRequestId: 0,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('inputStore', () => {
@@ -20,9 +39,9 @@ describe('inputStore', () => {
       ];
       mockedInvoke.mockResolvedValueOnce(mockInputs);
 
-      await useInputStore.getState().fetchInputs();
+      await useInputStore.getState().fetchInputs(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('list_inputs');
+      expect(mockedInvoke).toHaveBeenCalledWith('list_inputs', { instanceId });
       expect(useInputStore.getState().inputs).toEqual(mockInputs);
       expect(useInputStore.getState().loading).toBe(false);
     });
@@ -30,22 +49,95 @@ describe('inputStore', () => {
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('load failed');
 
-      await useInputStore.getState().fetchInputs();
+      await useInputStore.getState().fetchInputs(instanceId);
 
       expect(useInputStore.getState().error).toBe('load failed');
+      expect(useInputStore.getState().loading).toBe(false);
+    });
+
+    it('ignores stale input definitions from a previous computer instance', async () => {
+      const first = deferred<InputDefinition[]>();
+      const second = deferred<InputDefinition[]>();
+      const inputsA: InputDefinition[] = [
+        { type: 'PromptString', id: 'api_key_a', label: 'API Key A' },
+      ];
+      const inputsB: InputDefinition[] = [
+        { type: 'PromptString', id: 'api_key_b', label: 'API Key B' },
+      ];
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
+
+      const firstFetch = useInputStore.getState().fetchInputs('computer-a');
+      const secondFetch = useInputStore.getState().fetchInputs('computer-b');
+
+      second.resolve(inputsB);
+      await secondFetch;
+      first.resolve(inputsA);
+      await firstFetch;
+
+      expect(useInputStore.getState().inputs).toEqual(inputsB);
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
       expect(useInputStore.getState().loading).toBe(false);
     });
   });
 
   describe('fetchValues', () => {
     it('populates values map', async () => {
-      const mockValues = { api_key: 'secret123' };
+      const mockValues = { api_key: { configured: true, value: 'secret123' } };
       mockedInvoke.mockResolvedValueOnce(mockValues);
 
-      await useInputStore.getState().fetchValues();
+      await useInputStore.getState().fetchValues(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('list_input_values');
+      expect(mockedInvoke).toHaveBeenCalledWith('list_input_values', { instanceId });
       expect(useInputStore.getState().values).toEqual(mockValues);
+    });
+
+    it('ignores stale input values from a previous computer instance', async () => {
+      const first = deferred<Record<string, InputValueView>>();
+      const second = deferred<Record<string, InputValueView>>();
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
+
+      const firstFetch = useInputStore.getState().fetchValues('computer-a');
+      const secondFetch = useInputStore.getState().fetchValues('computer-b');
+
+      second.resolve({ token: { configured: true } });
+      await secondFetch;
+      first.resolve({ token: { configured: true } });
+      await firstFetch;
+
+      expect(useInputStore.getState().values).toEqual({ token: { configured: true } });
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
+    });
+
+    it('keeps definitions and values scoped during a component-style instance switch', async () => {
+      const inputsA = deferred<InputDefinition[]>();
+      const inputsB = deferred<InputDefinition[]>();
+      const valuesB = deferred<Record<string, InputValueView>>();
+      const definitionsB: InputDefinition[] = [
+        { type: 'PromptString', id: 'token_b', label: 'Token B' },
+      ];
+      mockedInvoke.mockReturnValueOnce(inputsA.promise as any);
+      mockedInvoke.mockReturnValueOnce(inputsB.promise as any);
+      mockedInvoke.mockReturnValueOnce(valuesB.promise as any);
+
+      const firstInputsFetch = useInputStore.getState().fetchInputs('computer-a');
+      const secondInputsFetch = useInputStore.getState().fetchInputs('computer-b');
+      const secondValuesFetch = useInputStore.getState().fetchValues('computer-b');
+
+      inputsB.resolve(definitionsB);
+      valuesB.resolve({ token_b: { configured: true } });
+      await secondInputsFetch;
+      await secondValuesFetch;
+
+      inputsA.resolve([{ type: 'PromptString', id: 'token_a', label: 'Token A' }]);
+      await firstInputsFetch;
+
+      expect(useInputStore.getState().inputs).toEqual(definitionsB);
+      expect(useInputStore.getState().values).toEqual({ token_b: { configured: true } });
+      expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useInputStore.getState().loading).toBe(false);
+      expect(useInputStore.getState().error).toBeNull();
     });
   });
 
@@ -55,9 +147,9 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined); // add_or_update_input
       mockedInvoke.mockResolvedValueOnce([input]);   // fetchInputs
 
-      await useInputStore.getState().addOrUpdateInput(input);
+      await useInputStore.getState().addOrUpdateInput(instanceId, input);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('add_or_update_input', { input });
+      expect(mockedInvoke).toHaveBeenCalledWith('add_or_update_input', { instanceId, input });
       expect(useInputStore.getState().inputs).toEqual([input]);
     });
 
@@ -65,7 +157,7 @@ describe('inputStore', () => {
       mockedInvoke.mockRejectedValueOnce('save failed');
 
       await expect(
-        useInputStore.getState().addOrUpdateInput({ type: 'PromptString', id: 'x', label: 'X' })
+        useInputStore.getState().addOrUpdateInput(instanceId, { type: 'PromptString', id: 'x', label: 'X' })
       ).rejects.toBe('save failed');
 
       expect(useInputStore.getState().error).toBe('save failed');
@@ -78,9 +170,9 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce([]);         // fetchInputs
       mockedInvoke.mockResolvedValueOnce({});          // fetchValues
 
-      await useInputStore.getState().removeInput('api_key');
+      await useInputStore.getState().removeInput(instanceId, 'api_key');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('remove_input', { id: 'api_key' });
+      expect(mockedInvoke).toHaveBeenCalledWith('remove_input', { instanceId, id: 'api_key' });
     });
   });
 
@@ -89,20 +181,25 @@ describe('inputStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);     // set_input_value
       mockedInvoke.mockResolvedValueOnce({ key: 'val' }); // fetchValues
 
-      await useInputStore.getState().setValue('key', 'val');
+      await useInputStore.getState().setValue(instanceId, 'key', 'val');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('set_input_value', { id: 'key', value: 'val' });
+      expect(mockedInvoke).toHaveBeenCalledWith('set_input_value', { instanceId, id: 'key', value: 'val' });
     });
   });
 
   describe('clearValues', () => {
     it('clears values map', async () => {
-      useInputStore.setState({ values: { a: '1', b: '2' } });
+      useInputStore.setState({
+        values: {
+          a: { configured: true, value: '1' },
+          b: { configured: true, value: '2' },
+        },
+      });
       mockedInvoke.mockResolvedValueOnce(undefined);
 
-      await useInputStore.getState().clearValues();
+      await useInputStore.getState().clearValues(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('clear_input_values');
+      expect(mockedInvoke).toHaveBeenCalledWith('clear_input_values', { instanceId });
       expect(useInputStore.getState().values).toEqual({});
     });
   });

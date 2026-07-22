@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
+import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -12,11 +13,17 @@ export interface ToolMeta {
 }
 
 export interface McpServerStatus {
+  bundleId: string;
   name: string;
   running: boolean;
   status_message: string;
   disabled: boolean;
+  managedBy: McpServerManagedBy;
 }
+
+export type McpServerManagedBy =
+  | { type: 'user' }
+  | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
 
 // server_parameters sub-types
 export interface StdioServerParameters {
@@ -39,6 +46,7 @@ export interface SseServerParameters {
 // Internally tagged discriminated union configs
 export interface StdioServerConfig {
   type: 'Stdio';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -50,6 +58,7 @@ export interface StdioServerConfig {
 
 export interface HttpServerConfig {
   type: 'Http';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -61,6 +70,7 @@ export interface HttpServerConfig {
 
 export interface SseServerConfig {
   type: 'Sse';
+  bundle_id?: string;
   name: string;
   disabled: boolean;
   forbidden_tools: string[];
@@ -82,28 +92,18 @@ export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse'
   return config.type.toLowerCase() as 'stdio' | 'http' | 'sse';
 }
 
-export interface ImportResult {
-  servers_imported: number;
-  inputs_imported: number;
-  servers_skipped: string[];
-}
-
 interface McpServerState {
   servers: McpServerStatus[];
   loading: boolean;
   error: string | null;
+  activeInstanceId: string | null;
+  serversRequestId: number;
 
-  fetchServers: () => Promise<void>;
-  addServer: (config: McpServerConfig) => Promise<void>;
-  updateServer: (config: McpServerConfig) => Promise<void>;
-  removeServer: (name: string) => Promise<void>;
-  startServer: (name: string) => Promise<void>;
-  stopServer: (name: string) => Promise<void>;
-  startAll: () => Promise<void>;
-  stopAll: () => Promise<void>;
-  getServerConfig: (name: string) => Promise<McpServerConfig>;
-  importConfig: (path: string) => Promise<ImportResult>;
-  exportConfig: (path: string, serverNames?: string[]) => Promise<void>;
+  fetchServers: (instanceId: string) => Promise<void>;
+  startServer: (instanceId: string, bundleId: string) => Promise<void>;
+  stopServer: (instanceId: string, bundleId: string) => Promise<void>;
+  startAll: (instanceId: string) => Promise<void>;
+  stopAll: (instanceId: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -111,130 +111,83 @@ const initialState = {
   servers: [] as McpServerStatus[],
   loading: false,
   error: null as string | null,
+  activeInstanceId: null as string | null,
+  serversRequestId: 0,
 };
 
 export const useMcpStore = create<McpServerState>((set, get) => ({
   ...initialState,
 
-  fetchServers: async () => {
-    set({ loading: true, error: null });
+  fetchServers: async (instanceId: string) => {
+    const requestId = get().serversRequestId + 1;
+    set({
+      activeInstanceId: instanceId,
+      serversRequestId: requestId,
+      servers: [],
+      loading: true,
+      error: null,
+    });
     try {
-      const servers = await invoke<McpServerStatus[]>('get_mcp_servers');
+      const servers = await invoke<McpServerStatus[]>('get_mcp_servers', { instanceId });
+      if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
       set({ servers, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
+      set({ error: formatRuntimeActionError(e), loading: false });
     }
   },
 
-  addServer: async (config: McpServerConfig) => {
+  startServer: async (instanceId: string, bundleId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('add_mcp_server', { config });
-      info(`MCP server added: ${config.name}`);
-      await get().fetchServers();
+      await invoke('start_mcp_server', { instanceId, bundleId });
+      info(`MCP server started: ${bundleId}`);
+      await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
 
-  updateServer: async (config: McpServerConfig) => {
+  stopServer: async (instanceId: string, bundleId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('update_mcp_server', { config });
-      await get().fetchServers();
+      await invoke('stop_mcp_server', { instanceId, bundleId });
+      info(`MCP server stopped: ${bundleId}`);
+      await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
 
-  removeServer: async (name: string) => {
+  startAll: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('remove_mcp_server', { name });
-      info(`MCP server removed: ${name}`);
-      await get().fetchServers();
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  startServer: async (name: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('start_mcp_server', { name });
-      info(`MCP server started: ${name}`);
-      await get().fetchServers();
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  stopServer: async (name: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('stop_mcp_server', { name });
-      info(`MCP server stopped: ${name}`);
-      await get().fetchServers();
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  startAll: async () => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('start_all_servers');
+      await invoke('start_all_servers', { instanceId });
       info('All MCP servers started');
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
 
-  stopAll: async () => {
+  stopAll: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('stop_all_servers');
+      await invoke('stop_all_servers', { instanceId });
       info('All MCP servers stopped');
-      await get().fetchServers();
+      await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  getServerConfig: async (name: string) => {
-    return await invoke<McpServerConfig>('get_mcp_server_config', { name });
-  },
-
-  importConfig: async (path: string) => {
-    set({ loading: true, error: null });
-    try {
-      const result = await invoke<ImportResult>('import_config', { path, format: null });
-      await get().fetchServers();
-      return result;
-    } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatRuntimeActionError(e), loading: false });
       throw e;
     }
   },
 
   reset: () => set(initialState),
-
-  exportConfig: async (path: string, serverNames?: string[]) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('export_config', { path, serverNames: serverNames || null });
-      set({ loading: false });
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
 }));

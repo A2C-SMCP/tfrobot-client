@@ -2,14 +2,18 @@ import { useEffect, useState } from 'react';
 import { App, Button, Space, Typography, Table, Empty, Alert, Spin, Image } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useDesktopStore, WindowContent } from '@/stores/desktopStore';
+import { useDesktopStore, WindowContent, type DesktopWindow } from '@/stores/desktopStore';
 
 const { Title, Text } = Typography;
 
 // Constants
 const MAX_TEXT_PREVIEW_LENGTH = 500;
 
-export function DesktopResources() {
+interface DesktopResourcesProps {
+  instanceId: string;
+}
+
+export function DesktopResources({ instanceId }: DesktopResourcesProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -25,8 +29,8 @@ export function DesktopResources() {
   const [expandedUris, setExpandedUris] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    fetchDesktop();
-  }, [fetchDesktop]);
+    fetchDesktop(instanceId);
+  }, [fetchDesktop, instanceId]);
 
   // Show error message when detail fetch fails
   useEffect(() => {
@@ -37,15 +41,18 @@ export function DesktopResources() {
     });
   }, [detailErrors, t, message]);
 
-  const handleRowExpand = async (expanded: boolean, record: { uri: string; server: string }) => {
+  const windowKey = (record: Pick<DesktopWindow, 'bundleId' | 'uri'>) => `${record.bundleId}:${record.uri}`;
+
+  const handleRowExpand = async (expanded: boolean, record: DesktopWindow) => {
+    const key = windowKey(record);
     const newExpanded = new Set(expandedUris);
     if (!expanded) {
-      newExpanded.delete(record.uri);
+      newExpanded.delete(key);
       setExpandedUris(newExpanded);
     } else {
-      newExpanded.add(record.uri);
+      newExpanded.add(key);
       setExpandedUris(newExpanded);
-      await fetchWindowDetail(record.server, record.uri);
+      await fetchWindowDetail(instanceId, record.bundleId, record.uri);
     }
   };
 
@@ -155,7 +162,7 @@ export function DesktopResources() {
         <Space>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => fetchDesktop()}
+            onClick={() => fetchDesktop(instanceId)}
             loading={loading}
           >
             {t('common.refresh')}
@@ -180,7 +187,7 @@ export function DesktopResources() {
         <Table
           columns={columns}
           dataSource={windows}
-          rowKey="uri"
+          rowKey={windowKey}
           loading={loading}
           size="middle"
           pagination={false}
@@ -188,8 +195,9 @@ export function DesktopResources() {
             expandedRowKeys: Array.from(expandedUris),
             onExpand: handleRowExpand,
             expandedRowRender: (record) => {
-              const detail = windowDetails[record.uri];
-              const isLoading = loadingDetails[record.uri];
+              const key = windowKey(record);
+              const detail = windowDetails[key];
+              const isLoading = loadingDetails[key];
 
               if (isLoading) {
                 return (
@@ -221,7 +229,7 @@ export function DesktopResources() {
                     <Button
                       size="small"
                       icon={<ReloadOutlined />}
-                      onClick={() => fetchWindowDetail(record.server, record.uri)}
+                      onClick={() => fetchWindowDetail(instanceId, record.bundleId, record.uri)}
                       loading={isLoading}
                     />
                   </div>

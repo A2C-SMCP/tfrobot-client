@@ -1,191 +1,323 @@
+use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::computer::{ComputerRuntimeAction, McpServerManagedBy};
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use serde::{Deserialize, Serialize};
-use smcp_computer::mcp_clients::MCPServerConfig;
 use tauri::State;
 
 /// Server status returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerStatus {
+    #[serde(rename = "bundleId")]
+    pub bundle_id: BundleId,
     pub name: String,
     pub running: bool,
     pub status_message: String,
     pub disabled: bool,
+    #[serde(rename = "managedBy")]
+    pub managed_by: McpServerManagedBy,
 }
 
-#[tauri::command]
-pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServerStatus>, String> {
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    let statuses = mgr.get_server_status().await;
-
-    Ok(statuses
-        .into_iter()
-        .map(|(name, running, status_message)| McpServerStatus {
-            name,
-            running,
-            status_message,
-            disabled: false,
-        })
-        .collect())
-}
-
-#[tauri::command]
-pub async fn get_mcp_server_config(
-    state: State<'_, AppState>,
+#[derive(Debug, Clone)]
+struct McpServerRuntimeMetadata {
     name: String,
-) -> Result<MCPServerConfig, String> {
-    let configs = state.config.load_configs().map_err(|e| e.to_string())?;
-    configs
+    disabled: bool,
+    managed_by: McpServerManagedBy,
+}
+
+#[tauri::command]
+pub async fn get_mcp_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<Vec<McpServerStatus>, String> {
+    get_mcp_servers_core(&state, &instance_id).await
+}
+
+pub async fn get_mcp_servers_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<McpServerStatus>, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let runtime_statuses: std::collections::HashMap<_, _> = runtime
+        .mcp_server_statuses()
+        .await
         .into_iter()
-        .find(|c| c.name() == name)
-        .ok_or(format!("Server not found: {}", name))
-}
-
-#[tauri::command]
-pub async fn add_mcp_server(
-    state: State<'_, AppState>,
-    config: MCPServerConfig,
-) -> Result<(), String> {
-    let name = config.name().to_string();
-    log::info!("Adding MCP server: {}", name);
-
-    state
-        .config
-        .add_config(config.clone())
-        .map_err(|e| e.to_string())?;
-
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.add_or_update_server(config)
+        .map(|(bundle_id, _name, running, status_message)| (bundle_id, (running, status_message)))
+        .collect();
+    let mut statuses: Vec<_> = mcp_server_runtime_metadata(&runtime)
         .await
-        .map_err(|e| e.to_string())?;
+        .into_iter()
+        .map(|(bundle_id, metadata)| {
+            let (running, status_message) = runtime_statuses
+                .get(&bundle_id)
+                .cloned()
+                .unwrap_or_else(|| (false, "Stopped".to_string()));
+            McpServerStatus {
+                disabled: metadata.disabled,
+                bundle_id,
+                name: metadata.name,
+                running,
+                status_message,
+                managed_by: metadata.managed_by,
+            }
+        })
+        .collect();
+    statuses.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.bundle_id.cmp(&right.bundle_id))
+    });
 
-    log::info!("MCP server added: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server added: {}", name), None);
-    Ok(())
+    Ok(statuses)
 }
 
 #[tauri::command]
-pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Removing MCP server: {}", name);
-
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.remove_server(&name).await.map_err(|e| e.to_string())?;
-
-    state
-        .config
-        .remove_config(&name)
-        .map_err(|e| e.to_string())?;
-
-    log::info!("MCP server removed: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server removed: {}", name), None);
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn update_mcp_server(
+pub async fn start_mcp_server(
     state: State<'_, AppState>,
-    config: MCPServerConfig,
-) -> Result<(), String> {
-    let name = config.name().to_string();
-    log::info!("Updating MCP server: {}", name);
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), RuntimeActionError> {
+    start_mcp_server_core(&state, &instance_id, &bundle_id).await
+}
 
-    state
-        .config
-        .add_config(config.clone())
-        .map_err(|e| e.to_string())?;
+pub async fn start_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), RuntimeActionError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    log::info!(
+        "Starting MCP server for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.add_or_update_server(config)
+    let runtime = require_runtime(state, instance_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_computer_started(&runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    let server_name = ensure_user_managed_server(bundle_id, &runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    runtime
+        .start_mcp_server(bundle_id)
+        .await
+        .map_err(RuntimeActionError::from)?;
 
-    log::info!("MCP server updated: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server updated: {}", name), None);
+    log::info!(
+        "MCP server started for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
+    let _ = state.log_service.write_for_instance(
+        "info",
+        "mcp",
+        &format!(
+            "Server started for instance {}: {}",
+            instance_id, server_name
+        ),
+        None,
+        Some(instance_id),
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn start_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Starting MCP server: {}", name);
+pub async fn stop_mcp_server(
+    state: State<'_, AppState>,
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), String> {
+    stop_mcp_server_core(&state, &instance_id, &bundle_id).await
+}
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.start_client(&name).await.map_err(|e| e.to_string())?;
+pub async fn stop_mcp_server_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!(
+        "Stopping MCP server for instance {}: {}",
+        instance_id,
+        bundle_id
+    );
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_computer_started(&runtime).await?;
+    let server_name = ensure_user_managed_server(bundle_id, &runtime).await?;
+    let stopped = runtime.stop_mcp_server(bundle_id).await?;
 
-    log::info!("MCP server started: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server started: {}", name), None);
+    log::info!(
+        "MCP server stop completed for instance {}: {} (changed={})",
+        instance_id,
+        bundle_id,
+        stopped
+    );
+    let _ = state.log_service.write_for_instance(
+        "info",
+        "mcp",
+        &format!(
+            "Server stopped for instance {}: {}",
+            instance_id, server_name
+        ),
+        None,
+        Some(instance_id),
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    log::info!("Stopping MCP server: {}", name);
+pub async fn start_all_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), RuntimeActionError> {
+    start_all_servers_core(&state, &instance_id).await
+}
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_client(&name).await.map_err(|e| e.to_string())?;
+pub async fn start_all_servers_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<(), RuntimeActionError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    log::info!("Starting all MCP servers for instance {}", instance_id);
 
-    log::info!("MCP server stopped: {}", name);
-    let _ = state
-        .log_service
-        .write("info", "mcp", &format!("Server stopped: {}", name), None);
+    let runtime = require_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    ensure_computer_started(&runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    for bundle_id in user_managed_server_ids(&runtime).await {
+        runtime
+            .start_mcp_server(&bundle_id)
+            .await
+            .map_err(RuntimeActionError::from)?;
+    }
+
+    log::info!("All MCP servers started for instance {}", instance_id);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn start_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("Starting all MCP servers");
+pub async fn stop_all_servers(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    stop_all_servers_core(&state, &instance_id).await
+}
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.start_all().await.map_err(|e| e.to_string())?;
+pub async fn stop_all_servers_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?;
+    log::info!("Stopping all MCP servers for instance {}", instance_id);
 
-    log::info!("All MCP servers started");
+    let runtime = require_runtime(state, instance_id).await?;
+    ensure_computer_started(&runtime).await?;
+    for bundle_id in user_managed_server_ids(&runtime).await {
+        runtime.stop_mcp_server(&bundle_id).await?;
+    }
+
+    log::info!("All MCP servers stopped for instance {}", instance_id);
     Ok(())
 }
 
-#[tauri::command]
-pub async fn stop_all_servers(state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("Stopping all MCP servers");
+fn require_instance_id(instance_id: &str) -> Result<&str, String> {
+    let instance_id = instance_id.trim();
+    if instance_id.is_empty() {
+        return Err("instance_id is required".to_string());
+    }
+    Ok(instance_id)
+}
 
-    let lock = state.manager.read().await;
-    let mgr = lock
-        .as_ref()
-        .ok_or("MCP manager not initialized".to_string())?;
-    mgr.stop_all().await.map_err(|e| e.to_string())?;
+async fn ensure_computer_started(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Result<(), String> {
+    runtime
+        .ensure_runtime_action(ComputerRuntimeAction::ManageMcp)
+        .await
+        .map_err(|error| error.to_string())
+}
 
-    log::info!("All MCP servers stopped");
-    Ok(())
+async fn ensure_user_managed_server(
+    bundle_id: &BundleId,
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Result<String, String> {
+    match mcp_server_runtime_metadata(runtime).await.get(bundle_id) {
+        Some(metadata) if metadata.managed_by.is_plugin_owned() => Err(format!(
+            "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+            metadata.name
+        )),
+        Some(metadata) => Ok(metadata.name.clone()),
+        None => Err(format!("Server not found: {bundle_id}")),
+    }
+}
+
+async fn require_runtime(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<crate::services::computer::ComputerInstanceRuntime, String> {
+    state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))
+}
+
+async fn user_managed_server_ids(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> Vec<BundleId> {
+    let mut ids: Vec<_> = mcp_server_runtime_metadata(runtime)
+        .await
+        .into_iter()
+        .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned())
+        .map(|(bundle_id, _)| bundle_id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+async fn mcp_server_runtime_metadata(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) -> std::collections::HashMap<BundleId, McpServerRuntimeMetadata> {
+    runtime
+        .sdk_mcp_server_ownership()
+        .await
+        .into_iter()
+        .filter_map(|entry| {
+            let bundle_id = BundleId::try_from(entry.bundle_id.as_str()).ok()?;
+            crate::services::computer::sdk_managed_by_to_client(entry.managed_by).map(
+                |managed_by| {
+                    (
+                        bundle_id,
+                        McpServerRuntimeMetadata {
+                            name: entry.name,
+                            disabled: entry.disabled,
+                            managed_by,
+                        },
+                    )
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use smcp_computer::mcp_clients::MCPServerConfig;
+    use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 
     #[test]
     fn test_stdio_config_from_frontend_json() {

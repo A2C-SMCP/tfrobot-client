@@ -13,6 +13,8 @@ pub struct LogEntry {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -22,6 +24,7 @@ pub struct LogFilter {
     pub levels: Option<Vec<String>>,
     pub categories: Option<Vec<String>>,
     pub keyword: Option<String>,
+    pub computer_instance_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -43,11 +46,18 @@ impl LogService {
                 level TEXT NOT NULL DEFAULT 'info',
                 category TEXT NOT NULL DEFAULT 'system',
                 message TEXT NOT NULL,
-                details TEXT
+                details TEXT,
+                computer_instance_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
             CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);",
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_computer_instance_id_column(&conn)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_logs_computer_instance_id ON logs(computer_instance_id)",
+            [],
         )
         .map_err(|e| e.to_string())?;
 
@@ -63,11 +73,22 @@ impl LogService {
         message: &str,
         details: Option<&str>,
     ) -> Result<(), String> {
+        self.write_for_instance(level, category, message, details, None)
+    }
+
+    pub fn write_for_instance(
+        &self,
+        level: &str,
+        category: &str,
+        message: &str,
+        details: Option<&str>,
+        computer_instance_id: Option<&str>,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO logs (timestamp, level, category, message, details) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![now, level, category, message, details],
+            "INSERT INTO logs (timestamp, level, category, message, details, computer_instance_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now, level, category, message, details, computer_instance_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -76,7 +97,7 @@ impl LogService {
     pub fn query(&self, filter: &LogFilter) -> Result<Vec<LogEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut sql = String::from(
-            "SELECT id, timestamp, level, category, message, details FROM logs WHERE 1=1",
+            "SELECT id, timestamp, level, category, message, details, computer_instance_id FROM logs WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -117,6 +138,12 @@ impl LogService {
                 param_values.push(Box::new(format!("%{}%", keyword)));
             }
         }
+        if let Some(ref computer_instance_id) = filter.computer_instance_id {
+            if !computer_instance_id.is_empty() {
+                sql.push_str(" AND computer_instance_id = ?");
+                param_values.push(Box::new(computer_instance_id.clone()));
+            }
+        }
 
         sql.push_str(" ORDER BY timestamp DESC");
 
@@ -139,6 +166,7 @@ impl LogService {
                     category: row.get(3)?,
                     message: row.get(4)?,
                     details: row.get(5)?,
+                    computer_instance_id: row.get(6)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -170,6 +198,23 @@ impl LogService {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn ensure_computer_instance_id_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(logs)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    for column in columns {
+        if column.map_err(|e| e.to_string())? == "computer_instance_id" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE logs ADD COLUMN computer_instance_id TEXT", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -223,6 +268,68 @@ mod tests {
         let logs = svc.query(&filter).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].message, "msg1");
+    }
+
+    #[test]
+    fn test_query_with_computer_instance_filter() {
+        let (svc, _tmp) = setup();
+        svc.write_for_instance("info", "tool", "msg1", None, Some("computer-a"))
+            .unwrap();
+        svc.write_for_instance("info", "tool", "msg2", None, Some("computer-b"))
+            .unwrap();
+
+        let filter = LogFilter {
+            computer_instance_id: Some("computer-a".to_string()),
+            ..Default::default()
+        };
+        let logs = svc.query(&filter).unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "msg1");
+        assert_eq!(logs[0].computer_instance_id.as_deref(), Some("computer-a"));
+    }
+
+    #[test]
+    fn test_migrates_existing_logs_table_without_computer_instance_column() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("logs.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                level TEXT NOT NULL DEFAULT 'info',
+                category TEXT NOT NULL DEFAULT 'system',
+                message TEXT NOT NULL,
+                details TEXT
+            );
+            INSERT INTO logs (level, category, message, details)
+            VALUES ('info', 'system', 'legacy log', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let svc = LogService::new(tmp.path()).unwrap();
+        svc.write_for_instance("info", "tool", "scoped log", None, Some("computer-a"))
+            .unwrap();
+
+        let legacy_logs = svc
+            .query(&LogFilter {
+                keyword: Some("legacy".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(legacy_logs.len(), 1);
+        assert_eq!(legacy_logs[0].computer_instance_id, None);
+
+        let scoped_logs = svc
+            .query(&LogFilter {
+                computer_instance_id: Some("computer-a".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(scoped_logs.len(), 1);
+        assert_eq!(scoped_logs[0].message, "scoped log");
     }
 
     #[test]

@@ -1,18 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
-
-export interface ConnectionProfile {
-  name: string;
-  url: string;
-  namespace: string;
-  office_id: string;
-  computer_name: string;
-  api_key_ref?: string;
-  headers: Record<string, string>;
-  auto_connect: boolean;
-  auto_reconnect: boolean;
-}
+import { getClientConnectionAuthority } from './connectionAuthority';
+import { projectRuntimeSnapshot, type ComputerRuntimeSnapshot } from './runtimeSnapshot';
 
 export interface ConnectionStatusInfo {
   connected: boolean;
@@ -21,26 +11,26 @@ export interface ConnectionStatusInfo {
   computer_name?: string;
   connected_at?: string;
   profile_name?: string;
+  source_type?: 'manual_smcp' | 'manager_robot';
+  target_id?: string;
+  target_name?: string;
+  employee_id?: number;
 }
 
 interface ConnectionState {
-  profiles: ConnectionProfile[];
-  status: ConnectionStatusInfo;
+  statuses: Record<string, ConnectionStatusInfo>;
   loading: boolean;
   error: string | null;
 
-  fetchProfiles: () => Promise<void>;
-  fetchStatus: () => Promise<void>;
-  saveProfile: (profile: ConnectionProfile, apiKey?: string) => Promise<void>;
-  deleteProfile: (name: string) => Promise<void>;
-  connect: (profileName: string) => Promise<void>;
-  disconnect: () => Promise<void>;
+  getStatus: (instanceId: string) => ConnectionStatusInfo;
+  applyRuntimeSnapshot: (instanceId: string, runtime: ComputerRuntimeSnapshot) => void;
+  forgetStatus: (instanceId: string) => void;
+  disconnect: (instanceId: string) => Promise<void>;
   reset: () => void;
 }
 
 const initialState = {
-  profiles: [] as ConnectionProfile[],
-  status: { connected: false } as ConnectionStatusInfo,
+  statuses: {} as Record<string, ConnectionStatusInfo>,
   loading: false,
   error: null as string | null,
 };
@@ -48,68 +38,48 @@ const initialState = {
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   ...initialState,
 
-  fetchProfiles: async () => {
-    set({ loading: true, error: null });
-    try {
-      const profiles = await invoke<ConnectionProfile[]>('list_profiles');
-      set({ profiles, loading: false });
-    } catch (e) {
-      set({ error: String(e), loading: false });
-    }
+  getStatus: (instanceId: string) => get().statuses[instanceId] ?? { connected: false },
+
+  applyRuntimeSnapshot: (instanceId, runtime) => {
+    const authority = getClientConnectionAuthority(instanceId, runtime.incarnation);
+    const projection = projectRuntimeSnapshot(runtime, authority?.present ?? false);
+    const context = projection.businessConnected ? authority?.context : null;
+    const status: ConnectionStatusInfo = context ? {
+      connected: true,
+      url: context.url,
+      office_id: context.office_id,
+      computer_name: context.computer_name,
+      connected_at: context.connected_at,
+      profile_name: context.profile_name,
+      source_type: context.source_type === 'manual_smcp' || context.source_type === 'manager_robot'
+        ? context.source_type
+        : undefined,
+      target_id: context.target_id ?? undefined,
+      target_name: context.target_name ?? undefined,
+      employee_id: context.employee_id ?? undefined,
+    } : { connected: false };
+    set((state) => ({
+      statuses: {
+        ...state.statuses,
+        [instanceId]: status,
+      },
+    }));
   },
 
-  fetchStatus: async () => {
-    try {
-      const status = await invoke<ConnectionStatusInfo>('get_connection_status');
-      set({ status });
-    } catch (e) {
-      set({ error: String(e) });
-    }
-  },
-
-  saveProfile: async (profile: ConnectionProfile, apiKey?: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('save_profile', { profile, apiKey: apiKey || null });
-      await get().fetchProfiles();
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  deleteProfile: async (name: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('delete_profile', { name });
-      await get().fetchProfiles();
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
-
-  connect: async (profileName: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('connect_smcp', { profileName });
-      info(`SMCP connected: ${profileName}`);
-      await get().fetchStatus();
-      set({ loading: false });
-    } catch (e) {
-      set({ error: String(e), loading: false });
-      throw e;
-    }
-  },
+  forgetStatus: (instanceId) => set((state) => {
+    if (!(instanceId in state.statuses)) return {};
+    const statuses = { ...state.statuses };
+    delete statuses[instanceId];
+    return { statuses };
+  }),
 
   reset: () => set(initialState),
 
-  disconnect: async () => {
+  disconnect: async (instanceId: string) => {
     set({ loading: true, error: null });
     try {
-      await invoke('disconnect_smcp');
+      await invoke('disconnect_smcp', { instanceId });
       info('SMCP disconnected');
-      await get().fetchStatus();
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });

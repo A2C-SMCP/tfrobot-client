@@ -2,39 +2,111 @@
 //! These verify that tfrobot-client's assumptions about smcp-computer's public API hold.
 //! When smcp-computer upgrades, these tests should fail first, providing clear guidance.
 
-use smcp_computer::mcp_clients::model::*;
-use smcp_computer::mcp_clients::MCPServerConfig;
-use smcp_computer::mcp_clients::MCPServerManager;
+use a2c_smcp::smcp_computer::mcp_clients::model::*;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::{
+    computer::{Computer, Session, SilentSession},
+    errors::ComputerResult,
+};
+use std::collections::HashMap;
+
+struct ContractSession;
+
+#[async_trait::async_trait]
+impl Session for ContractSession {
+    async fn resolve_input(&self, _input: &MCPServerInput) -> ComputerResult<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn session_id(&self) -> &str {
+        "contract-session"
+    }
+}
 
 // ── API Existence Contracts ──
 // If these fail to compile, the smcp-computer API has changed.
 
 #[test]
-fn contract_manager_constructible() {
-    let _manager = MCPServerManager::new();
+fn contract_computer_constructible() {
+    let _computer = Computer::new(
+        "contract-computer",
+        ContractSession,
+        Some(HashMap::new()),
+        Some(HashMap::new()),
+        false,
+        true,
+    );
 }
 
 #[tokio::test]
-async fn contract_manager_api_surface() {
-    let manager = MCPServerManager::new();
+async fn contract_computer_mcp_api_surface() {
+    let computer = Computer::new(
+        "contract-computer",
+        ContractSession,
+        Some(HashMap::new()),
+        Some(HashMap::new()),
+        false,
+        true,
+    );
 
     // These calls verify the API exists with expected signatures.
     // We don't assert behavior, just compilation.
-    let _statuses = manager.get_server_status().await;
-    let _tools = manager.list_available_tools().await;
-
-    // start_all/stop_all should exist
-    let _ = manager.stop_all().await;
+    let _statuses = computer.get_server_status().await;
+    let _tools = computer.get_available_tools().await;
+    let _ = computer.start_all_mcp_clients().await;
+    let _ = computer.stop_all_mcp_clients().await;
+    let _ = computer.shutdown().await;
 }
 
 #[test]
 fn contract_version_exists() {
-    let version = smcp_computer::VERSION;
+    let version = a2c_smcp::smcp_computer::VERSION;
     assert!(!version.is_empty());
     assert!(
         version.contains('.'),
         "VERSION should be semver format: {version}"
     );
+}
+
+#[tokio::test]
+async fn contract_boot_surfaces_structured_missing_input() {
+    let input = MCPServerInput::PromptString(PromptStringInput {
+        id: "required-token".to_string(),
+        description: "Required token".to_string(),
+        default: None,
+        password: Some(false),
+    });
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "missing-input-contract",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": ["${input:required-token}"],
+            "env": {}
+        }
+    }))
+    .unwrap();
+    let computer = Computer::new(
+        "contract-computer",
+        SilentSession::new("contract-session"),
+        Some(HashMap::from([("required-token".to_string(), input)])),
+        Some(HashMap::from([(
+            "missing-input-contract".to_string(),
+            server,
+        )])),
+        false,
+        true,
+    );
+
+    let error = computer
+        .boot_up()
+        .await
+        .expect_err("boot_up must surface a referenced missing input");
+    assert!(matches!(
+        error,
+        a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(_)
+    ));
 }
 
 // ── Serialization Format Contracts ──
@@ -218,7 +290,7 @@ fn contract_mcp_server_input_variants() {
 
 #[test]
 fn contract_computer_error_variants_exist() {
-    use smcp_computer::errors::ComputerError;
+    use a2c_smcp::smcp_computer::errors::ComputerError;
 
     // Verify key variants that tfrobot-client depends on can be constructed.
     // If smcp-computer removes/renames these, this test will fail at compile time.
@@ -229,7 +301,7 @@ fn contract_computer_error_variants_exist() {
     assert!(e2.to_string().contains("runtime"));
 
     let e3 = ComputerError::ServerNotActive {
-        server_name: "srv".into(),
+        bundle_id: "srv".into(),
     };
     assert!(e3.to_string().contains("srv"));
 
@@ -243,7 +315,7 @@ fn contract_computer_error_variants_exist() {
 
 #[test]
 fn contract_computer_error_implements_std_error() {
-    use smcp_computer::errors::ComputerError;
+    use a2c_smcp::smcp_computer::errors::ComputerError;
     let e = ComputerError::InvalidConfiguration("test".into());
     // Must implement std::error::Error (Display + Debug)
     let _display = format!("{e}");

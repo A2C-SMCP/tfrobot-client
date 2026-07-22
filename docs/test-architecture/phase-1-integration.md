@@ -1,5 +1,9 @@
 # Phase 1: 集成测试 + Contract Tests + Playwright E2E
 
+> 历史说明：本文档记录早期测试设计，部分示例仍直接测试 `MCPServerManager`。
+> SDK Computer 架构对齐后的当前测试边界以 `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md`
+> 和现有 `src-tauri/tests/*` 为准。
+
 > **目标**: 搭建 Echo MCP Server，完成 Rust Command 层集成测试、smcp-computer 契约测试、Playwright 前端 E2E。
 >
 > **依赖**: Phase 0（基础设施就绪、单元测试通过）
@@ -11,6 +15,9 @@
 ## 1.1 Echo MCP Server（测试 Fixture）
 
 ### 目的
+
+> 历史方案入口：本节示例保留早期 `MCPServerManager` 测试目标。当前集成测试应优先通过
+> command/runtime/SDK Computer 边界验证行为，不直接把 legacy manager 当作生产数据源。
 
 集成测试需要真实的 MCP 服务器进程，用于验证 `MCPServerManager` 的启动/停止/工具调用全流程。
 

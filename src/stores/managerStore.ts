@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info, warn, error as logError } from '@/utils/logger';
-import { useConnectionStore } from './connectionStore';
+import { useComputerStore } from './computerStore';
 
 /**
  * 登录成功后 Manager 下发的扁平 4 字段。
@@ -65,6 +65,11 @@ export type LoginResult =
   | { kind: 'authenticated'; user: UserInfo }
   | { kind: 'account_selection_required'; accounts: AccountOption[] };
 
+export interface RestoredManagerSession {
+  baseUrl: string;
+  user: UserInfo;
+}
+
 export type ManagerError =
   | { kind: 'network_error'; detail: string }
   | { kind: 'unauthorized' }
@@ -93,6 +98,7 @@ interface ManagerState {
   employees: DigitalEmployeeBrief[];
   selectedEmployeeId: number | null;
   loading: boolean;
+  restoreAttempted: boolean;
   error: ManagerError | null;
   paymentRequired: PaymentRequiredInfo | null;
   /** 上次成功拉取员工列表的时间戳（ms）。null = 尚未成功拉过。用于 60s staleness 兜底。 */
@@ -101,6 +107,7 @@ interface ManagerState {
   online: boolean;
 
   setBaseUrl: (url: string) => void;
+  restoreSession: () => Promise<RestoredManagerSession | null>;
   login: (phone: string, password: string, baseUrl?: string) => Promise<LoginResult>;
   selectAccount: (accountId: number) => Promise<void>;
   fetchEmployees: () => Promise<void>;
@@ -119,7 +126,10 @@ interface ManagerState {
    * 并起后台预刷新重连。鉴权不再走静态 token / profile。
    * 返回 `{ name }`（已连接的机器人名）或 `null`（前置校验未过）。
    */
-  selectEmployeeAndConnect: (employeeId: number) => Promise<{ name: string } | null>;
+  selectEmployeeAndConnect: (
+    instanceId: string,
+    employeeId: number,
+  ) => Promise<{ name: string } | null>;
   logout: () => Promise<void>;
   handleAuthExpired: () => void;
   dismissPaymentRequired: () => void;
@@ -137,6 +147,7 @@ const initialState = {
   employees: [] as DigitalEmployeeBrief[],
   selectedEmployeeId: null as number | null,
   loading: false,
+  restoreAttempted: false,
   error: null as ManagerError | null,
   paymentRequired: null as PaymentRequiredInfo | null,
   lastFetchAt: null as number | null,
@@ -161,6 +172,31 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
 
   clearError: () => set({ error: null }),
   dismissPaymentRequired: () => set({ paymentRequired: null }),
+
+  restoreSession: async () => {
+    if (get().restoreAttempted || get().session) return null;
+    set({ loading: true, error: null, restoreAttempted: true });
+    try {
+      const restored = await invoke<RestoredManagerSession | null>('manager_restore_session');
+      if (restored) {
+        info(`manager: restored session, accountId=${restored.user.accountId}`);
+        set({
+          session: restored.user,
+          pendingAccountSelection: null,
+          baseUrl: restored.baseUrl,
+          loading: false,
+        });
+      } else {
+        set({ loading: false });
+      }
+      return restored;
+    } catch (e) {
+      const err = toManagerError(e);
+      warn(`manager: restore_session failed, kind=${err.kind}`);
+      set({ error: err, loading: false });
+      return null;
+    }
+  },
 
   login: async (phone, password, baseUrl) => {
     set({ loading: true, error: null, paymentRequired: null });
@@ -262,8 +298,16 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     }
   },
 
-  selectEmployeeAndConnect: async (employeeId) => {
+  selectEmployeeAndConnect: async (instanceId, employeeId) => {
     set({ loading: true, error: null, selectedEmployeeId: employeeId, paymentRequired: null });
+    if (!instanceId) {
+      const err: ManagerError = {
+        kind: 'invalid_response',
+        detail: 'No Computer instance selected',
+      };
+      set({ error: err, loading: false });
+      throw err;
+    }
     const employee = get().employees.find((e) => e.id === employeeId);
     if (!employee) {
       const err: ManagerError = { kind: 'not_found' };
@@ -284,11 +328,18 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       // 后端编排 token-exchange 全路径：connection-info → exchange_token → 短 JWT 注入 Socket.IO
       // auth dict → 连接，并起后台预刷新重连。鉴权不再走静态 token / profile。
       await invoke('manager_connect_smcp', {
+        instanceId,
         employeeId,
         robotAccountId: employee.robotAccountId,
+        robotId: employee.robotId ?? null,
+        robotName: employee.name,
+        namespace: employee.namespace ?? null,
         scope: null,
       });
       info(`manager: connected via token-exchange employee=${employee.name}`);
+      // Connection status arrives through runtime events; reconcile the persisted robot binding
+      // and connection policy once after the command succeeds.
+      await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
       set({ loading: false });
       return { name: employee.name };
     } catch (e) {
@@ -320,13 +371,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   logout: async () => {
     set({ loading: true, error: null });
     try {
-      if (useConnectionStore.getState().status.connected) {
-        try {
-          await useConnectionStore.getState().disconnect();
-        } catch (e) {
-          warn(`manager: logout disconnect failed: ${String(e)}`);
-        }
-      }
       await invoke('manager_logout');
       info('manager: logout ok');
       set({
@@ -335,6 +379,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         employees: [],
         selectedEmployeeId: null,
         loading: false,
+        restoreAttempted: true,
         lastFetchAt: null,
       });
     } catch (e) {

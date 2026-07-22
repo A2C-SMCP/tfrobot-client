@@ -4,25 +4,28 @@ import { useMcpStore, getConfigName, getConfigType, type McpServerConfig } from 
 const mockedInvoke = vi.mocked(invoke);
 
 function resetStore() {
-  useMcpStore.setState({ servers: [], loading: false, error: null });
+  useMcpStore.setState({
+    servers: [],
+    loading: false,
+    error: null,
+    activeInstanceId: null,
+    serversRequestId: 0,
+  });
 }
 
-// Helper to create test configs in the correct internally tagged format
-function makeStdioConfig(overrides?: Partial<McpServerConfig & { server_parameters: Record<string, unknown> }>): McpServerConfig {
-  return {
-    type: 'Stdio',
-    name: 'test',
-    disabled: false,
-    forbidden_tools: [],
-    tool_meta: {},
-    default_tool_meta: null,
-    vrl: null,
-    server_parameters: { command: 'node', args: [], env: {}, cwd: null },
-    ...overrides,
-  } as McpServerConfig;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('mcpStore', () => {
+  const instanceId = 'computer-a';
+
   beforeEach(() => {
     resetStore();
     mockedInvoke.mockReset();
@@ -30,55 +33,105 @@ describe('mcpStore', () => {
 
   describe('fetchServers', () => {
     it('populates servers list', async () => {
-      const mockServers = [{ name: 'srv', running: false, status_message: '', disabled: false }];
+      const mockServers = [
+        {
+          name: 'srv',
+          running: false,
+          status_message: '',
+          disabled: false,
+          managedBy: { type: 'user' },
+        },
+      ];
       mockedInvoke.mockResolvedValueOnce(mockServers);
 
-      await useMcpStore.getState().fetchServers();
+      await useMcpStore.getState().fetchServers(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers', { instanceId });
       expect(useMcpStore.getState().servers).toEqual(mockServers);
       expect(useMcpStore.getState().loading).toBe(false);
+    });
+
+    it('preserves plugin ownership metadata from backend status', async () => {
+      const mockServers = [
+        {
+          name: 'plugin-srv',
+          running: false,
+          status_message: '',
+          disabled: false,
+          managedBy: {
+            type: 'plugin',
+            marketplace: 'tf-market',
+            plugin: 'desktop-tools',
+            pluginId: 'plugin-1',
+          },
+        },
+      ];
+      mockedInvoke.mockResolvedValueOnce(mockServers);
+
+      await useMcpStore.getState().fetchServers(instanceId);
+
+      expect(useMcpStore.getState().servers).toEqual(mockServers);
     });
 
     it('sets error on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('connection failed');
 
-      await useMcpStore.getState().fetchServers();
+      await useMcpStore.getState().fetchServers(instanceId);
 
       expect(useMcpStore.getState().error).toBe('connection failed');
     });
-  });
 
-  describe('addServer', () => {
-    it('invokes add_mcp_server and refreshes', async () => {
-      const config = makeStdioConfig();
-      mockedInvoke.mockResolvedValueOnce(undefined); // add_mcp_server
-      mockedInvoke.mockResolvedValueOnce([]);         // fetchServers
+    it('ignores stale server responses from a previous computer instance', async () => {
+      const first = deferred<
+        Array<{
+          name: string;
+          running: boolean;
+          status_message: string;
+          disabled: boolean;
+          managedBy: { type: 'user' };
+        }>
+      >();
+      const second = deferred<
+        Array<{
+          name: string;
+          running: boolean;
+          status_message: string;
+          disabled: boolean;
+          managedBy: { type: 'user' };
+        }>
+      >();
+      const serversA = [
+        {
+          name: 'a-only',
+          running: true,
+          status_message: 'Running',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
+      const serversB = [
+        {
+          name: 'b-only',
+          running: true,
+          status_message: 'Running',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
+      mockedInvoke.mockReturnValueOnce(first.promise as any);
+      mockedInvoke.mockReturnValueOnce(second.promise as any);
 
-      await useMcpStore.getState().addServer(config);
+      const firstFetch = useMcpStore.getState().fetchServers('computer-a');
+      const secondFetch = useMcpStore.getState().fetchServers('computer-b');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('add_mcp_server', { config });
-    });
+      second.resolve(serversB);
+      await secondFetch;
+      first.resolve(serversA);
+      await firstFetch;
 
-    it('sets error and re-throws on failure', async () => {
-      mockedInvoke.mockRejectedValueOnce('duplicate');
-
-      await expect(
-        useMcpStore.getState().addServer(makeStdioConfig({ name: 'x' }))
-      ).rejects.toBe('duplicate');
-
-      expect(useMcpStore.getState().error).toBe('duplicate');
-    });
-  });
-
-  describe('removeServer', () => {
-    it('invokes remove_mcp_server and refreshes', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-      mockedInvoke.mockResolvedValueOnce([]);
-
-      await useMcpStore.getState().removeServer('test');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('remove_mcp_server', { name: 'test' });
+      expect(useMcpStore.getState().servers).toEqual(serversB);
+      expect(useMcpStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useMcpStore.getState().loading).toBe(false);
     });
   });
 
@@ -87,18 +140,18 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().startServer('srv');
+      await useMcpStore.getState().startServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { instanceId, bundleId: 'srv' });
     });
 
     it('stop invokes stop_mcp_server', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().stopServer('srv');
+      await useMcpStore.getState().stopServer(instanceId, 'srv');
 
-      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { name: 'srv' });
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_mcp_server', { instanceId, bundleId: 'srv' });
     });
   });
 
@@ -107,49 +160,21 @@ describe('mcpStore', () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().startAll();
+      await useMcpStore.getState().startAll(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers', { instanceId });
     });
 
     it('stopAll invokes stop_all_servers', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().stopAll();
+      await useMcpStore.getState().stopAll(instanceId);
 
-      expect(mockedInvoke).toHaveBeenCalledWith('stop_all_servers');
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_all_servers', { instanceId });
     });
   });
 
-  describe('importConfig / exportConfig', () => {
-    it('importConfig returns result and refreshes', async () => {
-      const result = { servers_imported: 2, inputs_imported: 1, servers_skipped: [] };
-      mockedInvoke.mockResolvedValueOnce(result); // import_config
-      mockedInvoke.mockResolvedValueOnce([]);     // fetchServers
-
-      const ret = await useMcpStore.getState().importConfig('/path/to/config.json');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('import_config', { path: '/path/to/config.json', format: null });
-      expect(ret).toEqual(result);
-    });
-
-    it('exportConfig invokes export_config', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-
-      await useMcpStore.getState().exportConfig('/out.json', ['srv1']);
-
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', serverNames: ['srv1'] });
-    });
-
-    it('exportConfig passes null when no server names', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
-
-      await useMcpStore.getState().exportConfig('/out.json');
-
-      expect(mockedInvoke).toHaveBeenCalledWith('export_config', { path: '/out.json', serverNames: null });
-    });
-  });
 });
 
 describe('mcpStore helpers', () => {

@@ -2,30 +2,39 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
-use commands::connection::{close_smcp_connection, ConnectionState};
+use services::client_computers::ClientComputersPaths;
+use services::computer::{ComputerInstance, ComputerInstancesConfig, ComputerRegistry};
 use services::config::ConfigService;
+use services::config_migration::{migrate_legacy_config, MigrationError};
+use services::keychain::{SecretStore, SystemSecretStore};
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
+use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
-use smcp_computer::mcp_clients::model::MCPServerInput;
-use smcp_computer::mcp_clients::MCPServerManager;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 /// Application state shared across all Tauri commands
 pub struct AppState {
-    /// MCP Server manager from smcp-computer (wrapped in Option for SmcpComputerClient compatibility)
-    pub manager: Arc<RwLock<Option<MCPServerManager>>>,
     /// Configuration persistence service
     pub config: Arc<ConfigService>,
-    /// Input definitions for SMCP (shared with SmcpComputerClient)
-    pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
-    /// Active SMCP connection
-    pub connection: Arc<RwLock<Option<ConnectionState>>>,
+    /// Adapter for SDK-owned per-Computer configuration.
+    pub sdk_config: Arc<SdkConfigService>,
+    /// Runtime registry for all configured Computer instances
+    pub computer_registry: Arc<ComputerRegistry>,
+    /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
+    pub secret_store: Arc<dyn SecretStore>,
+    /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
+    /// happen as one transaction across Computer instances.
+    pub connection_establish_lock: Arc<Mutex<()>>,
+    /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
+    /// These operations are infrequent and must not observe one another half-committed.
+    pub computer_lifecycle_lock: Arc<Mutex<()>>,
+    /// Serializes global input definition/value mutations through runtime compensation.
+    pub input_mutation_lock: Arc<Mutex<()>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
     /// Settings persistence service
@@ -34,22 +43,139 @@ pub struct AppState {
     pub manager_client: Arc<ManagerClient>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AppStateInitError {
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
+    #[error("failed to discover Computer profiles: {0}")]
+    Config(#[from] services::config::ConfigError),
+    #[error("failed to load Computer input values from Keychain: {0}")]
+    Keychain(#[from] services::keychain::KeychainError),
+    #[error("failed to recover an interrupted configuration import: {0}")]
+    ConfigImportRecovery(String),
+}
+
 impl AppState {
     pub fn new(
         config: ConfigService,
         log_service: LogService,
         settings_service: SettingsService,
     ) -> Self {
-        Self {
-            manager: Arc::new(RwLock::new(Some(MCPServerManager::new()))),
-            config: Arc::new(config),
-            inputs: Arc::new(RwLock::new(HashMap::new())),
-            connection: Arc::new(RwLock::new(None)),
-            log_service: Arc::new(log_service),
-            settings_service: Arc::new(settings_service),
-            manager_client: Arc::new(ManagerClient::new()),
-        }
+        Self::try_new(config, log_service, settings_service)
+            .expect("failed to initialize application state")
     }
+
+    pub fn try_new(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+    ) -> Result<Self, AppStateInitError> {
+        Self::try_new_with_secret_store(
+            config,
+            log_service,
+            settings_service,
+            Arc::new(SystemSecretStore),
+        )
+    }
+
+    pub fn new_with_secret_store(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self::try_new_with_secret_store(config, log_service, settings_service, secret_store)
+            .expect("failed to initialize application state")
+    }
+
+    pub fn try_new_with_secret_store(
+        config: ConfigService,
+        log_service: LogService,
+        settings_service: SettingsService,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Result<Self, AppStateInitError> {
+        let config = Arc::new(config);
+        let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
+        let settings_service = Arc::new(settings_service);
+
+        migrate_legacy_config(
+            config.as_ref(),
+            sdk_config.as_ref(),
+            settings_service.as_ref(),
+            secret_store.as_ref(),
+        )?;
+        let stored_instances = config.load_computer_instances()?;
+        commands::config_io::recover_pending_config_imports(
+            config.as_ref(),
+            sdk_config.as_ref(),
+            secret_store.as_ref(),
+            stored_instances
+                .instances
+                .iter()
+                .map(|instance| instance.id.clone()),
+        )
+        .map_err(AppStateInitError::ConfigImportRecovery)?;
+        // Recovery may update global input definitions. Reload the profiles so every runtime is
+        // hydrated from the recovered storage state rather than the pre-recovery discovery copy.
+        let stored_instances = config.load_computer_instances()?;
+        let instances = hydrate_computer_instances(stored_instances, secret_store.as_ref())?;
+        let computer_registry = ComputerRegistry::from_config_with_skill_home_base_and_secret_store(
+            instances,
+            config.computer_skill_home_base(),
+            secret_store.clone(),
+        );
+
+        Ok(Self {
+            config,
+            sdk_config,
+            computer_registry: Arc::new(computer_registry),
+            secret_store: secret_store.clone(),
+            connection_establish_lock: Arc::new(Mutex::new(())),
+            computer_lifecycle_lock: Arc::new(Mutex::new(())),
+            input_mutation_lock: Arc::new(Mutex::new(())),
+            log_service: Arc::new(log_service),
+            settings_service,
+            manager_client: Arc::new(ManagerClient::new_with_secret_store(secret_store)),
+        })
+    }
+
+    pub fn hydrate_computer_instance(
+        &self,
+        instance: ComputerInstance,
+    ) -> Result<ComputerInstance, services::keychain::KeychainError> {
+        hydrate_computer_instance(instance, self.secret_store.as_ref())
+    }
+
+    pub fn load_hydrated_computer_instances(
+        &self,
+    ) -> Result<ComputerInstancesConfig, AppStateInitError> {
+        Ok(hydrate_computer_instances(
+            self.config.load_computer_instances()?,
+            self.secret_store.as_ref(),
+        )?)
+    }
+}
+
+fn hydrate_computer_instances(
+    mut config: ComputerInstancesConfig,
+    secret_store: &dyn SecretStore,
+) -> Result<ComputerInstancesConfig, services::keychain::KeychainError> {
+    config.instances = config
+        .instances
+        .into_iter()
+        .map(|instance| hydrate_computer_instance(instance, secret_store))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(config)
+}
+
+fn hydrate_computer_instance(
+    mut instance: ComputerInstance,
+    _secret_store: &dyn SecretStore,
+) -> Result<ComputerInstance, services::keychain::KeychainError> {
+    // Resolved values are intentionally never hydrated into the runtime profile. The SDK
+    // requests them through RuntimeInputResolver only while rendering a referenced input.
+    instance.input_values.clear();
+    Ok(instance)
 }
 
 /// Remove log files older than `retention_days` from the given directory.
@@ -88,6 +214,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -108,13 +235,20 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to get app data directory");
 
-            let config_service = ConfigService::new(app_data_dir.clone())
-                .expect("Failed to initialize config service");
+            let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
+            let config_service = ConfigService::new_with_client_computers_paths(
+                app_data_dir.clone(),
+                client_computers_paths.clone(),
+            )
+            .expect("Failed to initialize config service");
 
             let log_service =
                 LogService::new(&app_data_dir).expect("Failed to initialize log service");
 
-            let settings_service = SettingsService::new(app_data_dir.clone());
+            let settings_service = SettingsService::new_with_client_computers_paths(
+                app_data_dir.clone(),
+                client_computers_paths,
+            );
 
             // Use configured log retention days for cleanup
             let settings = settings_service.load();
@@ -132,10 +266,7 @@ pub fn run() {
                 );
             }
 
-            let saved_configs = config_service.load_configs().unwrap_or_default();
-            log::info!("Loaded {} MCP server configurations", saved_configs.len());
-
-            let state = AppState::new(config_service, log_service, settings_service);
+            let state = AppState::try_new(config_service, log_service, settings_service)?;
 
             // Write startup log and cleanup old entries
             let _ = state
@@ -145,18 +276,7 @@ pub fn run() {
                 .log_service
                 .cleanup(settings.log_retention_days as i64);
 
-            // Initialize manager with saved configs in background
-            let manager = state.manager.clone();
-            let configs = saved_configs.clone();
-            tauri::async_runtime::spawn(async move {
-                let lock = manager.read().await;
-                if let Some(mgr) = lock.as_ref() {
-                    if let Err(e) = mgr.initialize(configs).await {
-                        log::error!("Failed to initialize MCP servers: {}", e);
-                    }
-                    log::info!("MCP servers initialized");
-                }
-            });
+            log::info!("Configured Computer runtimes loaded; instances remain stopped");
 
             app.manage(state);
 
@@ -184,14 +304,29 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // MCP server management
             commands::mcp::get_mcp_servers,
-            commands::mcp::get_mcp_server_config,
-            commands::mcp::add_mcp_server,
-            commands::mcp::remove_mcp_server,
-            commands::mcp::update_mcp_server,
+            commands::sdk_config::get_computer_config_state,
+            commands::sdk_config::upsert_computer_mcp_config,
+            commands::sdk_config::remove_computer_mcp_config,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::start_all_servers,
             commands::mcp::stop_all_servers,
+            // Skills marketplace governance
+            commands::marketplace::get_marketplace_capabilities,
+            commands::marketplace::get_marketplace_governance,
+            commands::marketplace::add_marketplace,
+            commands::marketplace::refresh_marketplace,
+            commands::marketplace::remove_marketplace,
+            commands::marketplace::update_marketplace,
+            commands::marketplace::install_plugin,
+            commands::marketplace::enable_plugin,
+            commands::marketplace::disable_plugin,
+            commands::marketplace::uninstall_plugin,
+            // Skills inventory and content
+            commands::skills::list_skills,
+            commands::skills::get_skill,
+            commands::skills::refresh_skills,
+            commands::skills::open_local_skills_root,
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,
@@ -204,19 +339,37 @@ pub fn run() {
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,
             // SMCP connection management
-            commands::connection::list_profiles,
-            commands::connection::save_profile,
-            commands::connection::delete_profile,
-            commands::connection::connect_smcp,
+            commands::connection::list_manual_smcp_targets,
+            commands::connection::save_manual_smcp_target,
+            commands::connection::delete_manual_smcp_target,
+            commands::connection::connect_connection_target,
             commands::connection::manager_connect_smcp,
             commands::connection::disconnect_smcp,
             commands::connection::get_connection_status,
+            // Computer instance management
+            commands::computer::list_computer_instances,
+            commands::computer::get_computer_instance_status,
+            commands::computer::create_computer_instance,
+            commands::computer::rename_computer_instance,
+            commands::computer::duplicate_computer_instance,
+            commands::computer::delete_computer_instance,
+            commands::computer::start_computer_instance,
+            commands::computer::stop_computer_instance,
+            commands::computer::restart_computer_instance,
+            commands::computer::reload_computer_runtime,
+            commands::computer::update_computer_connection_policy,
+            commands::computer::update_computer_skill_home,
+            commands::computer::connect_computer_connection_target,
+            commands::computer::disconnect_computer_connection_target,
+            commands::computer_runtime::enable_computer_runtime_events,
+            commands::computer_runtime::get_computer_runtime_snapshots,
             // Config import/export
             commands::config_io::detect_config_format,
             commands::config_io::import_config,
             commands::config_io::export_config,
             // Debug & tools
             commands::debug::get_available_tools,
+            commands::debug::get_debug_resources,
             commands::debug::execute_tool,
             commands::debug::get_tool_history,
             // Desktop resources
@@ -228,6 +381,7 @@ pub fn run() {
             commands::logs::clear_logs,
             // Dashboard
             commands::dashboard::get_dashboard_data,
+            commands::dashboard::get_computer_overview_data,
             // Settings
             commands::settings::get_settings,
             commands::settings::update_settings,
@@ -235,6 +389,7 @@ pub fn run() {
             commands::settings::get_app_info,
             commands::settings::get_detected_path,
             // TFRSManager HTTP client (issue #23)
+            commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,
             commands::manager::manager_list_digital_employees,
@@ -247,19 +402,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    // Disconnect SMCP if connected
-                    let existing_connection = {
-                        let mut conn = state.connection.write().await;
-                        conn.take()
-                    };
-                    if let Some(connection) = existing_connection {
-                        close_smcp_connection(connection).await;
-                    }
-                    // Stop all MCP servers
-                    let lock = state.manager.read().await;
-                    if let Some(mgr) = lock.as_ref() {
-                        let _ = mgr.stop_all().await;
-                    }
+                    state.computer_registry.shutdown_all().await;
                 });
                 let _ =
                     state
@@ -332,5 +475,33 @@ mod tests {
         let path = std::path::Path::new("/tmp/nonexistent_log_dir_test_12345");
         // Should not panic
         cleanup_old_log_files(path, 3);
+    }
+
+    #[tokio::test]
+    async fn app_state_allows_empty_computer_registry() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+
+        let state = AppState::new(config, log_service, settings_service);
+
+        assert!(state.computer_registry.list_runtimes().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_state_loads_configured_computer_runtimes_stopped() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
+            .unwrap();
+        let log_service = LogService::new(dir.path()).unwrap();
+        let settings_service = SettingsService::new(dir.path().to_path_buf());
+
+        let state = AppState::new(config, log_service, settings_service);
+        let runtime = state.computer_registry.runtime("one").await.unwrap();
+
+        assert!(!runtime.is_running().await);
     }
 }

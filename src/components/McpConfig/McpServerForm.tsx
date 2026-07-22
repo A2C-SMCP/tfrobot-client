@@ -31,9 +31,46 @@ export function parseToolMetaJson(json: string | undefined): ToolMetaParseResult
   return { ok: true, value: result };
 }
 
+export function normalizeToolMeta(meta: ToolMeta | undefined | null): ToolMeta | null {
+  if (!meta) return null;
+
+  const normalized: ToolMeta = { ...meta };
+  if (normalized.alias !== undefined && normalized.alias.trim() === '') {
+    delete normalized.alias;
+  }
+  if (normalized.tags !== undefined) {
+    const tags = normalized.tags.filter((tag) => tag.trim() !== '');
+    if (tags.length > 0) {
+      normalized.tags = tags;
+    } else {
+      delete normalized.tags;
+    }
+  }
+
+  if (
+    normalized.auto_apply === undefined
+    && normalized.alias === undefined
+    && normalized.tags === undefined
+    && normalized.ret_object_mapper === undefined
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+export function normalizeToolMetaMap(toolMeta: Record<string, ToolMeta>): Record<string, ToolMeta> {
+  return Object.fromEntries(
+    Object.entries(toolMeta)
+      .map(([name, meta]) => [name, normalizeToolMeta(meta)] as const)
+      .filter((entry): entry is [string, ToolMeta] => entry[1] !== null),
+  );
+}
+
 interface FormValues {
   type: ServerType;
   name: string;
+  bundle_id?: string;
   // Stdio fields
   command?: string;
   args?: string[];
@@ -46,7 +83,7 @@ interface FormValues {
   disabled?: boolean;
   // Advanced
   forbidden_tools?: string[];
-  default_tool_meta?: { tags?: string[]; auto_apply?: boolean; alias?: string };
+  default_tool_meta?: { tags?: string[]; auto_apply?: boolean };
   tool_meta_json?: string;
   vrl?: string;
 }
@@ -69,6 +106,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
 
     const base = {
       name: initialValues.name,
+      bundle_id: initialValues.bundle_id,
       disabled: initialValues.disabled,
     };
 
@@ -128,7 +166,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
       form.setFields([{ name: 'tool_meta_json', errors: [t(errorKey)] }]);
       return;
     }
-    const toolMeta = toolMetaResult.value;
+    const toolMeta = normalizeToolMetaMap(toolMetaResult.value);
     const advancedFields = {
       disabled: values.disabled || false,
       forbidden_tools: values.forbidden_tools || [],
@@ -137,8 +175,9 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
 
     const commonFields = {
       name: values.name,
+      bundle_id: values.bundle_id?.trim() || undefined,
       ...advancedFields,
-      default_tool_meta: values.default_tool_meta ?? null,
+      default_tool_meta: normalizeToolMeta(values.default_tool_meta),
       vrl: values.vrl ?? null,
     };
 
@@ -216,6 +255,14 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
         rules={[{ required: true, message: t('mcp.form.nameRequired') }]}
       >
         <Input disabled={!!initialValues} />
+      </Form.Item>
+
+      <Form.Item
+        name="bundle_id"
+        label={t('mcp.form.bundleId')}
+        extra={t('mcp.form.bundleIdHint')}
+      >
+        <Input disabled={!!initialValues} placeholder={t('mcp.form.bundleIdPlaceholder')} />
       </Form.Item>
 
       {serverType === 'stdio' && (
@@ -341,9 +388,6 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
           <Card size="small" title={t('mcp.form.defaultToolMeta')} style={{ marginBottom: 16 }}>
             <Form.Item name={['default_tool_meta', 'auto_apply']} label={t('mcp.form.defaultToolMetaAutoApply')} valuePropName="checked">
               <Switch />
-            </Form.Item>
-            <Form.Item name={['default_tool_meta', 'alias']} label={t('mcp.form.defaultToolMetaAlias')}>
-              <Input />
             </Form.Item>
             <Form.Item name={['default_tool_meta', 'tags']} label={t('mcp.form.defaultToolMetaTags')}>
               <Select

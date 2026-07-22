@@ -1,4 +1,4 @@
-import { App, Table, Button, Space, Popconfirm } from 'antd';
+import { App, Table, Button, Space, Popconfirm, Tag, Tooltip } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
@@ -11,15 +11,19 @@ import type { McpServerStatus } from '@/stores/mcpStore';
 
 interface McpServerListProps {
   servers: McpServerStatus[];
+  mode?: 'config' | 'runtime';
+  actionsDisabled?: boolean;
   loading?: boolean;
-  onStart: (name: string) => Promise<void>;
-  onStop: (name: string) => Promise<void>;
-  onEdit: (name: string) => void;
-  onRemove: (name: string) => Promise<void>;
+  onStart?: (bundleId: string) => Promise<void>;
+  onStop?: (bundleId: string) => Promise<void>;
+  onEdit?: (name: string) => void;
+  onRemove?: (name: string) => Promise<void>;
 }
 
 export function McpServerList({
   servers,
+  mode = 'config',
+  actionsDisabled = false,
   loading,
   onStart,
   onStop,
@@ -29,18 +33,13 @@ export function McpServerList({
   const { t } = useTranslation();
   const { message } = App.useApp();
 
-  const handleStart = async (name: string) => {
-    try {
-      await onStart(name);
-      message.success(t('mcp.messages.started', { name }));
-    } catch (e) {
-      message.error(String(e));
-    }
+  const handleStart = async (bundleId: string) => {
+    await onStart?.(bundleId);
   };
 
-  const handleStop = async (name: string) => {
+  const handleStop = async (bundleId: string, name: string) => {
     try {
-      await onStop(name);
+      await onStop?.(bundleId);
       message.success(t('mcp.messages.stopped', { name }));
     } catch (e) {
       message.error(String(e));
@@ -49,14 +48,42 @@ export function McpServerList({
 
   const handleRemove = async (name: string) => {
     try {
-      await onRemove(name);
+      await onRemove?.(name);
       message.success(t('mcp.messages.removed', { name }));
     } catch (e) {
       message.error(String(e));
     }
   };
 
+  const isPluginOwned = (record: McpServerStatus) => record.managedBy.type === 'plugin';
+
+  const pluginLifecycleMessage = (record: McpServerStatus) => {
+    if (record.managedBy.type !== 'plugin') {
+      return undefined;
+    }
+    return t('mcp.pluginManagedHint', {
+      plugin: record.managedBy.plugin,
+      marketplace: record.managedBy.marketplace,
+    });
+  };
+
+  const sourceLabel = (record: McpServerStatus) => {
+    if (record.managedBy.type === 'plugin') {
+      return `${record.managedBy.plugin}@${record.managedBy.marketplace}`;
+    }
+    return t('mcp.source.user');
+  };
+
   const columns = [
+    {
+      title: t('mcp.table.source'),
+      key: 'source',
+      render: (_: unknown, record: McpServerStatus) => (
+        <Tag color={isPluginOwned(record) ? 'purple' : 'default'}>
+          {sourceLabel(record)}
+        </Tag>
+      ),
+    },
     {
       title: t('mcp.table.name'),
       dataIndex: 'name',
@@ -83,40 +110,61 @@ export function McpServerList({
       key: 'actions',
       render: (_: unknown, record: McpServerStatus) => (
         <Space size="small">
-          {record.running ? (
-            <Button
-              type="text"
-              icon={<PauseCircleOutlined />}
-              onClick={() => handleStop(record.name)}
-              title={t('mcp.actions.stop')}
-            />
+          {mode === 'runtime' && (record.running ? (
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  icon={<PauseCircleOutlined />}
+                  onClick={() => handleStop(record.bundleId, record.name)}
+                  title={t('mcp.actions.stop')}
+                  disabled={actionsDisabled || isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
           ) : (
-            <Button
-              type="text"
-              icon={<PlayCircleOutlined />}
-              onClick={() => handleStart(record.name)}
-              title={t('mcp.actions.start')}
-            />
-          )}
-          <Button
-            type="text"
-            icon={<EditOutlined />}
-            onClick={() => onEdit(record.name)}
-            title={t('mcp.actions.edit')}
-          />
-          <Popconfirm
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  icon={<PlayCircleOutlined />}
+                  onClick={() => handleStart(record.bundleId)}
+                  title={t('mcp.actions.start')}
+                  disabled={actionsDisabled || isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
+          ))}
+          {mode === 'config' && <Tooltip title={pluginLifecycleMessage(record)}>
+            <span>
+              <Button
+                type="text"
+                icon={<EditOutlined />}
+                onClick={() => onEdit?.(record.name)}
+                title={t('mcp.actions.edit')}
+                disabled={isPluginOwned(record)}
+              />
+            </span>
+          </Tooltip>}
+          {mode === 'config' && <Popconfirm
             title={t('mcp.confirmRemove')}
             onConfirm={() => handleRemove(record.name)}
             okText={t('common.yes')}
             cancelText={t('common.no')}
+            disabled={isPluginOwned(record)}
           >
-            <Button
-              type="text"
-              danger
-              icon={<DeleteOutlined />}
-              title={t('mcp.actions.remove')}
-            />
-          </Popconfirm>
+            <Tooltip title={pluginLifecycleMessage(record)}>
+              <span>
+                <Button
+                  type="text"
+                  danger
+                  icon={<DeleteOutlined />}
+                  title={t('mcp.actions.remove')}
+                  disabled={isPluginOwned(record)}
+                />
+              </span>
+            </Tooltip>
+          </Popconfirm>}
         </Space>
       ),
     },
@@ -126,7 +174,7 @@ export function McpServerList({
     <Table
       dataSource={servers}
       columns={columns}
-      rowKey="name"
+      rowKey="bundleId"
       loading={loading}
       pagination={false}
       size="middle"

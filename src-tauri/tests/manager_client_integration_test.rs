@@ -41,6 +41,12 @@ struct ScriptedResponse {
 
 type Captured = Arc<Mutex<Vec<CapturedRequest>>>;
 
+fn test_manager_client() -> ManagerClient {
+    ManagerClient::new_with_secret_store(
+        tfrobot_client_lib::services::keychain::InMemorySecretStore::shared(),
+    )
+}
+
 /// 启动一个 mock server，按顺序匹配 script 中第一个 `path_contains` 命中的项并回响应。
 /// 未命中时回 500。listener 持续接受连接直到 test 结束（通过 JoinHandle drop）。
 async fn spawn_mock_manager(
@@ -200,7 +206,7 @@ async fn login_success_writes_session_and_returns_authenticated() {
     )];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let result = client
         .login(Some(base.clone()), "13800138008", "Test@123456")
         .await
@@ -262,7 +268,7 @@ async fn login_multi_account_returns_account_selection_required() {
     )];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let result = client
         .login(Some(base), "13900139000", "Test@123456")
         .await
@@ -309,7 +315,7 @@ async fn select_account_completes_session() {
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13900139000", "Test@123456")
         .await
@@ -330,7 +336,7 @@ async fn select_account_completes_session() {
 
 #[tokio::test]
 async fn select_account_without_pending_session_errors() {
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.select_account(1).await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
@@ -351,7 +357,8 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
                 "items": [
                     {"id": 11, "name": "本地联调员工", "robotId": "r-1",
                      "status": "running", "templateType": "tfrserver", "templateDisplayName": "智能客服",
-                     "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver"},
+                     "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver",
+                     "robot_account_id": 4242},
                     {"id": 12, "name": "robot-2"}
                 ]
             })),
@@ -359,7 +366,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -370,6 +377,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     assert_eq!(list[0].template_type.as_deref(), Some("tfrserver"));
     assert_eq!(list[0].status.as_deref(), Some("running"));
     assert_eq!(list[0].cluster_name.as_deref(), Some("local-tfrobotserver"));
+    assert_eq!(list[0].robot_account_id, Some(4242));
 
     // Bearer token 应当在第二个请求（list）里
     let reqs = captured.lock().await;
@@ -403,7 +411,7 @@ async fn list_digital_employees_tolerates_empty_items() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138009", "Test@123456")
         .await
@@ -441,7 +449,7 @@ async fn connection_info_returns_full_dto() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -477,7 +485,7 @@ async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized(
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -507,7 +515,7 @@ async fn payment_required_parses_redirect_url_from_envelope() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -547,7 +555,7 @@ async fn payment_required_without_redirect_url_field_still_parses() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -582,7 +590,7 @@ async fn not_found_returned_for_missing_robot() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -609,7 +617,7 @@ async fn visibility_revoked_404_maps_to_not_found_or_no_permission() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -637,7 +645,7 @@ async fn forbidden_mapped_from_403() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -658,7 +666,7 @@ async fn other_status_bucket_captures_body() {
     )];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.login(Some(base), "a", "b").await.unwrap_err();
     match err {
         ManagerError::Other { status, body } => {
@@ -672,28 +680,28 @@ async fn other_status_bucket_captures_body() {
 #[tokio::test]
 async fn login_errors_when_base_url_missing_and_env_unset() {
     std::env::remove_var("TFRS_MANAGER_BASE_URL");
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.login(None, "a", "b").await.unwrap_err();
     assert!(matches!(err, ManagerError::MissingBaseUrl));
 }
 
 #[tokio::test]
 async fn list_without_login_errors_no_session() {
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.list_digital_employees().await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 
 #[tokio::test]
 async fn connection_info_without_login_errors_no_session() {
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.get_connection_info(1).await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 
 #[tokio::test]
 async fn logout_without_session_is_noop() {
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client.logout().await.expect("logout should be idempotent");
     assert!(!client.has_session().await);
 }
@@ -706,7 +714,7 @@ async fn network_error_when_server_unreachable() {
     drop(listener);
     let unreachable = format!("http://{}", addr);
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.login(Some(unreachable), "a", "b").await.unwrap_err();
     // reqwest 可能返回 NetworkError（connect refused）或 InvalidResponse（若端口碰巧被复用），
     // 但在本地 race 下绝大概率是 NetworkError。放宽断言，不接受非错误。
@@ -741,7 +749,7 @@ async fn exchange_token_posts_form_and_parses_oauth_response() {
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client
         .login(Some(base), "13800138008", "Test@123456")
         .await
@@ -813,7 +821,7 @@ async fn exchange_token_sends_scope_when_present() {
     ];
     let (base, captured, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
     let _ = client
         .exchange_token("r1", Some("smcp:connect tools:call".to_string()))
@@ -849,7 +857,7 @@ async fn exchange_token_maps_400_to_token_exchange_error() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
     let err = client.exchange_token("r1", None).await.unwrap_err();
     match err {
@@ -879,7 +887,7 @@ async fn exchange_token_maps_503_to_signing_unavailable() {
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
     let err = client.exchange_token("r1", None).await.unwrap_err();
     match err {
@@ -893,7 +901,7 @@ async fn exchange_token_maps_503_to_signing_unavailable() {
 
 #[tokio::test]
 async fn exchange_token_without_login_errors_no_session() {
-    let client = ManagerClient::new();
+    let client = test_manager_client();
     let err = client.exchange_token("r1", None).await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }

@@ -6,15 +6,16 @@
 //! 本模块不依赖 Tauri 运行时，便于单元测试。上层命令负责在 `ManagerError::Unauthorized`
 //! 时向前端 emit 事件。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use reqwest::{header, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::services::keychain;
+use crate::services::keychain::{self, SecretStore, SystemSecretStore};
 
 /// 环境变量：TFRSManager Base URL。无内置默认值；未配置且命令未显式传入 → `MissingBaseUrl`。
 pub const BASE_URL_ENV: &str = "TFRS_MANAGER_BASE_URL";
@@ -214,11 +215,11 @@ enum LoginData {
     MultiAccount(MultiAccountPayload),
 }
 
-/// 前端可感知的登录结果（JWT 不透出；存 keychain + 内存 session）。
+/// 前端可感知的登录结果（JWT 不透出；写 keychain 采用 best-effort，内存 session 必须建立）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LoginResult {
-    /// 登录成功，JWT 已存 keychain。
+    /// 登录成功，JWT 已进入内存 session；keychain 持久化失败不阻断当前会话。
     Authenticated { user: UserInfo },
     /// 命中多账户，需要前端让用户挑选账号后调 `manager_select_account`。
     AccountSelectionRequired { accounts: Vec<AccountOption> },
@@ -263,7 +264,11 @@ pub struct DigitalEmployeeBrief {
     /// audience = `robot:<robotAccountId>`（TFRM-183 暴露，**nullable**：历史/未回填实例为 null —
     /// 这类机器人不能做 token-exchange 连接，前端应禁用其连接按钮）。
     /// 注意与 `account_id`（创建人 ID）和 `robot_id`/rid（SMCP 路由串）区分。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "robot_account_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub robot_account_id: Option<u64>,
     /// `running` / `stopped` / `init_failed` / … 完整状态集见 UAT guide。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,7 +315,31 @@ pub struct ConnectionInfoResponse {
     pub computer_name: Option<String>,
     /// 纯路由头（`X-TF-*`）：客户端整 dict verbatim 注入 smcp-computer 的 headers 参数，
     /// 不要自组装 header 名。连接面鉴权不再走此处（TFRC-20：凭据走 Socket.IO auth dict）。
-    pub routing_headers: std::collections::HashMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_routing_headers")]
+    pub routing_headers: HashMap<String, String>,
+}
+
+fn deserialize_routing_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let headers = HashMap::<String, String>::deserialize(deserializer)?;
+    Ok(strip_auth_headers(headers))
+}
+
+fn strip_auth_headers(headers: HashMap<String, String>) -> HashMap<String, String> {
+    headers
+        .into_iter()
+        .filter(|(key, _)| !is_auth_header_name(key))
+        .collect()
+}
+
+pub(crate) fn is_auth_header_name(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('_', "-");
+    normalized.contains("token")
+        || normalized == "authorization"
+        || normalized == "cookie"
+        || normalized == "x-api-key"
 }
 
 // ───────── RFC 8693 token-exchange（TFRC-11 / C1，前置 TFRM-158/M4） ─────────
@@ -397,6 +426,7 @@ struct Session {
 pub struct ManagerClient {
     http: reqwest::Client,
     session: Arc<RwLock<Option<Session>>>,
+    secret_store: Arc<dyn SecretStore>,
 }
 
 /// 把 reqwest 错误的 source chain 展平成一行便于前端展示与诊断。
@@ -414,6 +444,10 @@ fn flatten_reqwest_err(e: reqwest::Error) -> String {
 
 impl ManagerClient {
     pub fn new() -> Self {
+        Self::new_with_secret_store(Arc::new(SystemSecretStore))
+    }
+
+    pub fn new_with_secret_store(secret_store: Arc<dyn SecretStore>) -> Self {
         let user_agent = format!(
             "tfrobot-client/{} (Tauri; {})",
             env!("CARGO_PKG_VERSION"),
@@ -431,15 +465,26 @@ impl ManagerClient {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            secret_store,
         }
     }
 
     /// 仅供测试：注入自定义 reqwest::Client（用于 mock server 断言 User-Agent 等）。
-    #[cfg(test)]
     pub fn with_http_client(http: reqwest::Client) -> Self {
+        Self::with_http_client_and_secret_store(
+            http,
+            Arc::new(crate::services::keychain::InMemorySecretStore::default()),
+        )
+    }
+
+    pub fn with_http_client_and_secret_store(
+        http: reqwest::Client,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            secret_store,
         }
     }
 
@@ -462,12 +507,50 @@ impl ManagerClient {
         format!("{KEYCHAIN_KEY_PREFIX}{}", &hex[..16])
     }
 
+    fn save_manager_jwt_best_effort(&self, base_url: &str, token: &str) {
+        let key = Self::keychain_key(base_url);
+        if let Err(error) = self.secret_store.set_secret(&key, token) {
+            log::warn!(
+                "manager: failed to persist JWT in keychain; continuing with in-memory session: {error}"
+            );
+        }
+    }
+
     async fn require_session(&self) -> Result<Session, ManagerError> {
         self.session
             .read()
             .await
             .clone()
             .ok_or(ManagerError::NoSession)
+    }
+
+    pub async fn current_base_url(&self) -> Option<String> {
+        self.session
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.base_url.clone())
+    }
+
+    pub async fn restore_session(
+        &self,
+        base_url: String,
+        user: UserInfo,
+    ) -> Result<Option<UserInfo>, ManagerError> {
+        let normalized_base_url = strip_trailing_slash(base_url);
+        let key = Self::keychain_key(&normalized_base_url);
+        let Some(jwt) = self.secret_store.get_secret(&key)? else {
+            return Ok(None);
+        };
+        if jwt.trim().is_empty() {
+            return Ok(None);
+        }
+        *self.session.write().await = Some(Session {
+            base_url: normalized_base_url,
+            jwt,
+            pending_session_token: None,
+        });
+        Ok(Some(user))
     }
 
     /// 用当前 session 的 JWT 构造鉴权 header。
@@ -520,7 +603,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            let _ = keychain::delete_credential(&key); // 失败不阻塞 401 路径
+            self.secret_store.delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
     }
@@ -560,9 +643,8 @@ impl ManagerClient {
 
         match envelope.data {
             LoginData::SingleAccount(payload) => {
-                // 写 keychain + 建立内存 session（清空 pending token）
-                let key = Self::keychain_key(&base);
-                keychain::save_credential(&key, &payload.token)?;
+                // keychain 持久化是 best-effort：系统凭据库异常不能阻断当前登录会话。
+                self.save_manager_jwt_best_effort(&base, &payload.token);
                 *self.session.write().await = Some(Session {
                     base_url: base,
                     jwt: payload.token,
@@ -616,8 +698,7 @@ impl ManagerClient {
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
-        let key = Self::keychain_key(&session.base_url);
-        keychain::save_credential(&key, &envelope.data.token)?;
+        self.save_manager_jwt_best_effort(&session.base_url, &envelope.data.token);
         *self.session.write().await = Some(Session {
             base_url: session.base_url,
             jwt: envelope.data.token,
@@ -767,7 +848,7 @@ impl ManagerClient {
         };
         if let Some(url) = base_url {
             let key = Self::keychain_key(&url);
-            keychain::delete_credential(&key)?;
+            self.secret_store.delete_secret_best_effort(&key);
         }
         *self.session.write().await = None;
         Ok(())
@@ -851,6 +932,12 @@ fn parse_payment_required(body: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_manager_client() -> ManagerClient {
+        ManagerClient::new_with_secret_store(
+            crate::services::keychain::InMemorySecretStore::shared(),
+        )
+    }
 
     /// `resolve_base_url` 依赖进程全局环境变量，cargo 默认并行测试会互相踩踏。
     /// 合并为一个顺序执行的测试，保证 set/unset 之间不被别的用例插入。
@@ -1032,8 +1119,15 @@ mod tests {
         // 与 rid/robot_id 区分：robotId 是路由串，robotAccountId 是数字账号 ID。
         assert_eq!(emp.robot_id.as_deref(), Some("rid-1"));
 
+        // Manager 若返回 snake_case，也必须保留；Tauri 再序列化给前端时会转回 robotAccountId。
+        let snake_case: DigitalEmployeeBrief =
+            serde_json::from_str(r#"{"id": 14, "name": "robot", "robot_account_id": 5252}"#)
+                .unwrap();
+        assert_eq!(snake_case.robot_account_id, Some(5252));
+
         // 缺字段（历史实例）→ None
-        let absent: DigitalEmployeeBrief = serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
+        let absent: DigitalEmployeeBrief =
+            serde_json::from_str(r#"{"id": 12, "name": "old"}"#).unwrap();
         assert!(absent.robot_account_id.is_none());
         // 显式 null → None
         let null_val: DigitalEmployeeBrief =
@@ -1142,10 +1236,20 @@ mod tests {
             "expiresAt": "2026-04-23T12:00:00Z"
         }"#;
         let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
-        // 顶层 legacy 鉴权字段（accessToken/expiresAt）被瘦身 DTO 忽略；解析成功即达标。
+        // 顶层 legacy 鉴权字段（accessToken/expiresAt）被瘦身 DTO 忽略；
+        // nested routingHeaders.access_token 也必须在 DTO 边界剔除，避免进入 HTTP header。
         assert_eq!(parsed.socket_base_url, "https://staging.turingfocus.cn");
         assert_eq!(parsed.rid.as_deref(), Some("robot-xxx"));
         assert_eq!(parsed.computer_name.as_deref(), Some("desktop-001"));
+        assert_eq!(
+            parsed
+                .routing_headers
+                .get("X-TF-Namespace")
+                .map(String::as_str),
+            Some("tenant-acme")
+        );
+        assert!(!parsed.routing_headers.contains_key("access_token"));
+        assert_eq!(parsed.routing_headers.len(), 1);
     }
 
     #[test]
@@ -1160,6 +1264,43 @@ mod tests {
         assert!(parsed.sio_path.is_none());
         assert!(parsed.smcp_namespace.is_none());
         assert!(parsed.computer_name.is_none());
+    }
+
+    #[test]
+    fn connection_info_strips_auth_like_routing_headers() {
+        let json = r#"{
+            "socketBaseURL": "https://s.example.com",
+            "routingHeaders": {
+                "X-TF-Namespace": "tenant-acme",
+                "X-TF-RobotId": "robot-xxx",
+                "Access_Token": "legacy-secret",
+                "Authorization": "Bearer legacy-secret",
+                "cookie": "sid=legacy-secret",
+                "x-api-key": "legacy-secret"
+            }
+        }"#;
+
+        let parsed: ConnectionInfoResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.routing_headers.len(), 2);
+        assert_eq!(
+            parsed
+                .routing_headers
+                .get("X-TF-Namespace")
+                .map(String::as_str),
+            Some("tenant-acme")
+        );
+        assert_eq!(
+            parsed
+                .routing_headers
+                .get("X-TF-RobotId")
+                .map(String::as_str),
+            Some("robot-xxx")
+        );
+        assert!(!parsed.routing_headers.contains_key("Access_Token"));
+        assert!(!parsed.routing_headers.contains_key("Authorization"));
+        assert!(!parsed.routing_headers.contains_key("cookie"));
+        assert!(!parsed.routing_headers.contains_key("x-api-key"));
     }
 
     #[test]
@@ -1256,14 +1397,29 @@ mod tests {
 
     #[tokio::test]
     async fn require_session_errors_when_none() {
-        let c = ManagerClient::new();
+        let c = test_manager_client();
         let err = c.require_session().await.unwrap_err();
         assert!(matches!(err, ManagerError::NoSession));
     }
 
     #[tokio::test]
+    async fn restore_session_returns_none_without_persisted_jwt() {
+        let c = test_manager_client();
+        let user = UserInfo {
+            user_id: 7,
+            account_id: 42,
+            account_name: "client_uat".to_string(),
+        };
+        let base_url = format!("https://missing-{}.example.com", uuid::Uuid::new_v4());
+
+        let restored = c.restore_session(base_url, user).await.unwrap();
+        assert!(restored.is_none());
+        assert!(!c.has_session().await);
+    }
+
+    #[tokio::test]
     async fn has_session_reflects_state_transitions() {
-        let c = ManagerClient::new();
+        let c = test_manager_client();
         assert!(!c.has_session().await);
         *c.session.write().await = Some(Session {
             base_url: "https://x".into(),

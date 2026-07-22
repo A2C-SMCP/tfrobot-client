@@ -9,10 +9,18 @@
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::services::manager_client::{
-    DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo,
+use crate::services::manager_client::{DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo};
+use crate::services::settings::{
+    ManagerSessionConfig, PersistedManagerSession, MANAGER_SESSION_SCHEMA_VERSION,
 };
 use crate::AppState;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredManagerSession {
+    pub base_url: String,
+    pub user: UserInfo,
+}
 
 /// 401 事件名。导出为 pub const 便于前端在单一来源引用（通过 get_app_info 之类的常量桥，后续 UI 可接）。
 pub const AUTH_EXPIRED_EVENT: &str = "manager:auth-expired";
@@ -39,11 +47,15 @@ pub async fn manager_login(
         base_url.is_some(),
         phone
     );
-    state
+    let result = state
         .manager_client
         .login(base_url, &phone, &password)
         .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))
+        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
+    if let LoginResult::Authenticated { user } = &result {
+        persist_manager_session(state.inner(), user).await;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -53,11 +65,44 @@ pub async fn manager_select_account(
     account_id: u64,
 ) -> Result<UserInfo, ManagerError> {
     log::info!("manager_select_account: account_id={}", account_id);
-    state
+    let user = state
         .manager_client
         .select_account(account_id)
         .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))
+        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
+    persist_manager_session(state.inner(), &user).await;
+    Ok(user)
+}
+
+#[tauri::command]
+pub async fn manager_restore_session(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Option<RestoredManagerSession>, ManagerError> {
+    let saved_config = state
+        .settings_service
+        .load_global_manager_session()
+        .map_err(|error| ManagerError::Other {
+            status: 0,
+            body: format!("failed to load Manager session metadata: {error}"),
+        })?;
+    let Some(saved) = saved_config.session else {
+        return Ok(None);
+    };
+    let user = UserInfo {
+        user_id: saved.user_id,
+        account_id: saved.account_id,
+        account_name: saved.account_name,
+    };
+    let restored = state
+        .manager_client
+        .restore_session(saved.base_url.clone(), user)
+        .await
+        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
+    Ok(restored.map(|user| RestoredManagerSession {
+        base_url: saved.base_url,
+        user,
+    }))
 }
 
 #[tauri::command]
@@ -79,5 +124,30 @@ pub async fn manager_list_digital_employees(
 #[tauri::command]
 pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerError> {
     log::info!("manager_logout");
-    state.manager_client.logout().await
+    state.manager_client.logout().await?;
+    if let Err(error) = state
+        .settings_service
+        .save_global_manager_session(&ManagerSessionConfig::default())
+    {
+        log::warn!("manager: failed to clear persisted session metadata: {error}");
+    }
+    Ok(())
+}
+
+async fn persist_manager_session(state: &AppState, user: &UserInfo) {
+    let Some(base_url) = state.manager_client.current_base_url().await else {
+        return;
+    };
+    let config = ManagerSessionConfig {
+        schema_version: MANAGER_SESSION_SCHEMA_VERSION,
+        session: Some(PersistedManagerSession {
+            base_url,
+            user_id: user.user_id,
+            account_id: user.account_id,
+            account_name: user.account_name.clone(),
+        }),
+    };
+    if let Err(error) = state.settings_service.save_global_manager_session(&config) {
+        log::warn!("manager: failed to persist session metadata: {error}");
+    }
 }

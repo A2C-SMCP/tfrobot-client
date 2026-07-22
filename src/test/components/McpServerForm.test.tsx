@@ -1,5 +1,10 @@
 import { render, screen } from '../helpers/render';
-import { McpServerForm, parseToolMetaJson } from '@/components/McpConfig/McpServerForm';
+import {
+  McpServerForm,
+  normalizeToolMeta,
+  normalizeToolMetaMap,
+  parseToolMetaJson,
+} from '@/components/McpConfig/McpServerForm';
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -62,6 +67,23 @@ describe('parseToolMetaJson', () => {
   });
 });
 
+describe('normalizeToolMeta', () => {
+  it('removes blank aliases so default metadata does not collapse all tool names', () => {
+    expect(normalizeToolMeta({ alias: '' })).toBeNull();
+    expect(normalizeToolMeta({ alias: '   ', auto_apply: true })).toEqual({ auto_apply: true });
+  });
+
+  it('drops blank aliases from parsed per-tool metadata', () => {
+    expect(normalizeToolMetaMap({
+      echo: { alias: '', tags: ['debug', ''] },
+      ping: { alias: 'pong' },
+    })).toEqual({
+      echo: { tags: ['debug'] },
+      ping: { alias: 'pong' },
+    });
+  });
+});
+
 describe('McpServerForm input attributes (issue #26)', () => {
   // macOS WKWebView auto-capitalizes / auto-corrects technical input
   // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
@@ -73,5 +95,11 @@ describe('McpServerForm input attributes (issue #26)', () => {
     expect(command).toHaveAttribute('autocorrect', 'off');
     expect(command).toHaveAttribute('spellcheck', 'false');
     expect(command).toHaveAttribute('autocomplete', 'off');
+  });
+
+  it('does not present default tool alias as a server-wide prefix', () => {
+    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+
+    expect(screen.queryByText('Alias Prefix')).not.toBeInTheDocument();
   });
 });

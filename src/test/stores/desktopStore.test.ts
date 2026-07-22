@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useDesktopStore } from '@/stores/desktopStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const instanceId = 'computer-a';
 
 describe('desktopStore', () => {
   beforeEach(() => {
@@ -16,9 +17,10 @@ describe('desktopStore', () => {
       ];
       mockedInvoke.mockResolvedValueOnce(mockWindows);
 
-      await useDesktopStore.getState().fetchDesktop();
+      await useDesktopStore.getState().fetchDesktop(instanceId);
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
+        instanceId,
         uri: null,
       });
       expect(useDesktopStore.getState().windows).toEqual(mockWindows);
@@ -27,9 +29,10 @@ describe('desktopStore', () => {
     it('passes uri parameter', async () => {
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useDesktopStore.getState().fetchDesktop('window://test');
+      await useDesktopStore.getState().fetchDesktop(instanceId, 'window://test');
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
+        instanceId,
         uri: 'window://test',
       });
     });
@@ -37,7 +40,7 @@ describe('desktopStore', () => {
     it('handles error', async () => {
       mockedInvoke.mockRejectedValueOnce('not available');
 
-      await useDesktopStore.getState().fetchDesktop();
+      await useDesktopStore.getState().fetchDesktop(instanceId);
 
       expect(useDesktopStore.getState().error).toBe('not available');
     });
@@ -49,7 +52,7 @@ describe('desktopStore', () => {
       });
       mockedInvoke.mockReturnValueOnce(promise as any);
 
-      const fetchPromise = useDesktopStore.getState().fetchDesktop();
+      const fetchPromise = useDesktopStore.getState().fetchDesktop(instanceId);
 
       // Loading should be true during fetch
       expect(useDesktopStore.getState().loading).toBe(true);
@@ -67,6 +70,7 @@ describe('desktopStore', () => {
   describe('fetchWindowDetail', () => {
     it('populates window detail on success', async () => {
       const mockDetail = {
+        bundleId: 'desktop-bundle',
         uri: 'window://main',
         title: null,
         server: 'desktop-server',
@@ -74,21 +78,26 @@ describe('desktopStore', () => {
       };
       mockedInvoke.mockResolvedValueOnce(mockDetail);
 
-      await useDesktopStore.getState().fetchWindowDetail('desktop-server', 'window://main');
+      await useDesktopStore.getState().fetchWindowDetail(
+        instanceId,
+        'desktop-bundle',
+        'window://main',
+      );
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
-        serverName: 'desktop-server',
+        instanceId,
+        bundleId: 'desktop-bundle',
         uri: 'window://main',
       });
-      expect(useDesktopStore.getState().windowDetails['window://main']).toEqual(mockDetail);
+      expect(useDesktopStore.getState().windowDetails['desktop-bundle:window://main']).toEqual(mockDetail);
     });
 
     it('sets detailErrors on failure', async () => {
       mockedInvoke.mockRejectedValueOnce('detail not found');
 
-      await useDesktopStore.getState().fetchWindowDetail('server', 'window://fail');
+      await useDesktopStore.getState().fetchWindowDetail(instanceId, 'bundle', 'window://fail');
 
-      expect(useDesktopStore.getState().detailErrors['window://fail']).toBe('detail not found');
+      expect(useDesktopStore.getState().detailErrors['bundle:window://fail']).toBe('detail not found');
     });
 
     it('sets loadingDetails during fetch', async () => {
@@ -98,42 +107,54 @@ describe('desktopStore', () => {
       });
       mockedInvoke.mockReturnValueOnce(promise as any);
 
-      const fetchPromise = useDesktopStore.getState().fetchWindowDetail('server', 'window://loading');
+      const fetchPromise = useDesktopStore.getState().fetchWindowDetail(
+        instanceId,
+        'bundle',
+        'window://loading',
+      );
 
-      expect(useDesktopStore.getState().loadingDetails['window://loading']).toBe(true);
+      expect(useDesktopStore.getState().loadingDetails['bundle:window://loading']).toBe(true);
 
-      resolveFn({ uri: 'window://loading', server: 'server', contents: [] });
+      resolveFn({ bundleId: 'bundle', uri: 'window://loading', server: 'server', contents: [] });
       await fetchPromise;
 
-      expect(useDesktopStore.getState().loadingDetails['window://loading']).toBeUndefined();
+      expect(useDesktopStore.getState().loadingDetails['bundle:window://loading']).toBeUndefined();
     });
 
     it('clears previous error for uri on success', async () => {
       // Set an existing error
       useDesktopStore.setState({
-        detailErrors: { 'window://main': 'old error' },
+        detailErrors: { 'bundle:window://main': 'old error' },
       });
 
       const mockDetail = {
+        bundleId: 'bundle',
         uri: 'window://main',
         server: 'server',
         contents: [],
       };
       mockedInvoke.mockResolvedValueOnce(mockDetail);
 
-      await useDesktopStore.getState().fetchWindowDetail('server', 'window://main');
+      await useDesktopStore.getState().fetchWindowDetail(instanceId, 'bundle', 'window://main');
 
-      expect(useDesktopStore.getState().detailErrors['window://main']).toBeUndefined();
+      expect(useDesktopStore.getState().detailErrors['bundle:window://main']).toBeUndefined();
     });
   });
 
   describe('reset', () => {
     it('resets all state to initial values', () => {
       useDesktopStore.setState({
-        windows: [{ uri: 'window://1', title: 'Test', server: 'desktop' }],
+        windows: [{ bundleId: 'desktop', uri: 'window://1', title: 'Test', server: 'desktop' }],
         loading: true,
         error: 'some error',
-        windowDetails: { 'window://1': { uri: 'window://1', server: 'desktop', contents: [] } },
+        windowDetails: {
+          'desktop:window://1': {
+            bundleId: 'desktop',
+            uri: 'window://1',
+            server: 'desktop',
+            contents: [],
+          },
+        },
         loadingDetails: { 'window://1': true },
         detailErrors: { 'window://1': 'error' },
       });
