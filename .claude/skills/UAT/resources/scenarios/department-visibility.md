@@ -6,9 +6,11 @@
 **Seed 依赖**：`../seed-requests/seed-request-department-visibility.md`（🟢 已实施 commit `137de75`）
 
 > ⚠️ **TFRM-174 已删除 `DEPT_VISIBILITY_FILTER_ENABLED` flag —— 可见性现在恒生效，行为由角色 `data_scope` 决定。**
-> 这条把本场景的 DV-03 / DV-08 触发前提改变了（见各用例 ⚠️ 注），不再有「翻 flag」这种 UAT 手法。
 
 ## 测试目标
+
+> **迁移说明**：涉及 Manager 可见性、离线兜底和连接授权跨系统链路的用例已迁移到 `cto_assistant/.claude/skills/UAT/resources/scenarios/desktop-department-visibility.md`。本文件仅维护 tfrobot-client 本地展示和组件行为。
+
 
 验证客户端：① 数字员工列表展示「所属部门」面包屑（含多部门 / 未分配兜底）；② 进入列表页
 60s staleness 兜底刷新；③ 离线保留最近一次列表 + 恢复在线自动校准；④ 收到 404 +
@@ -79,51 +81,18 @@
 - **应该看到**：Console 再次出现 `manager: fetched N digital employees`。
 - **失败时贴什么回来**：贴 Console `manager:` 行 + 大致停留时长。
 
-### P0 — 离线兜底 + 恢复校准（无需 seed）
+### 已迁移到 CTO 层：离线兜底 + 恢复校准
 
-> ⚠️ 两种"离线"要分清：
-> - **停 Manager 进程**（DV-06）：网卡仍在线 → `navigator.onLine` 不翻转 → 走 fetch 的 `network_error` 分支置离线；恢复要**手动刷新**或重进页面。
-> - **关网卡 / 断 Wi-Fi**（DV-07）：`navigator.onLine` 翻转 → `offline`/`online` window 事件触发 → 恢复时**自动**校准。
+详见 `cto_assistant/.claude/skills/UAT/resources/scenarios/desktop-department-visibility.md`。原项目不再维护该跨系统用例的详细步骤。
 
-#### DV-06: 停 Manager → 离线横幅 + 保留列表 ✅active
+### 已迁移到 CTO 层：可见性失效
 
-- **做什么**：在列表页，停掉 Manager（`Ctrl-C` 掉 :8090 进程），然后点页面右上角"刷新"。
-- **应该看到**：
-  - UI：顶部黄色横幅"离线模式——正在展示最近一次加载的列表，恢复网络后将自动刷新。"；**列表仍显示**（未清空）。
-  - Console：`manager: list_employees failed, kind=network_error`
-- **失败时贴什么回来**：截图（横幅 + 列表是否还在）+ Console `manager:` 行。
-- **恢复**：重启 Manager（`make local-run-init-debug`）→ 点"刷新"→ 横幅消失、Console 出现 `manager: fetched N digital employees`。
-
-#### DV-07: 关 Wi-Fi → 自动校准（网卡级离线）✅active
-
-- **做什么**：列表页停留时，关闭 Wi-Fi/网卡 → 稍候再打开。
-- **应该看到**：
-  - 关闭后：顶部出现离线横幅。
-  - 打开后：横幅消失，且**无需手动刷新**，Console 依次出现 `manager: back online, recalibrating employee list` + `manager: fetched N digital employees`。
-- **失败时贴什么回来**：贴关/开网卡前后 Console `manager:` 行。
-
-### P1 — 可见性失效（企业账号；可见性恒生效）
-
-#### DV-08: 调岗后连接触发剔除 ⏸️ BLOCKED（需调岗能力 + seed 调整）
-
-- **⚠️ flag 已删，触发方式变更**：旧版靠「flag-off 列表含 R → 翻 flag on」触发，已失效。可见性恒生效下，静态在华东区的 seed 机器人 `销售部机器人` 对 viewer@平台组 **永不可见、根本不进列表**，无法点它。
-- **新触发（真实调岗，需管理员侧操作）**：
-  1. 需要一台**起始在平台组（对 viewer 可见）**的机器人 R'。
-  2. viewer（testuser2_enterprise）登录、列表含 R'。
-  3. 管理员（AdminPortal / Manager API）把 R' **调岗**到华东区（viewer 子树外）。
-  4. 60s staleness 窗口内，viewer 点 R' 的"连接" → connection-info 回 404 + `errorCode=ERR_NOT_FOUND_OR_NO_PERMISSION`。
-- **应该看到**：
-  - UI：右上角 warning toast「`<R' 名字>` 已不可访问，已从列表中移除。」；R' 从列表消失。
-  - Console 依次：`manager: select_employee_and_connect failed, kind=not_found_or_no_permission` → `manager: employee <id> no longer visible, removing from local list` → `manager: fetched N digital employees`（校准）。
-- **解锁条件**：① seed 让一台机器人**起始在平台组**（可见）；② UAT 期可用 AdminPortal/Manager API 执行一次调岗。两者就位后转 active。
-- **失败时贴什么回来**：贴 Console `manager:` 行；若 toast 没出/项没剔除，对 R' 的 id 跑一次 `curl .../digital-employees/<id>/connection-info` 把响应贴回（确认后端是否真回 404 + `errorCode`）。
+详见 `cto_assistant/.claude/skills/UAT/resources/scenarios/desktop-department-visibility.md`。原项目不再维护该跨系统用例的详细步骤。
 
 ## 关键断言点（Claude 必须主动校验）
 
 1. **面包屑形态**：`ancestors` 根→叶有序、join `" / "`。DV-01（个人组织 client_uat）= `全员`（1 级）；DV-02（企业多部门）每条链根→叶（如 `总公司 / 研发中心 / 平台组`）。顺序反了或分隔符错 → 前端 `formatDeptBreadcrumb` bug。
 2. **空归属兜底**（DV-03，代码级）：`departments: []` → 显示"未分配部门"/`Unassigned`，不得空白或报错。由前端单测守护（UAT 无法构造真实数据）。
-3. **errorCode 解析**（DV-08）：Console 必须是 `kind=not_found_or_no_permission`（**不是** `kind=not_found`）。若是 `not_found`，说明 Rust `extract_error_code` 没命中 **或** Manager 没回 `errorCode` —— curl 验证后定归属。
-4. **离线保留**（DV-06）：网络错误后 `employees` 列表长度不变（未被清空）。
 
 ## 失败时的 Bug 分流映射
 
@@ -131,7 +100,6 @@
 |------|------|
 | 面包屑顺序错 / 格式错（分隔符、缺级） | tfrobot-client 前端 `formatDeptBreadcrumb` |
 | `departments` 缺失 / 为 null（面包屑全空 or Console `invalid_response`） | Rust DTO 或 Manager 契约 —— curl `/digital-employees` 验 |
-| DV-08 Console 是 `kind=not_found`（非 `not_found_or_no_permission`） | Rust `extract_error_code` 或 Manager 未回 `errorCode` |
 | toast 未出 / 项未剔除，但 Console 有 `not_found_or_no_permission` | tfrobot-client 前端 `EmployeeList` / `managerStore` |
 | curl `/digital-employees` 的 `departments` 本身就空 | TFRSManager seed 未落部门归属 |
 | 关网卡恢复后不自动刷新（DV-07） | 前端 online/offline 监听 or `setOnline` 校准逻辑 |
@@ -141,10 +109,8 @@
 | # | 用例 | 做什么 | 说明 |
 |---|------|--------|------|
 | DV-99a | 回干净登录态 | 登出 | 下一轮 UAT 从 fresh 开始 |
-| DV-99b | 调岗复位 | 若 DV-08 跑过调岗，把 R' 移回平台组 | 仅 DV-08 解锁并跑过时需要 |
 
 ## 维护说明
 
 本场景于 `2026-06-12` 对齐 TFRM-167 / 168 / 170 / **174**（flag 删除、可见性恒生效）。Seed 🟢 已实施
-（`137de75`）。当前 active：DV-01/02/04/05/06/07；**DV-03 因 TFRM-53 NOT NULL 降级为代码级**；
-**DV-08 待调岗能力 + seed 调整**。契约/状态变动走 `/uat-scenario update department-visibility ...`。
+（`137de75`）。当前本地 active：DV-01/02/04/05/07；DV-06/DV-08 已迁移到 CTO 层；**DV-03 因 TFRM-53 NOT NULL 降级为代码级**；
