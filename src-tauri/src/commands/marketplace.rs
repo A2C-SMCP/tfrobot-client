@@ -370,7 +370,7 @@ pub async fn enable_plugin_core(
         UserMcpConflictPolicy::KeepUserServer,
     )
     .await?;
-    runtime
+    if let Err(error) = runtime
         .sdk_enable_plugin(
             &plugin_id,
             EnableOptions {
@@ -381,7 +381,22 @@ pub async fn enable_plugin_core(
             Some(&hooks),
         )
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        let primary = error.to_string();
+        let cleanup = async {
+            hooks
+                .restore_deferred_servers_after_plugin_release(&runtime)
+                .await?;
+            hooks.reclaim_unowned_plugin_servers(&runtime).await
+        }
+        .await;
+        return match cleanup {
+            Ok(()) => Err(primary),
+            Err(cleanup_error) => Err(format!(
+                "{primary}; Marketplace MCP rollback cleanup failed: {cleanup_error}"
+            )),
+        };
+    }
 
     runtime.mark_sdk_skills_dirty().await;
     start_registered_plugin_servers_if_running(&runtime, &hooks).await
@@ -426,6 +441,9 @@ pub async fn disable_plugin_core(
         )
         .await
         .map_err(|error| error.to_string())?;
+    hooks
+        .restore_deferred_servers_after_plugin_release(&runtime)
+        .await?;
     hooks.reclaim_unowned_plugin_servers(&runtime).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
@@ -470,6 +488,9 @@ pub async fn uninstall_plugin_core(
         )
         .await
         .map_err(|error| error.to_string())?;
+    hooks
+        .restore_deferred_servers_after_plugin_release(&runtime)
+        .await?;
     hooks.reclaim_unowned_plugin_servers(&runtime).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
@@ -506,13 +527,20 @@ async fn start_registered_plugin_servers_if_running(
         .filter_map(|(bundle_id, _, is_running, _)| is_running.then_some(bundle_id))
         .collect();
     let mut seen = HashSet::new();
-    for bundle_id in hooks.registered_server_ids().await {
-        if seen.insert(bundle_id.clone()) && !running.contains(&bundle_id) {
-            runtime
-                .start_mcp_server(&bundle_id)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+    let bundle_ids = hooks
+        .registered_server_ids()
+        .await
+        .into_iter()
+        .filter(|bundle_id| seen.insert(bundle_id.clone()) && !running.contains(bundle_id))
+        .collect();
+    let failures = runtime.start_mcp_servers_best_effort(bundle_ids).await;
+    for (bundle_id, error) in failures {
+        log::warn!(
+            "Plugin enabled, but bundled MCP server failed to start for instance {}: {} ({})",
+            runtime.instance.id,
+            bundle_id,
+            error
+        );
     }
 
     Ok(())
@@ -695,9 +723,11 @@ struct MarketplaceMcpHooks {
     user_conflict_policy: UserMcpConflictPolicy,
     existing_servers: HashMap<BundleId, ServerName>,
     independent_server_ids: HashSet<BundleId>,
+    disabled_independent_server_ids: HashSet<BundleId>,
     registered_server_ids: Arc<tokio::sync::Mutex<Vec<BundleId>>>,
     mounted_server_ids: Arc<tokio::sync::Mutex<HashSet<BundleId>>>,
     preserved_registration_counts: Arc<tokio::sync::Mutex<HashMap<BundleId, usize>>>,
+    deferred_restore_server_ids: Arc<tokio::sync::Mutex<HashSet<BundleId>>>,
 }
 
 impl MarketplaceMcpHooks {
@@ -712,13 +742,21 @@ impl MarketplaceMcpHooks {
         debug_assert!(!plugin.trim().is_empty());
         // The SDK snapshot now projects enabled plugin servers too. Only non-bundled entries are
         // independent declarations that can satisfy a plugin's bundle dependency.
-        let mut existing_servers = state
+        let independent_servers = state
             .sdk_config
             .load(instance_id)
             .mcp
             .servers
             .into_iter()
             .filter(|server| !server.bundled)
+            .collect::<Vec<_>>();
+        let disabled_independent_server_ids = independent_servers
+            .iter()
+            .filter(|server| server.config.disabled())
+            .map(|server| resolve_bundle_id(&server.config))
+            .collect();
+        let mut existing_servers = independent_servers
+            .into_iter()
             .map(|server| (resolve_bundle_id(&server.config), server.name))
             .collect::<HashMap<_, _>>();
         let mut independent_server_ids = existing_servers.keys().cloned().collect::<HashSet<_>>();
@@ -754,9 +792,11 @@ impl MarketplaceMcpHooks {
             user_conflict_policy,
             existing_servers,
             independent_server_ids,
+            disabled_independent_server_ids,
             registered_server_ids: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             mounted_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             preserved_registration_counts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            deferred_restore_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         })
     }
 
@@ -790,6 +830,42 @@ impl MarketplaceMcpHooks {
         }
         Ok(())
     }
+
+    async fn restore_deferred_servers_after_plugin_release(
+        &self,
+        runtime: &crate::services::computer::ComputerInstanceRuntime,
+    ) -> Result<(), String> {
+        let mut deferred = self.deferred_restore_server_ids.lock().await.clone();
+        deferred.extend(
+            runtime
+                .tracked_plugin_mcp_server_ids()
+                .await
+                .into_iter()
+                .filter(|bundle_id| self.independent_server_ids.contains(bundle_id)),
+        );
+        let user_servers = self
+            .sdk_config
+            .load(&self.instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .filter(|server| !server.bundled)
+            .map(|server| (resolve_bundle_id(&server.config), server.config))
+            .collect::<HashMap<_, _>>();
+        for bundle_id in deferred {
+            if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
+                continue;
+            }
+            if let Some(server) = user_servers.get(&bundle_id) {
+                runtime
+                    .restore_user_mcp_server_config_after_plugin_release(server.clone())
+                    .await?;
+            } else if runtime.has_tracked_plugin_mcp_server(&bundle_id).await {
+                runtime.remove_plugin_server(&bundle_id).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -813,6 +889,28 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                 UserMcpConflictPolicy::KeepUserServer
             )
         {
+            if self.disabled_independent_server_ids.contains(&bundle_id) {
+                let runtime = self
+                    .registry
+                    .runtime(&self.instance_id)
+                    .await
+                    .ok_or_else(|| {
+                        McpHookError(format!(
+                        "Computer instance not found while activating Marketplace MCP server: {}",
+                        self.instance_id
+                    ))
+                    })?;
+                runtime
+                    .add_or_update_plugin_server(force_mcp_server_enabled(cfg))
+                    .await
+                    .map_err(McpHookError)?;
+                self.mounted_server_ids
+                    .lock()
+                    .await
+                    .insert(bundle_id.clone());
+                self.registered_server_ids.lock().await.push(bundle_id);
+                return Ok(());
+            }
             // The pre-enable snapshot is authoritative here: after the SDK writes
             // enabledPlugins=true, its merged read projection may show the plugin origin even
             // though this independent declaration already satisfied the dependency.
@@ -883,15 +981,32 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         match self.registry.runtime(&self.instance_id).await {
             Some(runtime) => {
                 let mut preserved = self.preserved_registration_counts.lock().await;
+                let mut released_preserved_registration = false;
                 if let Some(count) = preserved.get_mut(bundle_id) {
                     *count -= 1;
                     if *count == 0 {
                         preserved.remove(bundle_id);
+                        released_preserved_registration = true;
+                    } else {
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 drop(preserved);
+                if released_preserved_registration {
+                    self.deferred_restore_server_ids
+                        .lock()
+                        .await
+                        .insert(bundle_id.clone());
+                    return Ok(());
+                }
                 if self.independent_server_ids.contains(bundle_id) {
+                    // The SDK finalizes ownership after hooks return. Keep the transient plugin
+                    // config mounted during the callback; the caller restores the authoritative
+                    // user declaration once the SDK lifecycle transition has completed.
+                    self.deferred_restore_server_ids
+                        .lock()
+                        .await
+                        .insert(bundle_id.clone());
                     return Ok(());
                 }
                 if matches!(
@@ -951,6 +1066,15 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         .map_err(McpHookError)?;
         Ok(())
     }
+}
+
+fn force_mcp_server_enabled(mut config: MCPServerConfig) -> MCPServerConfig {
+    match &mut config {
+        MCPServerConfig::Stdio(server) => server.disabled = false,
+        MCPServerConfig::Sse(server) => server.disabled = false,
+        MCPServerConfig::Http(server) => server.disabled = false,
+    }
+    config
 }
 
 fn input_definition_from_mcp(input: &MCPServerInput) -> InputDefinition {
@@ -1095,9 +1219,11 @@ mod tests {
             .runtime(TEST_INSTANCE_ID)
             .await
             .unwrap();
-        assert!(runtime
-            .has_tracked_plugin_mcp_server(&audit_bundle_id())
-            .await);
+        assert!(
+            runtime
+                .has_tracked_plugin_mcp_server(&audit_bundle_id())
+                .await
+        );
 
         hooks.remove_server(&audit_bundle_id()).await.unwrap();
         assert!(state
@@ -1106,9 +1232,11 @@ mod tests {
             .mcp
             .servers
             .is_empty());
-        assert!(!runtime
-            .has_tracked_plugin_mcp_server(&audit_bundle_id())
-            .await);
+        assert!(
+            !runtime
+                .has_tracked_plugin_mcp_server(&audit_bundle_id())
+                .await
+        );
     }
 
     #[tokio::test]

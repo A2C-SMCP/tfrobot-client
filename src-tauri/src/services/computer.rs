@@ -706,6 +706,9 @@ pub struct ComputerInstanceRuntime {
     runtime_event_task: Arc<Mutex<Option<RuntimeEventRelay>>>,
     shutdown_completed: Arc<AtomicBool>,
     client_runtime_diagnostic: Arc<RwLock<Option<String>>>,
+    mcp_start_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
+    mcp_reload_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
+    sdk_config_reload_required: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
     fail_prepare_shutdown_once: Arc<AtomicBool>,
 }
@@ -776,6 +779,9 @@ impl ComputerInstanceRuntime {
             runtime_event_task: Arc::new(Mutex::new(None)),
             shutdown_completed: Arc::new(AtomicBool::new(false)),
             client_runtime_diagnostic: Arc::new(RwLock::new(None)),
+            mcp_start_diagnostics: Arc::new(RwLock::new(HashMap::new())),
+            mcp_reload_diagnostics: Arc::new(RwLock::new(HashMap::new())),
+            sdk_config_reload_required: Arc::new(AtomicBool::new(false)),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: Arc::new(AtomicBool::new(false)),
         }
@@ -807,6 +813,9 @@ impl ComputerInstanceRuntime {
             runtime_event_task: self.runtime_event_task.clone(),
             shutdown_completed: self.shutdown_completed.clone(),
             client_runtime_diagnostic: self.client_runtime_diagnostic.clone(),
+            mcp_start_diagnostics: self.mcp_start_diagnostics.clone(),
+            mcp_reload_diagnostics: self.mcp_reload_diagnostics.clone(),
+            sdk_config_reload_required: self.sdk_config_reload_required.clone(),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: self.fail_prepare_shutdown_once.clone(),
         }
@@ -925,6 +934,191 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    /// Applies an already-persisted user MCP declaration to this runtime without rebuilding the
+    /// Computer handle or interrupting its SMCP connection. Runtime start failures are recorded
+    /// per server and remain observable through the MCP status projection; they do not invalidate
+    /// the durable declaration.
+    pub async fn apply_user_mcp_server_config(
+        &self,
+        server: MCPServerConfig,
+    ) -> Result<(), String> {
+        self.apply_user_mcp_server_config_inner(server, true)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn restore_user_mcp_server_config_after_plugin_release(
+        &self,
+        server: MCPServerConfig,
+    ) -> Result<(), String> {
+        let bundle_id = resolve_bundle_id(&server);
+        if !self
+            .apply_user_mcp_server_config_inner(server, false)
+            .await?
+        {
+            return Err(format!(
+                "Failed to restore user MCP runtime after plugin release for {bundle_id}"
+            ));
+        }
+        self.plugin_mounted_server_ids
+            .write()
+            .await
+            .remove(&bundle_id);
+        Ok(())
+    }
+
+    async fn apply_user_mcp_server_config_inner(
+        &self,
+        server: MCPServerConfig,
+        preserve_plugin_runtime: bool,
+    ) -> Result<bool, String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active()?;
+        let bundle_id = resolve_bundle_id(&server);
+        let computer_running = self.is_running().await;
+
+        // While a plugin owns this BundleId, its lifecycle is authoritative. Persisting a
+        // disabled user fallback must not stop the plugin dependency; the durable user setting
+        // is restored when the last plugin owner releases the bundle.
+        if preserve_plugin_runtime
+            && server.disabled()
+            && self
+                .plugin_mcp_server_owner_inner(&bundle_id)
+                .await
+                .is_some()
+        {
+            self.plugin_mounted_server_ids
+                .write()
+                .await
+                .insert(bundle_id.clone());
+            self.mcp_start_diagnostics.write().await.remove(&bundle_id);
+            if computer_running {
+                if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
+                    log::warn!(
+                        "Plugin-owned MCP server failed to remain active for instance {} after user fallback was disabled for {}: {}",
+                        self.instance.id,
+                        bundle_id,
+                        error
+                    );
+                }
+            }
+            return Ok(true);
+        }
+
+        if computer_running {
+            if let Err(error) = self.computer.read().await.stop_mcp_client(&bundle_id).await {
+                self.record_sdk_config_reload_required(
+                    bundle_id.clone(),
+                    format!(
+                        "Configuration saved; runtime reload required after stop failed: {error}"
+                    ),
+                )
+                .await;
+                log::warn!(
+                    "Saved MCP config for instance {}, but stopping the previous runtime failed for {}: {}",
+                    self.instance.id,
+                    bundle_id,
+                    error
+                );
+                return Ok(false);
+            }
+        }
+
+        if let Err(error) = self
+            .computer
+            .read()
+            .await
+            .mount_server(normalize_mcp_server_tool_meta(server.clone()))
+            .await
+        {
+            self.record_sdk_config_reload_required(
+                bundle_id.clone(),
+                format!("Configuration saved; runtime activation failed: {error}"),
+            )
+            .await;
+            log::warn!(
+                "Saved MCP config for instance {}, but runtime activation failed for {}: {}",
+                self.instance.id,
+                bundle_id,
+                error
+            );
+            return Ok(false);
+        }
+
+        self.sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), server.name().to_string());
+        self.clear_sdk_config_reload_required(&bundle_id).await;
+        if server.disabled() || !computer_running {
+            self.mcp_start_diagnostics.write().await.remove(&bundle_id);
+            return Ok(true);
+        }
+
+        if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
+            log::warn!(
+                "Saved MCP config for instance {}, but server failed to start for {}: {}",
+                self.instance.id,
+                bundle_id,
+                error
+            );
+        }
+        Ok(true)
+    }
+
+    pub async fn mark_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
+        self.record_sdk_config_reload_required(bundle_id, message)
+            .await;
+    }
+
+    async fn record_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
+        self.mcp_reload_diagnostics
+            .write()
+            .await
+            .insert(bundle_id, message);
+        self.sdk_config_reload_required
+            .store(true, Ordering::Release);
+    }
+
+    async fn clear_sdk_config_reload_required(&self, bundle_id: &BundleId) {
+        let mut diagnostics = self.mcp_reload_diagnostics.write().await;
+        diagnostics.remove(bundle_id);
+        if diagnostics.is_empty() {
+            self.sdk_config_reload_required
+                .store(false, Ordering::Release);
+        }
+    }
+
+    pub async fn remove_user_mcp_server_config(&self, bundle_id: &BundleId) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active()?;
+        let computer_running = self.is_running().await;
+        if computer_running {
+            self.computer
+                .read()
+                .await
+                .stop_mcp_client(bundle_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        self.computer
+            .read()
+            .await
+            .unmount_server(bundle_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.sdk_servers.write().await.remove(bundle_id);
+        self.mcp_start_diagnostics.write().await.remove(bundle_id);
+        self.clear_sdk_config_reload_required(bundle_id).await;
+
+        self.reconcile_sdk_governance_inner().await?;
+        if computer_running {
+            let failures = self.start_desired_mcp_servers_inner().await;
+            self.log_mcp_start_failures(&failures, "user MCP removal");
+        }
+        Ok(())
+    }
+
     pub async fn remove_plugin_server(&self, bundle_id: &BundleId) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
@@ -939,7 +1133,24 @@ impl ComputerInstanceRuntime {
 
     pub async fn mcp_server_statuses(&self) -> Vec<(BundleId, ServerName, bool, String)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer.read().await.get_server_status().await
+        let diagnostics = self.mcp_start_diagnostics().await;
+        self.computer
+            .read()
+            .await
+            .get_server_status()
+            .await
+            .into_iter()
+            .map(|(bundle_id, name, running, status)| {
+                let status = diagnostics.get(&bundle_id).cloned().unwrap_or(status);
+                (bundle_id, name, running, status)
+            })
+            .collect()
+    }
+
+    pub async fn mcp_start_diagnostics(&self) -> HashMap<BundleId, String> {
+        let mut diagnostics = self.mcp_start_diagnostics.read().await.clone();
+        diagnostics.extend(self.mcp_reload_diagnostics.read().await.clone());
+        diagnostics
     }
 
     pub async fn mcp_server_display_name(&self, bundle_id: &BundleId) -> Option<ServerName> {
@@ -975,19 +1186,84 @@ impl ComputerInstanceRuntime {
 
     pub async fn start_mcp_server(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
+        self.start_mcp_server_inner(bundle_id).await
+    }
+
+    async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
-        self.computer.read().await.start_mcp_client(bundle_id).await
+        let result = self.computer.read().await.start_mcp_client(bundle_id).await;
+        let mut diagnostics = self.mcp_start_diagnostics.write().await;
+        match &result {
+            Ok(()) => {
+                diagnostics.remove(bundle_id);
+            }
+            Err(error) => {
+                diagnostics.insert(bundle_id.clone(), format!("Start failed: {error}"));
+            }
+        }
+        result
     }
 
     pub async fn stop_mcp_server(&self, bundle_id: &BundleId) -> Result<bool, String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
-        self.computer
+        let result = self
+            .computer
             .read()
             .await
             .stop_mcp_client(bundle_id)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        if result.is_ok() {
+            self.mcp_start_diagnostics.write().await.remove(bundle_id);
+        }
+        result
+    }
+
+    pub async fn start_mcp_servers_best_effort(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, String)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+    }
+
+    async fn start_mcp_servers_best_effort_inner(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, String)> {
+        let mut failures = Vec::new();
+        for bundle_id in bundle_ids {
+            if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
+                failures.push((bundle_id, error.to_string()));
+            }
+        }
+        failures
+    }
+
+    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, String)> {
+        let bundle_ids = self
+            .sdk_mcp_server_ownership()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                !entry.disabled || matches!(entry.managed_by, McpOwnership::Plugin { .. })
+            })
+            .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok())
+            .collect();
+        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+    }
+
+    pub(super) fn log_mcp_start_failures(&self, failures: &[(BundleId, String)], cause: &str) {
+        for (bundle_id, error) in failures {
+            log::warn!(
+                "Failed to start MCP server for Computer instance {} during {}: {} ({})",
+                self.instance.id,
+                cause,
+                bundle_id,
+                error
+            );
+        }
     }
 
     pub async fn remount_enabled_plugin_servers(&self) -> Result<(), String> {
@@ -1361,6 +1637,16 @@ impl ComputerInstanceRuntime {
                 self.instance.id
             );
         }
+        let plugin_owned_server_ids = self
+            .sdk_mcp_server_ownership()
+            .await
+            .into_iter()
+            .filter(|entry| matches!(entry.managed_by, McpOwnership::Plugin { .. }))
+            .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok());
+        self.plugin_mounted_server_ids
+            .write()
+            .await
+            .extend(plugin_owned_server_ids);
         Ok(hooks
             .registered_server_ids()
             .await
@@ -1389,6 +1675,8 @@ impl ComputerInstanceRuntime {
         }
 
         self.clear_client_runtime_diagnostic_silent().await;
+        self.mcp_start_diagnostics.write().await.clear();
+        self.mcp_reload_diagnostics.write().await.clear();
         self.shutdown_sdk_computer_inner().await?;
         self.stop_runtime_event_relay().await;
         {
@@ -1399,6 +1687,8 @@ impl ComputerInstanceRuntime {
             self.shutdown_completed.store(false, Ordering::Release);
         }
         *self.sdk_servers.write().await = sdk_servers;
+        self.sdk_config_reload_required
+            .store(false, Ordering::Release);
         self.plugin_mounted_server_ids.write().await.clear();
         *self.sdk_auto_connect.write().await = self.instance.connection_policy.auto_connect;
         self.start_runtime_event_relay().await;
@@ -1420,6 +1710,8 @@ impl ComputerInstanceRuntime {
                     )
                 })?;
             self.reconcile_sdk_governance_inner().await?;
+            let failures = self.start_desired_mcp_servers_inner().await;
+            self.log_mcp_start_failures(&failures, reason);
         }
         Ok(())
     }

@@ -190,6 +190,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       await invoke('upsert_computer_mcp_config', { instanceId, config });
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
+      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
       reportMutationError(set, get, instanceId, cause);
       throw cause;
     } finally {
@@ -203,6 +204,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       await invoke('remove_computer_mcp_config', { instanceId, name });
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
+      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
       reportMutationError(set, get, instanceId, cause);
       throw cause;
     } finally {

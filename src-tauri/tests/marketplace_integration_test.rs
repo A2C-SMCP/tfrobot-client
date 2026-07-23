@@ -6,6 +6,7 @@
 mod common;
 
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use common::{create_test_app_state, echo_server_config, echo_server_path, mcp};
 use std::fs;
 use std::path::Path;
@@ -13,7 +14,8 @@ use std::process::Command;
 use tfrobot_client_lib::commands::{
     computer::{
         duplicate_computer_instance_core, get_computer_instance_status_core,
-        start_computer_instance_core, DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
+        start_computer_instance_core, stop_computer_instance_core,
+        DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
     },
     config_io,
     dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
@@ -31,6 +33,12 @@ use tfrobot_client_lib::AppState;
 
 const TEST_INSTANCE_ID: &str = "computer-a";
 const TEST_SECOND_INSTANCE_ID: &str = "computer-b";
+
+fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
+    let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
+    value["disabled"] = serde_json::Value::Bool(disabled);
+    serde_json::from_value(value).unwrap()
+}
 
 async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
@@ -709,6 +717,13 @@ async fn shared_plugin_dependency_hands_off_and_is_reclaimed_after_the_last_disa
     )
     .await
     .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("audit-mcp", true),
+    )
+    .await
+    .unwrap();
     install_plugin_core(
         &state,
         TEST_INSTANCE_ID,
@@ -931,6 +946,153 @@ async fn plugin_enable_claims_an_existing_user_bundle_dependency_until_disabled(
 }
 
 #[tokio::test]
+async fn enabled_plugin_overrides_disabled_user_fallback_until_plugin_is_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("audit-mcp", true),
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("unrelated-mcp"),
+    )
+    .await
+    .unwrap();
+
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let active = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|server| server.bundle_id.as_str() == "audit-mcp")
+        .expect("enabled plugin MCP must override its disabled user fallback");
+    assert!(active.running);
+    assert!(matches!(
+        active.managed_by,
+        McpServerManagedBy::Plugin { .. }
+    ));
+
+    stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let restarted = create_test_app_state(tmp.path());
+    start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    disable_plugin_core(&restarted, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let restored_rows = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(
+        restored_rows
+            .iter()
+            .all(|server| server.bundle_id.as_str() != "audit-mcp"),
+        "disabled user fallback must be hidden after plugin release: {restored_rows:#?}"
+    );
+    assert!(restarted
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "audit-mcp" && server.config.disabled()));
+    assert!(mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| server.name == "unrelated-mcp" && server.running));
+}
+
+#[tokio::test]
+async fn direct_plugin_uninstall_restores_a_disabled_user_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("audit-mcp", true),
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .all(|server| server.bundle_id.as_str() != "audit-mcp"));
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "audit-mcp" && server.config.disabled()));
+}
+
+#[tokio::test]
 async fn config_import_is_independent_from_dynamic_plugin_runtime_ownership() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
@@ -1033,7 +1195,7 @@ async fn config_import_is_independent_from_dynamic_plugin_runtime_ownership() {
 }
 
 #[tokio::test]
-async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
+async fn computer_bootup_starts_enabled_plugin_mcp_servers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("marketplace-repo");
@@ -1071,10 +1233,6 @@ async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
     .await
     .unwrap();
 
-    // SDK currently owns boot/recovery semantics. tfrobot-client verifies that
-    // plugin servers stay visible in the current runtime, but it does not
-    // synthesize cold-start remount behavior or start bundled MCP servers during
-    // Computer bootup.
     let before_boot = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -1092,8 +1250,8 @@ async fn computer_bootup_does_not_start_enabled_plugin_mcp_servers() {
         .await
         .expect("plugin MCP server should remain visible after boot");
     assert!(
-        !audit_after_boot.running,
-        "enabled plugin MCP server should remain stopped after Computer bootup; status: {}",
+        audit_after_boot.running,
+        "enabled plugin MCP server should start with Computer bootup; status: {}",
         audit_after_boot.status_message
     );
 }

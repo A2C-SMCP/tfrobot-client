@@ -231,7 +231,9 @@ pub async fn get_computer_config_state_core(
     })
 }
 
-/// Creates or updates one SDK-owned MCP declaration without resolving or reloading runtime state.
+/// Creates or updates one SDK-owned MCP declaration, then applies it to the instance runtime
+/// without rebuilding the Computer handle. Runtime activation failures remain observable on the
+/// MCP runtime row and do not discard a valid durable declaration.
 #[tauri::command]
 pub async fn upsert_computer_mcp_config(
     state: State<'_, AppState>,
@@ -248,10 +250,42 @@ pub async fn upsert_computer_mcp_config_core(
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
+    let previous_bundle_id = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
+        .map(|server| resolve_bundle_id(&server.config));
+    let next_bundle_id = resolve_bundle_id(&config);
     state
         .sdk_config
-        .upsert_mcp_configs(instance_id, &[config])
+        .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
         .map_err(|error| error.to_string())?;
+    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
+        if let Some(previous_bundle_id) = previous_bundle_id {
+            if previous_bundle_id != next_bundle_id {
+                if let Err(error) = runtime
+                    .remove_user_mcp_server_config(&previous_bundle_id)
+                    .await
+                {
+                    runtime
+                        .mark_sdk_config_reload_required(
+                            previous_bundle_id.clone(),
+                            format!(
+                                "Configuration saved; previous runtime identity cleanup failed: {error}"
+                            ),
+                        )
+                        .await;
+                    return Err(format!(
+                        "MCP config was saved, but the previous runtime identity could not be removed: {error}"
+                    ));
+                }
+            }
+        }
+        runtime.apply_user_mcp_server_config(config).await?;
+    }
     Ok(())
 }
 
@@ -276,10 +310,33 @@ pub async fn remove_computer_mcp_config_core(
     if name.is_empty() {
         return Err("name is required".to_string());
     }
+    let bundle_id = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == name)
+        .map(|server| resolve_bundle_id(&server.config));
     state
         .sdk_config
         .remove_mcp_config(instance_id, name)
         .map_err(|error| error.to_string())?;
+    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
+        if let Some(bundle_id) = bundle_id {
+            if let Err(error) = runtime.remove_user_mcp_server_config(&bundle_id).await {
+                runtime
+                    .mark_sdk_config_reload_required(
+                        bundle_id.clone(),
+                        format!("Configuration removed; runtime cleanup failed: {error}"),
+                    )
+                    .await;
+                return Err(format!(
+                    "MCP config was removed, but runtime cleanup failed: {error}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
