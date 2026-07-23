@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, App, Button, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Modal, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   DeleteOutlined,
   EditOutlined,
@@ -75,6 +75,17 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     }
   };
 
+  const handleEnabledChange = async (record: SdkConfigServer, enabled: boolean) => {
+    try {
+      await upsertServer(instanceId, { ...record.config, disabled: !enabled });
+      message.success(t(enabled ? 'mcp.messages.enabled' : 'mcp.messages.disabled', {
+        name: record.name,
+      }));
+    } catch (cause) {
+      message.error(String(cause));
+    }
+  };
+
   const handleImport = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
@@ -133,6 +144,27 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       title: t('mcp.table.transport'),
       key: 'transport',
       render: (_: unknown, record: SdkConfigServer) => record.config.type,
+    },
+    {
+      title: t('mcp.table.enabled'),
+      key: 'enabled',
+      render: (_: unknown, record: SdkConfigServer) => {
+        const hint = record.writable
+          ? undefined
+          : t('mcp.readOnlyConfigHint', { origin: record.origin });
+        return (
+          <Tooltip title={hint}>
+            <span>
+              <Switch
+                checked={!record.config.disabled}
+                disabled={!record.writable}
+                onChange={(enabled) => void handleEnabledChange(record, enabled)}
+                aria-label={t('mcp.actions.toggleEnabled', { name: record.name })}
+              />
+            </span>
+          </Tooltip>
+        );
+      },
     },
     {
       title: t('mcp.table.actions'),

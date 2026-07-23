@@ -1,7 +1,9 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::{ComputerRuntimeAction, McpServerManagedBy};
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -53,14 +55,37 @@ pub async fn get_mcp_servers_core(
         .into_iter()
         .map(|(bundle_id, _name, running, status_message)| (bundle_id, (running, status_message)))
         .collect();
-    let mut statuses: Vec<_> = mcp_server_runtime_metadata(&runtime)
-        .await
+    let diagnostics = runtime.mcp_start_diagnostics().await;
+    let mut metadata = mcp_server_runtime_metadata(&runtime).await;
+    for server in state.sdk_config.load(instance_id).mcp.servers {
+        if server.origin == ProvenanceScope::Plugin {
+            continue;
+        }
+        let bundle_id = resolve_bundle_id(&server.config);
+        metadata
+            .entry(bundle_id)
+            .or_insert(McpServerRuntimeMetadata {
+                name: server.name,
+                disabled: server.config.disabled(),
+                managed_by: McpServerManagedBy::User,
+            });
+    }
+    let mut statuses: Vec<_> = metadata
         .into_iter()
+        .filter(|(_, metadata)| metadata.managed_by.is_plugin_owned() || !metadata.disabled)
         .map(|(bundle_id, metadata)| {
             let (running, status_message) = runtime_statuses
                 .get(&bundle_id)
                 .cloned()
-                .unwrap_or_else(|| (false, "Stopped".to_string()));
+                .unwrap_or_else(|| {
+                    (
+                        false,
+                        diagnostics
+                            .get(&bundle_id)
+                            .cloned()
+                            .unwrap_or_else(|| "pending".to_string()),
+                    )
+                });
             McpServerStatus {
                 disabled: metadata.disabled,
                 bundle_id,
@@ -201,11 +226,18 @@ pub async fn start_all_servers_core(
     ensure_computer_started(&runtime)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    for bundle_id in user_managed_server_ids(&runtime).await {
-        runtime
-            .start_mcp_server(&bundle_id)
-            .await
-            .map_err(RuntimeActionError::from)?;
+    let failures = runtime
+        .start_mcp_servers_best_effort(user_managed_server_ids(&runtime).await)
+        .await;
+    if !failures.is_empty() {
+        let details = failures
+            .into_iter()
+            .map(|(bundle_id, error)| format!("{bundle_id}: {error}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(RuntimeActionError::runtime(format!(
+            "Some MCP servers failed to start: {details}"
+        )));
     }
 
     log::info!("All MCP servers started for instance {}", instance_id);
@@ -283,7 +315,7 @@ async fn user_managed_server_ids(
     let mut ids: Vec<_> = mcp_server_runtime_metadata(runtime)
         .await
         .into_iter()
-        .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned())
+        .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned() && !metadata.disabled)
         .map(|(bundle_id, _)| bundle_id)
         .collect();
     ids.sort();

@@ -46,6 +46,25 @@ fn bundle_id(value: &str) -> BundleId {
     BundleId::try_from(value).unwrap()
 }
 
+fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
+    let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
+    value["disabled"] = serde_json::Value::Bool(disabled);
+    serde_json::from_value(value).unwrap()
+}
+
+fn echo_server_config_with_bundle_id(name: &str, bundle_id: &str) -> MCPServerConfig {
+    let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
+    value["bundle_id"] = serde_json::Value::String(bundle_id.to_string());
+    serde_json::from_value(value).unwrap()
+}
+
+fn unavailable_server_config(name: &str) -> MCPServerConfig {
+    let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
+    value["server_parameters"]["command"] =
+        serde_json::Value::String("tfrobot-command-that-does-not-exist".to_string());
+    serde_json::from_value(value).unwrap()
+}
+
 async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
     let state = create_test_app_state(path);
     if state
@@ -477,10 +496,9 @@ async fn test_mcp_commands_are_instance_scoped() {
     assert!(default_configs.is_empty());
     assert_eq!(second_configs.len(), 1);
     assert_eq!(second_configs[0].name, "second-only");
-    assert!(
-        second_statuses.is_empty(),
-        "config-only changes must not appear in runtime inventory before reload"
-    );
+    assert_eq!(second_statuses.len(), 1);
+    assert_eq!(second_statuses[0].name, "second-only");
+    assert!(!second_statuses[0].running);
 }
 
 #[tokio::test]
@@ -532,6 +550,7 @@ async fn test_sdk_config_remains_authoritative_across_runtime_sync_and_restart()
 
 #[tokio::test]
 async fn test_get_mcp_servers_uses_sdk_computer_status() {
+    require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -549,8 +568,142 @@ async fn test_get_mcp_servers_uses_sdk_computer_status() {
 
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].name, "sdk-status");
-    assert!(!statuses[0].running);
-    assert_eq!(statuses[0].status_message, "pending");
+    assert!(statuses[0].running);
+    assert_eq!(statuses[0].status_message, "connected");
+}
+
+#[tokio::test]
+async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("toggle-server", false),
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let enabled = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(enabled
+        .iter()
+        .any(|server| server.name == "toggle-server" && server.running));
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("toggle-server", true),
+    )
+    .await
+    .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .all(|server| server.name != "toggle-server"));
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("toggle-server", false),
+    )
+    .await
+    .unwrap();
+    let reenabled = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(reenabled
+        .iter()
+        .any(|server| server.name == "toggle-server" && server.running));
+}
+
+#[tokio::test]
+async fn changing_bundle_id_removes_the_previous_runtime_identity() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_bundle_id("identity-server", "identity-old"),
+    )
+    .await
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_bundle_id("identity-server", "identity-new"),
+    )
+    .await
+    .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime_ids = runtime.sdk_mcp_server_ids().await;
+    assert!(!runtime_ids.contains(&bundle_id("identity-old")));
+    assert!(runtime_ids.contains(&bundle_id("identity-new")));
+    let rows = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].bundle_id.as_str(), "identity-new");
+    assert!(rows[0].running);
+}
+
+#[tokio::test]
+async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        unavailable_server_config("broken-server"),
+    )
+    .await
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("healthy-server"),
+    )
+    .await
+    .unwrap();
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let healthy = servers
+        .iter()
+        .find(|server| server.name == "healthy-server")
+        .unwrap();
+    let broken = servers
+        .iter()
+        .find(|server| server.name == "broken-server")
+        .unwrap();
+    assert!(
+        healthy.running,
+        "healthy MCP must not be blocked by another failure"
+    );
+    assert!(!broken.running);
+    assert!(broken.status_message.starts_with("Start failed:"));
 }
 
 #[tokio::test]
@@ -636,7 +789,7 @@ async fn test_mcp_lifecycle_requires_started_computer() {
 }
 
 #[tokio::test]
-async fn test_config_only_add_stays_out_of_runtime_until_reload() {
+async fn test_config_add_applies_without_reloading_or_stopping_existing_servers() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -673,31 +826,15 @@ async fn test_config_only_add_stays_out_of_runtime_until_reload() {
         .find(|status| status.name == "already-running")
         .expect("active server status should exist");
     assert!(active.running, "active server should remain running");
-    assert!(
-        statuses.iter().all(|status| status.name != "newly-added"),
-        "config-only additions must not be synthesized into runtime status"
-    );
-    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("newly-added"))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("Server not found: newly-added"));
-
-    state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap()
-        .reload()
-        .await
-        .unwrap();
-    let reloaded = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    assert!(reloaded.iter().any(|status| status.name == "newly-added"));
+    let added = statuses
+        .iter()
+        .find(|status| status.name == "newly-added")
+        .expect("enabled config addition should enter the live runtime");
+    assert!(added.running);
 }
 
 #[tokio::test]
-async fn test_connected_config_crud_does_not_sync_or_reload_runtime() {
+async fn test_connected_config_update_syncs_without_rejoining_computer() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -725,16 +862,23 @@ async fn test_connected_config_crud_does_not_sync_or_reload_runtime() {
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(stats.update_config_events() > config_events_before);
     assert_eq!(
-        stats.update_config_events(),
-        config_events_before,
-        "config-only CRUD must not synchronize or reload runtime"
+        stats.join_events(),
+        1,
+        "hot config apply must not reconnect"
     );
+    let config_events_after_upsert = stats.update_config_events();
     sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "everything-sync")
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert_eq!(stats.update_config_events(), config_events_before);
+    assert!(stats.update_config_events() > config_events_after_upsert);
+    assert_eq!(
+        stats.join_events(),
+        1,
+        "hot config removal must not reconnect"
+    );
 }
 
 #[tokio::test]
@@ -764,15 +908,10 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         .servers
         .iter()
         .any(|server| server.name == "full-chain-echo"));
-    assert!(!runtime
+    assert!(runtime
         .sdk_mcp_server_ids()
         .await
         .contains(&bundle_id("full-chain-echo")));
-
-    runtime.reload().await.unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("full-chain-echo"))
-        .await
-        .unwrap();
     let tools = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -783,7 +922,7 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         &state,
         TEST_INSTANCE_ID,
         "full-chain-echo__echo",
-        serde_json::json!({ "message": "TFRC-67 full chain" }),
+        serde_json::json!({ "message": "TFRC-68 full chain" }),
         Some(5.0),
     )
     .await
@@ -831,7 +970,10 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
     );
 
     let final_snapshot = runtime.runtime_snapshot().await;
-    assert!(final_snapshot.generation > initial_snapshot.generation);
+    assert_eq!(
+        final_snapshot.generation, initial_snapshot.generation,
+        "hot MCP config apply must not rebuild the Computer runtime"
+    );
     assert!(final_snapshot.capability_revision > initial_snapshot.capability_revision);
     assert_eq!(final_snapshot.active_mcp_servers, 1);
     assert_eq!(final_snapshot.tools, 1);

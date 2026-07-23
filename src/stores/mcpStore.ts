@@ -148,7 +148,9 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info(`MCP server started: ${bundleId}`);
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      const actionError = formatRuntimeActionError(e);
+      await get().fetchServers(instanceId);
+      set({ error: actionError, loading: false });
       throw e;
     }
   },
@@ -172,7 +174,9 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       info('All MCP servers started');
       await get().fetchServers(instanceId);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      const actionError = formatRuntimeActionError(e);
+      await get().fetchServers(instanceId);
+      set({ error: actionError, loading: false });
       throw e;
     }
   },

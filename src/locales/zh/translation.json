@@ -302,6 +302,7 @@
       "name": "名称",
       "source": "来源",
       "transport": "传输类型",
+      "enabled": "启用",
       "status": "状态",
       "message": "消息",
       "actions": "操作"
@@ -316,7 +317,8 @@
       "start": "启动",
       "stop": "停止",
       "edit": "编辑",
-      "remove": "删除"
+      "remove": "删除",
+      "toggleEnabled": "切换服务器 {{name}} 的启用状态"
     },
     "form": {
       "type": "服务器类型",
@@ -353,6 +355,8 @@
     "messages": {
       "added": "服务器添加成功",
       "updated": "服务器更新成功",
+      "enabled": "服务器 {{name}} 已启用",
+      "disabled": "服务器 {{name}} 已禁用",
       "removed": "服务器删除成功",
       "started": "服务器 {{name}} 已启动",
       "stopped": "服务器 {{name}} 已停止",

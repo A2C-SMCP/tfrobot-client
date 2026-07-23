@@ -6,10 +6,12 @@ impl ComputerInstanceRuntime {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         let lifecycle = self.runtime_state().await;
-        if matches!(
-            lifecycle,
-            LifecycleState::Stopped | LifecycleState::Shutdown | LifecycleState::Error
-        ) {
+        if self.sdk_config_reload_required.load(Ordering::Acquire)
+            || matches!(
+                lifecycle,
+                LifecycleState::Stopped | LifecycleState::Shutdown | LifecycleState::Error
+            )
+        {
             self.replace_sdk_computer(false, "start_after_terminal")
                 .await
                 .map_err(ComputerRuntimeStartError::Client)?;
@@ -35,6 +37,8 @@ impl ComputerInstanceRuntime {
         self.reconcile_sdk_governance_inner()
             .await
             .map_err(ComputerRuntimeStartError::Client)?;
+        let failures = self.start_desired_mcp_servers_inner().await;
+        self.log_mcp_start_failures(&failures, "Computer startup");
 
         Ok(())
     }

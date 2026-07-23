@@ -171,6 +171,39 @@ describe('sdkConfigStore', () => {
     expect(useSdkConfigStore.getState().snapshot?.revision).toBe('sha256:updated');
   });
 
+  it('refreshes committed config after a runtime-side mutation error', async () => {
+    const config = {
+      type: 'Stdio' as const,
+      name: 'saved-before-runtime-error',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      server_parameters: { command: 'node', args: [], env: {} },
+    };
+    mockedInvoke
+      .mockRejectedValueOnce('runtime cleanup failed')
+      .mockResolvedValueOnce({
+        snapshot: {
+          version: 1,
+          revision: 'sha256:committed',
+          mcp: { servers: [{ name: config.name, config, origin: 'user', bundled: false, writable: true }] },
+          provenance: {},
+        },
+        validation: { valid: true, errors: [] },
+      });
+
+    await expect(useSdkConfigStore.getState().upsertServer('computer-a', config))
+      .rejects.toBe('runtime cleanup failed');
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'get_computer_config_state', {
+      instanceId: 'computer-a',
+    });
+    expect(useSdkConfigStore.getState()).toMatchObject({
+      snapshot: { revision: 'sha256:committed' },
+      error: 'runtime cleanup failed',
+    });
+  });
+
   it('imports through the config boundary and never fetches runtime status', async () => {
     const result = { servers_imported: 2, inputs_imported: 1, servers_skipped: [] };
     mockedInvoke

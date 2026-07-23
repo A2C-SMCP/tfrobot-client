@@ -127,6 +127,30 @@ describe('McpConfig', () => {
     expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
   });
 
+  it('toggles a writable user MCP declaration from the config list', async () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+    render(<McpConfig instanceId={instanceId} />);
+
+    const enabledSwitch = screen.getByRole('switch', {
+      name: 'Toggle server test-stdio enabled state',
+    });
+    expect(enabledSwitch).toBeChecked();
+    fireEvent.click(enabledSwitch);
+
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledWith(
+      instanceId,
+      expect.objectContaining({ name: 'test-stdio', disabled: true }),
+    ));
+  });
+
   it('keys same-name server rows by BundleId', () => {
     mockUseSdkConfigStore.mockReturnValue({
       ...mockSdkStore,
@@ -201,6 +225,9 @@ describe('McpConfig', () => {
     const editButton = screen.getByTitle('Edit');
     expect(editButton).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
+    expect(screen.getByRole('switch', {
+      name: 'Toggle server policy-server enabled state',
+    })).toBeDisabled();
     fireEvent.mouseOver(editButton.parentElement!);
     expect(await screen.findByText(/read-only policy scope/)).toBeInTheDocument();
   });

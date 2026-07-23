@@ -145,6 +145,26 @@ describe('mcpStore', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('start_mcp_server', { instanceId, bundleId: 'srv' });
     });
 
+    it('refreshes the server row after a start failure', async () => {
+      const failedRows = [{
+        bundleId: 'srv',
+        name: 'srv',
+        running: false,
+        status_message: 'Start failed: process exited',
+        disabled: false,
+        managedBy: { type: 'user' as const },
+      }];
+      mockedInvoke.mockRejectedValueOnce('process exited');
+      mockedInvoke.mockResolvedValueOnce(failedRows);
+
+      await expect(useMcpStore.getState().startServer(instanceId, 'srv'))
+        .rejects.toBe('process exited');
+
+      expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'get_mcp_servers', { instanceId });
+      expect(useMcpStore.getState().servers).toEqual(failedRows);
+      expect(useMcpStore.getState().error).toBe('process exited');
+    });
+
     it('stop invokes stop_mcp_server', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined);
       mockedInvoke.mockResolvedValueOnce([]);
@@ -163,6 +183,36 @@ describe('mcpStore', () => {
       await useMcpStore.getState().startAll(instanceId);
 
       expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers', { instanceId });
+    });
+
+    it('refreshes all rows when only some servers fail to start', async () => {
+      const mixedRows = [
+        {
+          bundleId: 'healthy',
+          name: 'healthy',
+          running: true,
+          status_message: 'connected',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+        {
+          bundleId: 'broken',
+          name: 'broken',
+          running: false,
+          status_message: 'Start failed: process exited',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
+      mockedInvoke.mockRejectedValueOnce('Some MCP servers failed to start: broken');
+      mockedInvoke.mockResolvedValueOnce(mixedRows);
+
+      await expect(useMcpStore.getState().startAll(instanceId))
+        .rejects.toBe('Some MCP servers failed to start: broken');
+
+      expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'get_mcp_servers', { instanceId });
+      expect(useMcpStore.getState().servers).toEqual(mixedRows);
+      expect(useMcpStore.getState().error).toBe('Some MCP servers failed to start: broken');
     });
 
     it('stopAll invokes stop_all_servers', async () => {

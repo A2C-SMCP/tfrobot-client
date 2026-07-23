@@ -102,7 +102,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
 
   // Convert initial config to form values
   const getInitialFormValues = (): FormValues | undefined => {
-    if (!initialValues) return { type: 'stdio', name: '', env: [], args: [] };
+    if (!initialValues) return { type: 'stdio', name: '', env: [], args: [], disabled: false };
 
     const base = {
       name: initialValues.name,
@@ -168,7 +168,7 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
     }
     const toolMeta = normalizeToolMetaMap(toolMetaResult.value);
     const advancedFields = {
-      disabled: values.disabled || false,
+      disabled: values.disabled ?? false,
       forbidden_tools: values.forbidden_tools || [],
       tool_meta: toolMeta,
     };

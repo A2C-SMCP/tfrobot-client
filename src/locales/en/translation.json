@@ -302,6 +302,7 @@
       "name": "Name",
       "source": "Source",
       "transport": "Transport",
+      "enabled": "Enabled",
       "status": "Status",
       "message": "Message",
       "actions": "Actions"
@@ -316,7 +317,8 @@
       "start": "Start",
       "stop": "Stop",
       "edit": "Edit",
-      "remove": "Remove"
+      "remove": "Remove",
+      "toggleEnabled": "Toggle server {{name}} enabled state"
     },
     "form": {
       "type": "Server Type",
@@ -353,6 +355,8 @@
     "messages": {
       "added": "Server added successfully",
       "updated": "Server updated successfully",
+      "enabled": "Server {{name}} enabled",
+      "disabled": "Server {{name}} disabled",
       "removed": "Server removed successfully",
       "started": "Server {{name}} started",
       "stopped": "Server {{name}} stopped",
