@@ -335,6 +335,7 @@ pub fn run() {
             commands::inputs::list_input_values,
             commands::inputs::get_input_value,
             commands::inputs::set_input_value,
+            commands::inputs::set_runtime_input_value,
             commands::inputs::remove_input_value,
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,

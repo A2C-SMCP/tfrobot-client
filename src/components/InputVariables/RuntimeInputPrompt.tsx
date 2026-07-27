@@ -8,6 +8,7 @@ import { InputValueEditor } from './InputValueEditor';
 interface RuntimeInputPromptProps {
   instanceId: string;
   error: MissingRuntimeInputError;
+  allowPersistentDefinitionCreation?: boolean;
   onCancel: () => void;
   onSubmitted: () => Promise<void>;
 }
@@ -15,6 +16,7 @@ interface RuntimeInputPromptProps {
 export function RuntimeInputPrompt({
   instanceId,
   error,
+  allowPersistentDefinitionCreation = true,
   onCancel,
   onSubmitted,
 }: RuntimeInputPromptProps) {
@@ -23,6 +25,7 @@ export function RuntimeInputPrompt({
   const getInput = useInputStore((state) => state.getInput);
   const addOrUpdateInput = useInputStore((state) => state.addOrUpdateInput);
   const setValue = useInputStore((state) => state.setValue);
+  const setRuntimeValue = useInputStore((state) => state.setRuntimeValue);
   const [loadedDefinition, setLoadedDefinition] = useState<{
     key: string;
     value: InputDefinition | null;
@@ -60,15 +63,29 @@ export function RuntimeInputPrompt({
     setSubmitError(null);
     try {
       if (definition === null) {
-        await addOrUpdateInput(instanceId, {
-          type: 'PromptString',
-          id: error.input_id,
-          label: error.input_id,
-          description: error.message,
-          password: createAsSecret,
-        });
+        const storedForRuntimeDefinition = await setRuntimeValue(
+          instanceId,
+          error.input_id,
+          value,
+        );
+        if (!storedForRuntimeDefinition) {
+          if (!allowPersistentDefinitionCreation) {
+            throw new Error(
+              `Runtime input definition '${error.input_id}' is no longer available`,
+            );
+          }
+          await addOrUpdateInput(instanceId, {
+            type: 'PromptString',
+            id: error.input_id,
+            label: error.input_id,
+            description: error.message,
+            password: createAsSecret,
+          });
+          await setValue(instanceId, error.input_id, value);
+        }
+      } else {
+        await setValue(instanceId, error.input_id, value);
       }
-      await setValue(instanceId, error.input_id, value);
       await onSubmitted();
     } catch (cause) {
       setSubmitError(String(cause));
@@ -101,14 +118,16 @@ export function RuntimeInputPrompt({
             message={t('inputs.runtime.definitionMissing', { id: error.input_id })}
             style={{ marginBottom: 16 }}
           />
-          <Typography.Paragraph>
-            <Switch
-              checked={createAsSecret}
-              onChange={setCreateAsSecret}
-              style={{ marginRight: 8 }}
-            />
-            {t('inputs.runtime.createAsSecret')}
-          </Typography.Paragraph>
+          {allowPersistentDefinitionCreation && (
+            <Typography.Paragraph>
+              <Switch
+                checked={createAsSecret}
+                onChange={setCreateAsSecret}
+                style={{ marginRight: 8 }}
+              />
+              {t('inputs.runtime.createAsSecret')}
+            </Typography.Paragraph>
+          )}
         </>
       )}
       {definition !== undefined && (

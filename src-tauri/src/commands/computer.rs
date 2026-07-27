@@ -5,8 +5,8 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
-    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ConnectionStateSummary,
-    RobotBindingMetadata,
+    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ComputerRuntimeState,
+    ConnectionStateSummary, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::keychain;
@@ -89,17 +89,17 @@ pub struct UpdateComputerSkillHomeRequest {
 #[tauri::command]
 pub async fn list_computer_instances(
     state: State<'_, AppState>,
-) -> Result<Vec<ComputerInstanceStatus>, String> {
+) -> Result<Vec<ComputerInstanceStatus>, RuntimeActionError> {
     list_computer_instances_core(&state).await
 }
 
 pub async fn list_computer_instances_core(
     state: &AppState,
-) -> Result<Vec<ComputerInstanceStatus>, String> {
+) -> Result<Vec<ComputerInstanceStatus>, RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let config = state
         .load_hydrated_computer_instances()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let discovered_ids = config
         .instances
         .iter()
@@ -110,16 +110,24 @@ pub async fn list_computer_instances_core(
             state
                 .computer_registry
                 .remove_runtime(&runtime.instance.id)
-                .await?;
+                .await
+                .map_err(RuntimeActionError::runtime)?;
         }
     }
     let mut statuses = Vec::with_capacity(config.instances.len());
 
     for instance in config.instances {
-        let runtime = state
-            .computer_registry
-            .update_runtime_instance(instance.clone())
-            .await?;
+        // Listing is observational and must not trigger SDK governance reconciliation. A
+        // lifecycle command or the instance-scoped status command performs typed synchronization,
+        // where a missing input can be associated with the exact Computer and retried safely.
+        let runtime = match state.computer_registry.runtime(&instance.id).await {
+            Some(runtime) => runtime,
+            None => state
+                .computer_registry
+                .upsert_runtime(instance.clone())
+                .await
+                .map_err(RuntimeActionError::runtime)?,
+        };
         statuses.push(status_from_instance(&instance, &runtime).await);
     }
 
@@ -130,27 +138,28 @@ pub async fn list_computer_instances_core(
 pub async fn get_computer_instance_status(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, String> {
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
     get_computer_instance_status_core(&state, id).await
 }
 
 pub async fn get_computer_instance_status_core(
     state: &AppState,
     id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, String> {
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let config = state
         .load_hydrated_computer_instances()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let instance = config
         .instances
         .into_iter()
         .find(|instance| instance.id == id)
-        .ok_or_else(|| format!("Computer instance not found: {id}"))?;
+        .ok_or_else(|| RuntimeActionError::runtime(format!("Computer instance not found: {id}")))?;
     let runtime = state
         .computer_registry
-        .update_runtime_instance(instance.clone())
-        .await?;
+        .update_runtime_instance_typed(instance.clone())
+        .await
+        .map_err(RuntimeActionError::from)?;
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -543,13 +552,18 @@ pub async fn start_computer_instance_core(
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let runtime = state
         .computer_registry
-        .update_runtime_instance(instance.clone())
-        .await
-        .map_err(RuntimeActionError::runtime)?;
-    runtime
-        .ensure_runtime_action(ComputerRuntimeAction::Start)
+        .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
+    if !matches!(
+        runtime.runtime_state().await,
+        ComputerRuntimeState::Started | ComputerRuntimeState::Degraded
+    ) {
+        runtime
+            .ensure_runtime_action(ComputerRuntimeAction::Start)
+            .await
+            .map_err(RuntimeActionError::from)?;
+    }
     runtime.start().await.map_err(RuntimeActionError::from)?;
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -625,9 +639,9 @@ pub async fn restart_computer_instance_core(
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let runtime = state
         .computer_registry
-        .update_runtime_instance(instance.clone())
+        .update_runtime_instance_typed(instance.clone())
         .await
-        .map_err(RuntimeActionError::runtime)?;
+        .map_err(RuntimeActionError::from)?;
     runtime
         .ensure_runtime_action(ComputerRuntimeAction::Restart)
         .await
@@ -668,9 +682,9 @@ pub async fn reload_computer_runtime_core(
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let runtime = state
         .computer_registry
-        .update_runtime_instance(instance.clone())
+        .update_runtime_instance_typed(instance.clone())
         .await
-        .map_err(RuntimeActionError::runtime)?;
+        .map_err(RuntimeActionError::from)?;
     runtime
         .ensure_runtime_action(ComputerRuntimeAction::Reload)
         .await

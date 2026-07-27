@@ -42,6 +42,22 @@ impl RuntimeActionError {
             message: message.into(),
         }
     }
+
+    pub fn append_context(mut self, context: impl std::fmt::Display) -> Self {
+        let suffix = context.to_string();
+        match &mut self {
+            Self::MissingInput { message, .. }
+            | Self::MissingSecret { message, .. }
+            | Self::ResolverFailed { message, .. }
+            | Self::RuntimeError { message } => {
+                *message = format!("{message}; {suffix}");
+            }
+            Self::ActionUnavailable { .. } => {
+                return Self::runtime(format!("{self}; {suffix}"));
+            }
+        }
+        self
+    }
 }
 
 impl From<ComputerError> for RuntimeActionError {
@@ -78,6 +94,9 @@ impl From<ComputerRuntimeStartError> for RuntimeActionError {
     fn from(error: ComputerRuntimeStartError) -> Self {
         match error {
             ComputerRuntimeStartError::Sdk(error) => error.into(),
+            ComputerRuntimeStartError::SdkWithContext { source, context } => {
+                Self::from(source).append_context(context)
+            }
             ComputerRuntimeStartError::Client(message) => Self::runtime(message),
         }
     }
@@ -123,6 +142,28 @@ mod tests {
                 "code": "resolver_failed",
                 "input_id": "region",
                 "message": "secret store unavailable"
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_missing_input_fields_when_runtime_restore_adds_context() {
+        let error = RuntimeActionError::from(ComputerRuntimeStartError::SdkWithContext {
+            source: ComputerError::InputResolution(InputResolutionError::Missing {
+                id: "audit@acme/api-key".to_string(),
+                kind: InputKind::Secret,
+                env_hint: "A2C_SMCP_audit_acme_api_key".to_string(),
+            }),
+            context: "previous runtime restore also failed".to_string(),
+        });
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "missing_secret",
+                "input_id": "audit@acme/api-key",
+                "env_hint": "A2C_SMCP_audit_acme_api_key",
+                "message": "Required secret input 'audit@acme/api-key' is unresolved; previous runtime restore also failed"
             })
         );
     }

@@ -11,6 +11,7 @@ use common::{create_test_app_state, echo_server_config, echo_server_path, mcp};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
     computer::{
         duplicate_computer_instance_core, get_computer_instance_status_core,
@@ -19,6 +20,7 @@ use tfrobot_client_lib::commands::{
     },
     config_io,
     dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
+    inputs,
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
         get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
@@ -149,6 +151,7 @@ async fn plugin_lifecycle_commands_use_sdk_errors_without_client_ledgers() {
     let enable_error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap_err();
+    let enable_error = enable_error.to_string();
     assert!(enable_error.contains("not installed") || enable_error.contains("not found"));
 
     // SDK disable/uninstall are intentionally idempotent around absent runtime materialization.
@@ -296,6 +299,185 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         .unwrap();
     assert!(governance.marketplaces.is_empty());
     assert!(governance.plugins.is_empty());
+}
+
+#[tokio::test]
+async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("runtime-input-marketplace");
+    build_runtime_input_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+
+    let error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingSecret {
+            ref input_id,
+            ..
+        } if input_id == "audit@acme/api_token"
+    ));
+    assert!(state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
+
+    // A normal status refresh rebuilds the persistent input projection. Plugin definitions must
+    // remain in the runtime-only pool so the prompt can still store the exact scoped value.
+    get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(state
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
+    assert!(inputs::set_runtime_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token".to_string(),
+        serde_json::json!("runtime-secret"),
+    )
+    .await
+    .unwrap());
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime
+        .remove_plugin_server(&BundleId::try_from("audit-mcp").unwrap())
+        .await
+        .unwrap();
+    tfrobot_client_lib::services::keychain::delete_input_secret(
+        state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token",
+    )
+    .unwrap();
+    let remount_error = runtime.remount_enabled_plugin_servers().await.unwrap_err();
+    assert!(matches!(
+        remount_error,
+        a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(
+            a2c_smcp::smcp_computer::inputs::InputResolutionError::Missing {
+                ref id,
+                ..
+            }
+        ) if id == "audit@acme/api_token"
+    ));
+    assert!(inputs::set_runtime_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token".to_string(),
+        serde_json::json!("runtime-secret-after-remount"),
+    )
+    .await
+    .unwrap());
+    runtime.remount_enabled_plugin_servers().await.unwrap();
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(
+        wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
+            .await
+            .is_some_and(|server| server.running)
+    );
+    runtime
+        .remove_plugin_server(&BundleId::try_from("audit-mcp").unwrap())
+        .await
+        .unwrap();
+    tfrobot_client_lib::services::keychain::delete_input_secret(
+        state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token",
+    )
+    .unwrap();
+    let listed = tfrobot_client_lib::commands::computer::list_computer_instances_core(&state)
+        .await
+        .unwrap();
+    assert!(listed
+        .iter()
+        .any(|instance| instance.id == TEST_INSTANCE_ID));
+    let status_error = get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        status_error,
+        RuntimeActionError::MissingSecret {
+            ref input_id,
+            ..
+        } if input_id == "audit@acme/api_token"
+    ));
+    assert!(inputs::set_runtime_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token".to_string(),
+        serde_json::json!("runtime-secret-after-status-refresh"),
+    )
+    .await
+    .unwrap());
+    get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let restarted = create_test_app_state(tmp.path());
+    let error = start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingSecret {
+            ref input_id,
+            ..
+        } if input_id == "audit@acme/api_token"
+    ));
+    assert!(inputs::set_runtime_input_value_core(
+        &restarted,
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token".to_string(),
+        serde_json::json!("runtime-secret-after-restart"),
+    )
+    .await
+    .unwrap());
+    let retried = start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(retried.running);
+    assert!(
+        wait_for_mcp_server_running(TEST_INSTANCE_ID, &restarted, "audit-mcp")
+            .await
+            .is_some_and(|server| server.running)
+    );
+    assert!(restarted
+        .config
+        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1748,6 +1930,46 @@ fn build_marketplace_repo(repo: &Path) {
     fs::write(
         servers.join("inputs.json"),
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
+    )
+    .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn build_runtime_input_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"audit","source":"./plugins/audit"}]}"#,
+    )
+    .unwrap();
+    let servers = repo.join("plugins/audit/mcp-servers");
+    fs::create_dir_all(&servers).unwrap();
+    let server_path = echo_server_path();
+    fs::write(
+        servers.join("audit-mcp.json"),
+        format!(
+            r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{"API_TOKEN":"${{input:audit@acme/api_token}}"}}}}}}"#,
+            server_path.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        servers.join("inputs.json"),
+        r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","password":true}]}"#,
     )
     .unwrap();
 

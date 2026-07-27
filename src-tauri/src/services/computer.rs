@@ -27,7 +27,7 @@ use a2c_smcp::smcp_computer::skills::{
     SkillResourceView, SkillSandboxError, MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR,
 };
 use a2c_smcp::smcp_computer::{
-    inputs::load_plugin_inputs,
+    inputs::{load_plugin_inputs, InputKind, InputResolutionError},
     inventory::{McpOwnership, McpServerWithMetadata},
     LifecycleState,
 };
@@ -617,8 +617,30 @@ fn default_schema_version() -> u32 {
 pub enum ComputerRuntimeStartError {
     #[error(transparent)]
     Sdk(#[from] ComputerError),
+    #[error("{source}; {context}")]
+    SdkWithContext {
+        source: ComputerError,
+        context: String,
+    },
     #[error("{0}")]
     Client(String),
+}
+
+impl ComputerRuntimeStartError {
+    fn append_context(self, context: impl std::fmt::Display) -> Self {
+        let context = context.to_string();
+        match self {
+            Self::Sdk(source) => Self::SdkWithContext { source, context },
+            Self::SdkWithContext {
+                source,
+                context: existing,
+            } => Self::SdkWithContext {
+                source,
+                context: format!("{existing}; {context}"),
+            },
+            Self::Client(message) => Self::Client(format!("{message}; {context}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,6 +704,7 @@ impl Drop for RuntimeActivityGuard {
 pub struct ComputerInstanceRuntime {
     pub instance: ComputerInstance,
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    plugin_runtime_inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
@@ -757,6 +780,7 @@ impl ComputerInstanceRuntime {
         Self {
             instance,
             inputs: Arc::new(RwLock::new(inputs)),
+            plugin_runtime_inputs: Arc::new(RwLock::new(HashMap::new())),
             computer: Arc::new(RwLock::new(computer)),
             session,
             input_resolver,
@@ -791,6 +815,7 @@ impl ComputerInstanceRuntime {
         Self {
             instance,
             inputs: self.inputs.clone(),
+            plugin_runtime_inputs: self.plugin_runtime_inputs.clone(),
             computer: self.computer.clone(),
             session: self.session.clone(),
             input_resolver: self.input_resolver.clone(),
@@ -873,33 +898,32 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub async fn sync_runtime(&self) -> Result<(), String> {
+    pub async fn sync_runtime(&self) -> Result<(), ComputerRuntimeStartError> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active()
+            .map_err(ComputerRuntimeStartError::Client)?;
         let was_running = self.is_running().await;
 
         let rebuilt = if self.sdk_requires_rebuild().await {
             self.replace_sdk_computer(was_running, "runtime_configuration_changed")
-                .await
-                .map_err(|error| error.to_string())?;
+                .await?;
             true
         } else {
             false
         };
 
-        let mut inputs = self.inputs.write().await;
-        *inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        self.computer
-            .read()
-            .await
-            .update_inputs(inputs.clone())
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to sync SDK Computer inputs for instance {}: {}",
-                    self.instance.id, error
-                )
-            })?;
+        let mut merged_inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+        merged_inputs.extend(self.plugin_runtime_inputs.read().await.clone());
+        {
+            let mut inputs = self.inputs.write().await;
+            *inputs = merged_inputs;
+            self.computer
+                .read()
+                .await
+                .update_inputs(inputs.clone())
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+        }
         let _ = rebuilt;
         *self.sdk_servers.write().await = self
             .sdk_user_mcp_server_config_map()
@@ -908,22 +932,23 @@ impl ComputerInstanceRuntime {
             .map(|(bundle_id, config)| (bundle_id, config.name().to_string()))
             .collect();
         if was_running {
-            self.reconcile_sdk_governance_inner().await?;
+            self.reconcile_sdk_governance_inner()
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
         }
         Ok(())
     }
 
-    pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> Result<(), String> {
+    pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         let name = server.name().to_string();
         let bundle_id = resolve_bundle_id(&server);
         self.computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(server))
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         self.sdk_servers
             .write()
             .await
@@ -933,6 +958,14 @@ impl ComputerInstanceRuntime {
             .await
             .insert(bundle_id);
         Ok(())
+    }
+
+    pub async fn runtime_input_kind(&self, input_id: &str) -> Option<InputKind> {
+        self.plugin_runtime_inputs
+            .read()
+            .await
+            .get(input_id)
+            .and_then(runtime_stored_input_kind)
     }
 
     /// Applies an already-persisted user MCP declaration to this runtime without rebuilding the
@@ -1114,7 +1147,9 @@ impl ComputerInstanceRuntime {
         self.mcp_start_diagnostics.write().await.remove(bundle_id);
         self.clear_sdk_config_reload_required(bundle_id).await;
 
-        self.reconcile_sdk_governance_inner().await?;
+        self.reconcile_sdk_governance_inner()
+            .await
+            .map_err(|error| error.to_string())?;
         if computer_running {
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, "user MCP removal");
@@ -1273,9 +1308,9 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub async fn remount_enabled_plugin_servers(&self) -> Result<(), String> {
+    pub async fn remount_enabled_plugin_servers(&self) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         self.reconcile_sdk_governance_inner().await.map(|_| ())
     }
 
@@ -1380,6 +1415,10 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         let input_id = input.id().to_string();
+        self.plugin_runtime_inputs
+            .write()
+            .await
+            .insert(input_id.clone(), input.clone());
         self.inputs.write().await.insert(input_id, input.clone());
         self.computer
             .read()
@@ -1626,11 +1665,13 @@ impl ComputerInstanceRuntime {
             .filter(McpServerManagedBy::is_plugin_owned)
     }
 
-    async fn reconcile_sdk_governance_inner(&self) -> Result<Vec<String>, String> {
+    async fn reconcile_sdk_governance_inner(&self) -> ComputerResult<Vec<String>> {
         let config_context = instance_config_context(&self.instance, &self.skill_home_base);
         let declared = resolve_instance_settings(&config_context);
         let existing_servers = self.sdk_servers.read().await.clone();
-        let hooks = RuntimeMcpHooks::new(self, existing_servers).await?;
+        let hooks = RuntimeMcpHooks::new(self, existing_servers)
+            .await
+            .map_err(ComputerError::RuntimeError)?;
         let report = self
             .computer
             .read()
@@ -1654,6 +1695,9 @@ impl ComputerInstanceRuntime {
             .write()
             .await
             .extend(plugin_owned_server_ids);
+        if let Some(error) = hooks.take_input_resolution_error().await {
+            return Err(ComputerError::InputResolution(error));
+        }
         Ok(hooks
             .registered_server_ids()
             .await
@@ -1667,7 +1711,8 @@ impl ComputerInstanceRuntime {
         was_running: bool,
         reason: &str,
     ) -> Result<(), ComputerRuntimeStartError> {
-        let inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+        let mut inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+        inputs.extend(self.plugin_runtime_inputs.read().await.clone());
         let (new_computer, sdk_servers) = build_sdk_computer(
             &self.instance,
             &inputs,
@@ -1719,7 +1764,7 @@ impl ComputerInstanceRuntime {
                 .map_err(ComputerRuntimeStartError::Sdk)?;
             self.reconcile_sdk_governance_inner()
                 .await
-                .map_err(ComputerRuntimeStartError::Client)?;
+                .map_err(ComputerRuntimeStartError::Sdk)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, reason);
         }
@@ -1791,6 +1836,7 @@ fn build_sdk_computer(
 struct RuntimeMcpHooks {
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    plugin_runtime_inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
     plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     existing_servers: HashMap<BundleId, ServerName>,
@@ -1798,6 +1844,7 @@ struct RuntimeMcpHooks {
     root_ownership: HashMap<PathBuf, (String, String)>,
     registered_server_ids: Arc<Mutex<Vec<BundleId>>>,
     preserved_registration_counts: Arc<Mutex<HashMap<BundleId, usize>>>,
+    first_input_resolution_error: Arc<Mutex<Option<InputResolutionError>>>,
 }
 
 impl RuntimeMcpHooks {
@@ -1835,6 +1882,7 @@ impl RuntimeMcpHooks {
         Ok(Self {
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
+            plugin_runtime_inputs: runtime.plugin_runtime_inputs.clone(),
             sdk_servers: runtime.sdk_servers.clone(),
             plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
             existing_servers,
@@ -1842,11 +1890,16 @@ impl RuntimeMcpHooks {
             root_ownership,
             registered_server_ids: Arc::new(Mutex::new(Vec::new())),
             preserved_registration_counts: Arc::new(Mutex::new(HashMap::new())),
+            first_input_resolution_error: Arc::new(Mutex::new(None)),
         })
     }
 
     async fn registered_server_ids(&self) -> Vec<BundleId> {
         self.registered_server_ids.lock().await.clone()
+    }
+
+    async fn take_input_resolution_error(&self) -> Option<InputResolutionError> {
+        self.first_input_resolution_error.lock().await.take()
     }
 }
 
@@ -1874,12 +1927,19 @@ impl McpInstallHooks for RuntimeMcpHooks {
             self.registered_server_ids.lock().await.push(bundle_id);
             return Ok(());
         }
-        self.computer
+        let mount_result = self
+            .computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(cfg))
-            .await
-            .map_err(|error| McpHookError(error.to_string()))?;
+            .await;
+        if let Err(ComputerError::InputResolution(error)) = &mount_result {
+            let mut first_error = self.first_input_resolution_error.lock().await;
+            if first_error.is_none() {
+                *first_error = Some(error.clone());
+            }
+        }
+        mount_result.map_err(|error| McpHookError(error.to_string()))?;
         self.sdk_servers
             .write()
             .await
@@ -1924,9 +1984,15 @@ impl McpInstallHooks for RuntimeMcpHooks {
             return Ok(());
         }
 
-        let mut current = self.inputs.write().await;
         for input in inputs {
-            current.insert(input.id().to_string(), input.clone());
+            self.plugin_runtime_inputs
+                .write()
+                .await
+                .insert(input.id().to_string(), input.clone());
+            self.inputs
+                .write()
+                .await
+                .insert(input.id().to_string(), input.clone());
             self.computer
                 .read()
                 .await
@@ -2066,6 +2132,18 @@ fn input_definitions_to_mcp_map(
             (input.id().to_string(), input)
         })
         .collect()
+}
+
+fn runtime_stored_input_kind(input: &MCPServerInput) -> Option<InputKind> {
+    match input {
+        MCPServerInput::PromptString(input) => Some(if input.password == Some(true) {
+            InputKind::Secret
+        } else {
+            InputKind::Value
+        }),
+        MCPServerInput::PickString(_) => Some(InputKind::Value),
+        MCPServerInput::Command(_) => None,
+    }
 }
 
 fn input_description(label: &str, description: &Option<String>) -> String {

@@ -2,10 +2,11 @@ import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 
-const { getInput, addOrUpdateInput, setValue } = vi.hoisted(() => ({
+const { getInput, addOrUpdateInput, setValue, setRuntimeValue } = vi.hoisted(() => ({
   getInput: vi.fn(),
   addOrUpdateInput: vi.fn(),
   setValue: vi.fn(),
+  setRuntimeValue: vi.fn(),
 }));
 
 vi.mock('@/stores/inputStore', () => ({
@@ -13,6 +14,7 @@ vi.mock('@/stores/inputStore', () => ({
     getInput,
     addOrUpdateInput,
     setValue,
+    setRuntimeValue,
   }),
 }));
 
@@ -21,6 +23,7 @@ describe('RuntimeInputPrompt', () => {
     getInput.mockReset();
     addOrUpdateInput.mockReset();
     setValue.mockReset();
+    setRuntimeValue.mockReset();
     getInput.mockResolvedValue({
       type: 'PromptString',
       id: 'api-key',
@@ -28,6 +31,7 @@ describe('RuntimeInputPrompt', () => {
       password: true,
     });
     setValue.mockResolvedValue(undefined);
+    setRuntimeValue.mockResolvedValue(false);
     addOrUpdateInput.mockResolvedValue(undefined);
   });
 
@@ -175,6 +179,75 @@ describe('RuntimeInputPrompt', () => {
       expect(setValue).toHaveBeenCalledWith('computer-a', 'OPENAI_KEY', 'top-secret');
       expect(onSubmitted).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('stores a runtime-only plugin input without creating a per-Computer definition', async () => {
+    getInput.mockResolvedValueOnce(null);
+    setRuntimeValue.mockResolvedValueOnce(true);
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'audit@acme/api-key',
+          env_hint: 'A2C_SMCP_audit_acme_api_key',
+          message: 'Required plugin secret is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
+      target: { value: 'plugin-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(setRuntimeValue).toHaveBeenCalledWith(
+        'computer-a',
+        'audit@acme/api-key',
+        'plugin-secret',
+      );
+      expect(addOrUpdateInput).not.toHaveBeenCalled();
+      expect(setValue).not.toHaveBeenCalled();
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('does not persist a Marketplace input when its runtime definition disappeared', async () => {
+    getInput.mockResolvedValueOnce(null);
+    setRuntimeValue.mockResolvedValueOnce(false);
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'audit@acme/api-key',
+          env_hint: 'A2C_SMCP_audit_acme_api_key',
+          message: 'Required plugin secret is unresolved',
+        }}
+        allowPersistentDefinitionCreation={false}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    expect(await screen.findByPlaceholderText('Enter value')).toHaveAttribute('type', 'password');
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Enter value'), {
+      target: { value: 'plugin-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(
+      "Error: Runtime input definition 'audit@acme/api-key' is no longer available",
+    )).toBeInTheDocument();
+    expect(addOrUpdateInput).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(onSubmitted).not.toHaveBeenCalled();
   });
 
   it('lets the user mark a missing value definition as secret', async () => {

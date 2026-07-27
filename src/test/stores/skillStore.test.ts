@@ -9,10 +9,12 @@ function resetStore() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe('skillStore', () => {
@@ -229,6 +231,46 @@ describe('skillStore', () => {
     expect(mockedInvoke).not.toHaveBeenCalledWith('list_skills', {
       instanceId: 'computer-a',
     });
+  });
+
+  it('propagates a stale marketplace lifecycle failure to its original caller', async () => {
+    const firstEnable = deferred<void>();
+    let enableCalls = 0;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === 'enable_plugin') {
+        enableCalls += 1;
+        return enableCalls === 1 ? firstEnable.promise as any : Promise.resolve();
+      }
+      if (command === 'get_marketplace_governance') {
+        return Promise.resolve({
+          capabilities: {
+            computerLifecycleApiAvailable: true,
+            supportedOperations: ['enable_plugin'],
+            requiredSdkApis: [],
+            reason: 'supported',
+          },
+          marketplaces: [],
+          plugins: [],
+        });
+      }
+      if (command === 'list_skills') return Promise.resolve([]);
+      return Promise.resolve();
+    });
+    const request = { marketplace: 'acme', plugin: 'audit' };
+
+    const staleEnable = useSkillStore.getState().enablePlugin('computer-a', request);
+    const staleFailure = expect(staleEnable).rejects.toEqual({
+      code: 'missing_secret',
+      input_id: 'audit@acme/api_token',
+    });
+    await useSkillStore.getState().enablePlugin('computer-a', request);
+    firstEnable.reject({
+      code: 'missing_secret',
+      input_id: 'audit@acme/api_token',
+    });
+
+    await staleFailure;
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceError).toBeNull();
   });
 
   it('keeps instance records isolated when switching back to a previous instance', async () => {

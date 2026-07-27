@@ -213,6 +213,15 @@ impl ComputerRegistry {
         &self,
         instance: ComputerInstance,
     ) -> Result<ComputerInstanceRuntime, String> {
+        self.update_runtime_instance_typed(instance)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn update_runtime_instance_typed(
+        &self,
+        instance: ComputerInstance,
+    ) -> Result<ComputerInstanceRuntime, ComputerRuntimeStartError> {
         let instance_id = instance.id.clone();
         let coordinator = self.runtime_mutation_coordinator(&instance_id);
         let _mutation_guard = coordinator.lock().await;
@@ -234,9 +243,9 @@ impl ComputerRegistry {
                 let restore_runtime =
                     previous_runtime.with_instance(previous_runtime.instance.clone());
                 if let Err(restore_error) = restore_runtime.sync_runtime().await {
-                    return Err(format!(
-                        "{error}; additionally failed to restore previous runtime: {restore_error}"
-                    ));
+                    return Err(error.append_context(format!(
+                        "additionally failed to restore previous runtime: {restore_error}"
+                    )));
                 }
             }
             return Err(error);
@@ -244,9 +253,9 @@ impl ComputerRegistry {
         {
             let mut runtimes = self.runtimes.write().await;
             if !Self::runtime_entry_matches(runtimes.get(&instance_id), previous.as_ref()) {
-                return Err(format!(
+                return Err(ComputerRuntimeStartError::Client(format!(
                     "Computer runtime changed while updating instance {instance_id}"
-                ));
+                )));
             }
             runtimes.insert(instance_id, runtime.clone());
         }

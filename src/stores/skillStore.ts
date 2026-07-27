@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { isMissingRuntimeInputError } from '@/utils/runtimeActionError';
 
 export interface SkillRef {
   name: string;
@@ -421,10 +422,10 @@ async function runMarketplaceLifecycle(
       await get().fetchSkills(instanceId);
     }
   } catch (e) {
-    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
+    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) throw e;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
-      marketplaceError: formatInvokeError(e),
+      marketplaceError: isMissingRuntimeInputError(e) ? null : formatInvokeError(e),
       loadingMarketplace: false,
     }));
     throw e;

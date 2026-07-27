@@ -1,4 +1,6 @@
+use crate::commands::runtime_error::RuntimeActionError;
 use crate::AppState;
+use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::{BundleId, ServerName};
@@ -351,7 +353,7 @@ pub async fn enable_plugin(
     state: State<'_, AppState>,
     instance_id: String,
     request: PluginLifecycleRequest,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     enable_plugin_core(&state, &instance_id, request).await
 }
 
@@ -359,10 +361,12 @@ pub async fn enable_plugin_core(
     state: &AppState,
     instance_id: &str,
     request: PluginLifecycleRequest,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    validate_plugin_request(&request)?;
+    let runtime = ensure_runtime(state, instance_id)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    validate_plugin_request(&request).map_err(RuntimeActionError::runtime)?;
     let plugin_id = plugin_id(&request);
     let env = sdk_settings_env(state, instance_id);
     let hooks = MarketplaceMcpHooks::for_plugin(
@@ -372,7 +376,12 @@ pub async fn enable_plugin_core(
         &request.plugin,
         UserMcpConflictPolicy::KeepUserServer,
     )
-    .await?;
+    .await
+    .map_err(RuntimeActionError::runtime)?;
+    hooks
+        .inject_installed_plugin_inputs(&runtime)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
     if let Err(error) = runtime
         .sdk_enable_plugin(
             &plugin_id,
@@ -385,7 +394,10 @@ pub async fn enable_plugin_core(
         )
         .await
     {
-        let primary = error.to_string();
+        let primary = hooks
+            .take_runtime_action_error()
+            .await
+            .unwrap_or_else(|| RuntimeActionError::runtime(error.to_string()));
         let cleanup = async {
             hooks
                 .restore_deferred_servers_after_plugin_release(&runtime)
@@ -395,9 +407,9 @@ pub async fn enable_plugin_core(
         .await;
         return match cleanup {
             Ok(()) => Err(primary),
-            Err(cleanup_error) => Err(format!(
-                "{primary}; Marketplace MCP rollback cleanup failed: {cleanup_error}"
-            )),
+            Err(cleanup_error) => Err(primary.append_context(format!(
+                "Marketplace MCP rollback cleanup failed: {cleanup_error}"
+            ))),
         };
     }
 
@@ -514,7 +526,7 @@ async fn ensure_runtime(
 async fn start_registered_plugin_servers_if_running(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
     hooks: &MarketplaceMcpHooks,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     if runtime
         .ensure_runtime_action(crate::services::computer::ComputerRuntimeAction::ManageMcp)
         .await
@@ -537,7 +549,12 @@ async fn start_registered_plugin_servers_if_running(
         .filter(|bundle_id| seen.insert(bundle_id.clone()) && !running.contains(bundle_id))
         .collect();
     let failures = runtime.start_mcp_servers_best_effort(bundle_ids).await;
+    let mut input_resolution_error = None;
     for (bundle_id, error) in failures {
+        if input_resolution_error.is_none() && matches!(&error, ComputerError::InputResolution(_)) {
+            input_resolution_error = Some(RuntimeActionError::from(error));
+            continue;
+        }
         log::warn!(
             "Plugin enabled, but bundled MCP server failed to start for instance {}: {} ({})",
             runtime.instance.id,
@@ -546,7 +563,10 @@ async fn start_registered_plugin_servers_if_running(
         );
     }
 
-    Ok(())
+    match input_resolution_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn validate_plugin_request(request: &PluginLifecycleRequest) -> Result<(), String> {
@@ -728,6 +748,7 @@ struct MarketplaceMcpHooks {
     mounted_server_ids: Arc<tokio::sync::Mutex<HashSet<BundleId>>>,
     preserved_registration_counts: Arc<tokio::sync::Mutex<HashMap<BundleId, usize>>>,
     deferred_restore_server_ids: Arc<tokio::sync::Mutex<HashSet<BundleId>>>,
+    first_runtime_action_error: Arc<tokio::sync::Mutex<Option<RuntimeActionError>>>,
 }
 
 impl MarketplaceMcpHooks {
@@ -794,11 +815,57 @@ impl MarketplaceMcpHooks {
             mounted_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             preserved_registration_counts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             deferred_restore_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            first_runtime_action_error: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
     async fn registered_server_ids(&self) -> Vec<BundleId> {
         self.registered_server_ids.lock().await.clone()
+    }
+
+    async fn inject_installed_plugin_inputs(
+        &self,
+        runtime: &crate::services::computer::ComputerInstanceRuntime,
+    ) -> Result<(), String> {
+        let snapshot = runtime.sdk_governance_snapshot().await?;
+        let Some(install_path) = snapshot
+            .plugins
+            .into_iter()
+            .find(|plugin| {
+                plugin.installed
+                    && plugin.marketplace == self.marketplace
+                    && plugin.plugin == self.plugin
+            })
+            .and_then(|plugin| plugin.install_path)
+        else {
+            // Let the SDK lifecycle method return its canonical not-installed/precondition error.
+            return Ok(());
+        };
+        self.inject_inputs(Path::new(&install_path))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn mount_plugin_server(
+        &self,
+        runtime: &crate::services::computer::ComputerInstanceRuntime,
+        config: MCPServerConfig,
+    ) -> Result<(), McpHookError> {
+        match runtime.add_or_update_plugin_server(config).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                let mut first_error = self.first_runtime_action_error.lock().await;
+                if first_error.is_none() {
+                    *first_error = Some(RuntimeActionError::from(error));
+                }
+                Err(McpHookError(message))
+            }
+        }
+    }
+
+    async fn take_runtime_action_error(&self) -> Option<RuntimeActionError> {
+        self.first_runtime_action_error.lock().await.take()
     }
 
     async fn preserve_existing_registration(&self, bundle_id: BundleId) {
@@ -897,10 +964,8 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                         self.instance_id
                     ))
                     })?;
-                runtime
-                    .add_or_update_plugin_server(force_mcp_server_enabled(cfg))
-                    .await
-                    .map_err(McpHookError)?;
+                self.mount_plugin_server(&runtime, force_mcp_server_enabled(cfg))
+                    .await?;
                 self.mounted_server_ids
                     .lock()
                     .await
@@ -956,10 +1021,7 @@ impl McpInstallHooks for MarketplaceMcpHooks {
                         self.marketplace,
                     )));
                 }
-                runtime
-                    .add_or_update_plugin_server(cfg)
-                    .await
-                    .map_err(McpHookError)?;
+                self.mount_plugin_server(&runtime, cfg).await?;
                 self.mounted_server_ids
                     .lock()
                     .await

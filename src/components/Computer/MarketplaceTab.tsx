@@ -11,6 +11,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   formatInvokeError,
   useSkillStore,
@@ -19,6 +20,10 @@ import {
   type SkillRef,
   type SkillResource,
 } from '@/stores/skillStore';
+import {
+  isMissingRuntimeInputError,
+  type MissingRuntimeInputError,
+} from '@/utils/runtimeActionError';
 import styles from './MarketplaceTab.module.css';
 
 const { Text, Title, Paragraph } = Typography;
@@ -88,6 +93,11 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   const [skillPreview, setSkillPreview] = useState<SkillResource | null>(null);
   const [loadingSkillPreview, setLoadingSkillPreview] = useState(false);
   const [skillPreviewError, setSkillPreviewError] = useState<string | null>(null);
+  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
+    error: MissingRuntimeInputError;
+    action: 'install' | 'enable' | 'disable' | 'uninstall';
+    plugin: PluginSummary;
+  } | null>(null);
   const {
     recordsByInstanceId,
     fetchMarketplaceGovernance,
@@ -239,8 +249,13 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       if (action === 'enable') await enablePlugin(instanceId, request);
       if (action === 'disable') await disablePlugin(instanceId, request);
       if (action === 'uninstall') await uninstallPlugin(instanceId, request);
+      setRuntimeInputPrompt(null);
       message.success(t(`marketplace.messages.${action}`));
     } catch (e) {
+      if (isMissingRuntimeInputError(e)) {
+        setRuntimeInputPrompt({ error: e, action, plugin });
+        return;
+      }
       message.error(formatInvokeError(e));
     }
   };
@@ -596,6 +611,18 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
           </Form.Item>
         </Form>
       </Modal>
+      {runtimeInputPrompt && (
+        <RuntimeInputPrompt
+          instanceId={instanceId}
+          error={runtimeInputPrompt.error}
+          allowPersistentDefinitionCreation={false}
+          onCancel={() => setRuntimeInputPrompt(null)}
+          onSubmitted={() => handlePluginAction(
+            runtimeInputPrompt.action,
+            runtimeInputPrompt.plugin,
+          )}
+        />
+      )}
     </Space>
   );
 }

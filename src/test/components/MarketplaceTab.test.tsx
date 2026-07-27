@@ -292,6 +292,67 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
   });
 
+  it('stores a runtime-only plugin input and automatically retries enable', async () => {
+    const governance = {
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'acme', displayGitUrl: 'https://example.com/acme.git', status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'audit@acme',
+          version: '1.0.0',
+          installed: true,
+          enabled: false,
+          status: 'installed',
+          bundledMcpServers: ['audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+      ],
+    };
+    mockedInvoke
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce({
+        code: 'missing_secret',
+        input_id: 'audit@acme/api_token',
+        env_hint: 'A2C_SMCP_audit_acme_api_token',
+        message: 'Required plugin secret is unresolved',
+      })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        ...governance,
+        plugins: [{ ...governance.plugins[0], enabled: true, status: 'enabled' }],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    fireEvent.click((await screen.findByText('Enable Plugin')).closest('button')!);
+    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Enter value'), {
+      target: { value: 'plugin-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('set_runtime_input_value', {
+        instanceId: 'computer-a',
+        id: 'audit@acme/api_token',
+        value: 'plugin-secret',
+      });
+      expect(mockedInvoke).toHaveBeenCalledTimes(8);
+    });
+    expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(2);
+    expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
+  });
+
   it('previews an enabled plugin skill from the details pane', async () => {
     mockedInvoke
       .mockResolvedValueOnce({

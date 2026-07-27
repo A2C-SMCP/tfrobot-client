@@ -1,6 +1,7 @@
 use crate::services::keychain;
 use crate::services::sdk_config::ensure_portable_cli_arguments;
 use crate::AppState;
+use a2c_smcp::smcp_computer::inputs::InputKind;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -404,6 +405,77 @@ pub async fn set_input_value_core(
     }
 
     Ok(())
+}
+
+/// Stores a value for an exact definition already present in the SDK runtime InputPool.
+///
+/// Plugin definitions remain runtime-only: this command never writes the per-Computer definition
+/// document and returns `false` when the exact runtime definition does not exist. The caller may
+/// then use the normal Computer Input CRUD path for an unbound/global definition.
+#[tauri::command]
+pub async fn set_runtime_input_value(
+    state: State<'_, AppState>,
+    instance_id: String,
+    id: String,
+    value: serde_json::Value,
+) -> Result<bool, String> {
+    set_runtime_input_value_core(&state, &instance_id, id, value).await
+}
+
+pub async fn set_runtime_input_value_core(
+    state: &AppState,
+    instance_id: &str,
+    id: String,
+    value: serde_json::Value,
+) -> Result<bool, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(state, instance_id)?;
+    let Some(runtime) = state.computer_registry.runtime(instance_id).await else {
+        return Ok(false);
+    };
+    let Some(kind) = runtime.runtime_input_kind(&id).await else {
+        return Ok(false);
+    };
+
+    log::info!(
+        "Setting runtime-only {} input value for instance {}: {}",
+        kind,
+        instance_id,
+        id
+    );
+    let previous_value = snapshot_input_storage(state, instance_id, &id)?;
+    let mutation = match kind {
+        InputKind::Secret => {
+            let secret = value
+                .as_str()
+                .ok_or_else(|| format!("Secret input '{id}' must be a string"))?;
+            keychain::set_input_secret(state.secret_store.as_ref(), instance_id, &id, secret)
+                .and_then(|_| {
+                    keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &id)
+                })
+        }
+        InputKind::Value => {
+            keychain::set_input_value(state.secret_store.as_ref(), instance_id, &id, &value)
+                .and_then(|_| {
+                    keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, &id)
+                })
+        }
+    };
+    if let Err(error) = mutation {
+        let primary_error = error.to_string();
+        return match restore_input_storage(state, instance_id, &previous_value) {
+            Ok(()) => Err(format!(
+                "Failed to store runtime input value; changes were reverted: {primary_error}"
+            )),
+            Err(rollback_error) => Err(format!(
+                "Failed to store runtime input value: {primary_error}; rollback also failed: {rollback_error}"
+            )),
+        };
+    }
+
+    Ok(true)
 }
 
 /// Remove a cached input value
@@ -966,6 +1038,82 @@ mod tests {
             })
         );
         assert!(!serde_json::to_string(&view).unwrap().contains("top-secret"));
+    }
+
+    #[tokio::test]
+    async fn runtime_only_plugin_input_stays_out_of_computer_crud() {
+        let (state, store, _dir) = test_state();
+        let instance = state.config.get_computer_instance("computer-a").unwrap();
+        let runtime = state
+            .computer_registry
+            .upsert_runtime(instance)
+            .await
+            .unwrap();
+        runtime
+            .add_or_update_input(
+                a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(
+                    a2c_smcp::smcp_computer::mcp_clients::model::PromptStringInput {
+                        id: "audit@acme/api-key".to_string(),
+                        description: "Plugin API key".to_string(),
+                        default: None,
+                        password: Some(true),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(set_runtime_input_value_core(
+            &state,
+            "computer-a",
+            "audit@acme/api-key".to_string(),
+            serde_json::json!("top-secret"),
+        )
+        .await
+        .unwrap());
+
+        assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
+        assert!(list_input_values_core(&state, "computer-a")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "computer-a", "audit@acme/api-key")
+                .unwrap()
+                .as_deref(),
+            Some("top-secret")
+        );
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "computer-a", "audit@acme/api-key").unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_only_value_rejects_unknown_definition_without_writing_storage() {
+        let (state, store, _dir) = test_state();
+        let instance = state.config.get_computer_instance("computer-a").unwrap();
+        state
+            .computer_registry
+            .upsert_runtime(instance)
+            .await
+            .unwrap();
+
+        assert!(!set_runtime_input_value_core(
+            &state,
+            "computer-a",
+            "missing".to_string(),
+            serde_json::json!("value"),
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "computer-a", "missing").unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_secret(store.as_ref(), "computer-a", "missing").unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

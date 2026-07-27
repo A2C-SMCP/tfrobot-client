@@ -16,13 +16,21 @@ impl ComputerInstanceRuntime {
                 .await?;
         } else if matches!(
             lifecycle,
+            LifecycleState::Started | LifecycleState::Degraded
+        ) {
+            self.reconcile_sdk_governance_inner()
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+            let failures = self.start_desired_mcp_servers_inner().await;
+            self.log_mcp_start_failures(&failures, "idempotent Computer startup");
+            return Ok(());
+        } else if matches!(
+            lifecycle,
             LifecycleState::Starting
-                | LifecycleState::Started
                 | LifecycleState::Connecting
                 | LifecycleState::Connected
                 | LifecycleState::JoinedOffice
                 | LifecycleState::Syncing
-                | LifecycleState::Degraded
                 | LifecycleState::Disconnecting
                 | LifecycleState::Stopping
         ) {
@@ -35,7 +43,7 @@ impl ComputerInstanceRuntime {
         }
         self.reconcile_sdk_governance_inner()
             .await
-            .map_err(ComputerRuntimeStartError::Client)?;
+            .map_err(ComputerRuntimeStartError::Sdk)?;
         let failures = self.start_desired_mcp_servers_inner().await;
         self.log_mcp_start_failures(&failures, "Computer startup");
 
