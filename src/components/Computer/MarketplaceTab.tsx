@@ -211,10 +211,10 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
     }
   };
 
-  const handleEditMarketplace = (marketplace: MarketplaceFormValues) => {
-    setEditingMarketplace(marketplace.name);
-    setSelectedMarketplaceName(marketplace.name);
-    marketplaceForm.setFieldsValue(marketplace);
+  const handleEditMarketplace = (marketplaceName: string) => {
+    setEditingMarketplace(marketplaceName);
+    setSelectedMarketplaceName(marketplaceName);
+    marketplaceForm.setFieldsValue({ name: marketplaceName, gitUrl: '' });
     setMarketplaceModalOpen(true);
   };
 
@@ -432,7 +432,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
                           <Tag>{marketplace.status}</Tag>
                         </Space>
                         <Text type="secondary" ellipsis className={styles.marketplaceUrl}>
-                          {marketplace.gitUrl ?? t('marketplace.sdkOwnedState')}
+                          {marketplace.displayGitUrl ?? t('marketplace.sdkOwnedState')}
                         </Text>
                       </div>
                       <Space size={4} className={styles.marketplaceActions}>
@@ -446,7 +446,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
                           loading={loadingMarketplace}
                           onClick={(event) => {
                             event.stopPropagation();
-                            handleEditMarketplace({ name: marketplace.name, gitUrl: marketplace.gitUrl ?? '' });
+                            handleEditMarketplace(marketplace.name);
                           }}
                         />
                         <Button
@@ -590,6 +590,7 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
             name="gitUrl"
             label={t('marketplace.form.gitUrl')}
             rules={[{ required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') }]}
+            extra={editingMarketplace ? t('marketplace.form.gitUrlEditHelp') : undefined}
           >
             <Input disabled={!(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
           </Form.Item>

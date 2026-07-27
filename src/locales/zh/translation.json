@@ -224,6 +224,7 @@
       "nameRequired": "请输入 Marketplace 名称",
       "gitUrl": "Git URL",
       "gitUrlRequired": "请输入 Git URL",
+      "gitUrlEditHelp": "为安全起见，请重新输入完整 Git URL。展示地址不包含凭据、查询参数和片段。",
       "marketplace": "Marketplace",
       "marketplaceRequired": "请输入 Marketplace",
       "plugin": "Plugin",

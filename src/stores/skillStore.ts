@@ -33,7 +33,7 @@ export interface MarketplaceCapabilities {
 
 export interface MarketplaceSummary {
   name: string;
-  gitUrl?: string | null;
+  displayGitUrl?: string | null;
   status: string;
   message?: string | null;
 }

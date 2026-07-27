@@ -508,6 +508,7 @@ mod tests {
                     ProvenanceScope::Project,
                 ),
             ]),
+            diagnostics: Vec::new(),
         };
 
         let value = serde_json::to_value(SdkConfigSnapshotView::from(snapshot)).unwrap();

@@ -54,7 +54,11 @@ pub struct MarketplaceCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceSummary {
     pub name: String,
-    pub git_url: Option<String>,
+    /// Sanitized URL returned by the SDK for presentation only.
+    ///
+    /// Credentials, query, and fragment may be absent. Callers must never submit this value as
+    /// the source for an update.
+    pub display_git_url: Option<String>,
     pub status: String,
     pub message: Option<String>,
 }
@@ -602,7 +606,7 @@ async fn marketplace_governance_snapshot(
         .into_iter()
         .map(|marketplace| MarketplaceSummary {
             name: marketplace.name,
-            git_url: marketplace.source_url,
+            display_git_url: marketplace.source_url,
             status: marketplace_status(marketplace.status).to_string(),
             message: diagnostic_message(
                 &marketplace.diagnostics,
