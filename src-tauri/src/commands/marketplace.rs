@@ -1,8 +1,7 @@
-use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
-use a2c_smcp::smcp_computer::mcp_clients::model::{BundleId, MCPServerInput, ServerName};
+use a2c_smcp::smcp_computer::mcp_clients::model::{BundleId, ServerName};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::{
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
@@ -712,11 +711,8 @@ fn plugin_id(request: &PluginLifecycleRequest) -> String {
 }
 
 struct MarketplaceMcpHooks {
-    config: Arc<crate::services::config::ConfigService>,
     sdk_config: Arc<crate::services::sdk_config::SdkConfigService>,
     registry: Arc<crate::services::computer::ComputerRegistry>,
-    secret_store: Arc<dyn crate::services::keychain::SecretStore>,
-    input_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     instance_id: String,
     marketplace: String,
     plugin: String,
@@ -781,11 +777,8 @@ impl MarketplaceMcpHooks {
             }
         }
         Ok(Self {
-            config: state.config.clone(),
             sdk_config: state.sdk_config.clone(),
             registry: state.computer_registry.clone(),
-            secret_store: state.secret_store.clone(),
-            input_mutation_lock: state.input_mutation_lock.clone(),
             instance_id: instance_id.to_string(),
             marketplace: marketplace.to_string(),
             plugin: plugin.to_string(),
@@ -1045,25 +1038,22 @@ impl McpInstallHooks for MarketplaceMcpHooks {
             return Ok(());
         }
 
-        let _mutation_guard = self.input_mutation_lock.lock().await;
-        let mut definitions = self
-            .config
-            .load_inputs_for_instance(&self.instance_id)
-            .map_err(|error| McpHookError(error.to_string()))?;
-        for input in &inputs {
-            let id = input.id().to_string();
-            definitions.retain(|definition| definition.id() != id);
-            definitions.push(input_definition_from_mcp(input));
+        let runtime = self
+            .registry
+            .runtime(&self.instance_id)
+            .await
+            .ok_or_else(|| {
+                McpHookError(format!(
+                    "Computer instance not found while injecting Marketplace inputs: {}",
+                    self.instance_id
+                ))
+            })?;
+        for input in inputs {
+            runtime
+                .add_or_update_input(input)
+                .await
+                .map_err(McpHookError)?;
         }
-        crate::commands::inputs::replace_global_input_definitions_with_parts_locked(
-            self.config.as_ref(),
-            self.registry.as_ref(),
-            self.secret_store.as_ref(),
-            &self.instance_id,
-            &definitions,
-        )
-        .await
-        .map_err(McpHookError)?;
         Ok(())
     }
 }
@@ -1075,42 +1065,6 @@ fn force_mcp_server_enabled(mut config: MCPServerConfig) -> MCPServerConfig {
         MCPServerConfig::Http(server) => server.disabled = false,
     }
     config
-}
-
-fn input_definition_from_mcp(input: &MCPServerInput) -> InputDefinition {
-    match input {
-        MCPServerInput::PromptString(input) => InputDefinition::PromptString {
-            id: input.id.clone(),
-            label: input.description.clone(),
-            description: Some(input.description.clone()),
-            default: input.default.clone(),
-            password: input.password,
-        },
-        MCPServerInput::PickString(input) => InputDefinition::PickString {
-            id: input.id.clone(),
-            label: input.description.clone(),
-            description: Some(input.description.clone()),
-            options: input
-                .options
-                .iter()
-                .map(|value| PickOption {
-                    label: value.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-            default: input.default.clone(),
-        },
-        MCPServerInput::Command(input) => InputDefinition::Command {
-            id: input.id.clone(),
-            label: input.description.clone(),
-            command: input.command.clone(),
-            args: input.args.as_ref().map(|args| {
-                let mut pairs: Vec<_> = args.iter().collect();
-                pairs.sort_by_key(|(index, _)| *index);
-                pairs.into_iter().map(|(_, value)| value.clone()).collect()
-            }),
-        },
-    }
 }
 
 #[cfg(test)]

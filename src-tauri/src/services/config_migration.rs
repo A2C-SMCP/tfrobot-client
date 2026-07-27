@@ -1,15 +1,11 @@
-use crate::commands::inputs::InputDefinition;
-use crate::services::computer::{
-    ComputerProfile, GlobalInputDefinition, GlobalInputsConfig, SdkContextConfig,
-    GLOBAL_INPUTS_SCHEMA_VERSION, SDK_CONTEXT_SCHEMA_VERSION,
-};
+use crate::services::computer::{ComputerProfile, SdkContextConfig, SDK_CONTEXT_SCHEMA_VERSION};
 use crate::services::config::{normalize_manual_smcp_target, ConfigError, ConfigService};
 use crate::services::connection_targets::{
     manual_target_keychain_id, GlobalManualSmcpTarget, GlobalManualTargetsConfig,
     MANUAL_TARGETS_SCHEMA_VERSION,
 };
-use crate::services::keychain::{self, KeychainError, SecretStore};
-use crate::services::sdk_config::SdkConfigService;
+use crate::services::keychain::{KeychainError, SecretStore};
+use crate::services::sdk_config::{normalize_mcp_input_references, SdkConfigService};
 use crate::services::settings::{
     ManagerSessionConfig, ManagerSessionConfigError, PersistedManagerSession, SettingsService,
     MANAGER_SESSION_SCHEMA_VERSION,
@@ -96,13 +92,6 @@ impl FileSnapshot {
 }
 
 #[derive(Debug)]
-struct SecretMutation {
-    key: String,
-    before: Option<String>,
-    after: String,
-}
-
-#[derive(Debug)]
 struct SdkMutation {
     instance_id: String,
     before: ProjectConfigDoc,
@@ -110,17 +99,18 @@ struct SdkMutation {
 }
 
 struct MigrationPlan {
-    profiles: Vec<(ComputerProfile, SdkContextConfig)>,
-    global_inputs: GlobalInputsConfig,
+    profiles: Vec<(
+        ComputerProfile,
+        SdkContextConfig,
+        Vec<crate::commands::inputs::InputDefinition>,
+    )>,
     manual_targets: GlobalManualTargetsConfig,
     manager_session: ManagerSessionConfig,
-    secrets: Vec<SecretMutation>,
     sdk_configs: Vec<SdkMutation>,
 }
 
 #[derive(Debug, Default)]
 struct MigrationProgress {
-    secret_mutations_attempted: usize,
     sdk_mutations_attempted: usize,
 }
 
@@ -219,17 +209,15 @@ fn build_plan(
         .config
         .instances
         .iter()
-        .map(|instance| (instance.id.clone(), ComputerProfile::from(instance)))
+        .map(|instance| {
+            (
+                instance.id.clone(),
+                (ComputerProfile::from(instance), instance.inputs.clone()),
+            )
+        })
         .collect();
 
     let mut profiles = Vec::new();
-    let mut input_definitions: BTreeMap<String, GlobalInputDefinition> = config
-        .load_global_inputs()?
-        .inputs
-        .into_iter()
-        .map(|input| (input.id().to_string(), input))
-        .collect();
-    let mut input_values: BTreeMap<String, Value> = BTreeMap::new();
     let mut sdk_configs = Vec::new();
 
     for instance in &legacy_instances.instances {
@@ -245,7 +233,7 @@ fn build_plan(
             schema_version: SDK_CONTEXT_SCHEMA_VERSION,
             skill_home_override: instance.local_skills_root.clone(),
         };
-        if let Some(existing) = existing_profiles.get(&instance.id) {
+        let inputs = if let Some((existing, inputs)) = existing_profiles.get(&instance.id) {
             if existing != &profile {
                 return Err(MigrationError::Conflict(format!(
                     "destination profile '{}' differs from the legacy profile",
@@ -258,26 +246,11 @@ fn build_plan(
                     instance.id
                 )));
             }
-        }
-        profiles.push((profile, context));
-
-        // Preserve the legacy runtime precedence: an explicitly resolved value wins over the
-        // input definition's default. Password defaults still need to leave JSON storage, so use
-        // them only as a fallback before checking whether different Computers can share one
-        // global value.
-        let mut effective_instance_values = instance.input_values.clone();
-        for input in &instance.inputs {
-            let (definition, password_default) = sanitize_legacy_input(input);
-            merge_definition(&mut input_definitions, definition)?;
-            if let Some(value) = password_default {
-                effective_instance_values
-                    .entry(input.id().to_string())
-                    .or_insert(value);
-            }
-        }
-        for (id, value) in effective_instance_values {
-            merge_value(&mut input_values, &id, value)?;
-        }
+            inputs.clone()
+        } else {
+            Vec::new()
+        };
+        profiles.push((profile, context, inputs));
 
         let before = sdk_config
             .load_raw_project_config(&instance.id)
@@ -298,11 +271,6 @@ fn build_plan(
             after,
         });
     }
-
-    let global_inputs = GlobalInputsConfig {
-        schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
-        inputs: input_definitions.into_values().collect(),
-    };
 
     let mut targets: BTreeMap<String, GlobalManualSmcpTarget> = config
         .load_global_manual_targets()?
@@ -348,22 +316,6 @@ fn build_plan(
         }
     }
 
-    let mut secrets = Vec::new();
-    for (id, value) in input_values {
-        let key = keychain::input_value_key(&id);
-        let after = serde_json::to_string(&value).map_err(KeychainError::from)?;
-        let before = secret_store.get_secret(&key)?;
-        if let Some(existing) = &before {
-            if existing != &after {
-                return Err(MigrationError::Conflict(format!(
-                    "Keychain input value '{}' differs from the legacy value",
-                    id
-                )));
-            }
-        }
-        secrets.push(SecretMutation { key, before, after });
-    }
-
     // Manual target credentials already use stable target IDs. Reading them during
     // preflight verifies keychain access without copying secrets into JSON.
     for target in &manual_targets.manual_smcp_targets {
@@ -372,60 +324,10 @@ fn build_plan(
 
     Ok(MigrationPlan {
         profiles,
-        global_inputs,
         manual_targets,
         manager_session,
-        secrets,
         sdk_configs,
     })
-}
-
-fn sanitize_legacy_input(input: &InputDefinition) -> (GlobalInputDefinition, Option<Value>) {
-    let mut definition = GlobalInputDefinition::from(input);
-    let password_default = match &mut definition {
-        GlobalInputDefinition::PromptString {
-            default,
-            password: Some(true),
-            ..
-        } => default
-            .take()
-            .filter(|value| !value.is_empty())
-            .map(Value::String),
-        _ => None,
-    };
-    (definition, password_default)
-}
-
-fn merge_definition(
-    definitions: &mut BTreeMap<String, GlobalInputDefinition>,
-    incoming: GlobalInputDefinition,
-) -> Result<(), MigrationError> {
-    let id = incoming.id().to_string();
-    match definitions.get(&id) {
-        Some(existing) if existing != &incoming => Err(MigrationError::Conflict(format!(
-            "input definition '{id}' differs between Computer instances"
-        ))),
-        _ => {
-            definitions.insert(id, incoming);
-            Ok(())
-        }
-    }
-}
-
-fn merge_value(
-    values: &mut BTreeMap<String, Value>,
-    id: &str,
-    incoming: Value,
-) -> Result<(), MigrationError> {
-    match values.get(id) {
-        Some(existing) if existing != &incoming => Err(MigrationError::Conflict(format!(
-            "resolved input value '{id}' differs between Computer instances"
-        ))),
-        _ => {
-            values.insert(id.to_string(), incoming);
-            Ok(())
-        }
-    }
 }
 
 fn merge_legacy_user_mcp(
@@ -448,7 +350,9 @@ fn merge_legacy_user_mcp(
             continue;
         }
         let name = server.name().to_string();
-        let mut value = serde_json::to_value(&server.config)
+        let normalized = normalize_mcp_input_references(server.config.clone())
+            .map_err(MigrationError::Conflict)?;
+        let mut value = serde_json::to_value(normalized)
             .map_err(|error| MigrationError::Conflict(error.to_string()))?;
         let body = value.as_object_mut().ok_or_else(|| {
             MigrationError::Conflict(format!("legacy MCP server '{name}' is not a JSON object"))
@@ -475,13 +379,13 @@ fn capture_destination_snapshots(
 ) -> Result<Vec<FileSnapshot>, MigrationError> {
     let mut paths = vec![
         config.migration_state_path(),
-        config.global_inputs_path(),
         config.global_manual_targets_path(),
         settings.global_manager_session_path(),
     ];
-    for (profile, _) in &plan.profiles {
+    for (profile, _, _) in &plan.profiles {
         paths.push(config.computer_profile_path(&profile.id)?);
         paths.push(config.sdk_context_path(&profile.id)?);
+        paths.push(config.computer_inputs_path(&profile.id)?);
     }
     paths.sort();
     paths.dedup();
@@ -496,20 +400,15 @@ fn apply_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
-    secret_store: &dyn SecretStore,
+    _secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
     progress: &mut MigrationProgress,
 ) -> Result<(), MigrationError> {
-    for (profile, context) in &plan.profiles {
-        config.save_computer_directory(profile, context)?;
+    for (profile, context, inputs) in &plan.profiles {
+        config.save_computer_directory(profile, context, inputs)?;
     }
-    config.save_global_inputs(&plan.global_inputs)?;
     config.save_global_manual_targets(&plan.manual_targets)?;
     settings.save_global_manager_session(&plan.manager_session)?;
-    for secret in &plan.secrets {
-        progress.secret_mutations_attempted += 1;
-        secret_store.set_secret(&secret.key, &secret.after)?;
-    }
     for sdk in &plan.sdk_configs {
         progress.sdk_mutations_attempted += 1;
         sdk_config
@@ -529,11 +428,6 @@ fn verify_plan(
     secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
 ) -> Result<(), MigrationError> {
-    if config.load_global_inputs()? != plan.global_inputs {
-        return Err(MigrationError::Verification(
-            "global inputs do not match the migration plan".to_string(),
-        ));
-    }
     if config.load_global_manual_targets()? != plan.manual_targets {
         return Err(MigrationError::Verification(
             "manual targets do not match the migration plan".to_string(),
@@ -544,9 +438,10 @@ fn verify_plan(
             "Manager session does not match the migration plan".to_string(),
         ));
     }
-    for (profile, context) in &plan.profiles {
+    for (profile, context, inputs) in &plan.profiles {
         if config.load_computer_profile(&profile.id)? != *profile
             || config.load_sdk_context(&profile.id)? != *context
+            || config.load_inputs_for_instance(&profile.id)? != *inputs
         {
             return Err(MigrationError::Verification(format!(
                 "Computer '{}' destination data does not match the migration plan",
@@ -554,13 +449,8 @@ fn verify_plan(
             )));
         }
     }
-    for secret in &plan.secrets {
-        if secret_store.get_secret(&secret.key)?.as_deref() != Some(secret.after.as_str()) {
-            return Err(MigrationError::Verification(format!(
-                "Keychain value '{}' was not persisted",
-                secret.key
-            )));
-        }
+    for target in &plan.manual_targets.manual_smcp_targets {
+        let _ = secret_store.get_secret(&manual_target_keychain_id(&target.id))?;
     }
     for sdk in &plan.sdk_configs {
         if sdk_config
@@ -583,7 +473,7 @@ fn verify_plan(
 fn rollback_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn SecretStore,
+    _secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
     progress: &MigrationProgress,
     snapshots: &[FileSnapshot],
@@ -592,10 +482,11 @@ fn rollback_plan(
     let computer_snapshot_paths = plan
         .profiles
         .iter()
-        .flat_map(|(profile, _)| {
+        .flat_map(|(profile, _, _)| {
             [
                 config.computer_profile_path(&profile.id),
                 config.sdk_context_path(&profile.id),
+                config.computer_inputs_path(&profile.id),
             ]
         })
         .filter_map(Result::ok)
@@ -611,20 +502,6 @@ fn rollback_plan(
             errors.push(format!("restore SDK config '{}': {error}", sdk.instance_id));
         }
     }
-    for secret in plan
-        .secrets
-        .iter()
-        .take(progress.secret_mutations_attempted)
-        .rev()
-    {
-        let result = match &secret.before {
-            Some(value) => secret_store.set_secret(&secret.key, value),
-            None => secret_store.delete_secret(&secret.key),
-        };
-        if let Err(error) = result {
-            errors.push(format!("restore Keychain value '{}': {error}", secret.key));
-        }
-    }
     for snapshot in snapshots.iter().rev() {
         if let Err(error) = snapshot.restore() {
             if computer_snapshot_paths.contains(&snapshot.path) {
@@ -638,7 +515,7 @@ fn rollback_plan(
             errors.push(format!("discard Computer directory transactions: {error}"));
         }
     }
-    for (profile, _) in &plan.profiles {
+    for (profile, _, _) in &plan.profiles {
         let profile_path = match config.computer_profile_path(&profile.id) {
             Ok(path) => path,
             Err(error) => {
@@ -729,42 +606,20 @@ fn archive_legacy_file(path: &Path) -> Result<(), MigrationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::inputs::InputDefinition;
     use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
     use crate::services::config::DirectoryRenameTestAction;
-    use crate::services::keychain::InMemorySecretStore;
+    use crate::services::keychain::{self, InMemorySecretStore};
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use tempfile::tempdir;
 
     #[derive(Default)]
-    struct FailingWriteSecretStore;
-
-    impl SecretStore for FailingWriteSecretStore {
-        fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
-            Err(KeychainError::Store("injected write failure".to_string()))
-        }
-
-        fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
-            Ok(None)
-        }
-
-        fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
     struct FailingVerificationReadSecretStore {
-        secret: std::sync::Mutex<Option<String>>,
         reads: std::sync::atomic::AtomicUsize,
     }
 
     impl SecretStore for FailingVerificationReadSecretStore {
-        fn set_secret(&self, _key: &str, secret: &str) -> Result<(), KeychainError> {
-            *self
-                .secret
-                .lock()
-                .map_err(|error| KeychainError::Store(error.to_string()))? =
-                Some(secret.to_string());
+        fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
             Ok(())
         }
 
@@ -774,61 +629,32 @@ mod tests {
                     "injected verification read failure".to_string(),
                 ));
             }
-            Ok(self
-                .secret
-                .lock()
-                .map_err(|error| KeychainError::Store(error.to_string()))?
-                .clone())
+            Ok(None)
         }
 
         fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
-            *self
-                .secret
-                .lock()
-                .map_err(|error| KeychainError::Store(error.to_string()))? = None;
             Ok(())
         }
     }
 
-    #[test]
-    fn conflicting_global_input_values_fail_without_marking_migration_complete() {
-        let directory = tempdir().unwrap();
-        let config = ConfigService::new(directory.path().to_path_buf()).unwrap();
-        let legacy = ComputerInstancesConfig {
-            schema_version: 1,
-            instances: vec![
-                ComputerInstance {
-                    input_values: HashMap::from([("token".to_string(), Value::String("a".into()))]),
-                    ..ComputerInstance::new("one", "One")
-                },
-                ComputerInstance {
-                    input_values: HashMap::from([("token".to_string(), Value::String("b".into()))]),
-                    ..ComputerInstance::new("two", "Two")
-                },
-            ],
-        };
-        write_json_atomically(config.legacy_computer_instances_path(), &legacy).unwrap();
-        let config = std::sync::Arc::new(config);
-        let sdk = SdkConfigService::new(config.clone());
-        let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
-
-        let error = migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("differs between Computer instances"));
-        assert!(config.legacy_computer_instances_path().exists());
-        assert!(!config.migration_state_path().exists());
-        assert!(config
-            .load_computer_instances()
-            .unwrap()
-            .instances
-            .is_empty());
+    fn install_verification_probe_target(config: &ConfigService) {
+        config
+            .save_global_manual_targets(&GlobalManualTargetsConfig {
+                schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
+                manual_smcp_targets: vec![GlobalManualSmcpTarget {
+                    id: "verification-probe".to_string(),
+                    name: "Verification probe".to_string(),
+                    url: "wss://example.test/smcp".to_string(),
+                    namespace: "/smcp".to_string(),
+                    office_id: "verification-probe".to_string(),
+                    routing_headers: HashMap::new(),
+                }],
+            })
+            .unwrap();
     }
 
     #[test]
-    fn explicit_legacy_input_value_overrides_password_default() {
+    fn legacy_inputs_and_values_are_not_migrated() {
         let directory = tempdir().unwrap();
         let config = ConfigService::new(directory.path().to_path_buf()).unwrap();
         let legacy = ComputerInstancesConfig {
@@ -838,12 +664,12 @@ mod tests {
                     id: "token".to_string(),
                     label: "Token".to_string(),
                     description: None,
-                    default: Some("definition-default".to_string()),
+                    default: Some("legacy-default".to_string()),
                     password: Some(true),
                 }],
                 input_values: HashMap::from([(
                     "token".to_string(),
-                    Value::String("explicit-value".to_string()),
+                    Value::String("legacy-value".to_string()),
                 )]),
                 ..ComputerInstance::new("one", "One")
             }],
@@ -859,14 +685,11 @@ mod tests {
             MigrationOutcome::Completed
         );
 
+        assert!(config.load_inputs_for_instance("one").unwrap().is_empty());
         assert_eq!(
-            keychain::get_input_value(&secrets, "token").unwrap(),
-            Some(Value::String("explicit-value".to_string()))
+            keychain::get_input_value(&secrets, "one", "token").unwrap(),
+            None
         );
-        assert!(matches!(
-            &config.load_global_inputs().unwrap().inputs[0],
-            GlobalInputDefinition::PromptString { default: None, .. }
-        ));
     }
 
     #[test]
@@ -905,37 +728,6 @@ mod tests {
         let marker: MigrationState =
             serde_json::from_slice(&fs::read(config.migration_state_path()).unwrap()).unwrap();
         assert!(marker.cleanup_completed);
-    }
-
-    #[test]
-    fn destination_files_are_rolled_back_when_keychain_write_fails() {
-        let directory = tempdir().unwrap();
-        let config = ConfigService::new(directory.path().to_path_buf()).unwrap();
-        let legacy = ComputerInstancesConfig {
-            schema_version: 1,
-            instances: vec![ComputerInstance {
-                input_values: HashMap::from([(
-                    "token".to_string(),
-                    Value::String("secret".into()),
-                )]),
-                ..ComputerInstance::new("one", "One")
-            }],
-        };
-        write_json_atomically(config.legacy_computer_instances_path(), &legacy).unwrap();
-        let config = std::sync::Arc::new(config);
-        let sdk = SdkConfigService::new(config.clone());
-        let settings = SettingsService::new(directory.path().to_path_buf());
-
-        let error =
-            migrate_legacy_config(&config, &sdk, &settings, &FailingWriteSecretStore).unwrap_err();
-
-        assert!(error.to_string().contains("injected write failure"));
-        assert!(config.legacy_computer_instances_path().exists());
-        assert!(!config.migration_state_path().exists());
-        assert!(!config.computer_profile_path("one").unwrap().exists());
-        assert!(!config.computer_instance_root("one").unwrap().exists());
-        assert!(!config.global_inputs_path().exists());
-        assert!(!settings.global_manager_session_path().exists());
     }
 
     #[test]
@@ -1051,6 +843,19 @@ mod tests {
             },
         )
         .unwrap();
+        let existing_input = InputDefinition::PromptString {
+            id: "current-token".to_string(),
+            label: "Current token".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        };
+        config
+            .add_computer_instance(ComputerInstance {
+                inputs: vec![existing_input.clone()],
+                ..ComputerInstance::new("one", "One")
+            })
+            .unwrap();
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
         sdk.save(
@@ -1074,6 +879,7 @@ mod tests {
         )
         .unwrap();
         sdk.inject_raw_restore_failure();
+        install_verification_probe_target(&config);
         let settings = SettingsService::new(directory.path().to_path_buf());
         let secrets = FailingVerificationReadSecretStore::default();
 
@@ -1083,6 +889,10 @@ mod tests {
         assert!(error
             .to_string()
             .contains("injected raw SDK restore failure"));
+        assert_eq!(
+            config.load_inputs_for_instance("one").unwrap(),
+            vec![existing_input]
+        );
         assert!(config.legacy_computer_instances_path().exists());
         assert!(!config.migration_state_path().exists());
     }
@@ -1139,6 +949,7 @@ mod tests {
         };
         sdk.save("one", &before).unwrap();
         sdk.inject_raw_restore_failure_after_backup();
+        install_verification_probe_target(&config);
         let settings = SettingsService::new(directory.path().to_path_buf());
         let secrets = FailingVerificationReadSecretStore::default();
 

@@ -1,10 +1,22 @@
-import { render, screen } from '../helpers/render';
+import { fireEvent, render, screen } from '../helpers/render';
+import { vi } from 'vitest';
 import {
   McpServerForm,
   normalizeToolMeta,
   normalizeToolMetaMap,
   parseToolMetaJson,
 } from '@/components/McpConfig/McpServerForm';
+
+const { fetchInputs } = vi.hoisted(() => ({
+  fetchInputs: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/stores/inputStore', () => ({
+  useInputStore: (selector: (state: unknown) => unknown) => selector({
+    inputs: [{ type: 'PromptString', id: 'OPENAI_KEY', label: 'OpenAI key', password: true }],
+    fetchInputs,
+  }),
+}));
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -88,7 +100,7 @@ describe('McpServerForm input attributes (issue #26)', () => {
   // macOS WKWebView auto-capitalizes / auto-corrects technical input
   // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
   it('disables auto-capitalization/correction/autofill on the command field', () => {
-    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     const command = screen.getByPlaceholderText('npx, python, node...');
     expect(command).toHaveAttribute('autocapitalize', 'off');
@@ -98,8 +110,18 @@ describe('McpServerForm input attributes (issue #26)', () => {
   });
 
   it('does not present default tool alias as a server-wide prefix', () => {
-    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     expect(screen.queryByText('Alias Prefix')).not.toBeInTheDocument();
+  });
+
+  it('inserts a canonical Input reference into an environment value', async () => {
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
+    fireEvent.click(await screen.findByText('OpenAI key (OPENAI_KEY)'));
+
+    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:OPENAI_KEY}');
   });
 });

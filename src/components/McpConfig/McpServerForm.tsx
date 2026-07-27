@@ -1,8 +1,10 @@
+import { useEffect } from 'react';
 import { Form, Select, Button, Space, Card, Collapse, Switch } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';
+import { useInputStore } from '@/stores/inputStore';
 
 type ServerType = 'stdio' | 'http' | 'sse';
 
@@ -89,16 +91,34 @@ interface FormValues {
 }
 
 interface McpServerFormProps {
+  instanceId: string;
   initialValues?: McpServerConfig;
   onSubmit: (config: McpServerConfig) => Promise<void>;
   onCancel: () => void;
   loading?: boolean;
 }
 
-export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: McpServerFormProps) {
+export function McpServerForm({
+  instanceId,
+  initialValues,
+  onSubmit,
+  onCancel,
+  loading,
+}: McpServerFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm<FormValues>();
   const serverType = Form.useWatch('type', form);
+  const inputs = useInputStore((state) => state.inputs);
+  const fetchInputs = useInputStore((state) => state.fetchInputs);
+
+  useEffect(() => {
+    void fetchInputs(instanceId);
+  }, [fetchInputs, instanceId]);
+
+  const inputReferenceOptions = inputs.map((input) => ({
+    label: `${input.label} (${input.id})`,
+    value: input.id,
+  }));
 
   // Convert initial config to form values
   const getInitialFormValues = (): FormValues | undefined => {
@@ -317,6 +337,19 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
                       >
                         <Input placeholder="value" style={{ width: 200 }} />
                       </Form.Item>
+                      <Select
+                        aria-label={t('mcp.form.inputReference')}
+                        placeholder={t('mcp.form.inputReference')}
+                        options={inputReferenceOptions}
+                        style={{ width: 180 }}
+                        value={undefined}
+                        onChange={(inputId) => {
+                          form.setFieldValue(
+                            ['env', field.name, 'value'],
+                            `\${input:${inputId}}`,
+                          );
+                        }}
+                      />
                       <MinusCircleOutlined onClick={() => remove(field.name)} />
                     </Space>
                   ))}
@@ -358,6 +391,19 @@ export function McpServerForm({ initialValues, onSubmit, onCancel, loading }: Mc
                       >
                         <Input placeholder="value" style={{ width: 200 }} />
                       </Form.Item>
+                      <Select
+                        aria-label={t('mcp.form.inputReference')}
+                        placeholder={t('mcp.form.inputReference')}
+                        options={inputReferenceOptions}
+                        style={{ width: 180 }}
+                        value={undefined}
+                        onChange={(inputId) => {
+                          form.setFieldValue(
+                            ['headers', field.name, 'value'],
+                            `\${input:${inputId}}`,
+                          );
+                        }}
+                      />
                       <MinusCircleOutlined onClick={() => remove(field.name)} />
                     </Space>
                   ))}

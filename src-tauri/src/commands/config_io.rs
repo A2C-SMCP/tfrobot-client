@@ -219,7 +219,6 @@ async fn import_servers_and_inputs(
     persist_config_import_transaction(state.config.as_ref(), &transaction)?;
 
     // The durable, secret-free transaction makes a crash between the two stores recoverable.
-    // Input definitions remain config-only here: runtime resolution belongs to start/preflight.
     let mut transaction = transaction;
     let input_snapshot = if let Some(merged_inputs) = &merged_inputs {
         match crate::commands::inputs::replace_input_definitions_config_only_locked(
@@ -280,6 +279,22 @@ async fn import_servers_and_inputs(
     }
 
     finish_config_import_transaction(state.config.as_ref(), &mut transaction);
+
+    if merged_inputs.is_some() {
+        let instance = state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| error.to_string())?;
+        state
+            .computer_registry
+            .update_runtime_instance(instance)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Configuration was imported, but the target Computer runtime could not synchronize its Inputs: {error}"
+                )
+            })?;
+    }
 
     Ok(ImportResult {
         servers_imported,

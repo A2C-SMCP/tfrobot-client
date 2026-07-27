@@ -2,18 +2,24 @@ import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 
-const { getInput, setValue } = vi.hoisted(() => ({
+const { getInput, addOrUpdateInput, setValue } = vi.hoisted(() => ({
   getInput: vi.fn(),
+  addOrUpdateInput: vi.fn(),
   setValue: vi.fn(),
 }));
 
 vi.mock('@/stores/inputStore', () => ({
-  useInputStore: (selector: (state: unknown) => unknown) => selector({ getInput, setValue }),
+  useInputStore: (selector: (state: unknown) => unknown) => selector({
+    getInput,
+    addOrUpdateInput,
+    setValue,
+  }),
 }));
 
 describe('RuntimeInputPrompt', () => {
   beforeEach(() => {
     getInput.mockReset();
+    addOrUpdateInput.mockReset();
     setValue.mockReset();
     getInput.mockResolvedValue({
       type: 'PromptString',
@@ -22,6 +28,7 @@ describe('RuntimeInputPrompt', () => {
       password: true,
     });
     setValue.mockResolvedValue(undefined);
+    addOrUpdateInput.mockResolvedValue(undefined);
   });
 
   it('loads the missing definition, stores the secret, and requests a retry', async () => {
@@ -134,6 +141,71 @@ describe('RuntimeInputPrompt', () => {
     expect(onSubmitted).not.toHaveBeenCalled();
     expect(screen.getByPlaceholderText('Enter value')).toBeInTheDocument();
   }, 10000);
+
+  it('creates a missing per-Computer definition before storing its value', async () => {
+    getInput.mockResolvedValueOnce(null);
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'OPENAI_KEY',
+          env_hint: 'A2C_SMCP_OPENAI_KEY',
+          message: 'Required secret input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
+      target: { value: 'top-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(addOrUpdateInput).toHaveBeenCalledWith('computer-a', {
+        type: 'PromptString',
+        id: 'OPENAI_KEY',
+        label: 'OPENAI_KEY',
+        description: 'Required secret input is unresolved',
+        password: true,
+      });
+      expect(setValue).toHaveBeenCalledWith('computer-a', 'OPENAI_KEY', 'top-secret');
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('lets the user mark a missing value definition as secret', async () => {
+    getInput.mockResolvedValueOnce(null);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_input',
+          input_id: 'CUSTOM_TOKEN',
+          env_hint: 'A2C_SMCP_CUSTOM_TOKEN',
+          message: 'Required value input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const secretSwitch = await screen.findByRole('switch');
+    expect(secretSwitch).not.toBeChecked();
+    fireEvent.click(secretSwitch);
+    const valueInput = screen.getByPlaceholderText('Enter value');
+    expect(valueInput).toHaveAttribute('type', 'password');
+    fireEvent.change(valueInput, { target: { value: 'secret-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(addOrUpdateInput).toHaveBeenCalledWith(
+      'computer-a',
+      expect.objectContaining({ id: 'CUSTOM_TOKEN', password: true }),
+    ));
+  });
 
   it('allows only one save and retry while the first retry is pending', async () => {
     let finishRetry: (() => void) | undefined;

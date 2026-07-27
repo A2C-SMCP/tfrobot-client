@@ -228,8 +228,7 @@ pub mod mcp {
             instance_id,
             config,
         )
-        .await
-        .map_err(RuntimeActionError::runtime)?;
+        .await?;
         runtime.reload().await.map_err(RuntimeActionError::from)
     }
 

@@ -335,6 +335,7 @@
       "cwd": "Working Directory",
       "envVars": "Environment Variables",
       "addEnv": "Add Variable",
+      "inputReference": "Use Input",
       "url": "URL",
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
@@ -383,7 +384,8 @@
       "missingInput": "Input required to start",
       "missingSecret": "Secret required to start",
       "envHint": "You can save it here or provide it through {{env}}.",
-      "definitionMissing": "Input definition {{id}} could not be loaded."
+      "definitionMissing": "Input {{id}} is not configured yet. Saving will create it for this Computer.",
+      "createAsSecret": "Store this Input as a Secret"
     },
     "table": {
       "id": "ID",

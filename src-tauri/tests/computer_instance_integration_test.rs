@@ -88,7 +88,7 @@ fn create_state_with_toggle_secret_store(
     (state, secrets)
 }
 
-async fn create_computer_with_global_input(state: &AppState, name: &str) -> String {
+async fn create_computer_with_input(state: &AppState, name: &str) -> String {
     let created = create_computer_instance_core(
         state,
         CreateComputerInstanceRequest {
@@ -150,6 +150,34 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     assert!(list
         .iter()
         .any(|instance| instance.id == created.id && instance.name == "Renamed Computer"));
+    inputs::add_or_update_input_core(
+        &state,
+        &created.id,
+        InputDefinition::PromptString {
+            id: "delete-token".to_string(),
+            label: "Delete token".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        &created.id,
+        "delete-token".to_string(),
+        serde_json::json!("deleted-secret"),
+    )
+    .await
+    .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_secret(
+        state.secret_store.as_ref(),
+        "other-computer",
+        "delete-token",
+        "preserved-secret",
+    )
+    .unwrap();
 
     let instance_storage_root = state.config.computer_instance_storage_root(&created.id);
     std::fs::create_dir_all(instance_storage_root.join("skill_home")).unwrap();
@@ -169,6 +197,25 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     assert!(list.is_empty());
     assert!(state.computer_registry.runtime(&created.id).await.is_none());
     assert!(!instance_storage_root.exists());
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            &created.id,
+            "delete-token",
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            "other-computer",
+            "delete-token",
+        )
+        .unwrap()
+        .as_deref(),
+        Some("preserved-secret")
+    );
 }
 
 #[tokio::test]
@@ -204,7 +251,7 @@ async fn created_instances_use_uuid_based_ids() {
 async fn create_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
-    create_computer_with_global_input(&state, "Existing").await;
+    create_computer_with_input(&state, "Existing").await;
     let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
@@ -232,7 +279,7 @@ async fn create_does_not_require_keychain_reads() {
 async fn rename_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
-    let id = create_computer_with_global_input(&state, "Original").await;
+    let id = create_computer_with_input(&state, "Original").await;
     let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
@@ -269,7 +316,7 @@ async fn rename_does_not_require_keychain_reads() {
 async fn duplicate_does_not_require_keychain_reads() {
     let dir = TempDir::new().unwrap();
     let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
-    let source_id = create_computer_with_global_input(&state, "Source").await;
+    let source_id = create_computer_with_input(&state, "Source").await;
     let read_count_before = secrets.read_count();
     secrets.fail_reads();
 
@@ -471,6 +518,27 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             )]),
         })
         .unwrap();
+    inputs::add_or_update_input_core(
+        &state,
+        &source.id,
+        InputDefinition::PromptString {
+            id: "source-token".to_string(),
+            label: "Source token".to_string(),
+            description: None,
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        &source.id,
+        "source-token".to_string(),
+        serde_json::json!("source-secret"),
+    )
+    .await
+    .unwrap();
     start_computer_instance_core(None, &state, source.id.clone())
         .await
         .unwrap();
@@ -499,6 +567,27 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     assert_ne!(duplicate.id, source.id);
     assert_uuid_instance_id(&duplicate.id);
     assert!(duplicate_config.input_values.is_empty());
+    assert_eq!(duplicate_config.inputs.len(), 1);
+    assert_eq!(duplicate_config.inputs[0].id(), "source-token");
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            &source.id,
+            "source-token",
+        )
+        .unwrap()
+        .as_deref(),
+        Some("source-secret")
+    );
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            &duplicate.id,
+            "source-token",
+        )
+        .unwrap(),
+        None
+    );
     assert_eq!(
         duplicate_config
             .robot_binding
@@ -946,7 +1035,7 @@ async fn failed_delete_preserves_the_authoritative_runtime_incarnation() {
 }
 
 #[tokio::test]
-async fn status_reads_reconcile_runtime_inputs_from_global_storage() {
+async fn status_reads_reconcile_runtime_inputs_from_computer_storage() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     let created = create_computer_instance_core(
@@ -1023,7 +1112,7 @@ async fn legacy_default_id_instance_is_a_normal_instance() {
 }
 
 #[tokio::test]
-async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
+async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     state
@@ -1077,6 +1166,19 @@ async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
     )
     .await
     .unwrap();
+    inputs::add_or_update_input_core(
+        &state,
+        &second.id,
+        InputDefinition::PromptString {
+            id: "token".to_string(),
+            label: "Second token".to_string(),
+            description: None,
+            default: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap();
     inputs::set_input_value_core(
         &state,
         &second.id,
@@ -1095,8 +1197,15 @@ async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
         .load_inputs_for_instance(LEGACY_INSTANCE_ID)
         .unwrap();
     let second_inputs = state.config.load_inputs_for_instance(&second.id).unwrap();
-    let shared_value = tfrobot_client_lib::services::keychain::get_input_value(
+    let default_value = tfrobot_client_lib::services::keychain::get_input_value(
         state.secret_store.as_ref(),
+        LEGACY_INSTANCE_ID,
+        "token",
+    )
+    .unwrap();
+    let second_value = tfrobot_client_lib::services::keychain::get_input_value(
+        state.secret_store.as_ref(),
+        &second.id,
         "token",
     )
     .unwrap();
@@ -1110,11 +1219,12 @@ async fn mcp_configs_are_isolated_while_inputs_and_values_are_global() {
         _ => panic!("expected default PromptString input"),
     }
     match &second_inputs[0] {
-        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Shared token"),
+        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Second token"),
         _ => panic!("expected second PromptString input"),
     }
+    assert_eq!(default_value, None);
     assert_eq!(
-        shared_value,
+        second_value,
         Some(serde_json::Value::String("shared-secret".to_string()))
     );
 }

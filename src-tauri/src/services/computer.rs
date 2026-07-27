@@ -193,7 +193,7 @@ pub struct ComputerInstance {
 }
 
 pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
-pub const GLOBAL_INPUTS_SCHEMA_VERSION: u32 = 1;
+pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 1;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 /// Client-owned, durable metadata for one Computer instance.
@@ -349,19 +349,19 @@ impl Default for SdkContextConfig {
     }
 }
 
-/// Global input definitions and UI schema owned by the client.
+/// Per-Computer input definitions and UI schema owned by the client.
 /// Resolved values and secrets are deliberately stored through `SecretStore`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalInputsConfig {
+pub struct ComputerInputsConfig {
     pub schema_version: u32,
     #[serde(default)]
-    pub inputs: Vec<GlobalInputDefinition>,
+    pub inputs: Vec<ComputerInputDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", deny_unknown_fields)]
-pub enum GlobalInputDefinition {
+pub enum ComputerInputDefinition {
     PromptString {
         id: String,
         label: String,
@@ -390,7 +390,7 @@ pub enum GlobalInputDefinition {
     },
 }
 
-impl GlobalInputDefinition {
+impl ComputerInputDefinition {
     pub fn id(&self) -> &str {
         match self {
             Self::PromptString { id, .. }
@@ -407,7 +407,7 @@ pub struct GlobalPickOption {
     pub value: String,
 }
 
-impl From<&InputDefinition> for GlobalInputDefinition {
+impl From<&InputDefinition> for ComputerInputDefinition {
     fn from(input: &InputDefinition) -> Self {
         match input {
             InputDefinition::PromptString {
@@ -457,10 +457,10 @@ impl From<&InputDefinition> for GlobalInputDefinition {
     }
 }
 
-impl From<&GlobalInputDefinition> for InputDefinition {
-    fn from(input: &GlobalInputDefinition) -> Self {
+impl From<&ComputerInputDefinition> for InputDefinition {
+    fn from(input: &ComputerInputDefinition) -> Self {
         match input {
-            GlobalInputDefinition::PromptString {
+            ComputerInputDefinition::PromptString {
                 id,
                 label,
                 description,
@@ -473,7 +473,7 @@ impl From<&GlobalInputDefinition> for InputDefinition {
                 default: default.clone(),
                 password: *password,
             },
-            GlobalInputDefinition::PickString {
+            ComputerInputDefinition::PickString {
                 id,
                 label,
                 description,
@@ -492,7 +492,7 @@ impl From<&GlobalInputDefinition> for InputDefinition {
                     .collect(),
                 default: default.clone(),
             },
-            GlobalInputDefinition::Command {
+            ComputerInputDefinition::Command {
                 id,
                 label,
                 command,
@@ -507,10 +507,10 @@ impl From<&GlobalInputDefinition> for InputDefinition {
     }
 }
 
-impl Default for GlobalInputsConfig {
+impl Default for ComputerInputsConfig {
     fn default() -> Self {
         Self {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: Vec::new(),
         }
     }
@@ -745,7 +745,7 @@ impl ComputerInstanceRuntime {
     ) -> Self {
         let inputs = input_definitions_to_mcp_map(&instance.inputs);
         let session = InstanceSession::new(instance.id.clone());
-        let input_resolver = Arc::new(RuntimeInputResolver::new(secret_store));
+        let input_resolver = Arc::new(RuntimeInputResolver::new(instance.id.clone(), secret_store));
         let (computer, sdk_servers) = build_sdk_computer(
             &instance,
             &inputs,
@@ -880,7 +880,8 @@ impl ComputerInstanceRuntime {
 
         let rebuilt = if self.sdk_requires_rebuild().await {
             self.replace_sdk_computer(was_running, "runtime_configuration_changed")
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             true
         } else {
             false
@@ -941,7 +942,7 @@ impl ComputerInstanceRuntime {
     pub async fn apply_user_mcp_server_config(
         &self,
         server: MCPServerConfig,
-    ) -> Result<(), String> {
+    ) -> ComputerResult<()> {
         self.apply_user_mcp_server_config_inner(server, true)
             .await
             .map(|_| ())
@@ -954,7 +955,8 @@ impl ComputerInstanceRuntime {
         let bundle_id = resolve_bundle_id(&server);
         if !self
             .apply_user_mcp_server_config_inner(server, false)
-            .await?
+            .await
+            .map_err(|error| error.to_string())?
         {
             return Err(format!(
                 "Failed to restore user MCP runtime after plugin release for {bundle_id}"
@@ -971,9 +973,9 @@ impl ComputerInstanceRuntime {
         &self,
         server: MCPServerConfig,
         preserve_plugin_runtime: bool,
-    ) -> Result<bool, String> {
+    ) -> ComputerResult<bool> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         let bundle_id = resolve_bundle_id(&server);
         let computer_running = self.is_running().await;
 
@@ -1042,7 +1044,7 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
-            return Ok(false);
+            return Err(error);
         }
 
         self.sdk_servers
@@ -1062,6 +1064,7 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
+            return Err(error);
         }
         Ok(true)
     }
@@ -1223,7 +1226,7 @@ impl ComputerInstanceRuntime {
     pub async fn start_mcp_servers_best_effort(
         &self,
         bundle_ids: Vec<BundleId>,
-    ) -> Vec<(BundleId, String)> {
+    ) -> Vec<(BundleId, ComputerError)> {
         let _guard = self.lifecycle_lock.lock().await;
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
@@ -1231,17 +1234,17 @@ impl ComputerInstanceRuntime {
     async fn start_mcp_servers_best_effort_inner(
         &self,
         bundle_ids: Vec<BundleId>,
-    ) -> Vec<(BundleId, String)> {
+    ) -> Vec<(BundleId, ComputerError)> {
         let mut failures = Vec::new();
         for bundle_id in bundle_ids {
             if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
-                failures.push((bundle_id, error.to_string()));
+                failures.push((bundle_id, error));
             }
         }
         failures
     }
 
-    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, String)> {
+    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership()
             .await
@@ -1254,7 +1257,11 @@ impl ComputerInstanceRuntime {
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
-    pub(super) fn log_mcp_start_failures(&self, failures: &[(BundleId, String)], cause: &str) {
+    pub(super) fn log_mcp_start_failures(
+        &self,
+        failures: &[(BundleId, ComputerError)],
+        cause: &str,
+    ) {
         for (bundle_id, error) in failures {
             log::warn!(
                 "Failed to start MCP server for Computer instance {} during {}: {} ({})",
@@ -1655,7 +1662,11 @@ impl ComputerInstanceRuntime {
             .collect())
     }
 
-    async fn replace_sdk_computer(&self, was_running: bool, reason: &str) -> Result<(), String> {
+    async fn replace_sdk_computer(
+        &self,
+        was_running: bool,
+        reason: &str,
+    ) -> Result<(), ComputerRuntimeStartError> {
         let inputs = input_definitions_to_mcp_map(&self.instance.inputs);
         let (new_computer, sdk_servers) = build_sdk_computer(
             &self.instance,
@@ -1667,17 +1678,19 @@ impl ComputerInstanceRuntime {
 
         if self.has_smcp_transport().await {
             self.clear_smcp_connection_inner().await.map_err(|error| {
-                format!(
+                ComputerRuntimeStartError::Client(format!(
                     "Failed to clear SMCP connection before rebuilding SDK Computer for instance {}: {}",
                     self.instance.id, error
-                )
+                ))
             })?;
         }
 
         self.clear_client_runtime_diagnostic_silent().await;
         self.mcp_start_diagnostics.write().await.clear();
         self.mcp_reload_diagnostics.write().await.clear();
-        self.shutdown_sdk_computer_inner().await?;
+        self.shutdown_sdk_computer_inner()
+            .await
+            .map_err(ComputerRuntimeStartError::Client)?;
         self.stop_runtime_event_relay().await;
         {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
@@ -1703,13 +1716,10 @@ impl ComputerInstanceRuntime {
                 .await
                 .boot_up()
                 .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to boot replacement SDK Computer for instance {}: {}",
-                        self.instance.id, error
-                    )
-                })?;
-            self.reconcile_sdk_governance_inner().await?;
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+            self.reconcile_sdk_governance_inner()
+                .await
+                .map_err(ComputerRuntimeStartError::Client)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, reason);
         }

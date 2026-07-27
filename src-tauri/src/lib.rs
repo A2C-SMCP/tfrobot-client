@@ -33,7 +33,7 @@ pub struct AppState {
     /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
     /// These operations are infrequent and must not observe one another half-committed.
     pub computer_lifecycle_lock: Arc<Mutex<()>>,
-    /// Serializes global input definition/value mutations through runtime compensation.
+    /// Serializes per-Computer input definition/value mutations through runtime compensation.
     pub input_mutation_lock: Arc<Mutex<()>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
@@ -115,7 +115,7 @@ impl AppState {
                 .map(|instance| instance.id.clone()),
         )
         .map_err(AppStateInitError::ConfigImportRecovery)?;
-        // Recovery may update global input definitions. Reload the profiles so every runtime is
+        // Recovery may update per-Computer input definitions. Reload the profiles so every runtime is
         // hydrated from the recovered storage state rather than the pre-recovery discovery copy.
         let stored_instances = config.load_computer_instances()?;
         let instances = hydrate_computer_instances(stored_instances, secret_store.as_ref())?;

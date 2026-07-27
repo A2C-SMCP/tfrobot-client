@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
-    computer::start_computer_instance_core,
+    computer::{self, start_computer_instance_core},
     config_io,
     dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
     debug, inputs, sdk_config,
@@ -1742,6 +1742,7 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
         sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, unsafe_server)
             .await
             .unwrap_err();
+    let server_error = server_error.to_string();
     assert!(server_error.contains("server_parameters.args[1]"));
     assert!(server_error.contains("client_secret"));
     assert!(state
@@ -1927,7 +1928,9 @@ async fn test_password_input_defaults_are_removed_from_crud_import_and_read_view
             })
         ));
     }
-    let persisted = std::fs::read_to_string(state.config.global_inputs_path()).unwrap();
+    let persisted =
+        std::fs::read_to_string(state.config.computer_inputs_path(TEST_INSTANCE_ID).unwrap())
+            .unwrap();
     assert!(!persisted.contains("crud-plaintext-secret"));
     assert!(!persisted.contains("imported-plaintext-secret"));
 }
@@ -2322,12 +2325,14 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
         .unwrap();
     tfrobot_client_lib::services::keychain::set_input_value(
         state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
         "api-token",
         &serde_json::json!("legacy-input-secret"),
     )
     .unwrap();
     tfrobot_client_lib::services::keychain::set_input_secret(
         state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
         "api-token",
         "namespaced-input-secret",
     )
@@ -2629,6 +2634,7 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
         .unwrap();
     tfrobot_client_lib::services::keychain::set_input_secret(
         state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
         "shared-token",
         "existing-secret",
     )
@@ -2710,6 +2716,7 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_secret(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "shared-token",
         )
         .unwrap()
@@ -2855,9 +2862,9 @@ async fn test_sdk_config_crud_does_not_require_or_reload_runtime() {
         "forbidden_tools": [],
         "tool_meta": {},
         "server_parameters": {
-            "command": "${input:missing-command}",
+            "command": "node",
             "args": [],
-            "env": { "TOKEN": "${input:missing-secret}" }
+            "env": { "MODE": "config-only" }
         }
     }))
     .unwrap();
@@ -2946,9 +2953,19 @@ async fn test_config_io_export_does_not_overwrite_target_when_source_is_corrupt(
 }
 
 #[tokio::test]
-async fn test_cli_native_import_persists_inputs_and_server_without_runtime_resolution() {
+async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtime() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    let other_instance = ComputerInstance::new("other-computer", "Other Computer");
+    state
+        .config
+        .add_computer_instance(other_instance.clone())
+        .unwrap();
+    let other_runtime = state
+        .computer_registry
+        .update_runtime_instance(other_instance)
+        .await
+        .unwrap();
     let import_path = tmp.path().join("import-with-input.json");
     let server_path = common::echo_server_path();
     let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
@@ -3006,15 +3023,16 @@ async fn test_cli_native_import_persists_inputs_and_server_without_runtime_resol
         .iter()
         .any(|server| server.name == "input-backed-server"));
     assert!(
-        !runtime
-            .synced_sdk_servers()
-            .await
-            .contains_key(&bundle_id("input-backed-server")),
-        "config import must defer runtime rendering to reload/start"
+        runtime.inputs.read().await.contains_key("node-command"),
+        "imported Input definitions must synchronize to the target runtime"
     );
     assert!(
-        !runtime.inputs.read().await.contains_key("node-command"),
-        "config import must persist input definitions without synchronizing runtime sessions"
+        !other_runtime
+            .inputs
+            .read()
+            .await
+            .contains_key("node-command"),
+        "the import must not synchronize Input definitions to another Computer runtime"
     );
 }
 
@@ -3555,15 +3573,32 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
             "command": "node",
             "args": [common::echo_server_path().to_str().unwrap()],
             "env": {
-                "RUNTIME_TOKEN": "${input:runtime-token}"
+                "RUNTIME_TOKEN": "{{runtime-token}}"
             }
         }
     }))
     .unwrap();
 
-    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+    let save_error = sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
         .await
+        .unwrap_err();
+    assert!(matches!(
+        &save_error,
+        RuntimeActionError::MissingInput { input_id, .. } if input_id == "runtime-token"
+    ));
+    let persisted = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "runtime-input-reload")
         .unwrap();
+    assert_eq!(
+        serde_json::to_value(persisted.config).unwrap()["server_parameters"]["env"]
+            ["RUNTIME_TOKEN"],
+        "${input:runtime-token}"
+    );
     // Recreate the application/runtime so boot reads the persisted SDK configuration,
     // matching the production cold-start path rather than an already-loaded runtime.
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -3605,6 +3640,126 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
         .sdk_mcp_server_ids()
         .await
         .contains(&bundle_id("runtime-input-reload")));
+}
+
+#[tokio::test]
+async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "missing-definition",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": {
+                "OPENAI_API_KEY": "{{OPENAI_KEY}}"
+            }
+        }
+    }))
+    .unwrap();
+
+    let error = sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingInput { input_id, .. } if input_id == "OPENAI_KEY"
+    ));
+    let persisted = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "missing-definition")
+        .expect("MCP declaration should remain durable while the UI prompts for its Input");
+    let persisted = serde_json::to_value(persisted.config).unwrap();
+    assert_eq!(
+        persisted["server_parameters"]["env"]["OPENAI_API_KEY"],
+        "${input:OPENAI_KEY}"
+    );
+}
+
+async fn create_running_input_backed_state(path: &std::path::Path, server_name: &str) -> AppState {
+    let state = create_mcp_test_app_state(path).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: "Runtime token".to_string(),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "runtime-token".to_string(),
+        serde_json::json!("configured"),
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": server_name,
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "RUNTIME_TOKEN": "${input:runtime-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    state
+}
+
+#[tokio::test]
+async fn test_restart_and_reload_preserve_structured_missing_input_error() {
+    require_node();
+    for action in ["restart", "reload"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            create_running_input_backed_state(tmp.path(), &format!("{action}-runtime-input")).await;
+        inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "runtime-token")
+            .await
+            .unwrap();
+
+        let error = match action {
+            "restart" => {
+                computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+                    .await
+                    .unwrap_err()
+            }
+            "reload" => {
+                computer::reload_computer_runtime_core(None, &state, TEST_INSTANCE_ID.to_string())
+                    .await
+                    .unwrap_err()
+            }
+            _ => unreachable!(),
+        };
+
+        assert!(
+            matches!(
+                error,
+                RuntimeActionError::MissingInput { ref input_id, .. }
+                    if input_id == "runtime-token"
+            ),
+            "{action} returned an unexpected error: {error:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3676,6 +3831,7 @@ async fn test_input_commands_sync_runtime_definitions() {
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "api-key"
         )
         .unwrap(),
@@ -3692,6 +3848,7 @@ async fn test_input_commands_sync_runtime_definitions() {
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "api-key"
         )
         .unwrap(),
@@ -3712,6 +3869,7 @@ async fn test_input_commands_sync_runtime_definitions() {
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "api-key"
         )
         .unwrap(),
@@ -3803,6 +3961,7 @@ async fn test_input_values_crud() {
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "key1"
         )
         .unwrap(),
@@ -3811,6 +3970,7 @@ async fn test_input_values_crud() {
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
+            TEST_INSTANCE_ID,
             "key2"
         )
         .unwrap(),
@@ -3822,12 +3982,14 @@ async fn test_input_values_crud() {
         .unwrap();
     assert!(tfrobot_client_lib::services::keychain::get_input_value(
         state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
         "key1"
     )
     .unwrap()
     .is_none());
     assert!(tfrobot_client_lib::services::keychain::get_input_value(
         state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
         "key2"
     )
     .unwrap()

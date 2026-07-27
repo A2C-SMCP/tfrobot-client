@@ -12,6 +12,12 @@ import {
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig } from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
+import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
+import {
+  formatRuntimeActionError,
+  isMissingRuntimeInputError,
+  type MissingRuntimeInputError,
+} from '@/utils/runtimeActionError';
 import { McpServerForm } from './McpServerForm';
 
 const { Title } = Typography;
@@ -39,6 +45,10 @@ export function McpConfig({ instanceId }: McpConfigProps) {
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
+  const [inputPrompt, setInputPrompt] = useState<{
+    config: McpServerConfig;
+    error: MissingRuntimeInputError;
+  } | null>(null);
 
   useEffect(() => {
     void fetchConfig(instanceId);
@@ -60,9 +70,14 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
         name: config.name,
       }));
+      setInputPrompt(null);
       setFormVisible(false);
     } catch (cause) {
-      message.error(String(cause));
+      if (isMissingRuntimeInputError(cause)) {
+        setInputPrompt({ config, error: cause });
+        return;
+      }
+      message.error(formatRuntimeActionError(cause));
     }
   };
 
@@ -76,13 +91,18 @@ export function McpConfig({ instanceId }: McpConfigProps) {
   };
 
   const handleEnabledChange = async (record: SdkConfigServer, enabled: boolean) => {
+    const config = { ...record.config, disabled: !enabled };
     try {
-      await upsertServer(instanceId, { ...record.config, disabled: !enabled });
+      await upsertServer(instanceId, config);
       message.success(t(enabled ? 'mcp.messages.enabled' : 'mcp.messages.disabled', {
         name: record.name,
       }));
     } catch (cause) {
-      message.error(String(cause));
+      if (isMissingRuntimeInputError(cause)) {
+        setInputPrompt({ config, error: cause });
+        return;
+      }
+      message.error(formatRuntimeActionError(cause));
     }
   };
 
@@ -315,12 +335,22 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         width={600}
       >
         <McpServerForm
+          instanceId={instanceId}
           initialValues={editingServer}
           onSubmit={handleFormSubmit}
           onCancel={() => setFormVisible(false)}
           loading={configLoading}
         />
       </Modal>
+      {inputPrompt && (
+        <RuntimeInputPrompt
+          key={`${instanceId}:${inputPrompt.error.input_id}`}
+          instanceId={instanceId}
+          error={inputPrompt.error}
+          onCancel={() => setInputPrompt(null)}
+          onSubmitted={() => handleFormSubmit(inputPrompt.config)}
+        />
+      )}
     </div>
   );
 }

@@ -1,17 +1,19 @@
-use crate::services::sdk_config::is_writable_provenance;
+use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
 use crate::AppState;
+use a2c_smcp::smcp_computer::inputs::env_var_name;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
 use a2c_smcp::smcp_computer::settings::SettingsValidationError;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tauri::State;
 
 /// Client-facing projection of SDK-owned configuration.
 ///
-/// SDK input definitions are intentionally omitted: tfrobot-client owns global input
+/// SDK input definitions are intentionally omitted: tfrobot-client owns per-Computer input
 /// definitions, values, and secrets, so the SDK snapshot must not become their UI source of truth.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,7 +241,7 @@ pub async fn upsert_computer_mcp_config(
     state: State<'_, AppState>,
     instance_id: String,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     upsert_computer_mcp_config_core(&state, &instance_id, config).await
 }
 
@@ -247,9 +249,17 @@ pub async fn upsert_computer_mcp_config_core(
     state: &AppState,
     instance_id: &str,
     config: MCPServerConfig,
-) -> Result<(), String> {
+) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let instance_id = require_instance(state, instance_id)?;
+    let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
+    let config = normalize_mcp_input_references(config).map_err(RuntimeActionError::runtime)?;
+    let defined_inputs = state
+        .config
+        .load_inputs_for_instance(instance_id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let missing_input_id = referenced_input_ids(&config)?
+        .into_iter()
+        .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
     let previous_bundle_id = state
         .sdk_config
         .load(instance_id)
@@ -262,7 +272,7 @@ pub async fn upsert_computer_mcp_config_core(
     state
         .sdk_config
         .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
         if let Some(previous_bundle_id) = previous_bundle_id {
             if previous_bundle_id != next_bundle_id {
@@ -278,15 +288,72 @@ pub async fn upsert_computer_mcp_config_core(
                             ),
                         )
                         .await;
-                    return Err(format!(
+                    return Err(RuntimeActionError::runtime(format!(
                         "MCP config was saved, but the previous runtime identity could not be removed: {error}"
-                    ));
+                    )));
                 }
             }
         }
-        runtime.apply_user_mcp_server_config(config).await?;
+        if let Some(input_id) = missing_input_id {
+            return Err(missing_input_definition_error(input_id));
+        }
+        runtime
+            .apply_user_mcp_server_config(config)
+            .await
+            .map_err(RuntimeActionError::from)?;
+    } else if let Some(input_id) = missing_input_id {
+        return Err(missing_input_definition_error(input_id));
     }
     Ok(())
+}
+
+fn missing_input_definition_error(input_id: String) -> RuntimeActionError {
+    RuntimeActionError::MissingInput {
+        env_hint: env_var_name(&input_id),
+        message: format!("Required input '{input_id}' is not defined for this Computer"),
+        input_id,
+    }
+}
+
+fn referenced_input_ids(config: &MCPServerConfig) -> Result<BTreeSet<String>, RuntimeActionError> {
+    let value = serde_json::to_value(config)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let mut references = BTreeSet::new();
+    if let Some(parameters) = value.get("server_parameters") {
+        collect_input_references_in_value(parameters, &mut references);
+    }
+    if let Some(env_file) = value.get("envFile") {
+        collect_input_references_in_value(env_file, &mut references);
+    }
+    Ok(references)
+}
+
+fn collect_input_references_in_value(value: &Value, references: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => collect_input_references_in_string(text, references),
+        Value::Array(values) => values
+            .iter()
+            .for_each(|value| collect_input_references_in_value(value, references)),
+        Value::Object(values) => values
+            .values()
+            .for_each(|value| collect_input_references_in_value(value, references)),
+        _ => {}
+    }
+}
+
+fn collect_input_references_in_string(value: &str, references: &mut BTreeSet<String>) {
+    let mut remaining = value;
+    while let Some(start) = remaining.find("${input:") {
+        let candidate = &remaining[start + "${input:".len()..];
+        let Some(end) = candidate.find('}') else {
+            return;
+        };
+        let id = &candidate[..end];
+        if !id.is_empty() {
+            references.insert(id.to_string());
+        }
+        remaining = &candidate[end + 1..];
+    }
 }
 
 /// Removes one SDK-owned MCP declaration without stopping or reloading runtime state.
@@ -478,5 +545,76 @@ mod tests {
         ] {
             assert!(!is_writable_provenance(origin));
         }
+    }
+
+    #[test]
+    fn normalizes_mustache_input_references_to_sdk_canonical_syntax() {
+        let config: MCPServerConfig = serde_json::from_value(json!({
+            "type": "stdio",
+            "name": "openai-{{STAGE}}",
+            "vrl": "{{VRL_TEMPLATE}}",
+            "server_parameters": {
+                "command": "node",
+                "args": ["--token={{ OPENAI_KEY }}", "{{not {an id}}}"],
+                "env": {
+                    "OPENAI_API_KEY": "{{OPENAI_KEY}}",
+                    "UNICODE": "{{地区 key}}",
+                    "EXISTING": "${input:EXISTING}"
+                }
+            }
+        }))
+        .unwrap();
+
+        let normalized = normalize_mcp_input_references(config).unwrap();
+        let value = serde_json::to_value(normalized).unwrap();
+
+        assert_eq!(
+            value["server_parameters"]["env"]["OPENAI_API_KEY"],
+            "${input:OPENAI_KEY}"
+        );
+        assert_eq!(
+            value["server_parameters"]["args"][0],
+            "--token=${input:OPENAI_KEY}"
+        );
+        assert_eq!(value["server_parameters"]["args"][1], "{{not {an id}}}");
+        assert_eq!(
+            value["server_parameters"]["env"]["UNICODE"],
+            "${input:地区 key}"
+        );
+        assert_eq!(
+            value["server_parameters"]["env"]["EXISTING"],
+            "${input:EXISTING}"
+        );
+        assert_eq!(value["name"], "openai-{{STAGE}}");
+        assert_eq!(value["vrl"], "{{VRL_TEMPLATE}}");
+    }
+
+    #[test]
+    fn collects_unique_canonical_input_references_in_stable_order() {
+        let config: MCPServerConfig = serde_json::from_value(json!({
+            "type": "stdio",
+            "name": "openai",
+            "server_parameters": {
+                "command": "${input:COMMAND}",
+                "args": ["--token=${input:OPENAI_KEY}", "${input:OPENAI_KEY}"],
+                "env": {
+                    "IGNORED": "${input:not valid}",
+                    "UNFINISHED": "${input:unfinished"
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            referenced_input_ids(&config)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![
+                "COMMAND".to_string(),
+                "OPENAI_KEY".to_string(),
+                "not valid".to_string()
+            ]
+        );
     }
 }

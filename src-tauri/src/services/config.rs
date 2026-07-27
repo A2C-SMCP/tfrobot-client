@@ -1,11 +1,12 @@
 use crate::commands::inputs::InputDefinition;
 use crate::services::client_computers::{
-    ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_PROFILE_FILE_NAME,
+    ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_INPUTS_FILE_NAME,
+    COMPUTER_PROFILE_FILE_NAME,
 };
 use crate::services::computer::{
-    ComputerInstance, ComputerInstancesConfig, ComputerProfile, GlobalInputDefinition,
-    GlobalInputsConfig, ManagedMcpServer, SdkContextConfig, COMPUTER_PROFILE_SCHEMA_VERSION,
-    GLOBAL_INPUTS_SCHEMA_VERSION, SDK_CONTEXT_SCHEMA_VERSION,
+    ComputerInputDefinition, ComputerInputsConfig, ComputerInstance, ComputerInstancesConfig,
+    ComputerProfile, ManagedMcpServer, SdkContextConfig, COMPUTER_INPUTS_SCHEMA_VERSION,
+    COMPUTER_PROFILE_SCHEMA_VERSION, SDK_CONTEXT_SCHEMA_VERSION,
 };
 use crate::services::connection_targets::{
     ConnectionTargetsConfig, GlobalManualSmcpTarget, GlobalManualTargetsConfig, ManualSmcpTarget,
@@ -120,6 +121,12 @@ impl ConfigService {
             .map_err(map_client_computers_path_error)
     }
 
+    pub fn computer_inputs_path(&self, instance_id: &str) -> Result<PathBuf, ConfigError> {
+        self.client_computers_paths
+            .computer_inputs(instance_id)
+            .map_err(map_client_computers_path_error)
+    }
+
     pub fn migration_state_path(&self) -> PathBuf {
         self.client_computers_paths.migration_state()
     }
@@ -193,29 +200,33 @@ impl ConfigService {
         &self,
         profile: &ComputerProfile,
         context: &SdkContextConfig,
+        inputs: &[InputDefinition],
     ) -> Result<(), ConfigError> {
         let _guard = self.lock_computer_directories()?;
         self.recover_computer_directory_transactions_unlocked()?;
-        self.save_computer_directory_transaction_unlocked(profile, context, false)
+        self.save_computer_directory_transaction_unlocked(profile, context, inputs, false)
     }
 
-    pub fn load_global_inputs(&self) -> Result<GlobalInputsConfig, ConfigError> {
-        let path = self.global_config_path(GlobalConfigFile::Inputs);
-        let mut config: GlobalInputsConfig = load_new_artifact_or_default(&path)?;
-        sanitize_global_inputs_config(&mut config);
-        validate_global_inputs_config(&config)?;
+    pub fn load_computer_inputs(
+        &self,
+        instance_id: &str,
+    ) -> Result<ComputerInputsConfig, ConfigError> {
+        let path = self.computer_inputs_path(instance_id)?;
+        let mut config: ComputerInputsConfig = load_new_artifact_or_default(&path)?;
+        sanitize_computer_inputs_config(&mut config);
+        validate_computer_inputs_config(&config)?;
         Ok(config)
     }
 
-    pub fn global_inputs_path(&self) -> PathBuf {
-        self.global_config_path(GlobalConfigFile::Inputs)
-    }
-
-    pub fn save_global_inputs(&self, config: &GlobalInputsConfig) -> Result<(), ConfigError> {
+    pub fn save_computer_inputs(
+        &self,
+        instance_id: &str,
+        config: &ComputerInputsConfig,
+    ) -> Result<(), ConfigError> {
         let mut config = config.clone();
-        sanitize_global_inputs_config(&mut config);
-        validate_global_inputs_config(&config)?;
-        save_json_file(&self.global_config_path(GlobalConfigFile::Inputs), &config)
+        sanitize_computer_inputs_config(&mut config);
+        validate_computer_inputs_config(&config)?;
+        save_json_file(&self.computer_inputs_path(instance_id)?, &config)
     }
 
     pub fn load_global_manual_targets(&self) -> Result<GlobalManualTargetsConfig, ConfigError> {
@@ -283,7 +294,13 @@ impl ConfigService {
         &self,
         instance_id: &str,
     ) -> Result<Vec<InputDefinition>, ConfigError> {
-        Ok(self.get_computer_instance(instance_id)?.inputs)
+        self.load_computer_profile(instance_id)?;
+        Ok(self
+            .load_computer_inputs(instance_id)?
+            .inputs
+            .iter()
+            .map(InputDefinition::from)
+            .collect())
     }
 
     pub fn save_inputs_for_instance(
@@ -291,11 +308,14 @@ impl ConfigService {
         instance_id: &str,
         inputs: &[InputDefinition],
     ) -> Result<ComputerInstance, ConfigError> {
-        self.get_computer_instance(instance_id)?;
-        self.save_global_inputs(&GlobalInputsConfig {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
-            inputs: inputs.iter().map(GlobalInputDefinition::from).collect(),
-        })?;
+        self.load_computer_profile(instance_id)?;
+        self.save_computer_inputs(
+            instance_id,
+            &ComputerInputsConfig {
+                schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+                inputs: inputs.iter().map(ComputerInputDefinition::from).collect(),
+            },
+        )?;
         self.get_computer_instance(instance_id)
     }
 
@@ -321,7 +341,6 @@ impl ConfigService {
             return Ok(ComputerProfileDiscovery::default());
         }
 
-        let global_inputs = self.load_global_inputs()?;
         let mut instances = Vec::new();
         let mut errors = Vec::new();
         for entry in fs::read_dir(&root)? {
@@ -353,11 +372,19 @@ impl ConfigService {
             match self.load_computer_profile(&directory_id) {
                 Ok(profile) => {
                     let mut instance = ComputerInstance::from(profile);
-                    instance.inputs = global_inputs
-                        .inputs
-                        .iter()
-                        .map(InputDefinition::from)
-                        .collect();
+                    match self.load_computer_inputs(&directory_id) {
+                        Ok(inputs) => {
+                            instance.inputs =
+                                inputs.inputs.iter().map(InputDefinition::from).collect()
+                        }
+                        Err(error) => {
+                            errors.push(ComputerProfileDiscoveryError {
+                                path: self.computer_inputs_path(&directory_id)?,
+                                error,
+                            });
+                            continue;
+                        }
+                    }
                     match self.load_sdk_context(&directory_id) {
                         Ok(context) => instance.local_skills_root = context.skill_home_override,
                         Err(error) => {
@@ -400,7 +427,7 @@ impl ConfigService {
                 schema_version: SDK_CONTEXT_SCHEMA_VERSION,
                 skill_home_override: instance.local_skills_root.clone(),
             };
-            self.save_computer_directory(&profile, &context)?;
+            self.save_computer_directory(&profile, &context, &instance.inputs)?;
         }
         Ok(())
     }
@@ -414,7 +441,7 @@ impl ConfigService {
     fn load_computer_instance_unlocked(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
         let mut instance = ComputerInstance::from(self.load_computer_profile(id)?);
         instance.inputs = self
-            .load_global_inputs()?
+            .load_computer_inputs(id)?
             .inputs
             .iter()
             .map(InputDefinition::from)
@@ -436,6 +463,7 @@ impl ConfigService {
                 schema_version: SDK_CONTEXT_SCHEMA_VERSION,
                 skill_home_override: instance.local_skills_root.clone(),
             },
+            &instance.inputs,
             true,
         )
     }
@@ -468,6 +496,7 @@ impl ConfigService {
                 schema_version: SDK_CONTEXT_SCHEMA_VERSION,
                 skill_home_override: instance.local_skills_root.clone(),
             },
+            &instance.inputs,
             false,
         )?;
         Ok(instance)
@@ -477,6 +506,7 @@ impl ConfigService {
         &self,
         profile: &ComputerProfile,
         context: &SdkContextConfig,
+        inputs: &[InputDefinition],
         require_absent: bool,
     ) -> Result<(), ConfigError> {
         validate_schema_version(
@@ -489,6 +519,12 @@ impl ConfigService {
             context.schema_version,
             SDK_CONTEXT_SCHEMA_VERSION,
         )?;
+        let mut inputs_config = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+            inputs: inputs.iter().map(ComputerInputDefinition::from).collect(),
+        };
+        sanitize_computer_inputs_config(&mut inputs_config);
+        validate_computer_inputs_config(&inputs_config)?;
         let instance_root = self.computer_instance_root(&profile.id)?;
         if require_absent && instance_root.exists() {
             return Err(ConfigError::AlreadyExists(profile.id.clone()));
@@ -513,12 +549,16 @@ impl ConfigService {
                 &staged_root.join(crate::services::client_computers::SDK_CONTEXT_FILE_NAME),
                 context,
             )?;
-            let (staged_profile, staged_context) =
+            save_json_file(&staged_root.join(COMPUTER_INPUTS_FILE_NAME), &inputs_config)?;
+            let (staged_profile, staged_context, staged_inputs) =
                 validate_staged_computer_directory(&staged_root, &profile.id)?;
-            if staged_profile != *profile || staged_context != *context {
+            if staged_profile != *profile
+                || staged_context != *context
+                || staged_inputs != inputs_config
+            {
                 return Err(ConfigError::InvalidArtifact {
                     path: staged_root.clone(),
-                    reason: "staged Computer directory does not match the requested profile and SDK context"
+                    reason: "staged Computer directory does not match the requested profile, SDK context, and Inputs"
                         .to_string(),
                 });
             }
@@ -907,16 +947,19 @@ fn validate_schema_version(
     Ok(())
 }
 
-fn validate_global_inputs_config(config: &GlobalInputsConfig) -> Result<(), ConfigError> {
+fn validate_computer_inputs_config(config: &ComputerInputsConfig) -> Result<(), ConfigError> {
     validate_schema_version(
-        "global inputs",
+        "Computer inputs",
         config.schema_version,
-        GLOBAL_INPUTS_SCHEMA_VERSION,
+        COMPUTER_INPUTS_SCHEMA_VERSION,
     )?;
-    validate_unique_artifact_ids("global input", config.inputs.iter().map(|input| input.id()))?;
+    validate_unique_artifact_ids(
+        "Computer input",
+        config.inputs.iter().map(|input| input.id()),
+    )?;
 
     for input in &config.inputs {
-        if let GlobalInputDefinition::PromptString {
+        if let ComputerInputDefinition::PromptString {
             id,
             default: Some(default),
             password: Some(true),
@@ -924,7 +967,7 @@ fn validate_global_inputs_config(config: &GlobalInputsConfig) -> Result<(), Conf
         } = input
         {
             if !default.is_empty() {
-                return Err(ConfigError::SecretPlaintextInGlobalInput {
+                return Err(ConfigError::SecretPlaintextInComputerInput {
                     input_id: id.clone(),
                 });
             }
@@ -933,9 +976,9 @@ fn validate_global_inputs_config(config: &GlobalInputsConfig) -> Result<(), Conf
     Ok(())
 }
 
-fn sanitize_global_inputs_config(config: &mut GlobalInputsConfig) {
+fn sanitize_computer_inputs_config(config: &mut ComputerInputsConfig) {
     for input in &mut config.inputs {
-        if let GlobalInputDefinition::PromptString {
+        if let ComputerInputDefinition::PromptString {
             default, password, ..
         } = input
         {
@@ -1045,7 +1088,7 @@ fn save_json_file<T: serde::Serialize + ?Sized>(path: &Path, data: &T) -> Result
 fn validate_staged_computer_directory(
     staged_root: &Path,
     instance_id: &str,
-) -> Result<(ComputerProfile, SdkContextConfig), ConfigError> {
+) -> Result<(ComputerProfile, SdkContextConfig, ComputerInputsConfig), ConfigError> {
     let profile_path = staged_root.join(COMPUTER_PROFILE_FILE_NAME);
     let profile: ComputerProfile = load_required_json_file(&profile_path)?;
     validate_schema_version(
@@ -1067,7 +1110,11 @@ fn validate_staged_computer_directory(
         context.schema_version,
         SDK_CONTEXT_SCHEMA_VERSION,
     )?;
-    Ok((profile, context))
+    let inputs_path = staged_root.join(COMPUTER_INPUTS_FILE_NAME);
+    let mut inputs: ComputerInputsConfig = load_required_json_file(&inputs_path)?;
+    sanitize_computer_inputs_config(&mut inputs);
+    validate_computer_inputs_config(&inputs)?;
+    Ok((profile, context, inputs))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1121,8 +1168,8 @@ pub enum ConfigError {
     #[error("invalid config artifact at {path}: {reason}")]
     InvalidArtifact { path: PathBuf, reason: String },
 
-    #[error("global input '{input_id}' contains a password default; store it in keychain")]
-    SecretPlaintextInGlobalInput { input_id: String },
+    #[error("Computer input '{input_id}' contains a password default; store it in keychain")]
+    SecretPlaintextInComputerInput { input_id: String },
 
     #[error("{artifact} has invalid entity id '{id}'")]
     InvalidArtifactEntityId { artifact: &'static str, id: String },
@@ -1249,8 +1296,8 @@ mod tests {
             schema_version: COMPUTER_PROFILE_SCHEMA_VERSION + 1,
             ..ComputerProfile::new("computer-a", "Computer")
         };
-        let inputs = GlobalInputsConfig {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION + 1,
+        let inputs = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION + 1,
             inputs: Vec::new(),
         };
 
@@ -1262,20 +1309,21 @@ mod tests {
             }
         ));
         assert!(matches!(
-            svc.save_global_inputs(&inputs).unwrap_err(),
+            svc.save_computer_inputs(TEST_INSTANCE_ID, &inputs)
+                .unwrap_err(),
             ConfigError::UnsupportedSchemaVersion {
-                artifact: "global inputs",
+                artifact: "Computer inputs",
                 ..
             }
         ));
     }
 
     #[test]
-    fn global_inputs_and_manual_targets_are_stored_separately() {
+    fn computer_inputs_and_global_manual_targets_are_stored_separately() {
         let (svc, tmp) = setup_empty();
-        let inputs = GlobalInputsConfig {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
-            inputs: vec![GlobalInputDefinition::PromptString {
+        let inputs = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+            inputs: vec![ComputerInputDefinition::PromptString {
                 id: "region".to_string(),
                 label: "Region".to_string(),
                 description: None,
@@ -1295,34 +1343,35 @@ mod tests {
             }],
         };
 
-        svc.save_global_inputs(&inputs).unwrap();
+        svc.save_computer_inputs(TEST_INSTANCE_ID, &inputs).unwrap();
         svc.save_global_manual_targets(&targets).unwrap();
 
-        let loaded_inputs = svc.load_global_inputs().unwrap();
+        let loaded_inputs = svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap();
         let loaded_targets = svc.load_global_manual_targets().unwrap();
         assert_eq!(loaded_inputs.inputs[0].id(), "region");
         assert_eq!(loaded_targets.manual_smcp_targets[0].id, "target-a");
         assert!(tmp
             .path()
-            .join("client_computers/global/inputs.json")
+            .join("client_computers/instances/computer-a/inputs.json")
             .exists());
         assert!(tmp
             .path()
             .join("client_computers/global/manual_targets.json")
             .exists());
-        assert!(
-            !std::fs::read_to_string(tmp.path().join("client_computers/global/inputs.json"))
-                .unwrap()
-                .contains("input_values")
-        );
+        assert!(!std::fs::read_to_string(
+            tmp.path()
+                .join("client_computers/instances/computer-a/inputs.json")
+        )
+        .unwrap()
+        .contains("input_values"));
     }
 
     #[test]
-    fn global_inputs_strip_password_default_plaintext() {
-        let (svc, tmp) = setup_empty();
-        let inputs = GlobalInputsConfig {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
-            inputs: vec![GlobalInputDefinition::PromptString {
+    fn computer_inputs_strip_password_default_plaintext() {
+        let (svc, _tmp) = setup_empty();
+        let inputs = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+            inputs: vec![ComputerInputDefinition::PromptString {
                 id: "api-key".to_string(),
                 label: "API key".to_string(),
                 description: None,
@@ -1331,24 +1380,25 @@ mod tests {
             }],
         };
 
-        svc.save_global_inputs(&inputs).unwrap();
-        let stored =
-            std::fs::read_to_string(tmp.path().join("client_computers/global/inputs.json"))
-                .unwrap();
+        svc.save_computer_inputs(TEST_INSTANCE_ID, &inputs).unwrap();
+        let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
+        let stored = std::fs::read_to_string(&inputs_path).unwrap();
         assert!(!stored.contains("plaintext-secret"));
         assert!(matches!(
-            svc.load_global_inputs().unwrap().inputs.as_slice(),
-            [GlobalInputDefinition::PromptString { default: None, .. }]
+            svc.load_computer_inputs(TEST_INSTANCE_ID)
+                .unwrap()
+                .inputs
+                .as_slice(),
+            [ComputerInputDefinition::PromptString { default: None, .. }]
         ));
 
-        std::fs::write(
-            tmp.path().join("client_computers/global/inputs.json"),
-            serde_json::to_vec_pretty(&inputs).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(inputs_path, serde_json::to_vec_pretty(&inputs).unwrap()).unwrap();
         assert!(matches!(
-            svc.load_global_inputs().unwrap().inputs.as_slice(),
-            [GlobalInputDefinition::PromptString { default: None, .. }]
+            svc.load_computer_inputs(TEST_INSTANCE_ID)
+                .unwrap()
+                .inputs
+                .as_slice(),
+            [ComputerInputDefinition::PromptString { default: None, .. }]
         ));
     }
 
@@ -1419,7 +1469,7 @@ mod tests {
     #[test]
     fn global_artifact_entity_ids_must_be_non_empty_and_unique_on_save() {
         let (svc, _tmp) = setup_empty();
-        let prompt = |id: &str| GlobalInputDefinition::PromptString {
+        let prompt = |id: &str| ComputerInputDefinition::PromptString {
             id: id.to_string(),
             label: "Input".to_string(),
             description: None,
@@ -1435,14 +1485,15 @@ mod tests {
             routing_headers: HashMap::new(),
         };
 
-        let invalid_inputs = GlobalInputsConfig {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+        let invalid_inputs = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: vec![prompt(" ")],
         };
         assert!(matches!(
-            svc.save_global_inputs(&invalid_inputs).unwrap_err(),
+            svc.save_computer_inputs(TEST_INSTANCE_ID, &invalid_inputs)
+                .unwrap_err(),
             ConfigError::InvalidArtifactEntityId {
-                artifact: "global input",
+                artifact: "Computer input",
                 ..
             }
         ));
@@ -1464,7 +1515,7 @@ mod tests {
     #[test]
     fn global_artifact_entity_ids_are_validated_on_load() {
         let (svc, _tmp) = setup_empty();
-        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
         std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
         std::fs::write(
             inputs_path,
@@ -1478,15 +1529,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            svc.load_global_inputs().unwrap_err(),
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap_err(),
             ConfigError::DuplicateArtifactEntityId {
-                artifact: "global input",
+                artifact: "Computer input",
                 id
             } if id == "duplicate"
         ));
 
+        let targets_path = svc.global_config_path(GlobalConfigFile::ManualTargets);
+        std::fs::create_dir_all(targets_path.parent().unwrap()).unwrap();
         std::fs::write(
-            svc.global_config_path(GlobalConfigFile::ManualTargets),
+            targets_path,
             r#"{
               "schema_version": 1,
               "manual_smcp_targets": [{
@@ -1508,13 +1561,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_global_artifacts_return_current_version_defaults() {
+    fn missing_input_and_global_target_artifacts_return_current_version_defaults() {
         let (svc, _tmp) = setup_empty();
 
-        let inputs = svc.load_global_inputs().unwrap();
+        let inputs = svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap();
         let targets = svc.load_global_manual_targets().unwrap();
 
-        assert_eq!(inputs.schema_version, GLOBAL_INPUTS_SCHEMA_VERSION);
+        assert_eq!(inputs.schema_version, COMPUTER_INPUTS_SCHEMA_VERSION);
         assert!(inputs.inputs.is_empty());
         assert_eq!(targets.schema_version, MANUAL_TARGETS_SCHEMA_VERSION);
         assert!(targets.manual_smcp_targets.is_empty());
@@ -1630,6 +1683,11 @@ mod tests {
             &SdkContextConfig::default(),
         )
         .unwrap();
+        save_json_file(
+            &staged_root.join(COMPUTER_INPUTS_FILE_NAME),
+            &ComputerInputsConfig::default(),
+        )
+        .unwrap();
         std::fs::rename(&instance_root, &previous_root).unwrap();
 
         let discovered = svc.discover_computer_instances().unwrap();
@@ -1740,6 +1798,11 @@ mod tests {
         )
         .unwrap();
         save_json_file(
+            &staged_root.join(COMPUTER_INPUTS_FILE_NAME),
+            &ComputerInputsConfig::default(),
+        )
+        .unwrap();
+        save_json_file(
             &transaction_root.join("transaction.json"),
             &ComputerDirectoryTransaction {
                 schema_version: 1,
@@ -1831,7 +1894,7 @@ mod tests {
             ConfigError::Json(_)
         ));
 
-        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
         std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
         std::fs::write(
             inputs_path,
@@ -1847,11 +1910,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            svc.load_global_inputs().unwrap_err(),
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap_err(),
             ConfigError::Json(_)
         ));
 
         let targets_path = svc.global_config_path(GlobalConfigFile::ManualTargets);
+        std::fs::create_dir_all(targets_path.parent().unwrap()).unwrap();
         std::fs::write(
             targets_path,
             r#"{
@@ -1875,14 +1939,16 @@ mod tests {
     #[test]
     fn existing_empty_global_artifacts_are_reported_as_corrupted() {
         let (svc, _tmp) = setup_empty();
-        for artifact in [GlobalConfigFile::Inputs, GlobalConfigFile::ManualTargets] {
-            let path = svc.global_config_path(artifact);
+        for path in [
+            svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap(),
+            svc.global_config_path(GlobalConfigFile::ManualTargets),
+        ] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
 
         assert!(matches!(
-            svc.load_global_inputs().unwrap_err(),
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap_err(),
             ConfigError::InvalidArtifact { .. }
         ));
         assert!(matches!(
@@ -1894,19 +1960,21 @@ mod tests {
     #[test]
     fn global_artifacts_reject_unknown_schema_versions_when_loaded() {
         let (svc, _tmp) = setup_empty();
-        let inputs_path = svc.global_config_path(GlobalConfigFile::Inputs);
+        let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
         std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
         std::fs::write(inputs_path, r#"{"schema_version": 2, "inputs": []}"#).unwrap();
+        let targets_path = svc.global_config_path(GlobalConfigFile::ManualTargets);
+        std::fs::create_dir_all(targets_path.parent().unwrap()).unwrap();
         std::fs::write(
-            svc.global_config_path(GlobalConfigFile::ManualTargets),
+            targets_path,
             r#"{"schema_version": 2, "manual_smcp_targets": []}"#,
         )
         .unwrap();
 
         assert!(matches!(
-            svc.load_global_inputs().unwrap_err(),
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap_err(),
             ConfigError::UnsupportedSchemaVersion {
-                artifact: "global inputs",
+                artifact: "Computer inputs",
                 ..
             }
         ));

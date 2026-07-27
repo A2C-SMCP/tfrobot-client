@@ -125,14 +125,15 @@ pub fn delete_secret_best_effort(key: &str) {
     SystemSecretStore.delete_secret_best_effort(key);
 }
 
-/// Stable keychain key for a resolved input value. The logical ID is hashed so
-/// arbitrary user-provided IDs cannot violate platform keyring constraints.
-pub fn input_value_key(input_id: &str) -> String {
-    scoped_secret_key("input-value", input_id)
+/// Stable per-Computer keychain key for a resolved input value. Both logical IDs are hashed so
+/// arbitrary user-provided values cannot violate platform keyring constraints or collide across
+/// Computer instances.
+pub fn input_value_key(instance_id: &str, input_id: &str) -> String {
+    scoped_input_key("input-value", instance_id, input_id)
 }
 
-pub fn input_secret_key(input_id: &str) -> String {
-    scoped_secret_key("input-secret", input_id)
+pub fn input_secret_key(instance_id: &str, input_id: &str) -> String {
+    scoped_input_key("input-secret", instance_id, input_id)
 }
 
 pub fn secret_value_key(secret_id: &str) -> String {
@@ -141,43 +142,67 @@ pub fn secret_value_key(secret_id: &str) -> String {
 
 pub fn set_input_value(
     store: &dyn SecretStore,
+    instance_id: &str,
     input_id: &str,
     value: &serde_json::Value,
 ) -> Result<(), KeychainError> {
-    store.set_secret(&input_value_key(input_id), &serde_json::to_string(value)?)
+    store.set_secret(
+        &input_value_key(instance_id, input_id),
+        &serde_json::to_string(value)?,
+    )
 }
 
 pub fn get_input_value(
     store: &dyn SecretStore,
+    instance_id: &str,
     input_id: &str,
 ) -> Result<Option<serde_json::Value>, KeychainError> {
     store
-        .get_secret(&input_value_key(input_id))?
+        .get_secret(&input_value_key(instance_id, input_id))?
         .map(|value| serde_json::from_str(&value).map_err(KeychainError::from))
         .transpose()
 }
 
-pub fn delete_input_value(store: &dyn SecretStore, input_id: &str) -> Result<(), KeychainError> {
-    store.delete_secret(&input_value_key(input_id))
+pub fn delete_input_value(
+    store: &dyn SecretStore,
+    instance_id: &str,
+    input_id: &str,
+) -> Result<(), KeychainError> {
+    store.delete_secret(&input_value_key(instance_id, input_id))
 }
 
 pub fn set_input_secret(
     store: &dyn SecretStore,
+    instance_id: &str,
     input_id: &str,
     secret: &str,
 ) -> Result<(), KeychainError> {
-    store.set_secret(&input_secret_key(input_id), secret)
+    store.set_secret(&input_secret_key(instance_id, input_id), secret)
 }
 
 pub fn get_input_secret(
     store: &dyn SecretStore,
+    instance_id: &str,
     input_id: &str,
 ) -> Result<Option<String>, KeychainError> {
-    store.get_secret(&input_secret_key(input_id))
+    store.get_secret(&input_secret_key(instance_id, input_id))
 }
 
-pub fn delete_input_secret(store: &dyn SecretStore, input_id: &str) -> Result<(), KeychainError> {
-    store.delete_secret(&input_secret_key(input_id))
+pub fn delete_input_secret(
+    store: &dyn SecretStore,
+    instance_id: &str,
+    input_id: &str,
+) -> Result<(), KeychainError> {
+    store.delete_secret(&input_secret_key(instance_id, input_id))
+}
+
+fn scoped_input_key(namespace: &str, instance_id: &str, input_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(instance_id.as_bytes());
+    digest.update([0]);
+    digest.update(input_id.as_bytes());
+    let digest = digest.finalize();
+    format!("{namespace}:{}", hex::encode(&digest[..16]))
 }
 
 fn scoped_secret_key(namespace: &str, logical_id: &str) -> String {
@@ -203,11 +228,27 @@ mod tests {
 
     #[test]
     fn keychain_value_namespaces_are_stable_and_isolated() {
-        assert_eq!(input_value_key("api-key"), input_value_key("api-key"));
-        assert_ne!(input_value_key("api-key"), input_value_key("other"));
-        assert_ne!(input_value_key("api-key"), input_secret_key("api-key"));
-        assert_ne!(input_secret_key("api-key"), secret_value_key("api-key"));
-        assert!(!input_value_key("path/with spaces").contains("path/with spaces"));
+        assert_eq!(
+            input_value_key("computer-a", "api-key"),
+            input_value_key("computer-a", "api-key")
+        );
+        assert_ne!(
+            input_value_key("computer-a", "api-key"),
+            input_value_key("computer-b", "api-key")
+        );
+        assert_ne!(
+            input_value_key("computer-a", "api-key"),
+            input_value_key("computer-a", "other")
+        );
+        assert_ne!(
+            input_value_key("computer-a", "api-key"),
+            input_secret_key("computer-a", "api-key")
+        );
+        assert_ne!(
+            input_secret_key("computer-a", "api-key"),
+            secret_value_key("api-key")
+        );
+        assert!(!input_value_key("computer-a", "path/with spaces").contains("path/with spaces"));
     }
 
     #[test]
@@ -215,33 +256,50 @@ mod tests {
         let store = InMemorySecretStore::default();
         let value = serde_json::json!({"token": "secret", "enabled": true});
 
-        set_input_value(&store, "credentials", &value).unwrap();
-        assert_eq!(get_input_value(&store, "credentials").unwrap(), Some(value));
+        set_input_value(&store, "computer-a", "credentials", &value).unwrap();
+        assert_eq!(
+            get_input_value(&store, "computer-a", "credentials").unwrap(),
+            Some(value)
+        );
 
-        delete_input_value(&store, "credentials").unwrap();
-        assert_eq!(get_input_value(&store, "credentials").unwrap(), None);
+        delete_input_value(&store, "computer-a", "credentials").unwrap();
+        assert_eq!(
+            get_input_value(&store, "computer-a", "credentials").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn input_secrets_roundtrip_without_json_serialization() {
         let store = InMemorySecretStore::default();
 
-        set_input_secret(&store, "api-key", "top-secret").unwrap();
+        set_input_secret(&store, "computer-a", "api-key", "top-secret").unwrap();
         assert_eq!(
-            get_input_secret(&store, "api-key").unwrap().as_deref(),
+            get_input_secret(&store, "computer-a", "api-key")
+                .unwrap()
+                .as_deref(),
             Some("top-secret")
         );
-        assert_eq!(get_input_value(&store, "api-key").unwrap(), None);
+        assert_eq!(
+            get_input_value(&store, "computer-a", "api-key").unwrap(),
+            None
+        );
 
-        delete_input_secret(&store, "api-key").unwrap();
-        assert_eq!(get_input_secret(&store, "api-key").unwrap(), None);
+        delete_input_secret(&store, "computer-a", "api-key").unwrap();
+        assert_eq!(
+            get_input_secret(&store, "computer-a", "api-key").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn client_owned_secret_namespaces_roundtrip_and_delete_independently() {
         let store = InMemorySecretStore::default();
         let secrets = [
-            (input_secret_key("credentials"), "input-secret"),
+            (
+                input_secret_key("computer-a", "credentials"),
+                "input-secret",
+            ),
             (secret_value_key("shared-token"), "explicit-secret"),
             (
                 manual_target_keychain_id("target-a"),

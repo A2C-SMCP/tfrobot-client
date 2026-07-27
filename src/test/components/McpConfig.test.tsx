@@ -37,6 +37,20 @@ vi.mock('@/components/McpConfig/McpServerForm', () => ({
   ),
 }));
 
+vi.mock('@/components/InputVariables/RuntimeInputPrompt', () => ({
+  RuntimeInputPrompt: ({
+    error,
+    onSubmitted,
+  }: {
+    error: { input_id: string };
+    onSubmitted: () => Promise<void>;
+  }) => (
+    <button onClick={() => onSubmitted()}>
+      Configure {error.input_id}
+    </button>
+  ),
+}));
+
 import { useSdkConfigStore } from '@/stores/sdkConfigStore';
 const mockUseSdkConfigStore = vi.mocked(useSdkConfigStore);
 
@@ -151,6 +165,37 @@ describe('McpConfig', () => {
     ));
   });
 
+  it('prompts for a missing Input when enabling a declaration and retries it', async () => {
+    mockSdkStore.upsertServer
+      .mockRejectedValueOnce({
+        code: 'missing_input',
+        input_id: 'api-key',
+        env_hint: 'A2C_SMCP_api_key',
+        message: 'Required input is unresolved',
+      })
+      .mockResolvedValueOnce(undefined);
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByRole('switch', {
+      name: 'Toggle server test-stdio enabled state',
+    }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure api-key' }));
+
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
+    expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
+      mockSdkStore.upsertServer.mock.calls[0],
+    );
+  });
+
   it('keys same-name server rows by BundleId', () => {
     mockUseSdkConfigStore.mockReturnValue({
       ...mockSdkStore,
@@ -232,7 +277,7 @@ describe('McpConfig', () => {
     expect(await screen.findByText(/read-only policy scope/)).toBeInTheDocument();
   });
 
-  it('persists a declaration through config CRUD without requesting runtime inputs', async () => {
+  it('persists a declaration through config CRUD when its inputs are resolved', async () => {
     render(<McpConfig instanceId={instanceId} />);
     fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
@@ -243,4 +288,26 @@ describe('McpConfig', () => {
     }));
     expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
   }, 10000);
+
+  it('opens the Input configuration prompt and retries the saved MCP declaration', async () => {
+    mockSdkStore.upsertServer
+      .mockRejectedValueOnce({
+        code: 'missing_secret',
+        input_id: 'api-key',
+        env_hint: 'A2C_SMCP_api_key',
+        message: 'Required secret input is unresolved',
+      })
+      .mockResolvedValueOnce(undefined);
+    render(<McpConfig instanceId={instanceId} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+
+    const configure = await screen.findByRole('button', { name: 'Configure api-key' });
+    fireEvent.click(configure);
+
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
+    expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
+      mockSdkStore.upsertServer.mock.calls[0],
+    );
+  });
 });

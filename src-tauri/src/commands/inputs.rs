@@ -214,7 +214,7 @@ pub async fn add_or_update_input_core(
         .map_err(|e| e.to_string())?;
     let previous_inputs = inputs.clone();
     let previous_definition = inputs.iter().find(|item| item.id() == id).cloned();
-    let previous_value = snapshot_input_storage(state, &id)?;
+    let previous_value = snapshot_input_storage(state, instance_id, &id)?;
     inputs.retain(|i| i.id() != id);
     inputs.push(input);
     let inputs = prepare_portable_input_definitions(&inputs)?;
@@ -225,6 +225,7 @@ pub async fn add_or_update_input_core(
     let new_definition = inputs.iter().find(|item| item.id() == id);
     if let Err(error) = reconcile_definition_storage(
         state.secret_store.as_ref(),
+        instance_id,
         previous_definition.as_ref(),
         new_definition,
     ) {
@@ -237,7 +238,7 @@ pub async fn add_or_update_input_core(
         )
         .await);
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(rollback_input_mutation(
             state,
             instance_id,
@@ -277,7 +278,7 @@ pub async fn remove_input_core(
         .load_inputs_for_instance(instance_id)
         .map_err(|e| e.to_string())?;
     let previous_inputs = inputs.clone();
-    let previous_value = snapshot_input_storage(state, id)?;
+    let previous_value = snapshot_input_storage(state, instance_id, id)?;
     let original_len = inputs.len();
     inputs.retain(|i| i.id() != id);
 
@@ -290,7 +291,7 @@ pub async fn remove_input_core(
         .config
         .save_inputs_for_instance(instance_id, &inputs)
         .map_err(|e| e.to_string())?;
-    if let Err(error) = delete_input_storage(state, id) {
+    if let Err(error) = delete_input_storage(state, instance_id, id) {
         return Err(rollback_input_mutation(
             state,
             instance_id,
@@ -300,7 +301,7 @@ pub async fn remove_input_core(
         )
         .await);
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(rollback_input_mutation(
             state,
             instance_id,
@@ -339,7 +340,7 @@ pub async fn get_input_value(
         .into_iter()
         .find(|input| input.id() == id)
         .ok_or_else(|| format!("Input not found: {id}"))?;
-    input_value_view(state.secret_store.as_ref(), &definition)
+    input_value_view(state.secret_store.as_ref(), instance_id, &definition)
 }
 
 /// Set a cached input value
@@ -372,20 +373,22 @@ pub async fn set_input_value_core(
         .iter()
         .find(|input| input.id() == id)
         .ok_or_else(|| format!("Input not found: {id}"))?;
-    let previous_value = snapshot_input_storage(state, &id)?;
+    let previous_value = snapshot_input_storage(state, instance_id, &id)?;
     let mutation = if definition.is_secret() {
         let secret = value
             .as_str()
             .ok_or_else(|| format!("Secret input '{id}' must be a string"))?;
-        keychain::set_input_secret(state.secret_store.as_ref(), &id, secret)
-            .and_then(|_| keychain::delete_input_value(state.secret_store.as_ref(), &id))
+        keychain::set_input_secret(state.secret_store.as_ref(), instance_id, &id, secret).and_then(
+            |_| keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &id),
+        )
     } else {
-        keychain::set_input_value(state.secret_store.as_ref(), &id, &value)
-            .and_then(|_| keychain::delete_input_secret(state.secret_store.as_ref(), &id))
+        keychain::set_input_value(state.secret_store.as_ref(), instance_id, &id, &value).and_then(
+            |_| keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, &id),
+        )
     };
     if let Err(error) = mutation {
         let primary_error = error.to_string();
-        return match restore_input_storage(state, &previous_value) {
+        return match restore_input_storage(state, instance_id, &previous_value) {
             Ok(()) => Err(format!(
                 "Failed to store input value; changes were reverted: {primary_error}"
             )),
@@ -394,7 +397,7 @@ pub async fn set_input_value_core(
             )),
         };
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(
             rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
         );
@@ -422,13 +425,13 @@ pub async fn remove_input_value_core(
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
-    let previous_value = snapshot_input_storage(state, id)?;
-    if let Err(error) = delete_input_storage(state, id) {
+    let previous_value = snapshot_input_storage(state, instance_id, id)?;
+    if let Err(error) = delete_input_storage(state, instance_id, id) {
         return Err(
             rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
         );
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(
             rollback_input_mutation(state, instance_id, None, &[previous_value], error).await,
         );
@@ -456,10 +459,10 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
         .map_err(|e| e.to_string())?;
     let previous_values = inputs
         .iter()
-        .map(|input| snapshot_input_storage(state, input.id()))
+        .map(|input| snapshot_input_storage(state, instance_id, input.id()))
         .collect::<Result<Vec<_>, _>>()?;
     for input in &inputs {
-        if let Err(error) = delete_input_storage(state, input.id()) {
+        if let Err(error) = delete_input_storage(state, instance_id, input.id()) {
             return Err(rollback_input_mutation(
                 state,
                 instance_id,
@@ -470,7 +473,7 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
             .await);
         }
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(
             rollback_input_mutation(state, instance_id, None, &previous_values, error).await,
         );
@@ -514,7 +517,7 @@ pub async fn import_inputs_core(
         .collect::<std::collections::HashSet<_>>();
     let previous_values = imported_ids
         .iter()
-        .map(|id| snapshot_input_storage(state, id))
+        .map(|id| snapshot_input_storage(state, instance_id, id))
         .collect::<Result<Vec<_>, _>>()?;
     for input in imported {
         let id = input.id().to_string();
@@ -531,6 +534,7 @@ pub async fn import_inputs_core(
         let new_definition = inputs.iter().find(|input| input.id() == id);
         if let Err(error) = reconcile_definition_storage(
             state.secret_store.as_ref(),
+            instance_id,
             previous_definition,
             new_definition,
         ) {
@@ -544,7 +548,7 @@ pub async fn import_inputs_core(
             .await);
         }
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         return Err(rollback_input_mutation(
             state,
             instance_id,
@@ -558,80 +562,24 @@ pub async fn import_inputs_core(
     Ok(count)
 }
 
-async fn sync_all_computer_runtimes(state: &AppState) -> Result<(), String> {
-    sync_all_computer_runtimes_with_parts(
+async fn sync_computer_runtime(state: &AppState, instance_id: &str) -> Result<(), String> {
+    sync_computer_runtime_with_parts(
         state.config.as_ref(),
         state.computer_registry.as_ref(),
-        state.secret_store.as_ref(),
+        instance_id,
     )
     .await
 }
 
-async fn sync_all_computer_runtimes_with_parts(
+async fn sync_computer_runtime_with_parts(
     config: &crate::services::config::ConfigService,
     registry: &crate::services::computer::ComputerRegistry,
-    _secret_store: &dyn crate::services::keychain::SecretStore,
-) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for instance in config
-        .load_computer_instances()
-        .map_err(|error| error.to_string())?
-        .instances
-    {
-        if let Err(error) = registry.update_runtime_instance(instance).await {
-            errors.push(error);
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
-}
-
-pub(crate) async fn replace_global_input_definitions_with_parts_locked(
-    config: &crate::services::config::ConfigService,
-    registry: &crate::services::computer::ComputerRegistry,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_id: &str,
-    definitions: &[InputDefinition],
 ) -> Result<(), String> {
-    let snapshot = replace_input_definitions_config_only_locked(
-        config,
-        secret_store,
-        instance_id,
-        definitions,
-    )
-    .map_err(|error| error.to_string())?;
-    if let Err(primary_error) =
-        sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
-    {
-        let mut rollback_errors = Vec::new();
-        if let Err(error) = restore_input_definitions_config_only_locked(
-            config,
-            secret_store,
-            instance_id,
-            &snapshot,
-        ) {
-            rollback_errors.push(error);
-        }
-        if let Err(error) =
-            sync_all_computer_runtimes_with_parts(config, registry, secret_store).await
-        {
-            rollback_errors.push(format!("restore Computer runtimes: {error}"));
-        }
-        return if rollback_errors.is_empty() {
-            Err(format!(
-                "Failed to synchronize global input definitions; changes were reverted: {primary_error}"
-            ))
-        } else {
-            Err(format!(
-                "Failed to synchronize global input definitions: {primary_error}; rollback also failed: {}",
-                rollback_errors.join("; ")
-            ))
-        };
-    }
-    Ok(())
+    let instance = config
+        .get_computer_instance(instance_id)
+        .map_err(|error| error.to_string())?;
+    registry.update_runtime_instance(instance).await.map(|_| ())
 }
 
 /// Replaces client-owned input definitions without rebuilding or reloading any runtime.
@@ -657,7 +605,7 @@ pub(crate) fn replace_input_definitions_config_only_locked(
         .collect::<std::collections::HashSet<_>>();
     let stored_values = affected_ids
         .iter()
-        .map(|id| snapshot_input_storage_with_store(secret_store, id))
+        .map(|id| snapshot_input_storage_with_store(secret_store, instance_id, id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(InputDefinitionsConfigMutationError::Unchanged)?;
     let snapshot = InputDefinitionsConfigSnapshot {
@@ -687,6 +635,7 @@ pub(crate) fn replace_input_definitions_config_only_locked(
     let reconcile_result = affected_ids.iter().try_for_each(|id| {
         reconcile_definition_storage(
             secret_store,
+            instance_id,
             snapshot
                 .definitions
                 .iter()
@@ -728,7 +677,7 @@ pub(crate) fn restore_input_definitions_config_only_locked(
         errors.push(format!("restore input definitions: {error}"));
     }
     for stored in &snapshot.stored_values {
-        if let Err(error) = restore_input_storage_with_store(secret_store, stored) {
+        if let Err(error) = restore_input_storage_with_store(secret_store, instance_id, stored) {
             errors.push(format!("restore input '{}': {error}", stored.id));
         }
     }
@@ -751,30 +700,30 @@ async fn rollback_input_mutation(
         match prepare_portable_input_definitions(inputs) {
             Ok(inputs) => {
                 if let Err(error) = state.config.save_inputs_for_instance(instance_id, &inputs) {
-                    rollback_errors.push(format!("restore global input definitions: {error}"));
+                    rollback_errors.push(format!("restore Computer input definitions: {error}"));
                 }
             }
             Err(error) => {
-                rollback_errors.push(format!("sanitize global input definitions: {error}"));
+                rollback_errors.push(format!("sanitize Computer input definitions: {error}"));
             }
         }
     }
     for snapshot in previous_values {
-        let result = restore_input_storage(state, snapshot);
+        let result = restore_input_storage(state, instance_id, snapshot);
         if let Err(error) = result {
             rollback_errors.push(format!("restore Keychain input '{}': {error}", snapshot.id));
         }
     }
-    if let Err(error) = sync_all_computer_runtimes(state).await {
+    if let Err(error) = sync_computer_runtime(state, instance_id).await {
         rollback_errors.push(format!("restore Computer runtimes: {error}"));
     }
     if rollback_errors.is_empty() {
         format!(
-            "Failed to synchronize global input mutation; changes were reverted: {primary_error}"
+            "Failed to synchronize Computer input mutation; changes were reverted: {primary_error}"
         )
     } else {
         format!(
-            "Failed to synchronize global input mutation: {primary_error}; rollback also failed: {}",
+            "Failed to synchronize Computer input mutation: {primary_error}; rollback also failed: {}",
             rollback_errors.join("; ")
         )
     }
@@ -807,7 +756,7 @@ fn list_input_values_core(
         .load_inputs_for_instance(instance_id)
         .map_err(|error| error.to_string())?
     {
-        if let Some(value) = input_value_view(state.secret_store.as_ref(), &input)? {
+        if let Some(value) = input_value_view(state.secret_store.as_ref(), instance_id, &input)? {
             values.insert(input.id().to_string(), value);
         }
     }
@@ -816,74 +765,86 @@ fn list_input_values_core(
 
 fn input_value_view(
     store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
     definition: &InputDefinition,
 ) -> Result<Option<InputValueView>, String> {
     if definition.is_secret() {
-        let configured = keychain::get_input_secret(store, definition.id())
+        let configured = keychain::get_input_secret(store, instance_id, definition.id())
             .map_err(|error| error.to_string())?
-            .is_some()
-            || keychain::get_input_value(store, definition.id())
-                .map_err(|error| error.to_string())?
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .is_some();
+            .is_some();
         return Ok(configured.then_some(InputValueView {
             configured: true,
             value: None,
         }));
     }
 
-    Ok(keychain::get_input_value(store, definition.id())
-        .map_err(|error| error.to_string())?
-        .map(|value| InputValueView {
-            configured: true,
-            value: Some(value),
-        }))
+    Ok(
+        keychain::get_input_value(store, instance_id, definition.id())
+            .map_err(|error| error.to_string())?
+            .map(|value| InputValueView {
+                configured: true,
+                value: Some(value),
+            }),
+    )
 }
 
-fn snapshot_input_storage(state: &AppState, id: &str) -> Result<StoredInputSnapshot, String> {
-    snapshot_input_storage_with_store(state.secret_store.as_ref(), id)
+fn snapshot_input_storage(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
+) -> Result<StoredInputSnapshot, String> {
+    snapshot_input_storage_with_store(state.secret_store.as_ref(), instance_id, id)
 }
 
 fn snapshot_input_storage_with_store(
     store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
     id: &str,
 ) -> Result<StoredInputSnapshot, String> {
     Ok(StoredInputSnapshot {
         id: id.to_string(),
-        value: keychain::get_input_value(store, id).map_err(|error| error.to_string())?,
-        secret: keychain::get_input_secret(store, id).map_err(|error| error.to_string())?,
+        value: keychain::get_input_value(store, instance_id, id)
+            .map_err(|error| error.to_string())?,
+        secret: keychain::get_input_secret(store, instance_id, id)
+            .map_err(|error| error.to_string())?,
     })
 }
 
-fn delete_input_storage(state: &AppState, id: &str) -> Result<(), String> {
-    keychain::delete_input_value(state.secret_store.as_ref(), id)
+fn delete_input_storage(state: &AppState, instance_id: &str, id: &str) -> Result<(), String> {
+    keychain::delete_input_value(state.secret_store.as_ref(), instance_id, id)
         .map_err(|error| error.to_string())?;
-    keychain::delete_input_secret(state.secret_store.as_ref(), id)
+    keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, id)
         .map_err(|error| error.to_string())
 }
 
-fn restore_input_storage(state: &AppState, snapshot: &StoredInputSnapshot) -> Result<(), String> {
-    restore_input_storage_with_store(state.secret_store.as_ref(), snapshot)
+fn restore_input_storage(
+    state: &AppState,
+    instance_id: &str,
+    snapshot: &StoredInputSnapshot,
+) -> Result<(), String> {
+    restore_input_storage_with_store(state.secret_store.as_ref(), instance_id, snapshot)
 }
 
 fn restore_input_storage_with_store(
     store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
     snapshot: &StoredInputSnapshot,
 ) -> Result<(), String> {
     match &snapshot.value {
-        Some(value) => keychain::set_input_value(store, &snapshot.id, value),
-        None => keychain::delete_input_value(store, &snapshot.id),
+        Some(value) => keychain::set_input_value(store, instance_id, &snapshot.id, value),
+        None => keychain::delete_input_value(store, instance_id, &snapshot.id),
     }
     .map_err(|error| error.to_string())?;
     match &snapshot.secret {
-        Some(secret) => keychain::set_input_secret(store, &snapshot.id, secret),
-        None => keychain::delete_input_secret(store, &snapshot.id),
+        Some(secret) => keychain::set_input_secret(store, instance_id, &snapshot.id, secret),
+        None => keychain::delete_input_secret(store, instance_id, &snapshot.id),
     }
     .map_err(|error| error.to_string())
 }
 
 fn reconcile_definition_storage(
     store: &dyn crate::services::keychain::SecretStore,
+    instance_id: &str,
     previous: Option<&InputDefinition>,
     next: Option<&InputDefinition>,
 ) -> Result<(), String> {
@@ -891,29 +852,22 @@ fn reconcile_definition_storage(
         let Some(previous) = previous else {
             return Ok(());
         };
-        keychain::delete_input_value(store, previous.id()).map_err(|error| error.to_string())?;
-        return keychain::delete_input_secret(store, previous.id())
+        keychain::delete_input_value(store, instance_id, previous.id())
+            .map_err(|error| error.to_string())?;
+        return keychain::delete_input_secret(store, instance_id, previous.id())
             .map_err(|error| error.to_string());
     };
 
     if next.is_secret() {
-        let secret =
-            keychain::get_input_secret(store, next.id()).map_err(|error| error.to_string())?;
-        let legacy_value =
-            keychain::get_input_value(store, next.id()).map_err(|error| error.to_string())?;
-        if secret.is_none() {
-            if let Some(value) = legacy_value.as_ref().and_then(serde_json::Value::as_str) {
-                keychain::set_input_secret(store, next.id(), value)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        return keychain::delete_input_value(store, next.id()).map_err(|error| error.to_string());
+        return keychain::delete_input_value(store, instance_id, next.id())
+            .map_err(|error| error.to_string());
     }
 
     if previous.is_some_and(InputDefinition::is_secret) {
-        keychain::delete_input_value(store, next.id()).map_err(|error| error.to_string())?;
+        keychain::delete_input_value(store, instance_id, next.id())
+            .map_err(|error| error.to_string())?;
     }
-    keychain::delete_input_secret(store, next.id()).map_err(|error| error.to_string())
+    keychain::delete_input_secret(store, instance_id, next.id()).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -994,13 +948,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "api-key")
+            keychain::get_input_secret(store.as_ref(), "computer-a", "api-key")
                 .unwrap()
                 .as_deref(),
             Some("top-secret")
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "api-key").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "api-key").unwrap(),
             None
         );
         let view = list_input_values_core(&state, "computer-a").unwrap();
@@ -1045,27 +999,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "remove-me").unwrap(),
+            keychain::get_input_secret(store.as_ref(), "computer-a", "remove-me").unwrap(),
             None
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "remove-me").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "remove-me").unwrap(),
             None
         );
 
         clear_input_values_core(&state, "computer-a").await.unwrap();
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "clear-me").unwrap(),
+            keychain::get_input_secret(store.as_ref(), "computer-a", "clear-me").unwrap(),
             None
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "clear-me").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "clear-me").unwrap(),
             None
         );
     }
 
     #[tokio::test]
-    async fn changing_value_definition_to_secret_migrates_only_string_values() {
+    async fn changing_value_definition_to_secret_drops_value_and_requires_reentry() {
         let (state, store, _dir) = test_state();
         let value_definition = InputDefinition::PromptString {
             id: "credential".to_string(),
@@ -1100,13 +1054,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "credential")
-                .unwrap()
-                .as_deref(),
-            Some("legacy-secret")
+            keychain::get_input_secret(store.as_ref(), "computer-a", "credential").unwrap(),
+            None
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
 
@@ -1115,6 +1067,7 @@ mod tests {
             .unwrap();
         keychain::set_input_value(
             store.as_ref(),
+            "computer-a",
             "credential",
             &serde_json::json!({"nested": true}),
         )
@@ -1133,11 +1086,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_secret(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
     }
@@ -1179,11 +1132,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_secret(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
         assert!(!list_input_values_core(&state, "computer-a")
@@ -1245,13 +1198,13 @@ mod tests {
             vec![secret_definition]
         );
         assert_eq!(
-            keychain::get_input_secret(store.as_ref(), "credential")
+            keychain::get_input_secret(store.as_ref(), "computer-a", "credential")
                 .unwrap()
                 .as_deref(),
             Some("top-secret")
         );
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "credential").unwrap(),
+            keychain::get_input_value(store.as_ref(), "computer-a", "credential").unwrap(),
             None
         );
     }

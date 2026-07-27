@@ -9,6 +9,7 @@ use crate::services::computer::{
     RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
+use crate::services::keychain;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -344,16 +345,45 @@ pub async fn delete_computer_instance_core(
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_storage_root = state.config.computer_instance_storage_root(&id);
-    let persisted_instance = state.config.get_computer_instance(&id).ok();
-    let prepared_removal = state.computer_registry.prepare_runtime_removal(&id).await?;
-    let quarantined_storage =
-        match quarantine_computer_instance_storage(&instance_storage_root).await {
-            Ok(quarantined_storage) => quarantined_storage,
-            Err(error) => {
-                drop(prepared_removal);
-                return Err(error);
-            }
+    let persisted_instance = state
+        .config
+        .get_computer_instance(&id)
+        .map_err(|error| error.to_string())?;
+    let input_storage = snapshot_computer_input_storage(state, &persisted_instance)?;
+    if let Err(error) = delete_computer_input_storage(state, &id, &input_storage) {
+        let rollback = restore_computer_input_storage(state, &id, &input_storage);
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(format!(
+                "{error}; additionally failed to restore Computer input storage: {rollback_error}"
+            )),
         };
+    }
+    let prepared_removal = match state.computer_registry.prepare_runtime_removal(&id).await {
+        Ok(prepared_removal) => prepared_removal,
+        Err(error) => {
+            return match restore_computer_input_storage(state, &id, &input_storage) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                "{error}; additionally failed to restore Computer input storage: {rollback_error}"
+            )),
+            }
+        }
+    };
+    let quarantined_storage = match quarantine_computer_instance_storage(&instance_storage_root)
+        .await
+    {
+        Ok(quarantined_storage) => quarantined_storage,
+        Err(error) => {
+            drop(prepared_removal);
+            return match restore_computer_input_storage(state, &id, &input_storage) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "{error}; additionally failed to restore Computer input storage: {rollback_error}"
+                    )),
+                };
+        }
+    };
     if let Err(error) = state.config.remove_computer_instance(&id) {
         let mut rollback_errors = Vec::new();
         if let Some(quarantined) = quarantined_storage.as_ref() {
@@ -362,6 +392,9 @@ pub async fn delete_computer_instance_core(
             {
                 rollback_errors.push(format!("restore SDK storage: {restore_error}"));
             }
+        }
+        if let Err(restore_error) = restore_computer_input_storage(state, &id, &input_storage) {
+            rollback_errors.push(format!("restore Computer input storage: {restore_error}"));
         }
         drop(prepared_removal);
         if rollback_errors.is_empty() {
@@ -379,10 +412,11 @@ pub async fn delete_computer_instance_core(
             .await
         {
             let mut rollback_errors = Vec::new();
-            if let Some(instance) = persisted_instance {
-                if let Err(restore_error) = state.config.add_computer_instance(instance) {
-                    rollback_errors.push(format!("restore Computer profile: {restore_error}"));
-                }
+            if let Err(restore_error) = state
+                .config
+                .add_computer_instance(persisted_instance.clone())
+            {
+                rollback_errors.push(format!("restore Computer profile: {restore_error}"));
             }
             if let Some(quarantined) = quarantined_storage.as_ref() {
                 if let Err(restore_error) =
@@ -390,6 +424,9 @@ pub async fn delete_computer_instance_core(
                 {
                     rollback_errors.push(format!("restore SDK storage: {restore_error}"));
                 }
+            }
+            if let Err(restore_error) = restore_computer_input_storage(state, &id, &input_storage) {
+                rollback_errors.push(format!("restore Computer input storage: {restore_error}"));
             }
             if rollback_errors.is_empty() {
                 return Err(error);
@@ -402,6 +439,83 @@ pub async fn delete_computer_instance_core(
     }
     cleanup_quarantined_computer_storage(quarantined_storage).await;
 
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ComputerInputStorageSnapshot {
+    id: String,
+    value: Option<serde_json::Value>,
+    secret: Option<String>,
+}
+
+fn snapshot_computer_input_storage(
+    state: &AppState,
+    instance: &ComputerInstance,
+) -> Result<Vec<ComputerInputStorageSnapshot>, String> {
+    instance
+        .inputs
+        .iter()
+        .map(|input| {
+            let id = input.id().to_string();
+            Ok(ComputerInputStorageSnapshot {
+                value: keychain::get_input_value(state.secret_store.as_ref(), &instance.id, &id)
+                    .map_err(|error| error.to_string())?,
+                secret: keychain::get_input_secret(state.secret_store.as_ref(), &instance.id, &id)
+                    .map_err(|error| error.to_string())?,
+                id,
+            })
+        })
+        .collect()
+}
+
+fn delete_computer_input_storage(
+    state: &AppState,
+    instance_id: &str,
+    snapshots: &[ComputerInputStorageSnapshot],
+) -> Result<(), String> {
+    for snapshot in snapshots {
+        keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &snapshot.id)
+            .map_err(|error| error.to_string())?;
+        keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, &snapshot.id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn restore_computer_input_storage(
+    state: &AppState,
+    instance_id: &str,
+    snapshots: &[ComputerInputStorageSnapshot],
+) -> Result<(), String> {
+    for snapshot in snapshots {
+        match &snapshot.value {
+            Some(value) => keychain::set_input_value(
+                state.secret_store.as_ref(),
+                instance_id,
+                &snapshot.id,
+                value,
+            ),
+            None => {
+                keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &snapshot.id)
+            }
+        }
+        .map_err(|error| error.to_string())?;
+        match &snapshot.secret {
+            Some(secret) => keychain::set_input_secret(
+                state.secret_store.as_ref(),
+                instance_id,
+                &snapshot.id,
+                secret,
+            ),
+            None => keychain::delete_input_secret(
+                state.secret_store.as_ref(),
+                instance_id,
+                &snapshot.id,
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 

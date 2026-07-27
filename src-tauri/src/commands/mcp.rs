@@ -229,19 +229,37 @@ pub async fn start_all_servers_core(
     let failures = runtime
         .start_mcp_servers_best_effort(user_managed_server_ids(&runtime).await)
         .await;
-    if !failures.is_empty() {
-        let details = failures
-            .into_iter()
-            .map(|(bundle_id, error)| format!("{bundle_id}: {error}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(RuntimeActionError::runtime(format!(
-            "Some MCP servers failed to start: {details}"
-        )));
+    if let Some(error) = start_failures_error(failures) {
+        return Err(error);
     }
 
     log::info!("All MCP servers started for instance {}", instance_id);
     Ok(())
+}
+
+fn start_failures_error(
+    mut failures: Vec<(BundleId, a2c_smcp::smcp_computer::errors::ComputerError)>,
+) -> Option<RuntimeActionError> {
+    if let Some(index) = failures.iter().position(|(_, error)| {
+        matches!(
+            error,
+            a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(_)
+        )
+    }) {
+        let (_, error) = failures.swap_remove(index);
+        return Some(RuntimeActionError::from(error));
+    }
+    if failures.is_empty() {
+        return None;
+    }
+    let details = failures
+        .into_iter()
+        .map(|(bundle_id, error)| format!("{bundle_id}: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(RuntimeActionError::runtime(format!(
+        "Some MCP servers failed to start: {details}"
+    )))
 }
 
 #[tauri::command]
@@ -349,6 +367,9 @@ async fn mcp_server_runtime_metadata(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use a2c_smcp::smcp_computer::errors::ComputerError;
+    use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 
     #[test]
@@ -534,5 +555,23 @@ mod tests {
         let serialized = serde_json::to_value(&config).unwrap();
         let roundtrip: MCPServerConfig = serde_json::from_value(serialized).unwrap();
         assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn start_all_preserves_structured_missing_input_error() {
+        let error = start_failures_error(vec![(
+            BundleId::try_from("input-backed").unwrap(),
+            ComputerError::InputResolution(InputResolutionError::Missing {
+                id: "runtime-token".to_string(),
+                kind: InputKind::Value,
+                env_hint: "A2C_SMCP_runtime_token".to_string(),
+            }),
+        )])
+        .unwrap();
+
+        assert!(matches!(
+            error,
+            RuntimeActionError::MissingInput { input_id, .. } if input_id == "runtime-token"
+        ));
     }
 }
