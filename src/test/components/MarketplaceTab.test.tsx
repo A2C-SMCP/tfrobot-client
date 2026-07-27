@@ -53,8 +53,8 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: 'lastUpdated=2026-07-03T06:08:14Z' },
-        { name: 'acme', gitUrl: 'https://example.com/acme.git', status: 'known', message: null },
+        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: 'lastUpdated=2026-07-03T06:08:14Z' },
+        { name: 'acme', displayGitUrl: 'https://example.com/acme.git', status: 'known', message: null },
       ],
       plugins: [
         {
@@ -117,7 +117,7 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
       ],
       plugins: [
         {
@@ -178,7 +178,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-mkt', gitUrl: 'https://example.com/old.git', status: 'known', message: null },
+          { name: 'tf-mkt', displayGitUrl: 'https://example.com/private.git', status: 'known', message: null },
         ],
         plugins: [],
       })
@@ -196,7 +196,11 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('tf-mkt')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Edit'));
     expect(screen.getByText('Update Marketplace')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/new.git' } });
+    expect(screen.getByLabelText('Git URL')).toHaveValue('');
+    expect(screen.getByText(/enter the complete Git URL again/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Git URL'), {
+      target: { value: 'https://oauth2:test-token@example.com/private.git?ref=release#v1' },
+    });
     fireEvent.click(screen.getByText('Update').closest('button')!);
 
     await waitFor(() => {
@@ -204,7 +208,7 @@ describe('MarketplaceTab', () => {
         instanceId: 'computer-a',
         request: {
           name: 'tf-mkt',
-          gitUrl: 'https://example.com/new.git',
+          gitUrl: 'https://oauth2:test-token@example.com/private.git?ref=release#v1',
         },
       });
     });
@@ -222,7 +226,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
         ],
         plugins: [],
       })
@@ -260,7 +264,7 @@ describe('MarketplaceTab', () => {
         reason: 'partial support',
       },
       marketplaces: [
-        { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
       ],
       plugins: [
         {
@@ -293,7 +297,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
         ],
         plugins: [
           {
@@ -350,7 +354,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', gitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
         ],
         plugins: [
           {
@@ -388,7 +392,7 @@ describe('MarketplaceTab', () => {
       activeInstanceId: 'computer-a',
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'stale-market', gitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+        { name: 'stale-market', displayGitUrl: 'https://example.com/stale.git', status: 'known', message: null },
       ],
       plugins: [
         {
@@ -413,7 +417,7 @@ describe('MarketplaceTab', () => {
           governance: {
             capabilities: supportedCapabilities,
             marketplaces: [
-              { name: 'stale-market', gitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+              { name: 'stale-market', displayGitUrl: 'https://example.com/stale.git', status: 'known', message: null },
             ],
             plugins: [
               {

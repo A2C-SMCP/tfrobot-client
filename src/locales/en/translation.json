@@ -224,6 +224,7 @@
       "nameRequired": "Marketplace name is required",
       "gitUrl": "Git URL",
       "gitUrlRequired": "Git URL is required",
+      "gitUrlEditHelp": "For security, enter the complete Git URL again. The displayed source omits credentials, query, and fragment.",
       "marketplace": "Marketplace",
       "marketplaceRequired": "Marketplace is required",
       "plugin": "Plugin",

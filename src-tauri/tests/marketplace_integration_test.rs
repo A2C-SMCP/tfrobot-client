@@ -1466,7 +1466,7 @@ async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
         .unwrap();
     assert_eq!(governance.marketplaces.len(), 1);
     assert_eq!(
-        governance.marketplaces[0].git_url.as_deref(),
+        governance.marketplaces[0].display_git_url.as_deref(),
         Some(format!("file://{}", second_repo.display()).as_str())
     );
     assert_eq!(governance.plugins.len(), 1);
