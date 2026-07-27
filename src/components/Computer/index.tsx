@@ -49,9 +49,16 @@ const { Title, Text } = Typography;
 
 const statusColor: Record<ComputerStatus, string> = {
   running: 'success',
-  stopped: 'default',
+  not_running: 'default',
+  starting: 'processing',
+  stopping: 'processing',
+  degraded: 'warning',
   error: 'error',
 };
+
+function usesStopAction(status: ComputerStatus): boolean {
+  return status === 'running' || status === 'degraded' || status === 'stopping';
+}
 
 function isConnectionTargetConnectable(target?: ComputerConnectionTarget | null): boolean {
   if (!target) return false;
@@ -89,19 +96,35 @@ function ComputerCard({
   loading: boolean;
 }) {
   const { t } = useTranslation();
-  const startStopLabel = instance.status === 'running' ? t('computer.stop') : t('computer.start');
-  const startStopIcon = instance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />;
-  const startStopColor = instance.status === 'running' ? '#fa8c16' : '#52c41a';
-  const startStopAction = instance.status === 'running' ? onStop : onStart;
-  const canStartStop = instance.status === 'running'
-    ? instance.runtime.actions.can_stop
-    : instance.runtime.actions.can_start;
+  const stopAction = usesStopAction(instance.status);
+  const startStopLabel = instance.status === 'starting'
+    ? t('computer.runtime.actionProgress.starting')
+    : instance.status === 'stopping'
+      ? t('computer.runtime.actionProgress.stopping')
+      : stopAction
+        ? t('computer.stop')
+        : t('computer.start');
+  const startStopIcon = stopAction ? <StopOutlined /> : <PlayCircleOutlined />;
+  const startStopColor = stopAction ? '#fa8c16' : '#52c41a';
+  const startStopAction = stopAction ? onStop : onStart;
+  const startStopCapability = stopAction
+    ? instance.runtime.actions.stop
+    : instance.runtime.actions.start;
+  const canStartStop = startStopCapability.enabled;
+  const startStopDisabledReason = startStopCapability.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${startStopCapability.disabled_reason}`)
+    : undefined;
   const connectionTarget = instance.connectionPolicy.target;
   const connectionTargetSelected = Boolean(connectionTarget);
   const connectionTargetConnectable = isConnectionTargetConnectable(connectionTarget);
-  const canConnect = instance.runtime.actions.can_connect && connectionTargetConnectable;
-  const connectDisabledReason = !instance.runtime.actions.can_connect
-    ? t('computer.connectionActions.requiresRunning')
+  const canConnect = instance.runtime.actions.connect.enabled && connectionTargetConnectable;
+  const hasClientConnection = instance.clientConnectionPresent
+    ?? instance.connectionStatus === 'connected';
+  const disconnectDisabledReason = instance.runtime.actions.disconnect.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${instance.runtime.actions.disconnect.disabled_reason}`)
+    : undefined;
+  const connectDisabledReason = !instance.runtime.actions.connect.enabled
+    ? t(`computer.runtime.actionDisabledReasons.${instance.runtime.actions.connect.disabled_reason}`)
     : !connectionTargetSelected
       ? t('computer.connectionActions.requiresTarget')
       : !connectionTargetConnectable
@@ -157,7 +180,7 @@ function ComputerCard({
           size={6}
           style={{ borderLeft: '1px solid #f0f0f0', paddingLeft: 12, justifyContent: 'center' }}
         >
-          <Tooltip title={startStopLabel} placement="right">
+          <Tooltip title={startStopDisabledReason ?? startStopLabel} placement="right">
             <Button
               aria-label={startStopLabel}
               type="text"
@@ -168,14 +191,14 @@ function ComputerCard({
               onClick={startStopAction}
             />
           </Tooltip>
-          {instance.connectionStatus === 'connected' ? (
-            <Tooltip title={t('connection.disconnect')} placement="right">
+          {hasClientConnection ? (
+            <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')} placement="right">
               <Button
                 aria-label={t('connection.disconnect')}
                 type="text"
                 danger
                 icon={<DisconnectOutlined />}
-                disabled={!instance.runtime.actions.can_disconnect}
+                disabled={!instance.runtime.actions.disconnect.enabled}
                 loading={loading}
                 onClick={onDisconnect}
               />
@@ -226,7 +249,6 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     startInstance,
     stopInstance,
     restartInstance,
-    reloadRuntime,
     connectSelectedTarget,
     disconnectConnection,
   } = useComputerStore();
@@ -238,7 +260,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
     instanceId: string;
     error: MissingRuntimeInputError;
-    action: 'start' | 'restart' | 'reload';
+    action: 'start' | 'restart';
   } | null>(null);
   const [form] = Form.useForm<{
     name: string;
@@ -331,14 +353,13 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
 
   const runRuntimeAction = async (
     instance: ComputerInstance,
-    action: 'start' | 'restart' | 'reload',
+    action: 'start' | 'restart',
   ) => {
     try {
       if (action === 'start') await startInstance(instance.id);
       if (action === 'restart') await restartInstance(instance.id);
-      if (action === 'reload') await reloadRuntime(instance.id);
       setRuntimeInputPrompt(null);
-      message.success(t(`computer.messages.${action === 'start' ? 'started' : action === 'restart' ? 'restarted' : 'reloaded'}`));
+      message.success(t(`computer.messages.${action === 'start' ? 'started' : 'restarted'}`));
     } catch (e) {
       if (isMissingRuntimeInputError(e)) {
         setRuntimeInputPrompt({ instanceId: instance.id, error: e, action });
@@ -349,7 +370,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   };
 
   const handleStartStop = async (instance: ComputerInstance) => {
-    if (instance.status !== 'running') {
+    if (!usesStopAction(instance.status)) {
       await runRuntimeAction(instance, 'start');
       return;
     }
@@ -459,12 +480,26 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   }
 
   const selectedConnectionTarget = selectedInstance?.connectionPolicy.target;
+  const selectedHasClientConnection = selectedInstance?.clientConnectionPresent
+    ?? selectedInstance?.connectionStatus === 'connected';
   const selectedConnectionTargetSelected = Boolean(selectedConnectionTarget);
   const selectedConnectionTargetConnectable = isConnectionTargetConnectable(selectedConnectionTarget);
-  const selectedCanConnect = Boolean(selectedInstance?.runtime.actions.can_connect)
+  const selectedCanConnect = Boolean(selectedInstance?.runtime.actions.connect.enabled)
     && selectedConnectionTargetConnectable;
-  const selectedConnectDisabledReason = !selectedInstance?.runtime.actions.can_connect
-    ? t('computer.connectionActions.requiresRunning')
+  const selectedStopAction = selectedInstance ? usesStopAction(selectedInstance.status) : false;
+  const selectedStartStopCapability = selectedInstance
+    ? selectedStopAction
+      ? selectedInstance.runtime.actions.stop
+      : selectedInstance.runtime.actions.start
+    : undefined;
+  const selectedStartStopDisabledReason = selectedStartStopCapability?.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${selectedStartStopCapability.disabled_reason}`)
+    : undefined;
+  const selectedDisconnectDisabledReason = selectedInstance?.runtime.actions.disconnect.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${selectedInstance.runtime.actions.disconnect.disabled_reason}`)
+    : undefined;
+  const selectedConnectDisabledReason = !selectedInstance?.runtime.actions.connect.enabled
+    ? t(`computer.runtime.actionDisabledReasons.${selectedInstance?.runtime.actions.connect.disabled_reason}`)
     : !selectedConnectionTargetSelected
       ? t('computer.connectionActions.requiresTarget')
       : !selectedConnectionTargetConnectable
@@ -524,16 +559,18 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               <Space direction="vertical" size={2}>
                 <Text type="secondary">{t('computer.actionGroups.runtime')}</Text>
                 <Space.Compact>
-                  {selectedInstance.connectionStatus === 'connected' ? (
-                    <Button
-                      danger
-                      icon={<DisconnectOutlined />}
-                      disabled={!selectedInstance.runtime.actions.can_disconnect}
-                      loading={loading}
-                      onClick={() => handleDisconnect(selectedInstance)}
-                    >
-                      {t('connection.disconnect')}
-                    </Button>
+                  {selectedHasClientConnection ? (
+                    <Tooltip title={selectedDisconnectDisabledReason}>
+                      <Button
+                        danger
+                        icon={<DisconnectOutlined />}
+                        disabled={!selectedInstance.runtime.actions.disconnect.enabled}
+                        loading={loading}
+                        onClick={() => handleDisconnect(selectedInstance)}
+                      >
+                        {t('connection.disconnect')}
+                      </Button>
+                    </Tooltip>
                   ) : (
                     <Tooltip title={selectedConnectDisabledReason}>
                       <Button
@@ -547,16 +584,22 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                       </Button>
                     </Tooltip>
                   )}
-                  <Button
-                    icon={selectedInstance.status === 'running' ? <StopOutlined /> : <PlayCircleOutlined />}
-                    disabled={selectedInstance.status === 'running'
-                      ? !selectedInstance.runtime.actions.can_stop
-                      : !selectedInstance.runtime.actions.can_start}
-                    loading={loading}
-                    onClick={() => handleStartStop(selectedInstance)}
-                  >
-                    {selectedInstance.status === 'running' ? t('computer.stop') : t('computer.start')}
-                  </Button>
+                  <Tooltip title={selectedStartStopDisabledReason}>
+                    <Button
+                      icon={selectedStopAction ? <StopOutlined /> : <PlayCircleOutlined />}
+                      disabled={!selectedStartStopCapability?.enabled}
+                      loading={loading}
+                      onClick={() => handleStartStop(selectedInstance)}
+                    >
+                      {selectedInstance.status === 'starting'
+                        ? t('computer.runtime.actionProgress.starting')
+                        : selectedInstance.status === 'stopping'
+                          ? t('computer.runtime.actionProgress.stopping')
+                          : selectedStopAction
+                            ? t('computer.stop')
+                            : t('computer.start')}
+                    </Button>
+                  </Tooltip>
                 </Space.Compact>
               </Space>
             </Space>
@@ -587,7 +630,6 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                     connectDisabledReason={selectedConnectDisabledReason}
                     onStartStop={() => { void handleStartStop(selectedInstance); }}
                     onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
-                    onReload={() => { void runRuntimeAction(selectedInstance, 'reload'); }}
                     onConnect={() => { void handleConnect(selectedInstance); }}
                     onDisconnect={() => { void handleDisconnect(selectedInstance); }}
                   />

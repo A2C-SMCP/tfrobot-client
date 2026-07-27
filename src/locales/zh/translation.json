@@ -53,7 +53,10 @@
     "tools": "{{count}} 个工具",
     "status": {
       "running": "运行中",
-      "stopped": "已停止",
+      "not_running": "未运行",
+      "starting": "启动中",
+      "stopping": "停止中",
+      "degraded": "运行受限",
       "error": "错误"
     },
     "connection": {
@@ -63,6 +66,7 @@
     "runtime": {
       "title": "运行时",
       "statusTitle": "运行时状态",
+      "userState": "状态",
       "lifecycle": "生命周期",
       "generation": "运行时世代",
       "snapshotRevision": "快照 Revision",
@@ -72,7 +76,26 @@
       "activeMcpServers": "活跃 MCP 服务器",
       "mcpLifecycle": "MCP 运行时",
       "restart": "重启",
-      "reload": "重载",
+      "advancedDiagnostics": "高级运行诊断",
+      "actionProgress": {
+        "starting": "启动中…",
+        "stopping": "停止中…"
+      },
+      "actionDisabledReasons": {
+        "already_running": "Runtime 已在运行。",
+        "not_running": "请先启动 Runtime，再执行此操作。",
+        "transition_in_progress": "请等待当前 Runtime 操作完成。",
+        "degraded": "Runtime 运行受限，暂时无法执行此操作。",
+        "connection_unavailable": "当前连接状态下无法执行此操作。"
+      },
+      "userStates": {
+        "not_running": "未运行",
+        "starting": "启动中",
+        "running": "运行中",
+        "stopping": "停止中",
+        "degraded": "运行受限",
+        "error": "运行异常"
+      },
       "lastError": "运行时错误",
       "degraded": "运行时降级",
       "recentEvents": "最近运行时事件",
@@ -124,9 +147,9 @@
       "resetSkillHome": "使用默认值",
       "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。",
       "nextSkillHome": "目标 Skill Home",
-      "skillHomeConfirmTitle": "确认重建 Computer？",
-      "skillHomeConfirmDescription": "修改 Skill Home 会保存新的能力治理根目录，并重建当前 Computer runtime。Marketplace、Plugin、MCP Server 和 Skill 会按新的 Skill Home 重新解析；当前连接和运行态可能被刷新。",
-      "skillHomeConfirmOk": "确认重建"
+      "skillHomeConfirmTitle": "保存 Skill Home？",
+      "skillHomeConfirmDescription": "此操作只保存新的能力治理根目录，不会重启当前 Runtime。下次启动或主动重启 Runtime 时使用新的 Skill Home。",
+      "skillHomeConfirmOk": "保存"
     },
     "actionGroups": {
       "profile": "Profile 与配置",
@@ -167,8 +190,7 @@
       "deleted": "Computer 已删除",
       "started": "Computer 已启动",
       "stopped": "Computer 已停止",
-      "restarted": "Computer 已重启",
-      "reloaded": "Computer 运行时已重载"
+      "restarted": "Computer 已重启"
     }
   },
   "skills": {

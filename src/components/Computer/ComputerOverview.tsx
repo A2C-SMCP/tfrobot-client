@@ -60,16 +60,17 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
         <Col xs={24}>
           <Card title={t('computer.runtime.statusTitle')}>
             <Descriptions column={{ xs: 1, sm: 3 }} size="small">
-              <Descriptions.Item label={t('computer.runtime.lifecycle')}>
-                <Tag color={data.runtime.lifecycle === 'degraded' ? 'orange' : data.running ? 'green' : 'default'}>
-                  {t(`computer.runtime.lifecycleStates.${data.runtime.lifecycle}`)}
+              <Descriptions.Item label={t('computer.runtime.userState')}>
+                <Tag color={data.runtime.user_state === 'error'
+                  ? 'red'
+                  : data.runtime.user_state === 'degraded'
+                    ? 'orange'
+                    : data.running
+                      ? 'green'
+                      : 'default'}
+                >
+                  {t(`computer.runtime.userStates.${data.runtime.user_state}`)}
                 </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label={t('computer.runtime.configRevision')}>
-                {data.runtime.config_revision}
-              </Descriptions.Item>
-              <Descriptions.Item label={t('computer.runtime.capabilityRevision')}>
-                {data.runtime.capability_revision}
               </Descriptions.Item>
               <Descriptions.Item label={t('skills.title')}>
                 {data.runtime.skills}

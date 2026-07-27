@@ -315,7 +315,7 @@ impl SdkConfigService {
     /// Upserts MCP declarations into SDK-owned config without touching runtime state.
     ///
     /// Configuration CRUD must not resolve commands, paths, inputs, or secrets. Those checks are
-    /// deferred to runtime reload/preflight/start. New declarations use the client's local scope;
+    /// deferred to runtime restart/preflight/start. New declarations use the client's local scope;
     /// existing declarations update at their writable origin through the SDK write-target resolver.
     pub fn upsert_mcp_configs(
         &self,

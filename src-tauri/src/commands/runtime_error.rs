@@ -21,17 +21,25 @@ pub enum RuntimeActionError {
     },
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
-    #[error("runtime action '{action}' is unavailable while lifecycle is '{lifecycle}'")]
-    ActionUnavailable { action: String, lifecycle: String },
+    #[error("{message}")]
+    ActionUnavailable {
+        action: String,
+        lifecycle: String,
+        disabled_reason: String,
+        message: String,
+    },
     #[error("{message}")]
     RuntimeError { message: String },
 }
 
 impl From<ComputerRuntimeActionUnavailable> for RuntimeActionError {
     fn from(error: ComputerRuntimeActionUnavailable) -> Self {
+        let message = error.to_string();
         Self::ActionUnavailable {
             action: error.action.to_string(),
             lifecycle: error.lifecycle.to_string(),
+            disabled_reason: error.disabled_reason.to_string(),
+            message,
         }
     }
 }
@@ -173,6 +181,7 @@ mod tests {
         let error = RuntimeActionError::from(ComputerRuntimeActionUnavailable {
             action: "connect",
             lifecycle: a2c_smcp::smcp_computer::LifecycleState::Connecting,
+            disabled_reason: "transition_in_progress",
         });
 
         assert_eq!(
@@ -180,7 +189,9 @@ mod tests {
             serde_json::json!({
                 "code": "action_unavailable",
                 "action": "connect",
-                "lifecycle": "connecting"
+                "lifecycle": "connecting",
+                "disabled_reason": "transition_in_progress",
+                "message": "runtime action 'connect' is unavailable while lifecycle is 'connecting' (transition_in_progress)"
             })
         );
     }

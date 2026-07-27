@@ -20,17 +20,59 @@ function runtimeActionsForTest(
   lifecycle: ComputerRuntimeSnapshot['lifecycle'],
 ): ComputerRuntimeSnapshot['actions'] {
   const inactive = ['created', 'stopped', 'shutdown', 'error'].includes(lifecycle);
+  const transitioning = ['starting', 'connecting', 'syncing', 'disconnecting', 'stopping']
+    .includes(lifecycle);
   const locallyOperational = ['started', 'connected', 'joined_office', 'degraded']
     .includes(lifecycle);
+  const capability = (
+    enabled: boolean,
+    disabledReason: ComputerRuntimeSnapshot['actions']['start']['disabled_reason'],
+  ) => ({
+    enabled,
+    disabled_reason: enabled ? null : disabledReason,
+  });
+  const inactiveOrTransitionReason = transitioning ? 'transition_in_progress' : 'not_running';
   return {
-    can_start: inactive,
-    can_stop: locallyOperational,
-    can_restart: locallyOperational,
-    can_reload: inactive || locallyOperational,
-    can_connect: lifecycle === 'started',
-    can_disconnect: ['connected', 'joined_office', 'degraded'].includes(lifecycle),
-    can_manage_mcp: ['started', 'connected', 'joined_office'].includes(lifecycle),
+    start: capability(
+      inactive,
+      transitioning ? 'transition_in_progress' : 'already_running',
+    ),
+    stop: capability(locallyOperational, inactiveOrTransitionReason),
+    restart: capability(locallyOperational, inactiveOrTransitionReason),
+    connect: capability(
+      lifecycle === 'started',
+      transitioning
+        ? 'transition_in_progress'
+        : inactive
+          ? 'not_running'
+          : 'connection_unavailable',
+    ),
+    disconnect: capability(
+      ['connected', 'joined_office', 'degraded'].includes(lifecycle),
+      transitioning
+        ? 'transition_in_progress'
+        : inactive
+          ? 'not_running'
+          : 'connection_unavailable',
+    ),
+    manage_mcp: capability(
+      ['started', 'connected', 'joined_office'].includes(lifecycle),
+      lifecycle === 'degraded' ? 'degraded' : inactiveOrTransitionReason,
+    ),
   };
+}
+
+function runtimeUserStateForTest(
+  lifecycle: ComputerRuntimeSnapshot['lifecycle'],
+): ComputerRuntimeSnapshot['user_state'] {
+  if (['created', 'stopped', 'shutdown'].includes(lifecycle)) return 'not_running';
+  if (['starting', 'syncing'].includes(lifecycle)) return 'starting';
+  if (['started', 'connecting', 'connected', 'joined_office', 'disconnecting'].includes(lifecycle)) {
+    return 'running';
+  }
+  if (lifecycle === 'stopping') return 'stopping';
+  if (lifecycle === 'degraded') return 'degraded';
+  return 'error';
 }
 
 export function runtimeSnapshot(
@@ -42,6 +84,7 @@ export function runtimeSnapshot(
     generation: 1,
     snapshot_revision: 1,
     lifecycle,
+    user_state: overrides.user_state ?? runtimeUserStateForTest(lifecycle),
     actions: overrides.actions ?? runtimeActionsForTest(lifecycle),
     config_revision: 0,
     capability_revision: 0,

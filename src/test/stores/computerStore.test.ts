@@ -22,7 +22,7 @@ const baseStatus = {
 };
 
 const baseInstance = {
-  status: 'stopped' as const,
+  status: 'not_running' as const,
   connectionStatus: 'disconnected' as const,
   connectionPolicy: { target: null, auto_connect: false },
   mcpServerCount: 0,
@@ -944,7 +944,7 @@ describe('computerStore', () => {
     expect(useComputerStore.getState().instances[0].status).toBe('running');
 
     await useComputerStore.getState().stopInstance('computer-a');
-    expect(useComputerStore.getState().instances[0].status).toBe('stopped');
+    expect(useComputerStore.getState().instances[0].status).toBe('not_running');
   });
 
   it('updates raw connection authority from start and stop status responses', async () => {
@@ -999,7 +999,7 @@ describe('computerStore', () => {
     });
   });
 
-  it('updates raw connection authority from restart and reload responses', async () => {
+  it('updates raw connection authority from restart responses', async () => {
     const connectionContext = {
       profile_name: 'prod',
       url: 'https://smcp.example.com',
@@ -1030,7 +1030,7 @@ describe('computerStore', () => {
     await useComputerStore.getState().restartInstance('computer-a');
     expect(useComputerStore.getState().instances[0].clientConnectionPresent).toBe(true);
 
-    await useComputerStore.getState().reloadRuntime('computer-a');
+    await useComputerStore.getState().restartInstance('computer-a');
     expect(useComputerStore.getState().instances[0]).toMatchObject({
       clientConnectionPresent: false,
       clientConnectionContext: null,

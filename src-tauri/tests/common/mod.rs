@@ -152,8 +152,7 @@ pub fn everything_server_config_with_forbidden_tools(
 /// Compatibility helpers for runtime-focused integration tests.
 ///
 /// Production config CRUD is intentionally exposed only through `commands::sdk_config`. These
-/// test-only composites retain the old setup ergonomics while making the config mutation and the
-/// subsequent runtime reload explicit outside the production command surface.
+/// test-only composites retain the old setup ergonomics while using the same live-apply boundary.
 #[allow(dead_code)]
 pub mod mcp {
     #[allow(unused_imports)]
@@ -228,8 +227,7 @@ pub mod mcp {
             instance_id,
             config,
         )
-        .await?;
-        runtime.reload().await.map_err(RuntimeActionError::from)
+        .await
     }
 
     pub async fn remove_mcp_server_core(
@@ -264,7 +262,6 @@ pub mod mcp {
             name,
         )
         .await?;
-        runtime.reload().await.map_err(|error| error.to_string())?;
         if runtime.plugin_mcp_server_owner(&bundle_id).await.is_some() {
             runtime
                 .start_mcp_server(&bundle_id)

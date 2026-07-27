@@ -49,7 +49,8 @@ pub mod runtime_lifecycle;
 pub use connection::{ClientConnectionAuthoritySnapshot, ConnectionStateSummary};
 pub use registry::ComputerRegistry;
 pub use runtime_lifecycle::{
-    ComputerRuntimeAction, ComputerRuntimeActionCapabilities, ComputerRuntimeActionUnavailable,
+    ComputerRuntimeAction, ComputerRuntimeActionCapabilities, ComputerRuntimeActionDisabledReason,
+    ComputerRuntimeActionUnavailable, ComputerRuntimeUserState,
 };
 
 pub type ComputerInstanceId = String;
@@ -709,7 +710,6 @@ pub struct ComputerInstanceRuntime {
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: PathBuf,
-    sdk_auto_connect: Arc<RwLock<bool>>,
     sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
     // Tracks only whether this client materialized a Marketplace dependency. Plugin ownership
     // itself is SDK ledger-derived and may hand off between multiple enabled plugins.
@@ -730,8 +730,7 @@ pub struct ComputerInstanceRuntime {
     shutdown_completed: Arc<AtomicBool>,
     client_runtime_diagnostic: Arc<RwLock<Option<String>>>,
     mcp_start_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
-    mcp_reload_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
-    sdk_config_reload_required: Arc<AtomicBool>,
+    mcp_config_apply_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
     #[cfg(debug_assertions)]
     fail_prepare_shutdown_once: Arc<AtomicBool>,
 }
@@ -776,7 +775,6 @@ impl ComputerInstanceRuntime {
             input_resolver.clone(),
             &skill_home_base,
         );
-        let auto_connect = instance.connection_policy.auto_connect;
         Self {
             instance,
             inputs: Arc::new(RwLock::new(inputs)),
@@ -785,7 +783,6 @@ impl ComputerInstanceRuntime {
             session,
             input_resolver,
             skill_home_base,
-            sdk_auto_connect: Arc::new(RwLock::new(auto_connect)),
             sdk_servers: Arc::new(RwLock::new(sdk_servers)),
             plugin_mounted_server_ids: Arc::new(RwLock::new(HashSet::new())),
             connection: Arc::new(RwLock::new(None)),
@@ -804,8 +801,7 @@ impl ComputerInstanceRuntime {
             shutdown_completed: Arc::new(AtomicBool::new(false)),
             client_runtime_diagnostic: Arc::new(RwLock::new(None)),
             mcp_start_diagnostics: Arc::new(RwLock::new(HashMap::new())),
-            mcp_reload_diagnostics: Arc::new(RwLock::new(HashMap::new())),
-            sdk_config_reload_required: Arc::new(AtomicBool::new(false)),
+            mcp_config_apply_diagnostics: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: Arc::new(AtomicBool::new(false)),
         }
@@ -820,7 +816,6 @@ impl ComputerInstanceRuntime {
             session: self.session.clone(),
             input_resolver: self.input_resolver.clone(),
             skill_home_base: self.skill_home_base.clone(),
-            sdk_auto_connect: self.sdk_auto_connect.clone(),
             sdk_servers: self.sdk_servers.clone(),
             plugin_mounted_server_ids: self.plugin_mounted_server_ids.clone(),
             connection: self.connection.clone(),
@@ -839,8 +834,7 @@ impl ComputerInstanceRuntime {
             shutdown_completed: self.shutdown_completed.clone(),
             client_runtime_diagnostic: self.client_runtime_diagnostic.clone(),
             mcp_start_diagnostics: self.mcp_start_diagnostics.clone(),
-            mcp_reload_diagnostics: self.mcp_reload_diagnostics.clone(),
-            sdk_config_reload_required: self.sdk_config_reload_required.clone(),
+            mcp_config_apply_diagnostics: self.mcp_config_apply_diagnostics.clone(),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: self.fail_prepare_shutdown_once.clone(),
         }
@@ -902,15 +896,6 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        let was_running = self.is_running().await;
-
-        let rebuilt = if self.sdk_requires_rebuild().await {
-            self.replace_sdk_computer(was_running, "runtime_configuration_changed")
-                .await?;
-            true
-        } else {
-            false
-        };
 
         let mut merged_inputs = input_definitions_to_mcp_map(&self.instance.inputs);
         merged_inputs.extend(self.plugin_runtime_inputs.read().await.clone());
@@ -924,14 +909,13 @@ impl ComputerInstanceRuntime {
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
         }
-        let _ = rebuilt;
         *self.sdk_servers.write().await = self
             .sdk_user_mcp_server_config_map()
             .await
             .into_iter()
             .map(|(bundle_id, config)| (bundle_id, config.name().to_string()))
             .collect();
-        if was_running {
+        if self.is_running().await {
             self.reconcile_sdk_governance_inner()
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
@@ -1042,10 +1026,10 @@ impl ComputerInstanceRuntime {
 
         if computer_running {
             if let Err(error) = self.computer.read().await.stop_mcp_client(&bundle_id).await {
-                self.record_sdk_config_reload_required(
+                self.record_mcp_config_apply_diagnostic(
                     bundle_id.clone(),
                     format!(
-                        "Configuration saved; runtime reload required after stop failed: {error}"
+                        "Configuration saved, but the active MCP process could not be stopped: {error}. Restart Runtime or inspect the logs before retrying."
                     ),
                 )
                 .await;
@@ -1066,9 +1050,11 @@ impl ComputerInstanceRuntime {
             .mount_server(normalize_mcp_server_tool_meta(server.clone()))
             .await
         {
-            self.record_sdk_config_reload_required(
+            self.record_mcp_config_apply_diagnostic(
                 bundle_id.clone(),
-                format!("Configuration saved; runtime activation failed: {error}"),
+                format!(
+                    "Configuration saved, but it could not be applied to the active Runtime: {error}. Restart Runtime or inspect the logs before retrying."
+                ),
             )
             .await;
             log::warn!(
@@ -1084,7 +1070,7 @@ impl ComputerInstanceRuntime {
             .write()
             .await
             .insert(bundle_id.clone(), server.name().to_string());
-        self.clear_sdk_config_reload_required(&bundle_id).await;
+        self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
         if server.disabled() || !computer_running {
             self.mcp_start_diagnostics.write().await.remove(&bundle_id);
             return Ok(true);
@@ -1102,27 +1088,18 @@ impl ComputerInstanceRuntime {
         Ok(true)
     }
 
-    pub async fn mark_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
-        self.record_sdk_config_reload_required(bundle_id, message)
-            .await;
-    }
-
-    async fn record_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
-        self.mcp_reload_diagnostics
+    pub async fn record_mcp_config_apply_diagnostic(&self, bundle_id: BundleId, message: String) {
+        self.mcp_config_apply_diagnostics
             .write()
             .await
             .insert(bundle_id, message);
-        self.sdk_config_reload_required
-            .store(true, Ordering::Release);
     }
 
-    async fn clear_sdk_config_reload_required(&self, bundle_id: &BundleId) {
-        let mut diagnostics = self.mcp_reload_diagnostics.write().await;
-        diagnostics.remove(bundle_id);
-        if diagnostics.is_empty() {
-            self.sdk_config_reload_required
-                .store(false, Ordering::Release);
-        }
+    async fn clear_mcp_config_apply_diagnostic(&self, bundle_id: &BundleId) {
+        self.mcp_config_apply_diagnostics
+            .write()
+            .await
+            .remove(bundle_id);
     }
 
     pub async fn remove_user_mcp_server_config(&self, bundle_id: &BundleId) -> Result<(), String> {
@@ -1145,7 +1122,7 @@ impl ComputerInstanceRuntime {
             .map_err(|error| error.to_string())?;
         self.sdk_servers.write().await.remove(bundle_id);
         self.mcp_start_diagnostics.write().await.remove(bundle_id);
-        self.clear_sdk_config_reload_required(bundle_id).await;
+        self.clear_mcp_config_apply_diagnostic(bundle_id).await;
 
         self.reconcile_sdk_governance_inner()
             .await
@@ -1187,7 +1164,7 @@ impl ComputerInstanceRuntime {
 
     pub async fn mcp_start_diagnostics(&self) -> HashMap<BundleId, String> {
         let mut diagnostics = self.mcp_start_diagnostics.read().await.clone();
-        diagnostics.extend(self.mcp_reload_diagnostics.read().await.clone());
+        diagnostics.extend(self.mcp_config_apply_diagnostics.read().await.clone());
         diagnostics
     }
 
@@ -1732,7 +1709,7 @@ impl ComputerInstanceRuntime {
 
         self.clear_client_runtime_diagnostic_silent().await;
         self.mcp_start_diagnostics.write().await.clear();
-        self.mcp_reload_diagnostics.write().await.clear();
+        self.mcp_config_apply_diagnostics.write().await.clear();
         self.shutdown_sdk_computer_inner()
             .await
             .map_err(ComputerRuntimeStartError::Client)?;
@@ -1745,10 +1722,7 @@ impl ComputerInstanceRuntime {
             self.shutdown_completed.store(false, Ordering::Release);
         }
         *self.sdk_servers.write().await = sdk_servers;
-        self.sdk_config_reload_required
-            .store(false, Ordering::Release);
         self.plugin_mounted_server_ids.write().await.clear();
-        *self.sdk_auto_connect.write().await = self.instance.connection_policy.auto_connect;
         self.start_runtime_event_relay().await;
         self.publish_runtime_status(ComputerRuntimeEventCause::HandleReplaced {
             reason: reason.to_string(),
@@ -2699,9 +2673,9 @@ mod tests {
         let sink = Arc::new(RecordingRuntimeEventSink::default());
         registry.set_runtime_event_sink(sink.clone()).await;
         let runtime = registry.runtime("one").await.unwrap();
-        let first_generation = runtime.runtime_generation();
 
         registry.start_runtime("one").await.unwrap();
+        let first_generation = runtime.runtime_generation();
         sink.wait_for(|event| {
             event.snapshot.generation == first_generation
                 && event.snapshot.lifecycle == LifecycleState::Started
@@ -2750,8 +2724,8 @@ mod tests {
         let first_generation = runtime.runtime_generation();
 
         let snapshot_guard = runtime.runtime_snapshot_lock.lock().await;
-        let reload_runtime = runtime.clone();
-        let reload_task = tokio::spawn(async move { reload_runtime.reload().await });
+        let restart_runtime = runtime.clone();
+        let restart_task = tokio::spawn(async move { restart_runtime.restart().await });
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while runtime.runtime_state().await != LifecycleState::Shutdown {
@@ -2767,14 +2741,14 @@ mod tests {
         );
 
         drop(snapshot_guard);
-        reload_task.await.unwrap().unwrap();
+        restart_task.await.unwrap().unwrap();
         assert_eq!(runtime.runtime_generation(), first_generation + 1);
         assert!(runtime.is_running().await);
         runtime.shutdown().await;
     }
 
     #[tokio::test]
-    async fn concurrent_event_sink_install_and_reload_rebinds_current_generation() {
+    async fn concurrent_event_sink_install_and_restart_rebinds_current_generation() {
         let registry = Arc::new(ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance("one", "One")],
@@ -2783,11 +2757,11 @@ mod tests {
         runtime.start().await.unwrap();
         let sink = Arc::new(RecordingRuntimeEventSink::default());
 
-        let (_, reload_result) = tokio::join!(
+        let (_, restart_result) = tokio::join!(
             registry.set_runtime_event_sink(sink.clone()),
-            runtime.reload()
+            runtime.restart()
         );
-        reload_result.unwrap();
+        restart_result.unwrap();
         let generation = runtime.runtime_generation();
 
         runtime.try_shutdown().await.unwrap();
@@ -2799,7 +2773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_runtime_instance_preserves_runtime_handles() {
+    async fn update_runtime_instance_saves_profile_without_restarting_active_handle() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance_with_input("one", "Initial Label")],
@@ -2807,6 +2781,7 @@ mod tests {
 
         let before = registry.runtime("one").await.unwrap();
         registry.start_runtime("one").await.unwrap();
+        let generation_before_update = before.runtime_generation();
         let mut updated = instance_with_input("one", "Updated Label");
         updated.name = "Renamed".to_string();
         let after = registry.update_runtime_instance(updated).await.unwrap();
@@ -2822,6 +2797,8 @@ mod tests {
         ));
         assert_eq!(before.runtime_incarnation, after.runtime_incarnation);
         assert!(Arc::ptr_eq(&before.lifecycle_lock, &after.lifecycle_lock));
+        assert_eq!(after.runtime_generation(), generation_before_update);
+        assert_eq!(after.computer.read().await.name(), "Computer");
         let inputs = after.inputs.read().await;
         let input = inputs.get("api-key").expect("input should be synced");
         assert!(matches!(
@@ -2836,10 +2813,15 @@ mod tests {
             after.sdk_skill_home().await,
             after.skill_home_base.join("one").join("skill_home")
         );
+        drop(inputs);
+
+        after.restart().await.unwrap();
+        assert_eq!(after.runtime_generation(), generation_before_update + 1);
+        assert_eq!(after.computer.read().await.name(), "Renamed");
     }
 
     #[tokio::test]
-    async fn runtime_rebuild_restores_default_skill_home_when_override_is_cleared() {
+    async fn start_reads_saved_skill_home_without_rebuilding_during_save() {
         let registry = ComputerRegistry::from_config_with_skill_home_base(
             ComputerInstancesConfig {
                 schema_version: 1,
@@ -2856,6 +2838,11 @@ mod tests {
         updated.local_skills_root = None;
         let runtime = registry.update_runtime_instance(updated).await.unwrap();
 
+        assert_eq!(
+            runtime.sdk_skill_home().await,
+            PathBuf::from("/tmp/custom-skill-home")
+        );
+        runtime.start().await.unwrap();
         assert_eq!(
             runtime.sdk_skill_home().await,
             runtime.skill_home_base.join("one").join("skill_home")
@@ -2920,7 +2907,7 @@ mod tests {
         assert!(Arc::ptr_eq(&before.computer, &after.computer));
         assert!(after.is_running().await);
         assert!(after.sdk_is_mcp_manager_initialized().await);
-        assert_eq!(after.computer.read().await.name(), "Updated");
+        assert_eq!(after.computer.read().await.name(), "Initial");
         assert!(after.sdk_mcp_server_ids().await.is_empty());
     }
 

@@ -112,7 +112,7 @@ describe('runtimeStore', () => {
     useRuntimeStore.getState().receiveSnapshot('computer-a', nextRuntime);
 
     expect(useComputerStore.getState().instances[0]).toMatchObject({
-      status: 'running',
+      status: 'degraded',
       mcpServerCount: 4,
       runtime: nextRuntime,
     });
@@ -548,13 +548,13 @@ describe('runtimeStore', () => {
 
     useRuntimeStore.getState().receiveEvent({
       instance_id: 'computer-a',
-      cause: { kind: 'handle_replaced', reason: 'reload' },
+      cause: { kind: 'handle_replaced', reason: 'restart' },
       snapshot: runtimeSnapshot({ incarnation: 2, snapshot_revision: 1 }),
       connection: { present: false, revision: 0, context: null },
     });
     expect(useRuntimeStore.getState().eventsByInstance['computer-a']).toMatchObject([
       {
-        cause: { kind: 'handle_replaced', reason: 'reload' },
+        cause: { kind: 'handle_replaced', reason: 'restart' },
         snapshot: { incarnation: 2, snapshot_revision: 1 },
       },
     ]);

@@ -1,5 +1,5 @@
 use crate::services::computer::{
-    ClientConnectionAuthoritySnapshot, ComputerRuntimeActionCapabilities,
+    ClientConnectionAuthoritySnapshot, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
 };
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ pub struct ComputerRuntimeSnapshot {
     pub generation: u64,
     pub snapshot_revision: u64,
     pub lifecycle: LifecycleState,
+    pub user_state: ComputerRuntimeUserState,
     pub actions: ComputerRuntimeActionCapabilities,
     pub config_revision: u64,
     pub capability_revision: u64,
@@ -38,6 +39,7 @@ impl ComputerRuntimeSnapshot {
             generation,
             snapshot_revision,
             lifecycle,
+            user_state: lifecycle.into(),
             actions: ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle),
             config_revision: snapshot.config_revision,
             capability_revision: snapshot.capability_revision,
@@ -194,6 +196,7 @@ mod tests {
         assert_eq!(snapshot.generation, 7);
         assert_eq!(snapshot.snapshot_revision, 11);
         assert_eq!(snapshot.lifecycle, LifecycleState::Degraded);
+        assert_eq!(snapshot.user_state, ComputerRuntimeUserState::Degraded);
         assert_eq!(snapshot.config_revision, 2);
         assert_eq!(snapshot.capability_revision, 3);
         assert!(snapshot.is_running());

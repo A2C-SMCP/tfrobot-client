@@ -281,10 +281,10 @@ pub async fn upsert_computer_mcp_config_core(
                     .await
                 {
                     runtime
-                        .mark_sdk_config_reload_required(
+                        .record_mcp_config_apply_diagnostic(
                             previous_bundle_id.clone(),
                             format!(
-                                "Configuration saved; previous runtime identity cleanup failed: {error}"
+                                "Configuration saved, but the previous MCP runtime identity could not be removed: {error}. Restart Runtime or inspect the logs before retrying."
                             ),
                         )
                         .await;
@@ -393,9 +393,11 @@ pub async fn remove_computer_mcp_config_core(
         if let Some(bundle_id) = bundle_id {
             if let Err(error) = runtime.remove_user_mcp_server_config(&bundle_id).await {
                 runtime
-                    .mark_sdk_config_reload_required(
+                    .record_mcp_config_apply_diagnostic(
                         bundle_id.clone(),
-                        format!("Configuration removed; runtime cleanup failed: {error}"),
+                        format!(
+                            "Configuration removed, but the active MCP runtime could not be cleaned up: {error}. Restart Runtime or inspect the logs before retrying."
+                        ),
                     )
                     .await;
                 return Err(format!(

@@ -5,8 +5,8 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
-    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ComputerRuntimeState,
-    ConnectionStateSummary, RobotBindingMetadata,
+    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ConnectionStateSummary,
+    RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::keychain;
@@ -547,6 +547,14 @@ pub async fn start_computer_instance_core(
         .config
         .get_computer_instance(&id)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let current_runtime =
+        state.computer_registry.runtime(&id).await.ok_or_else(|| {
+            RuntimeActionError::runtime(format!("Computer instance not found: {id}"))
+        })?;
+    current_runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Start)
+        .await
+        .map_err(RuntimeActionError::from)?;
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
@@ -555,15 +563,6 @@ pub async fn start_computer_instance_core(
         .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
-    if !matches!(
-        runtime.runtime_state().await,
-        ComputerRuntimeState::Started | ComputerRuntimeState::Degraded
-    ) {
-        runtime
-            .ensure_runtime_action(ComputerRuntimeAction::Start)
-            .await
-            .map_err(RuntimeActionError::from)?;
-    }
     runtime.start().await.map_err(RuntimeActionError::from)?;
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -634,68 +633,24 @@ pub async fn restart_computer_instance_core(
         .config
         .get_computer_instance(&id)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let current_runtime =
+        state.computer_registry.runtime(&id).await.ok_or_else(|| {
+            RuntimeActionError::runtime(format!("Computer instance not found: {id}"))
+        })?;
+    current_runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Restart)
+        .await
+        .map_err(RuntimeActionError::from)?;
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     let runtime = state
         .computer_registry
         .update_runtime_instance_typed(instance.clone())
-        .await
-        .map_err(RuntimeActionError::from)?;
-    runtime
-        .ensure_runtime_action(ComputerRuntimeAction::Restart)
         .await
         .map_err(RuntimeActionError::from)?;
     runtime.restart().await.map_err(RuntimeActionError::from)?;
     if instance.connection_policy.auto_connect {
-        if let Some(target) = instance.connection_policy.target.as_ref() {
-            connect_computer_connection_target_by_policy(app, state, &id, target)
-                .await
-                .map_err(RuntimeActionError::runtime)?;
-        }
-    }
-
-    Ok(status_from_instance(&instance, &runtime).await)
-}
-
-#[tauri::command]
-pub async fn reload_computer_runtime(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    reload_computer_runtime_core(Some(&app), &state, id).await
-}
-
-pub async fn reload_computer_runtime_core(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    id: ComputerInstanceId,
-) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let instance = state
-        .config
-        .get_computer_instance(&id)
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let instance = state
-        .hydrate_computer_instance(instance)
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance_typed(instance.clone())
-        .await
-        .map_err(RuntimeActionError::from)?;
-    runtime
-        .ensure_runtime_action(ComputerRuntimeAction::Reload)
-        .await
-        .map_err(RuntimeActionError::from)?;
-    runtime.reload().await.map_err(RuntimeActionError::from)?;
-    if runtime
-        .ensure_runtime_action(ComputerRuntimeAction::Connect)
-        .await
-        .is_ok()
-        && instance.connection_policy.auto_connect
-    {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             connect_computer_connection_target_by_policy(app, state, &id, target)
                 .await
@@ -1191,6 +1146,8 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::inputs::InputDefinition;
+    use crate::services::computer::ComputerRuntimeState;
     use crate::services::config::ConfigService;
     use crate::services::logger::LogService;
     use crate::services::settings::SettingsService;
@@ -1209,9 +1166,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_computer_skill_home_updates_runtime_and_can_restore_default() {
+    async fn update_computer_skill_home_saves_without_restarting_runtime() {
         let (state, dir) = test_state();
         let custom_root = dir.path().join("custom-skill-home");
+        let default_root = state.config.default_local_skills_root("computer-a");
 
         let updated = update_computer_skill_home_core(
             &state,
@@ -1224,7 +1182,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(updated.local_skills_root, Some(custom_root.clone()));
-        assert_eq!(updated.effective_skill_home, custom_root);
+        assert_eq!(updated.effective_skill_home, default_root);
+
+        let started = start_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(started.effective_skill_home, custom_root.clone());
+        let generation_before_save = started.runtime.generation;
 
         let restored = update_computer_skill_home_core(
             &state,
@@ -1237,10 +1201,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(restored.local_skills_root, None);
-        assert_eq!(
-            restored.effective_skill_home,
-            state.config.default_local_skills_root("computer-a")
-        );
+        assert_eq!(restored.effective_skill_home, custom_root);
+        assert_eq!(restored.runtime.generation, generation_before_save);
+
+        let restarted = restart_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(restarted.effective_skill_home, default_root);
+        assert!(restarted.runtime.generation > generation_before_save);
     }
 
     #[tokio::test]
@@ -1266,14 +1234,59 @@ mod tests {
             .mcp_servers
             .is_empty());
 
-        let before_reload = get_computer_instance_status_core(&state, "computer-a".to_string())
+        let before_start = get_computer_instance_status_core(&state, "computer-a".to_string())
             .await
             .unwrap();
-        assert_eq!(before_reload.mcp_server_count, 0);
+        assert_eq!(before_start.mcp_server_count, 0);
 
-        let after_reload = reload_computer_runtime_core(None, &state, "computer-a".to_string())
+        let after_start = start_computer_instance_core(None, &state, "computer-a".to_string())
             .await
             .unwrap();
-        assert_eq!(after_reload.mcp_server_count, 1);
+        assert_eq!(after_start.mcp_server_count, 1);
+    }
+
+    #[tokio::test]
+    async fn start_command_rejects_an_already_running_runtime() {
+        let (state, _dir) = test_state();
+        let started = start_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        state
+            .config
+            .update_computer_instance("computer-a", |instance| {
+                instance.inputs = vec![InputDefinition::PromptString {
+                    id: "new-input".to_string(),
+                    label: "New Input".to_string(),
+                    description: None,
+                    default: None,
+                    password: None,
+                }];
+            })
+            .unwrap();
+        let runtime = state.computer_registry.runtime("computer-a").await.unwrap();
+        let config_revision_before_rejected_start =
+            runtime.runtime_snapshot().await.config_revision;
+
+        let error = start_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeActionError::ActionUnavailable {
+                action,
+                lifecycle,
+                disabled_reason,
+                ..
+            } if action == "start"
+                && lifecycle == ComputerRuntimeState::Started.to_string()
+                && disabled_reason == "already_running"
+        ));
+        assert_eq!(runtime.runtime_generation(), started.runtime.generation);
+        assert_eq!(
+            runtime.runtime_snapshot().await.config_revision,
+            config_revision_before_rejected_start,
+            "a rejected start must not synchronize newly persisted inputs into the active SDK handle"
+        );
     }
 }

@@ -13,14 +13,33 @@ export type ComputerRuntimeLifecycle =
   | 'shutdown'
   | 'error';
 
+export type ComputerRuntimeUserState =
+  | 'not_running'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'degraded'
+  | 'error';
+
+export type ComputerRuntimeActionDisabledReason =
+  | 'already_running'
+  | 'not_running'
+  | 'transition_in_progress'
+  | 'degraded'
+  | 'connection_unavailable';
+
+export interface ComputerRuntimeActionCapability {
+  enabled: boolean;
+  disabled_reason?: ComputerRuntimeActionDisabledReason | null;
+}
+
 export interface ComputerRuntimeActionCapabilities {
-  can_start: boolean;
-  can_stop: boolean;
-  can_restart: boolean;
-  can_reload: boolean;
-  can_connect: boolean;
-  can_disconnect: boolean;
-  can_manage_mcp: boolean;
+  start: ComputerRuntimeActionCapability;
+  stop: ComputerRuntimeActionCapability;
+  restart: ComputerRuntimeActionCapability;
+  connect: ComputerRuntimeActionCapability;
+  disconnect: ComputerRuntimeActionCapability;
+  manage_mcp: ComputerRuntimeActionCapability;
 }
 
 export interface ComputerRuntimeSnapshot {
@@ -28,6 +47,7 @@ export interface ComputerRuntimeSnapshot {
   generation: number;
   snapshot_revision: number;
   lifecycle: ComputerRuntimeLifecycle;
+  user_state: ComputerRuntimeUserState;
   actions: ComputerRuntimeActionCapabilities;
   config_revision: number;
   capability_revision: number;
@@ -61,7 +81,7 @@ export function isRuntimeTransportConnected(runtime: ComputerRuntimeSnapshot): b
   return runtime.lifecycle === 'connected' || runtime.lifecycle === 'joined_office';
 }
 
-export type RuntimeExecutionStatus = 'running' | 'stopped' | 'error';
+export type RuntimeExecutionStatus = ComputerRuntimeUserState;
 
 export interface RuntimeProjection {
   status: RuntimeExecutionStatus;
@@ -84,7 +104,7 @@ export function projectRuntimeSnapshot(
 ): RuntimeProjection {
   const running = isRuntimeRunning(runtime);
   return {
-    status: runtime.lifecycle === 'error' ? 'error' : running ? 'running' : 'stopped',
+    status: runtime.user_state,
     running,
     businessConnected: clientConnected && runtime.lifecycle === 'joined_office',
     mcpServerCount: runtime.mcp_servers,

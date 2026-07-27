@@ -6,13 +6,14 @@ impl ComputerInstanceRuntime {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         let lifecycle = self.runtime_state().await;
-        if self.sdk_config_reload_required.load(Ordering::Acquire)
-            || matches!(
-                lifecycle,
-                LifecycleState::Stopped | LifecycleState::Shutdown | LifecycleState::Error
-            )
-        {
-            self.replace_sdk_computer(false, "start_after_terminal")
+        if matches!(
+            lifecycle,
+            LifecycleState::Created
+                | LifecycleState::Stopped
+                | LifecycleState::Shutdown
+                | LifecycleState::Error
+        ) {
+            self.replace_sdk_computer(false, "start_with_persisted_configuration")
                 .await?;
         } else if matches!(
             lifecycle,
@@ -246,14 +247,6 @@ impl ComputerInstanceRuntime {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         self.replace_sdk_computer(true, "restart").await
-    }
-
-    pub async fn reload(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()
-            .map_err(ComputerRuntimeStartError::Client)?;
-        let was_running = self.is_running().await;
-        self.replace_sdk_computer(was_running, "reload").await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {

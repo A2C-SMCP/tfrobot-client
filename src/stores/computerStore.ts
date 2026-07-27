@@ -11,17 +11,19 @@ import {
   resolveRuntimeSnapshot,
   type ComputerRuntimeSnapshot,
 } from './runtimeSnapshot';
+import type { ComputerRuntimeUserState } from './runtimeSnapshot';
 
 export {
   isRuntimeRunning,
   isRuntimeTransportConnected,
   type ComputerRuntimeActionCapabilities,
   type ComputerRuntimeLifecycle,
+  type ComputerRuntimeUserState,
   type ComputerRuntimeSnapshot,
 } from './runtimeSnapshot';
 export type { ConnectionStateSummary } from './connectionAuthority';
 
-export type ComputerStatus = 'running' | 'stopped' | 'error';
+export type ComputerStatus = ComputerRuntimeUserState;
 export type ComputerConnectionStatus = 'connected' | 'disconnected';
 
 export interface RobotBindingMetadata {
@@ -118,7 +120,6 @@ interface ComputerState {
   startInstance: (id: string) => Promise<ComputerInstance>;
   stopInstance: (id: string) => Promise<ComputerInstance>;
   restartInstance: (id: string) => Promise<ComputerInstance>;
-  reloadRuntime: (id: string) => Promise<ComputerInstance>;
   applyRuntimeSnapshot: (id: string, runtime: ComputerRuntimeSnapshot) => void;
   updateConnectionPolicy: (
     id: string,
@@ -683,34 +684,6 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         selectedInstanceId: state.selectedInstanceId,
       }));
       return requireInstance(get().instances, restarted.id);
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
-      throw e;
-    } finally {
-      set((state) => {
-        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
-        return {
-          pendingMutationCount,
-          loading: pendingMutationCount > 0,
-          mutationCompletionRevision: state.mutationCompletionRevision + 1,
-        };
-      });
-    }
-  },
-
-  reloadRuntime: async (id) => {
-    set((state) => ({
-      loading: true,
-      error: null,
-      pendingMutationCount: state.pendingMutationCount + 1,
-    }));
-    try {
-      const reloaded = await ingestStatus(await invoke<ComputerInstanceStatus>('reload_computer_runtime', { id }));
-      set((state) => ({
-        instances: upsertRuntimeAction(state.instances, reloaded),
-        selectedInstanceId: state.selectedInstanceId,
-      }));
-      return requireInstance(get().instances, reloaded.id);
     } catch (e) {
       set({ error: formatRuntimeActionError(e) });
       throw e;

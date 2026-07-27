@@ -318,6 +318,24 @@ describe('Computer', () => {
     });
   }, 20000);
 
+  it('offers disconnect from list and detail when connection authority precedes joined-office', async () => {
+    const authorityConnectedInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      client_connection_present: true,
+      runtime: runtimeSnapshot({ lifecycle: 'connected' }),
+      connection: null,
+    };
+    mockInvoke.mockResolvedValueOnce([authorityConnectedInstance]);
+
+    render(<Computer />);
+
+    expect(await screen.findByRole('button', { name: 'Disconnect' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    expect(screen.getByRole('button', { name: /Disconnect$/ })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+  }, 20000);
+
   it('disables detail connect for a Manager Robot target without robotAccountId', async () => {
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
@@ -413,7 +431,7 @@ describe('Computer', () => {
     });
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Stop' })[0]);
-    expect(await screen.findByText('Stopped')).toBeInTheDocument();
+    expect(await screen.findByText('Not Running')).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: 'Start' })[0]);
     expect(await screen.findByText('Running')).toBeInTheDocument();
 

@@ -85,11 +85,16 @@ export function Dashboard({ onNavigate }: DashboardProps) {
                   title={computer.name}
                   description={(
                     <Space wrap size={[8, 8]}>
-                      <Tag color={computer.running ? 'green' : 'default'}>
-                        {t(`computer.runtime.lifecycleStates.${computer.runtime.lifecycle}`)}
+                      <Tag color={computer.runtime.user_state === 'error'
+                        ? 'red'
+                        : computer.runtime.user_state === 'degraded'
+                          ? 'orange'
+                          : computer.running
+                            ? 'green'
+                            : 'default'}
+                      >
+                        {t(`computer.runtime.userStates.${computer.runtime.user_state}`)}
                       </Tag>
-                      <Tag>{t('computer.runtime.configRevision')}: {computer.runtime.config_revision}</Tag>
-                      <Tag>{t('computer.runtime.capabilityRevision')}: {computer.runtime.capability_revision}</Tag>
                       <Tag color={computer.connected ? 'green' : 'default'}>
                         {computer.connected ? t('connection.connected') : t('connection.disconnected')}
                       </Tag>

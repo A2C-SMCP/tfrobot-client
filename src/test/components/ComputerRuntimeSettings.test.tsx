@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '../helpers/render';
+import { render, screen, fireEvent, waitFor, within } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -32,7 +32,7 @@ describe('ComputerRuntimeSettings', () => {
       id: 'computer-a',
       name: 'Computer A',
       local_skills_root: '/next/skill-home',
-      effective_skill_home: '/next/skill-home',
+      effective_skill_home: '/custom/skill-home',
       running: true,
       runtime: runtimeSnapshot(),
       connected: false,
@@ -49,10 +49,10 @@ describe('ComputerRuntimeSettings', () => {
       target: { value: '/next/skill-home' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByText('Rebuild this Computer?')).toBeInTheDocument();
-    expect(screen.getByText(/Changing Skill Home saves a new capability governance root/)).toBeInTheDocument();
+    expect(await screen.findByText('Save Skill Home?')).toBeInTheDocument();
+    expect(screen.getByText(/without restarting the current Runtime/)).toBeInTheDocument();
     expect(mockInvoke).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('update_computer_skill_home', {
@@ -70,7 +70,7 @@ describe('ComputerRuntimeSettings', () => {
       id: 'computer-a',
       name: 'Computer A',
       local_skills_root: null,
-      effective_skill_home: '/default/skill_home',
+      effective_skill_home: '/custom/skill-home',
       running: true,
       runtime: runtimeSnapshot(),
       connected: false,
@@ -88,8 +88,8 @@ describe('ComputerRuntimeSettings', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Use Default' }));
-    expect(await screen.findByText('Rebuild this Computer?')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
+    expect(await screen.findByText('Save Skill Home?')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('update_computer_skill_home', {

@@ -9,6 +9,12 @@ type RuntimeActionError = MissingRuntimeInputError | {
   code: 'resolver_failed' | 'runtime_error';
   input_id?: string;
   message: string;
+} | {
+  code: 'action_unavailable';
+  action: string;
+  lifecycle: string;
+  disabled_reason: string;
+  message: string;
 };
 
 export function isMissingRuntimeInputError(error: unknown): error is MissingRuntimeInputError {

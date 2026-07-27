@@ -783,7 +783,7 @@ async fn test_mcp_lifecycle_requires_started_computer() {
     ] {
         assert_eq!(
             err,
-            "runtime action 'manage_mcp' is unavailable while lifecycle is 'created'"
+            "runtime action 'manage_mcp' is unavailable while lifecycle is 'created' (not_running)"
         );
     }
 }
@@ -1021,7 +1021,7 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap()
-        .reload()
+        .restart()
         .await
         .unwrap();
     mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
@@ -3549,7 +3549,7 @@ async fn test_project_scope_enable_allowlist_is_rejected_with_actionable_validat
 }
 
 #[tokio::test]
-async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
+async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     inputs::add_or_update_input_core(
@@ -3567,7 +3567,7 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     .unwrap();
     let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "stdio",
-        "name": "runtime-input-reload",
+        "name": "runtime-input-apply",
         "disabled": false,
         "server_parameters": {
             "command": "node",
@@ -3592,7 +3592,7 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
         .mcp
         .servers
         .into_iter()
-        .find(|server| server.name == "runtime-input-reload")
+        .find(|server| server.name == "runtime-input-apply")
         .unwrap();
     assert_eq!(
         serde_json::to_value(persisted.config).unwrap()["server_parameters"]["env"]
@@ -3627,7 +3627,7 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-reload"))
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-apply"))
         .await
         .unwrap();
 
@@ -3639,7 +3639,7 @@ async fn test_mcp_runtime_reloads_config_after_missing_input_is_supplied() {
     assert!(runtime
         .sdk_mcp_server_ids()
         .await
-        .contains(&bundle_id("runtime-input-reload")));
+        .contains(&bundle_id("runtime-input-apply")));
 }
 
 #[tokio::test]
@@ -3727,39 +3727,27 @@ async fn create_running_input_backed_state(path: &std::path::Path, server_name: 
 }
 
 #[tokio::test]
-async fn test_restart_and_reload_preserve_structured_missing_input_error() {
+async fn test_restart_preserves_structured_missing_input_error() {
     require_node();
-    for action in ["restart", "reload"] {
-        let tmp = tempfile::tempdir().unwrap();
-        let state =
-            create_running_input_backed_state(tmp.path(), &format!("{action}-runtime-input")).await;
-        inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "runtime-token")
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_running_input_backed_state(tmp.path(), "restart-runtime-input").await;
+    inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "runtime-token")
+        .await
+        .unwrap();
+
+    let error =
+        computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
             .await
-            .unwrap();
+            .unwrap_err();
 
-        let error = match action {
-            "restart" => {
-                computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
-                    .await
-                    .unwrap_err()
-            }
-            "reload" => {
-                computer::reload_computer_runtime_core(None, &state, TEST_INSTANCE_ID.to_string())
-                    .await
-                    .unwrap_err()
-            }
-            _ => unreachable!(),
-        };
-
-        assert!(
-            matches!(
-                error,
-                RuntimeActionError::MissingInput { ref input_id, .. }
-                    if input_id == "runtime-token"
-            ),
-            "{action} returned an unexpected error: {error:?}"
-        );
-    }
+    assert!(
+        matches!(
+            error,
+            RuntimeActionError::MissingInput { ref input_id, .. }
+                if input_id == "runtime-token"
+        ),
+        "restart returned an unexpected error: {error:?}"
+    );
 }
 
 #[tokio::test]

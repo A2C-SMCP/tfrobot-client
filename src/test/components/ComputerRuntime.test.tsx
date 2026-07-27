@@ -40,7 +40,6 @@ describe('ComputerRuntime', () => {
   it('renders SDK runtime state and exposes lifecycle operations separately', () => {
     const onStartStop = vi.fn();
     const onRestart = vi.fn();
-    const onReload = vi.fn();
     const onConnect = vi.fn();
 
     render(
@@ -50,12 +49,14 @@ describe('ComputerRuntime', () => {
         canConnect
         onStartStop={onStartStop}
         onRestart={onRestart}
-        onReload={onReload}
         onConnect={onConnect}
         onDisconnect={vi.fn()}
       />,
     );
 
+    expect(screen.getByText('Running')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reload$/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Advanced Runtime Diagnostics'));
     expect(screen.getByText('Started')).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Runtime Generation 2' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Config Revision 4' })).toBeInTheDocument();
@@ -64,12 +65,10 @@ describe('ComputerRuntime', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Stop$/ }));
     fireEvent.click(screen.getByRole('button', { name: /Restart$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Reload$/ }));
     fireEvent.click(screen.getByRole('button', { name: /Connect$/ }));
 
     expect(onStartStop).toHaveBeenCalledOnce();
     expect(onRestart).toHaveBeenCalledOnce();
-    expect(onReload).toHaveBeenCalledOnce();
     expect(onConnect).toHaveBeenCalledOnce();
   }, 30_000);
 
@@ -98,12 +97,12 @@ describe('ComputerRuntime', () => {
         canConnect
         onStartStop={vi.fn()}
         onRestart={vi.fn()}
-        onReload={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
       />,
     );
 
+    fireEvent.click(screen.getByText('Advanced Runtime Diagnostics'));
     expect(screen.getByRole('cell', { name: 'Snapshot Revision 9' })).toBeInTheDocument();
     expect(screen.getByText('Recent Runtime Events')).toBeInTheDocument();
     expect(screen.getByText('Config revision changed to 4')).toBeInTheDocument();
@@ -124,7 +123,6 @@ describe('ComputerRuntime', () => {
         connectDisabledReason="Start the Computer first"
         onStartStop={vi.fn()}
         onRestart={vi.fn()}
-        onReload={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
       />,
@@ -147,7 +145,6 @@ describe('ComputerRuntime', () => {
         canConnect={false}
         onStartStop={vi.fn()}
         onRestart={vi.fn()}
-        onReload={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
       />,
@@ -155,8 +152,40 @@ describe('ComputerRuntime', () => {
 
     expect(screen.getByRole('button', { name: /Stop$/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Restart$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Reload$/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Connect$/ })).toBeDisabled();
+    expect(screen.getAllByText('Wait for the current Runtime operation to finish.')).toHaveLength(2);
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
   });
+
+  it.each([
+    ['connected', 'running'],
+    ['degraded', 'degraded'],
+  ] as const)(
+    'offers disconnect while the client connection authority is present in %s lifecycle',
+    (lifecycle, status) => {
+      const onDisconnect = vi.fn();
+      render(
+        <ComputerRuntime
+          instance={instance({
+            status,
+            connectionStatus: 'disconnected',
+            clientConnectionPresent: true,
+            runtime: runtimeSnapshot({ lifecycle }),
+          })}
+          loading={false}
+          canConnect={false}
+          onStartStop={vi.fn()}
+          onRestart={vi.fn()}
+          onConnect={vi.fn()}
+          onDisconnect={onDisconnect}
+        />,
+      );
+
+      const disconnect = screen.getByRole('button', { name: /Disconnect$/ });
+      expect(disconnect).toBeEnabled();
+      expect(screen.queryByRole('button', { name: /Connect$/ })).not.toBeInTheDocument();
+      fireEvent.click(disconnect);
+      expect(onDisconnect).toHaveBeenCalledOnce();
+    },
+  );
 });

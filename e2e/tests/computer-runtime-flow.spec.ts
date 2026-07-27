@@ -55,7 +55,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
 
     await openComputerTab(page, 'Runtime');
     await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Reload$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Reload$/ })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Start All' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Stop All' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import Config' })).not.toBeVisible();
@@ -70,6 +70,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
 
   test('projects runtime status events into the active Computer view and refreshes consumers', async ({ page }) => {
     await openComputerTab(page, 'Runtime');
+    await page.getByText('Advanced Runtime Diagnostics').click();
     await expect(page.getByRole('cell', { name: /Snapshot Revision\s*:\s*1/ })).toBeVisible();
     await expect(page.getByRole('cell', { name: /Capability Revision\s*:\s*1/ })).toBeVisible();
 
@@ -106,14 +107,14 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
             generation: 1,
             snapshot_revision: 2,
             lifecycle: 'started',
+            user_state: 'running',
             actions: {
-              can_start: false,
-              can_stop: true,
-              can_restart: true,
-              can_reload: true,
-              can_connect: true,
-              can_disconnect: false,
-              can_manage_mcp: true,
+              start: { enabled: false, disabled_reason: 'already_running' },
+              stop: { enabled: true, disabled_reason: null },
+              restart: { enabled: true, disabled_reason: null },
+              connect: { enabled: true, disabled_reason: null },
+              disconnect: { enabled: false, disabled_reason: 'connection_unavailable' },
+              manage_mcp: { enabled: true, disabled_reason: null },
             },
             config_revision: 1,
             capability_revision: 2,

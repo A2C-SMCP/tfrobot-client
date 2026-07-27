@@ -1324,7 +1324,7 @@ async fn profile_connect_requires_running_computer() {
 
     assert_eq!(
         err,
-        "runtime action 'connect' is unavailable while lifecycle is 'created'"
+        "runtime action 'connect' is unavailable while lifecycle is 'created' (not_running)"
     );
     assert!(runtime
         .connection_handle_for_test()

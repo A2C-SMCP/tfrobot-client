@@ -3,6 +3,7 @@ import {
   Button,
   Card,
   Col,
+  Collapse,
   Descriptions,
   Empty,
   List,
@@ -17,13 +18,12 @@ import {
   DisconnectOutlined,
   LinkOutlined,
   PlayCircleOutlined,
-  ReloadOutlined,
   RetweetOutlined,
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
-import { isRuntimeRunning, type ComputerInstance } from '@/stores/computerStore';
+import type { ComputerInstance } from '@/stores/computerStore';
 import {
   useRuntimeStore,
   type ComputerRuntimeEventCause,
@@ -39,7 +39,6 @@ interface ComputerRuntimeProps {
   connectDisabledReason?: string;
   onStartStop: () => void;
   onRestart: () => void;
-  onReload: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
 }
@@ -51,22 +50,50 @@ export function ComputerRuntime({
   connectDisabledReason,
   onStartStop,
   onRestart,
-  onReload,
   onConnect,
   onDisconnect,
 }: ComputerRuntimeProps) {
   const { t } = useTranslation();
   const runtime = instance.runtime;
   const actions = runtime.actions;
+  const hasClientConnection = instance.clientConnectionPresent
+    ?? instance.connectionStatus === 'connected';
   const recentEvents = useRuntimeStore((state) => state.eventsByInstance[instance.id])
     ?? EMPTY_RUNTIME_EVENTS;
-  const running = isRuntimeRunning(runtime);
-  const lifecycleColor = runtime.lifecycle === 'error'
+  const primaryAction = ['running', 'degraded', 'stopping'].includes(runtime.user_state)
+    ? 'stop'
+    : 'start';
+  const primaryCapability = actions[primaryAction];
+  const primaryActionLabel = runtime.user_state === 'starting'
+    ? t('computer.runtime.actionProgress.starting')
+    : runtime.user_state === 'stopping'
+      ? t('computer.runtime.actionProgress.stopping')
+      : primaryAction === 'stop'
+        ? t('computer.stop')
+        : t('computer.start');
+  const primaryDisabledReason = primaryCapability.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${primaryCapability.disabled_reason}`)
+    : undefined;
+  const restartDisabledReason = actions.restart.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${actions.restart.disabled_reason}`)
+    : undefined;
+  const backendConnectDisabledReason = actions.connect.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${actions.connect.disabled_reason}`)
+    : undefined;
+  const disconnectDisabledReason = actions.disconnect.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${actions.disconnect.disabled_reason}`)
+    : undefined;
+  const mcpDisabledReason = actions.manage_mcp.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${actions.manage_mcp.disabled_reason}`)
+    : undefined;
+  const runtimeStateColor = runtime.user_state === 'error'
     ? 'red'
-    : runtime.lifecycle === 'degraded'
+    : runtime.user_state === 'degraded'
       ? 'orange'
-        : running
+      : runtime.user_state === 'running'
         ? 'green'
+        : runtime.user_state === 'starting' || runtime.user_state === 'stopping'
+          ? 'blue'
         : 'default';
   const describeEventCause = (cause: ComputerRuntimeEventCause): string => {
     switch (cause.kind) {
@@ -121,45 +148,41 @@ export function ComputerRuntime({
         extra={(
           <Space wrap>
             <Button
-              icon={running ? <StopOutlined /> : <PlayCircleOutlined />}
-              disabled={running ? !actions.can_stop : !actions.can_start}
+              type="primary"
+              icon={primaryAction === 'stop' ? <StopOutlined /> : <PlayCircleOutlined />}
+              disabled={!primaryCapability.enabled}
               loading={loading}
               onClick={onStartStop}
             >
-              {running ? t('computer.stop') : t('computer.start')}
+              {primaryActionLabel}
             </Button>
-            <Button
-              icon={<RetweetOutlined />}
-              disabled={!actions.can_restart}
-              loading={loading}
-              onClick={onRestart}
-            >
-              {t('computer.runtime.restart')}
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              disabled={!actions.can_reload}
-              loading={loading}
-              onClick={onReload}
-            >
-              {t('computer.runtime.reload')}
-            </Button>
-            {instance.connectionStatus === 'connected' ? (
+            <Tooltip title={restartDisabledReason}>
               <Button
-                danger
-                icon={<DisconnectOutlined />}
-                disabled={!actions.can_disconnect}
+                icon={<RetweetOutlined />}
+                disabled={!actions.restart.enabled}
                 loading={loading}
-                onClick={onDisconnect}
+                onClick={onRestart}
               >
-                {t('connection.disconnect')}
+                {t('computer.runtime.restart')}
               </Button>
-            ) : (
-              <Tooltip title={connectDisabledReason}>
+            </Tooltip>
+            {hasClientConnection ? (
+              <Tooltip title={disconnectDisabledReason}>
                 <Button
-                  type="primary"
+                  danger
+                  icon={<DisconnectOutlined />}
+                  disabled={!actions.disconnect.enabled}
+                  loading={loading}
+                  onClick={onDisconnect}
+                >
+                  {t('connection.disconnect')}
+                </Button>
+              </Tooltip>
+            ) : (
+              <Tooltip title={backendConnectDisabledReason ?? connectDisabledReason}>
+                <Button
                   icon={<LinkOutlined />}
-                  disabled={!canConnect || !actions.can_connect}
+                  disabled={!canConnect || !actions.connect.enabled}
                   loading={loading}
                   onClick={onConnect}
                 >
@@ -170,28 +193,23 @@ export function ComputerRuntime({
           </Space>
         )}
       >
-        <Descriptions column={{ xs: 1, sm: 2, lg: 3 }} size="small">
-          <Descriptions.Item label={t('computer.runtime.lifecycle')}>
-            <Tag color={lifecycleColor}>{t(`computer.runtime.lifecycleStates.${runtime.lifecycle}`)}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label={t('computer.runtime.generation')}>
-            {runtime.generation}
-          </Descriptions.Item>
-          <Descriptions.Item label={t('computer.runtime.snapshotRevision')}>
-            {runtime.snapshot_revision}
-          </Descriptions.Item>
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Descriptions column={{ xs: 1, sm: 2 }} size="small">
+            <Descriptions.Item label={t('computer.runtime.userState')}>
+              <Tag color={runtimeStateColor}>
+                {t(`computer.runtime.userStates.${runtime.user_state}`)}
+              </Tag>
+            </Descriptions.Item>
           <Descriptions.Item label={t('computer.runtime.connection')}>
             <Tag color={instance.connectionStatus === 'connected' ? 'green' : 'default'}>
               {t(`computer.connection.${instance.connectionStatus}`)}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label={t('computer.runtime.configRevision')}>
-            {runtime.config_revision}
-          </Descriptions.Item>
-          <Descriptions.Item label={t('computer.runtime.capabilityRevision')}>
-            {runtime.capability_revision}
-          </Descriptions.Item>
-        </Descriptions>
+          </Descriptions>
+          {primaryDisabledReason && (
+            <Typography.Text type="secondary">{primaryDisabledReason}</Typography.Text>
+          )}
+        </Space>
       </Card>
 
       <Row gutter={[16, 16]}>
@@ -209,40 +227,71 @@ export function ComputerRuntime({
         </Col>
       </Row>
 
-      <Card title={t('computer.runtime.recentEvents')}>
-        {recentEvents.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('computer.runtime.noEvents')} />
-        ) : (
-          <List
-            size="small"
-            dataSource={[...recentEvents].reverse()}
-            renderItem={(event) => (
-              <List.Item
-                key={`${event.snapshot.incarnation}-${event.snapshot.generation}-${event.snapshot.snapshot_revision}`}
-              >
-                <List.Item.Meta
-                  title={describeEventCause(event.cause)}
-                  description={(
-                    <Typography.Text type="secondary">
-                      {t('computer.runtime.eventRevision', {
-                        revision: event.snapshot.snapshot_revision,
-                        receivedAt: new Date(event.received_at).toLocaleString(),
-                      })}
-                    </Typography.Text>
-                  )}
-                />
-              </List.Item>
-            )}
-          />
-        )}
-      </Card>
-
       <Card title={t('computer.runtime.mcpLifecycle')}>
         <McpRuntimeControls
           instanceId={instance.id}
-          disabled={!actions.can_manage_mcp}
+          disabled={!actions.manage_mcp.enabled}
         />
+        {mcpDisabledReason && (
+          <Typography.Text type="secondary">{mcpDisabledReason}</Typography.Text>
+        )}
       </Card>
+
+      <Collapse
+        items={[{
+          key: 'advanced-runtime-diagnostics',
+          label: t('computer.runtime.advancedDiagnostics'),
+          children: (
+            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <Descriptions column={{ xs: 1, sm: 2, lg: 3 }} size="small">
+                <Descriptions.Item label={t('computer.runtime.lifecycle')}>
+                  <Tag>{t(`computer.runtime.lifecycleStates.${runtime.lifecycle}`)}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label={t('computer.runtime.generation')}>
+                  {runtime.generation}
+                </Descriptions.Item>
+                <Descriptions.Item label={t('computer.runtime.snapshotRevision')}>
+                  {runtime.snapshot_revision}
+                </Descriptions.Item>
+                <Descriptions.Item label={t('computer.runtime.configRevision')}>
+                  {runtime.config_revision}
+                </Descriptions.Item>
+                <Descriptions.Item label={t('computer.runtime.capabilityRevision')}>
+                  {runtime.capability_revision}
+                </Descriptions.Item>
+              </Descriptions>
+              <Typography.Title level={5} style={{ margin: 0 }}>
+                {t('computer.runtime.recentEvents')}
+              </Typography.Title>
+              {recentEvents.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('computer.runtime.noEvents')} />
+              ) : (
+                <List
+                  size="small"
+                  dataSource={[...recentEvents].reverse()}
+                  renderItem={(event) => (
+                    <List.Item
+                      key={`${event.snapshot.incarnation}-${event.snapshot.generation}-${event.snapshot.snapshot_revision}`}
+                    >
+                      <List.Item.Meta
+                        title={describeEventCause(event.cause)}
+                        description={(
+                          <Typography.Text type="secondary">
+                            {t('computer.runtime.eventRevision', {
+                              revision: event.snapshot.snapshot_revision,
+                              receivedAt: new Date(event.received_at).toLocaleString(),
+                            })}
+                          </Typography.Text>
+                        )}
+                      />
+                    </List.Item>
+                  )}
+                />
+              )}
+            </Space>
+          ),
+        }]}
+      />
     </Space>
   );
 }

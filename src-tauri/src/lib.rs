@@ -357,7 +357,6 @@ pub fn run() {
             commands::computer::start_computer_instance,
             commands::computer::stop_computer_instance,
             commands::computer::restart_computer_instance,
-            commands::computer::reload_computer_runtime,
             commands::computer::update_computer_connection_policy,
             commands::computer::update_computer_skill_home,
             commands::computer::connect_computer_connection_target,

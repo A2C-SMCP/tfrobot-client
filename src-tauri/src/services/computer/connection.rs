@@ -309,25 +309,6 @@ impl ComputerInstanceRuntime {
             .fetch_add(1, Ordering::AcqRel);
     }
 
-    pub(super) async fn sdk_requires_rebuild(&self) -> bool {
-        let computer = self.computer.read().await;
-        if computer.name() != self.instance.name.as_str() {
-            return true;
-        }
-        if *self.sdk_auto_connect.read().await != self.instance.connection_policy.auto_connect {
-            return true;
-        }
-        if computer.skill_home()
-            != self.instance.local_skills_root.clone().unwrap_or_else(|| {
-                default_local_skills_root(&self.skill_home_base, &self.instance.id)
-            })
-        {
-            return true;
-        }
-
-        false
-    }
-
     pub(super) async fn connect_smcp_socketio_inner(
         &self,
         url: &str,

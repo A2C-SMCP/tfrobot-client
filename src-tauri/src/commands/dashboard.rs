@@ -272,12 +272,7 @@ mod tests {
             .runtime("computer-a")
             .await
             .unwrap()
-            .reload()
-            .await
-            .unwrap();
-        state
-            .computer_registry
-            .start_runtime("computer-a")
+            .restart()
             .await
             .unwrap();
         state
