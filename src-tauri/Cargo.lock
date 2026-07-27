@@ -4,12 +4,12 @@ version = 4
 
 [[package]]
 name = "a2c-smcp"
-version = "0.3.0-dev.0"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491#5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491"
+version = "0.3.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=ff544d1c3eba205953cb9f4c643bad6e1bab51db#ff544d1c3eba205953cb9f4c643bad6e1bab51db"
 dependencies = [
  "serde",
  "serde_json",
- "smcp 0.3.0-dev.0",
+ "smcp 0.3.0",
  "smcp-computer",
  "thiserror 2.0.18",
  "tokio",
@@ -4877,7 +4877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6350,8 +6350,8 @@ dependencies = [
 
 [[package]]
 name = "smcp"
-version = "0.3.0-dev.0"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491#5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491"
+version = "0.3.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=ff544d1c3eba205953cb9f4c643bad6e1bab51db#ff544d1c3eba205953cb9f4c643bad6e1bab51db"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6365,11 +6365,11 @@ dependencies = [
 
 [[package]]
 name = "smcp-client-transport"
-version = "0.3.0-dev.0"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491#5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491"
+version = "0.3.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=ff544d1c3eba205953cb9f4c643bad6e1bab51db#ff544d1c3eba205953cb9f4c643bad6e1bab51db"
 dependencies = [
  "serde_json",
- "smcp 0.3.0-dev.0",
+ "smcp 0.3.0",
  "tf-rust-engineio",
  "tf-rust-socketio",
  "tracing",
@@ -6377,8 +6377,8 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.3.0-dev.0"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491#5a490b3d189e2f5eeb8c8fa9f06eafb8f5486491"
+version = "0.3.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=ff544d1c3eba205953cb9f4c643bad6e1bab51db#ff544d1c3eba205953cb9f4c643bad6e1bab51db"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -6406,7 +6406,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "smcp 0.3.0-dev.0",
+ "smcp 0.3.0",
  "smcp-client-transport",
  "tar",
  "tf-rust-socketio",
