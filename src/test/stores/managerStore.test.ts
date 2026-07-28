@@ -231,7 +231,10 @@ describe('managerStore', () => {
       });
       expect(mockedInvoke).toHaveBeenCalledWith('list_computer_instances');
       expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
-      expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+      expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
+        status: 'disconnected',
+        connected: false,
+      });
       expect(useComputerStore.getState().instances[0]).toMatchObject({
         connectionStatus: 'disconnected',
         robotName: 'bot-one',

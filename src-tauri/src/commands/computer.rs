@@ -4,9 +4,9 @@ use crate::commands::connection::{
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
-    ComputerConnectionPolicy, ComputerConnectionTarget, ComputerConnectionTargetType,
-    ComputerInstance, ComputerInstanceId, ComputerRuntimeAction, ConnectionStateSummary,
-    RobotBindingMetadata,
+    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance, ComputerInstanceId,
+    ComputerRuntimeAction, ConnectionStateSummary, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::keychain;
@@ -26,6 +26,9 @@ pub struct ComputerInstanceStatus {
     pub effective_skill_home: PathBuf,
     pub running: bool,
     pub runtime: ComputerRuntimeSnapshot,
+    pub connection_state: ClientConnectionStateSnapshot,
+    // Compatibility projections for existing non-runtime consumers. `connection_state` is the
+    // only versioned source of truth and every alias below is derived from the same snapshot.
     pub connected: bool,
     pub client_connection_present: bool,
     pub connection_revision: u64,
@@ -738,7 +741,6 @@ pub async fn connect_computer_connection_target_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -757,7 +759,6 @@ pub async fn disconnect_computer_connection_target(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     disconnect_smcp_locked(&state, &id).await
 }
 
@@ -826,11 +827,9 @@ async fn status_from_instance(
 ) -> ComputerInstanceStatus {
     let runtime_snapshot = runtime.runtime_snapshot().await;
     let mcp_server_count = runtime_snapshot.mcp_servers;
-    let connection_authority = runtime.connection_authority_snapshot().await;
-    let connection_context = connection_authority.context;
-    let connected = runtime_snapshot.lifecycle
-        == crate::services::computer::ComputerRuntimeState::JoinedOffice
-        && connection_context.is_some();
+    let connection_state = runtime.connection_snapshot().await;
+    let connection_context = connection_state.context.clone();
+    let connected = connection_state.status == ClientConnectionStatus::Connected;
     ComputerInstanceStatus {
         id: instance.id.clone(),
         name: instance.name.clone(),
@@ -839,9 +838,10 @@ async fn status_from_instance(
         effective_skill_home: runtime.sdk_skill_home().await,
         running: runtime_snapshot.is_running(),
         runtime: runtime_snapshot,
+        connection_state: connection_state.clone(),
         connected,
         client_connection_present: connection_context.is_some(),
-        connection_revision: connection_authority.revision,
+        connection_revision: connection_state.revision,
         connection_context: connection_context.clone(),
         mcp_server_count,
         robot_binding: instance.robot_binding.clone(),

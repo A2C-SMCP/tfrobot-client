@@ -51,7 +51,12 @@ describe('computerOverviewStore', () => {
     await useComputerOverviewStore.getState().fetchOverview('computer-a');
 
     expect(mockedInvoke).toHaveBeenCalledWith('get_computer_overview_data', { instanceId: 'computer-a' });
-    expect(useComputerOverviewStore.getState().data).toEqual(mockData);
+    expect(useComputerOverviewStore.getState().data).toMatchObject(mockData);
+    expect(useComputerOverviewStore.getState().data?.connection_state).toMatchObject({
+      status: 'connected',
+      present: true,
+      revision: 0,
+    });
     expect(useComputerOverviewStore.getState().loading).toBe(false);
   });
 

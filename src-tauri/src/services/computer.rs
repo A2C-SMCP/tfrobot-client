@@ -46,7 +46,14 @@ mod registry;
 mod runtime;
 pub mod runtime_lifecycle;
 
-pub use connection::{ClientConnectionAuthoritySnapshot, ConnectionStateSummary};
+use connection::ClientConnectionOperationState;
+pub use connection::{
+    ClientConnectionActionCapabilities, ClientConnectionActionCapability,
+    ClientConnectionActionDisabledReason, ClientConnectionOperation,
+    ClientConnectionOperationError, ClientConnectionOperationTarget,
+    ClientConnectionOperationToken, ClientConnectionStateSnapshot, ClientConnectionStatus,
+    ConnectionStateSummary,
+};
 pub use registry::ComputerRegistry;
 pub use runtime_lifecycle::{
     ComputerRuntimeAction, ComputerRuntimeActionCapabilities, ComputerRuntimeActionDisabledReason,
@@ -715,6 +722,7 @@ pub struct ComputerInstanceRuntime {
     // itself is SDK ledger-derived and may hand off between multiple enabled plugins.
     plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     connection: Arc<RwLock<Option<ConnectionState>>>,
+    connection_operation: Arc<RwLock<ClientConnectionOperationState>>,
     connection_authority_revision: Arc<AtomicU64>,
     lifecycle_lock: Arc<Mutex<()>>,
     refresh_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -733,6 +741,10 @@ pub struct ComputerInstanceRuntime {
     mcp_config_apply_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
     #[cfg(debug_assertions)]
     fail_prepare_shutdown_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    fail_smcp_disconnect_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    hang_smcp_disconnect_once: Arc<AtomicBool>,
 }
 
 impl ComputerInstanceRuntime {
@@ -786,6 +798,7 @@ impl ComputerInstanceRuntime {
             sdk_servers: Arc::new(RwLock::new(sdk_servers)),
             plugin_mounted_server_ids: Arc::new(RwLock::new(HashSet::new())),
             connection: Arc::new(RwLock::new(None)),
+            connection_operation: Arc::new(RwLock::new(ClientConnectionOperationState::default())),
             connection_authority_revision: Arc::new(AtomicU64::new(0)),
             lifecycle_lock: Arc::new(Mutex::new(())),
             refresh_task: Arc::new(Mutex::new(None)),
@@ -804,6 +817,10 @@ impl ComputerInstanceRuntime {
             mcp_config_apply_diagnostics: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            fail_smcp_disconnect_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            hang_smcp_disconnect_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -819,6 +836,7 @@ impl ComputerInstanceRuntime {
             sdk_servers: self.sdk_servers.clone(),
             plugin_mounted_server_ids: self.plugin_mounted_server_ids.clone(),
             connection: self.connection.clone(),
+            connection_operation: self.connection_operation.clone(),
             connection_authority_revision: self.connection_authority_revision.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
             refresh_task: self.refresh_task.clone(),
@@ -837,6 +855,10 @@ impl ComputerInstanceRuntime {
             mcp_config_apply_diagnostics: self.mcp_config_apply_diagnostics.clone(),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: self.fail_prepare_shutdown_once.clone(),
+            #[cfg(debug_assertions)]
+            fail_smcp_disconnect_once: self.fail_smcp_disconnect_once.clone(),
+            #[cfg(debug_assertions)]
+            hang_smcp_disconnect_once: self.hang_smcp_disconnect_once.clone(),
         }
     }
 
@@ -857,6 +879,18 @@ impl ComputerInstanceRuntime {
     #[doc(hidden)]
     pub fn can_begin_activity_for_test(&self) -> bool {
         self.begin_activity().is_ok()
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn fail_next_smcp_disconnect_for_test(&self) {
+        self.fail_smcp_disconnect_once.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn hang_next_smcp_disconnect_for_test(&self) {
+        self.hang_smcp_disconnect_once.store(true, Ordering::SeqCst);
     }
 
     #[cfg(debug_assertions)]
@@ -1706,6 +1740,10 @@ impl ComputerInstanceRuntime {
                 ))
             })?;
         }
+        // Handle replacement invalidates every in-flight connection command, including a
+        // Manager connect still waiting on HTTP before any transport exists.
+        self.cancel_connection_operation_for_handle_replacement()
+            .await;
 
         self.clear_client_runtime_diagnostic_silent().await;
         self.mcp_start_diagnostics.write().await.clear();
@@ -2186,6 +2224,7 @@ fn default_skill_home_base() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::connection::{settle_refresh_terminal, RefreshTerminalOutcome};
 
     #[derive(Default)]
     struct RecordingRuntimeEventSink {
@@ -2564,7 +2603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_authority_changes_publish_versioned_runtime_events() {
+    async fn connection_state_changes_publish_versioned_runtime_events() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance("one", "One")],
@@ -2594,9 +2633,9 @@ mod tests {
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 1,
-                        present: true,
+                        status: ClientConnectionStatus::Connected,
                     }
                 )
             })
@@ -2617,9 +2656,9 @@ mod tests {
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 2,
-                        present: true,
+                        status: ClientConnectionStatus::Connected,
                     }
                 )
             })
@@ -2640,16 +2679,16 @@ mod tests {
                 .await
         );
         assert_eq!(sink.event_count(), event_count);
-        assert_eq!(runtime.connection_authority_snapshot().await.revision, 2);
+        assert_eq!(runtime.connection_snapshot().await.revision, 2);
 
         runtime.take_connection_state().await;
         let removed = sink
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 3,
-                        present: false,
+                        status: ClientConnectionStatus::Disconnected,
                     }
                 )
             })
@@ -2661,7 +2700,264 @@ mod tests {
         let event_count = sink.event_count();
         assert!(!runtime.refresh_connection_timestamp_for_generation(7).await);
         assert_eq!(sink.event_count(), event_count);
-        assert_eq!(runtime.connection_authority_snapshot().await.revision, 3);
+        assert_eq!(runtime.connection_snapshot().await.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn connection_operation_state_is_versioned_and_isolated_per_computer() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One"), instance("two", "Two")],
+        });
+        let first = registry.runtime("one").await.unwrap();
+        let second = registry.runtime("two").await.unwrap();
+
+        first
+            .begin_connection_operation(
+                ClientConnectionOperation::Connect,
+                Some(ClientConnectionOperationTarget {
+                    source_type: "manager_robot".to_string(),
+                    target_id: Some("employee:11".to_string()),
+                    employee_id: Some(11),
+                }),
+            )
+            .await
+            .unwrap();
+        let connecting = first.connection_snapshot().await;
+        assert_eq!(connecting.status, ClientConnectionStatus::Connecting);
+        assert_eq!(
+            connecting.operation,
+            Some(ClientConnectionOperation::Connect)
+        );
+        assert_eq!(
+            connecting
+                .operation_target
+                .as_ref()
+                .and_then(|target| target.employee_id),
+            Some(11)
+        );
+        assert_eq!(connecting.revision, 1);
+        assert!(!connecting.actions.connect.enabled);
+        assert!(!connecting.actions.disconnect.enabled);
+
+        let unaffected = second.connection_snapshot().await;
+        assert_eq!(unaffected.status, ClientConnectionStatus::Disconnected);
+        assert_eq!(unaffected.revision, 0);
+
+        first
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("target-a".to_string()),
+                target_name: Some("Target A".to_string()),
+                employee_id: None,
+                generation: 7,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first.connection_snapshot().await.status,
+            ClientConnectionStatus::Connecting
+        );
+
+        first.complete_connection_operation().await;
+        let connected = first.connection_snapshot().await;
+        assert_eq!(connected.status, ClientConnectionStatus::Connected);
+        assert_eq!(connected.revision, 3);
+        assert!(connected.operation_target.is_none());
+        assert!(connected.actions.disconnect.enabled);
+
+        first
+            .begin_connection_operation(
+                ClientConnectionOperation::Disconnect,
+                connected
+                    .context
+                    .as_ref()
+                    .map(|context| ClientConnectionOperationTarget {
+                        source_type: context.source_type.clone(),
+                        target_id: context.target_id.clone(),
+                        employee_id: context.employee_id,
+                    }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.connection_snapshot().await.status,
+            ClientConnectionStatus::Disconnecting
+        );
+        first
+            .reconcile_disconnect_failure("transport no longer valid".to_string())
+            .await;
+        let failed = first.connection_snapshot().await;
+        assert_eq!(failed.status, ClientConnectionStatus::Disconnected);
+        assert!(!failed.present);
+        assert!(failed.operation_target.is_none());
+        assert_eq!(
+            failed.last_error.as_ref().map(|error| error.operation),
+            Some(ClientConnectionOperation::Disconnect)
+        );
+        assert!(failed
+            .last_error
+            .as_ref()
+            .is_some_and(|error| error.retryable));
+
+        let orphan_transport_projection = ClientConnectionStateSnapshot::from_parts(
+            failed.revision + 1,
+            None,
+            &ClientConnectionOperationState::default(),
+            ComputerRuntimeState::Connected,
+        );
+        assert_eq!(
+            orphan_transport_projection.status,
+            ClientConnectionStatus::Disconnected
+        );
+        assert!(!orphan_transport_projection.actions.connect.enabled);
+        assert!(orphan_transport_projection.actions.disconnect.enabled);
+    }
+
+    #[tokio::test]
+    async fn aborted_reconnect_settles_only_its_generation() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 7,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(7).await);
+        assert!(!runtime.abort_reconnect_for_generation(6).await);
+        assert_eq!(
+            runtime.connection_snapshot().await.status,
+            ClientConnectionStatus::Connecting
+        );
+
+        runtime.take_connection_state().await;
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://other.example.com".to_string(),
+                office_id: "office-b".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("target-b".to_string()),
+                target_name: Some("Target B".to_string()),
+                employee_id: None,
+                generation: 8,
+            })
+            .await
+            .unwrap();
+
+        assert!(runtime.abort_reconnect_for_generation(7).await);
+        let settled = runtime.connection_snapshot().await;
+        assert_eq!(settled.status, ClientConnectionStatus::Connected);
+        assert_eq!(
+            settled.context.and_then(|context| context.target_id),
+            Some("target-b".to_string())
+        );
+
+        assert!(runtime.begin_reconnect_for_generation(8).await);
+        assert!(
+            runtime
+                .fail_reconnect_for_generation(8, "Manager session expired".to_string(), false,)
+                .await
+        );
+        let unauthorized = runtime.connection_snapshot().await;
+        assert_eq!(unauthorized.status, ClientConnectionStatus::Disconnected);
+        assert!(!unauthorized.present);
+        assert_eq!(
+            unauthorized
+                .last_error
+                .as_ref()
+                .map(|error| error.retryable),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_replacement_invalidates_connect_operation_without_transport() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime.start().await.unwrap();
+        let token = runtime
+            .begin_connection_operation(ClientConnectionOperation::Connect, None)
+            .await
+            .unwrap();
+
+        runtime.restart().await.unwrap();
+
+        assert!(runtime.ensure_connection_operation(token).await.is_err());
+        let snapshot = runtime.connection_snapshot().await;
+        assert_eq!(snapshot.status, ClientConnectionStatus::Disconnected);
+        assert!(snapshot.operation.is_none());
+        assert!(!snapshot.present);
+    }
+
+    #[tokio::test]
+    async fn every_refresh_terminal_outcome_leaves_a_non_transitional_snapshot() {
+        let cases = [
+            (RefreshTerminalOutcome::Gone, None),
+            (RefreshTerminalOutcome::Unauthorized, Some(false)),
+            (RefreshTerminalOutcome::Stop, Some(false)),
+            (RefreshTerminalOutcome::Exhausted, Some(true)),
+        ];
+        for (index, (outcome, expected_retryable)) in cases.into_iter().enumerate() {
+            let id = format!("terminal-{index}");
+            let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+                schema_version: 1,
+                instances: vec![instance(&id, "Terminal")],
+            });
+            let runtime = registry.runtime(&id).await.unwrap();
+            let generation = 100 + index as u64;
+            runtime
+                .install_connection_state(ConnectionState {
+                    profile_name: "manager:1".to_string(),
+                    url: "https://smcp.example.com".to_string(),
+                    office_id: "office-a".to_string(),
+                    computer_name: "Terminal".to_string(),
+                    connected_at: chrono::Utc::now(),
+                    source_type: "manager_robot".to_string(),
+                    target_id: Some("manager:1".to_string()),
+                    target_name: Some("Robot One".to_string()),
+                    employee_id: Some(1),
+                    generation,
+                })
+                .await
+                .unwrap();
+            assert!(runtime.begin_reconnect_for_generation(generation).await);
+            assert!(
+                settle_refresh_terminal(&runtime, generation, outcome).await,
+                "terminal outcome {outcome:?} did not settle"
+            );
+
+            let snapshot = runtime.connection_snapshot().await;
+            assert_ne!(snapshot.status, ClientConnectionStatus::Connecting);
+            assert_ne!(snapshot.status, ClientConnectionStatus::Disconnecting);
+            assert_eq!(
+                snapshot.last_error.as_ref().map(|error| error.retryable),
+                expected_retryable
+            );
+        }
     }
 
     #[tokio::test]
@@ -2818,6 +3114,28 @@ mod tests {
         after.restart().await.unwrap();
         assert_eq!(after.runtime_generation(), generation_before_update + 1);
         assert_eq!(after.computer.read().await.name(), "Renamed");
+    }
+
+    #[tokio::test]
+    async fn update_runtime_instance_does_not_recreate_a_removed_runtime() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "Original")],
+        });
+        registry
+            .remove_runtime("one")
+            .await
+            .unwrap()
+            .expect("runtime should be removed");
+
+        let error = registry
+            .update_runtime_instance(instance("one", "Stale Update"))
+            .await
+            .err()
+            .expect("update must not recreate a removed runtime");
+
+        assert!(error.contains("does not exist"));
+        assert!(registry.runtime("one").await.is_none());
     }
 
     #[tokio::test]

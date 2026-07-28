@@ -14,7 +14,6 @@ type ManagerStoreMock = {
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
   employees: DigitalEmployeeBrief[];
-  selectedEmployeeId: number | null;
   loading: boolean;
   restoreAttempted: boolean;
   error: ManagerError | null;
@@ -40,7 +39,6 @@ const mockStore: ManagerStoreMock = {
   session: null,
   pendingAccountSelection: null,
   employees: [],
-  selectedEmployeeId: null,
   loading: false,
   restoreAttempted: true,
   error: null,
@@ -234,6 +232,18 @@ describe('ManagerAccount', () => {
     it('invokes selectEmployeeAndConnect on connect click', async () => {
       const selectEmployeeAndConnect = vi.fn().mockResolvedValue({ name: 'bot-one' });
       applyMock({ session: user, employees: [employee], selectEmployeeAndConnect });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnected',
+            connected: false,
+            actions: {
+              connect: { enabled: true, disabled_reason: null },
+              disconnect: { enabled: false, disabled_reason: 'not_connected' },
+            },
+          },
+        },
+      });
       mockedInvoke.mockImplementationOnce(() => new Promise(() => {}));
 
       render(<EmployeeList instanceId="computer-a" />);
@@ -242,6 +252,14 @@ describe('ManagerAccount', () => {
         expect(selectEmployeeAndConnect).toHaveBeenCalled();
         expect(selectEmployeeAndConnect.mock.calls[0]).toEqual(['computer-a', 11]);
       });
+    });
+
+    it('keeps connect disabled until backend capabilities are hydrated', () => {
+      applyMock({ session: user, employees: [employee] });
+
+      render(<EmployeeList instanceId="computer-a" />);
+
+      expect(screen.getByText('Connect').closest('button')).toBeDisabled();
     });
 
     it('shows disconnect for manager connection even when robotId is missing', async () => {
@@ -264,6 +282,103 @@ describe('ManagerAccount', () => {
 
       render(<EmployeeList instanceId="computer-a" />);
       expect(screen.getByRole('button', { name: /Disconnect/i })).toBeInTheDocument();
+    });
+
+    it('uses the backend operation target for Manager connect transitions', () => {
+      const otherEmployee = {
+        ...employee,
+        id: 12,
+        name: 'bot-two',
+        robotId: 'robot-b',
+        robotAccountId: 4343,
+      };
+      applyMock({
+        session: user,
+        employees: [employee, otherEmployee],
+        loading: false,
+      });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'connecting',
+            connected: false,
+            operation: 'connect',
+            operation_target: {
+              source_type: 'manager_robot',
+              target_id: `manager:${employee.id}`,
+              employee_id: employee.id,
+            },
+            actions: {
+              connect: { enabled: false, disabled_reason: 'transition_in_progress' },
+              disconnect: { enabled: false, disabled_reason: 'transition_in_progress' },
+            },
+          },
+        },
+      });
+
+      render(<EmployeeList instanceId="computer-a" />);
+      const connectButtons = screen.getAllByRole('button', { name: /Connect/i });
+      expect(connectButtons).toHaveLength(2);
+      expect(connectButtons[0]).toBeDisabled();
+      expect(connectButtons[0]).toHaveClass('ant-btn-loading');
+      expect(connectButtons[1]).toBeDisabled();
+      expect(connectButtons[1]).not.toHaveClass('ant-btn-loading');
+    });
+
+    it('keeps the backend disconnect action visible while disconnecting', () => {
+      applyMock({ session: user, employees: [employee], loading: false });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnecting',
+            connected: false,
+            operation: 'disconnect',
+            profile_name: 'manager:11',
+            office_id: 'robot-a',
+            actions: {
+              connect: { enabled: false, disabled_reason: 'transition_in_progress' },
+              disconnect: { enabled: false, disabled_reason: 'transition_in_progress' },
+            },
+          },
+        },
+      });
+
+      render(<EmployeeList instanceId="computer-a" />);
+      const disconnect = screen.getByRole('button', { name: /Disconnect/i });
+      expect(disconnect).toBeDisabled();
+      expect(disconnect).toHaveClass('ant-btn-loading');
+      expect(screen.queryByText('Connect')).not.toBeInTheDocument();
+    });
+
+    it('offers Computer-level cleanup when an orphan transport remains', () => {
+      applyMock({ session: user, employees: [employee], loading: false });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnected',
+            connected: false,
+            operation: undefined,
+            last_error: {
+              operation: 'disconnect',
+              message: 'Socket cleanup failed',
+              retryable: true,
+            },
+            actions: {
+              connect: { enabled: false, disabled_reason: 'connection_unavailable' },
+              disconnect: { enabled: true, disabled_reason: null },
+            },
+          },
+        },
+      });
+
+      render(<EmployeeList instanceId="computer-a" />);
+
+      expect(screen.getByText(
+        'A stale connection must be cleaned up before reconnecting.',
+      )).toBeInTheDocument();
+      expect(screen.getByText('Socket cleanup failed')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Disconnect/i })).toBeEnabled();
+      expect(screen.getByText('Connect').closest('button')).toBeDisabled();
     });
 
     it('disables connect button for non-running status', async () => {

@@ -1,5 +1,6 @@
 use crate::services::computer::{
-    ClientConnectionAuthoritySnapshot, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
+    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerRuntimeActionCapabilities,
+    ComputerRuntimeUserState,
 };
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
@@ -71,14 +72,30 @@ impl ComputerRuntimeSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ComputerRuntimeEventCause {
-    LifecycleChanged { state: LifecycleState },
-    ConfigRevisionBumped { revision: u64 },
-    CapabilityRevisionBumped { revision: u64 },
-    ClientConnectionAuthorityChanged { revision: u64, present: bool },
-    ClientDiagnosticChanged { operation: String, has_error: bool },
-    HandleReplaced { reason: String },
+    LifecycleChanged {
+        state: LifecycleState,
+    },
+    ConfigRevisionBumped {
+        revision: u64,
+    },
+    CapabilityRevisionBumped {
+        revision: u64,
+    },
+    ClientConnectionStateChanged {
+        revision: u64,
+        status: ClientConnectionStatus,
+    },
+    ClientDiagnosticChanged {
+        operation: String,
+        has_error: bool,
+    },
+    HandleReplaced {
+        reason: String,
+    },
     ObservationAdvanced,
-    Resync { skipped_events: u64 },
+    Resync {
+        skipped_events: u64,
+    },
 }
 
 impl From<ComputerEvent> for ComputerRuntimeEventCause {
@@ -99,7 +116,7 @@ impl ComputerRuntimeEventCause {
     fn matches_observation(
         &self,
         snapshot: &ComputerRuntimeSnapshot,
-        connection: &ClientConnectionAuthoritySnapshot,
+        connection: &ClientConnectionStateSnapshot,
     ) -> bool {
         match self {
             Self::LifecycleChanged { state } => snapshot.lifecycle == *state,
@@ -107,8 +124,8 @@ impl ComputerRuntimeEventCause {
             Self::CapabilityRevisionBumped { revision } => {
                 snapshot.capability_revision == *revision
             }
-            Self::ClientConnectionAuthorityChanged { revision, present } => {
-                connection.revision == *revision && connection.present == *present
+            Self::ClientConnectionStateChanged { revision, status } => {
+                connection.revision == *revision && connection.status == *status
             }
             Self::ClientDiagnosticChanged { has_error, .. } => {
                 snapshot.last_error.is_some() == *has_error
@@ -123,7 +140,7 @@ pub struct ComputerRuntimeStatusEvent {
     pub instance_id: String,
     pub cause: ComputerRuntimeEventCause,
     pub snapshot: ComputerRuntimeSnapshot,
-    pub connection: ClientConnectionAuthoritySnapshot,
+    pub connection: ClientConnectionStateSnapshot,
 }
 
 impl ComputerRuntimeStatusEvent {
@@ -136,7 +153,7 @@ impl ComputerRuntimeStatusEvent {
         instance_id: String,
         cause: ComputerRuntimeEventCause,
         snapshot: ComputerRuntimeSnapshot,
-        connection: ClientConnectionAuthoritySnapshot,
+        connection: ClientConnectionStateSnapshot,
     ) -> Self {
         let cause = if cause.matches_observation(&snapshot, &connection) {
             cause
@@ -159,6 +176,10 @@ pub trait ComputerRuntimeEventSink: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::computer::{
+        ClientConnectionActionCapabilities, ClientConnectionActionCapability,
+        ClientConnectionActionDisabledReason,
+    };
 
     fn sdk_snapshot(lifecycle: LifecycleState) -> ComputerStatusSnapshot {
         ComputerStatusSnapshot {
@@ -174,11 +195,32 @@ mod tests {
         }
     }
 
-    fn connection_authority(revision: u64, present: bool) -> ClientConnectionAuthoritySnapshot {
-        ClientConnectionAuthoritySnapshot {
+    fn connection_state(revision: u64, present: bool) -> ClientConnectionStateSnapshot {
+        let status = if present {
+            ClientConnectionStatus::Connected
+        } else {
+            ClientConnectionStatus::Disconnected
+        };
+        ClientConnectionStateSnapshot {
+            status,
             present,
             revision,
             context: None,
+            operation: None,
+            operation_target: None,
+            last_error: None,
+            actions: ClientConnectionActionCapabilities {
+                connect: ClientConnectionActionCapability {
+                    enabled: !present,
+                    disabled_reason: present
+                        .then_some(ClientConnectionActionDisabledReason::AlreadyConnected),
+                },
+                disconnect: ClientConnectionActionCapability {
+                    enabled: present,
+                    disabled_reason: (!present)
+                        .then_some(ClientConnectionActionDisabledReason::NotConnected),
+                },
+            },
         }
     }
 
@@ -259,19 +301,19 @@ mod tests {
                 sdk_snapshot(LifecycleState::JoinedOffice),
                 None,
             ),
-            connection_authority(0, false),
+            connection_state(0, false),
         );
 
         assert_eq!(event.cause, ComputerRuntimeEventCause::ObservationAdvanced);
     }
 
     #[test]
-    fn event_preserves_matching_connection_authority_cause() {
+    fn event_preserves_matching_connection_state_cause() {
         let event = ComputerRuntimeStatusEvent::from_observation(
             "computer-a".to_string(),
-            ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+            ComputerRuntimeEventCause::ClientConnectionStateChanged {
                 revision: 4,
-                present: true,
+                status: ClientConnectionStatus::Connected,
             },
             ComputerRuntimeSnapshot::from_sdk(
                 1,
@@ -280,14 +322,14 @@ mod tests {
                 sdk_snapshot(LifecycleState::JoinedOffice),
                 None,
             ),
-            connection_authority(4, true),
+            connection_state(4, true),
         );
 
         assert_eq!(
             event.cause,
-            ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+            ComputerRuntimeEventCause::ClientConnectionStateChanged {
                 revision: 4,
-                present: true,
+                status: ClientConnectionStatus::Connected,
             }
         );
     }

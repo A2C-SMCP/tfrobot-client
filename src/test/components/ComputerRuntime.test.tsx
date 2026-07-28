@@ -188,4 +188,84 @@ describe('ComputerRuntime', () => {
       expect(onDisconnect).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([
+    ['connecting', 'connect', 'Connect'],
+    ['disconnecting', 'disconnect', 'Disconnect'],
+  ] as const)(
+    'renders backend-owned %s state and disables conflicting connection actions',
+    (connectionStatus, operation, buttonName) => {
+      render(
+        <ComputerRuntime
+          instance={instance({
+            connectionStatus,
+            connectionState: {
+              status: connectionStatus,
+              present: connectionStatus === 'disconnecting',
+              revision: 4,
+            context: null,
+            operation,
+            operation_target: null,
+            last_error: null,
+              actions: {
+                connect: { enabled: false, disabled_reason: 'transition_in_progress' },
+                disconnect: { enabled: false, disabled_reason: 'transition_in_progress' },
+              },
+            },
+          })}
+          loading={false}
+          canConnect
+          onStartStop={vi.fn()}
+          onRestart={vi.fn()}
+          onConnect={vi.fn()}
+          onDisconnect={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText(connectionStatus === 'connecting' ? 'Connecting' : 'Disconnecting'))
+        .toBeInTheDocument();
+      const action = screen.getByRole('button', { name: new RegExp(`${buttonName}$`) });
+      expect(action).toBeDisabled();
+      expect(action).toHaveClass('ant-btn-loading');
+    },
+  );
+
+  it('offers disconnect cleanup for a disconnected orphan transport capability', () => {
+    const onDisconnect = vi.fn();
+    render(
+      <ComputerRuntime
+        instance={instance({
+          connectionState: {
+            status: 'disconnected',
+            present: false,
+            revision: 8,
+          context: null,
+          operation: null,
+          operation_target: null,
+          last_error: {
+              operation: 'disconnect',
+              message: 'Socket cleanup failed',
+              retryable: true,
+            },
+            actions: {
+              connect: { enabled: false, disabled_reason: 'connection_unavailable' },
+              disconnect: { enabled: true, disabled_reason: null },
+            },
+          },
+        })}
+        loading={false}
+        canConnect={false}
+        onStartStop={vi.fn()}
+        onRestart={vi.fn()}
+        onConnect={vi.fn()}
+        onDisconnect={onDisconnect}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /Connect$/ })).not.toBeInTheDocument();
+    const disconnect = screen.getByRole('button', { name: /Disconnect$/ });
+    expect(disconnect).toBeEnabled();
+    fireEvent.click(disconnect);
+    expect(onDisconnect).toHaveBeenCalledOnce();
+  });
 });

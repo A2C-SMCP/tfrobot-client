@@ -1,4 +1,8 @@
 use super::*;
+use std::time::Duration;
+use tokio::time::timeout;
+
+const SDK_COMPUTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
@@ -111,7 +115,7 @@ impl ComputerInstanceRuntime {
             self.instance.id.clone(),
             cause,
             self.runtime_snapshot().await,
-            self.connection_authority_snapshot().await,
+            self.connection_snapshot().await,
         );
         if let Err(error) = sink.emit(&event) {
             log::warn!(
@@ -143,6 +147,7 @@ impl ComputerInstanceRuntime {
         let incarnation = self.runtime_incarnation;
         let client_runtime_diagnostic = self.client_runtime_diagnostic.clone();
         let connection = self.connection.clone();
+        let connection_operation = self.connection_operation.clone();
         let connection_authority_revision = self.connection_authority_revision.clone();
         let mut relay = self.runtime_event_task.lock().await;
         if self.is_retired()
@@ -207,12 +212,15 @@ impl ComputerInstanceRuntime {
                 let event = ComputerRuntimeStatusEvent::from_observation(
                     instance_id.clone(),
                     cause,
-                    runtime_snapshot,
+                    runtime_snapshot.clone(),
                     {
                         let connection = connection.read().await;
-                        ClientConnectionAuthoritySnapshot::from_connection(
+                        let operation = connection_operation.read().await;
+                        ClientConnectionStateSnapshot::from_parts(
                             connection_authority_revision.load(Ordering::Acquire),
                             connection.as_ref(),
+                            &operation,
+                            runtime_snapshot.lifecycle,
                         )
                     },
                 );
@@ -286,7 +294,7 @@ impl ComputerInstanceRuntime {
         }
 
         if self.has_smcp_transport().await {
-            if let Err(error) = self.disconnect_smcp_socketio_inner().await {
+            if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
                 cleanup_errors.push(format!(
                     "Failed to disconnect SMCP socket during shutdown for instance {}: {}",
                     self.instance.id, error
@@ -297,6 +305,7 @@ impl ComputerInstanceRuntime {
         // leave refresh work or logical connection state alive for an instance being removed.
         self.abort_refresh_task().await;
         self.take_connection_state().await;
+        self.complete_connection_operation().await;
         self.clear_client_runtime_diagnostic_silent().await;
         if let Err(error) = self.shutdown_sdk_computer_inner().await {
             cleanup_errors.push(error);
@@ -351,8 +360,21 @@ impl ComputerInstanceRuntime {
             return Ok(());
         }
 
-        let computer = self.computer.read().await;
-        if let Err(error) = computer.shutdown().await {
+        let shutdown_result = timeout(SDK_COMPUTER_SHUTDOWN_TIMEOUT, async {
+            self.computer.read().await.shutdown().await
+        })
+        .await;
+        let shutdown_result = match shutdown_result {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(format!(
+                    "Timed out shutting down SDK Computer for instance {} after {:?}",
+                    self.instance.id, SDK_COMPUTER_SHUTDOWN_TIMEOUT
+                ))
+            }
+        };
+        if let Err(error) = shutdown_result {
+            let computer = self.computer.read().await;
             if computer.lifecycle_state() != LifecycleState::Shutdown {
                 return Err(format!(
                     "Failed to shutdown SDK Computer for instance {}: {}",

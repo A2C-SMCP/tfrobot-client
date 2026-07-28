@@ -27,9 +27,10 @@ pub struct AppState {
     pub computer_registry: Arc<ComputerRegistry>,
     /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
     pub secret_store: Arc<dyn SecretStore>,
-    /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
-    /// happen as one transaction across Computer instances.
-    pub connection_establish_lock: Arc<Mutex<()>>,
+    /// Short-lived cross-Computer reservations for Robot/Office identities. Network connection
+    /// work runs under each Computer's own lifecycle coordinator, never under this map lock.
+    pub connection_target_reservations:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
     /// These operations are infrequent and must not observe one another half-committed.
     pub computer_lifecycle_lock: Arc<Mutex<()>>,
@@ -130,7 +131,9 @@ impl AppState {
             sdk_config,
             computer_registry: Arc::new(computer_registry),
             secret_store: secret_store.clone(),
-            connection_establish_lock: Arc::new(Mutex::new(())),
+            connection_target_reservations: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             computer_lifecycle_lock: Arc::new(Mutex::new(())),
             input_mutation_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),

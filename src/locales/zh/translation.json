@@ -61,7 +61,9 @@
     },
     "connection": {
       "connected": "已连接",
-      "disconnected": "未连接"
+      "disconnected": "未连接",
+      "connecting": "连接中",
+      "disconnecting": "断开中"
     },
     "runtime": {
       "title": "运行时",
@@ -105,7 +107,7 @@
         "lifecycleChanged": "生命周期变更为 {{state}}",
         "configRevisionBumped": "配置 Revision 变更为 {{revision}}",
         "capabilityRevisionBumped": "能力 Revision 变更为 {{revision}}",
-        "clientConnectionAuthorityChanged": "连接权威 Revision {{revision}}：{{status}}",
+        "clientConnectionStateChanged": "连接状态 Revision {{revision}}：{{status}}",
         "connectionPresent": "存在",
         "connectionAbsent": "不存在",
         "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
@@ -156,6 +158,14 @@
       "runtime": "运行态"
     },
     "connectionActions": {
+      "lastError": "连接错误",
+      "disabledReasons": {
+        "already_connected": "这个 Computer 已连接。",
+        "not_connected": "这个 Computer 尚未连接。",
+        "transition_in_progress": "请等待当前连接操作完成。",
+        "not_running": "请先启动这个 Computer，再执行连接。",
+        "connection_unavailable": "当前运行时状态下无法执行连接操作。"
+      },
       "targetTitle": "连接目标",
       "selectTarget": "选择 Robot 或手动 SMCP 目标",
       "requiresRunning": "需要先启动这个 Computer 才能连接。",
@@ -635,6 +645,7 @@
       "connect": "连接",
       "connected": "已连接",
       "disconnect": "断开连接",
+      "connectionCleanupRequired": "重新连接前需要先清理残留连接。",
       "disconnectSuccess": "已断开 SMCP 连接",
       "connectSuccess": "正在连接 {{name}}…",
       "noRobotAccount": "该机器人暂不支持安全连接（缺少机器人账号 ID）。",

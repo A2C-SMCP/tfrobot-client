@@ -68,7 +68,12 @@ describe('dashboardStore', () => {
       await useDashboardStore.getState().fetchDashboard();
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_dashboard_data');
-      expect(useDashboardStore.getState().data).toEqual(mockData);
+      expect(useDashboardStore.getState().data).toMatchObject(mockData);
+      expect(useDashboardStore.getState().data?.computers[0].connection_state).toMatchObject({
+        status: 'connected',
+        present: true,
+        revision: 0,
+      });
       expect(useDashboardStore.getState().loading).toBe(false);
     });
 
@@ -181,7 +186,12 @@ describe('dashboardStore', () => {
       resolveFn!(mockData);
       await promise;
       expect(useDashboardStore.getState().loading).toBe(false);
-      expect(useDashboardStore.getState().data).toEqual(mockData);
+      expect(useDashboardStore.getState().data).toMatchObject(mockData);
+      expect(useDashboardStore.getState().data?.computers[0].connection_state).toMatchObject({
+        status: 'connected',
+        present: true,
+        revision: 0,
+      });
     });
 
     it('keeps a newer event snapshot when an older dashboard query finishes later', async () => {

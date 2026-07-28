@@ -117,14 +117,20 @@ function ComputerCard({
   const connectionTarget = instance.connectionPolicy.target;
   const connectionTargetSelected = Boolean(connectionTarget);
   const connectionTargetConnectable = isConnectionTargetConnectable(connectionTarget);
-  const canConnect = instance.runtime.actions.connect.enabled && connectionTargetConnectable;
-  const hasClientConnection = instance.clientConnectionPresent
-    ?? instance.connectionStatus === 'connected';
-  const disconnectDisabledReason = instance.runtime.actions.disconnect.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${instance.runtime.actions.disconnect.disabled_reason}`)
+  const connectionActions = instance.connectionState?.actions ?? {
+    connect: instance.runtime.actions.connect,
+    disconnect: instance.runtime.actions.disconnect,
+  };
+  const connectionStatus = instance.connectionState?.status
+    ?? (instance.clientConnectionPresent ? 'connected' : instance.connectionStatus);
+  const canConnect = connectionActions.connect.enabled && connectionTargetConnectable;
+  const showDisconnect = connectionActions.disconnect.enabled
+    || connectionStatus === 'disconnecting';
+  const disconnectDisabledReason = connectionActions.disconnect.disabled_reason
+    ? t(`computer.connectionActions.disabledReasons.${connectionActions.disconnect.disabled_reason}`)
     : undefined;
-  const connectDisabledReason = !instance.runtime.actions.connect.enabled
-    ? t(`computer.runtime.actionDisabledReasons.${instance.runtime.actions.connect.disabled_reason}`)
+  const connectDisabledReason = !connectionActions.connect.enabled
+    ? t(`computer.connectionActions.disabledReasons.${connectionActions.connect.disabled_reason}`)
     : !connectionTargetSelected
       ? t('computer.connectionActions.requiresTarget')
       : !connectionTargetConnectable
@@ -156,8 +162,8 @@ function ComputerCard({
           <Text type="secondary" copyable>{instance.id}</Text>
           {instance.description && <Text>{instance.description}</Text>}
           <Space wrap>
-            <Tag color={instance.connectionStatus === 'connected' ? 'green' : 'default'}>
-              {t(`computer.connection.${instance.connectionStatus}`)}
+            <Tag color={connectionStatus === 'connected' ? 'green' : 'default'}>
+              {t(`computer.connection.${connectionStatus}`)}
             </Tag>
             <Tag icon={<ApiOutlined />}>
               {t('computer.mcpServers', { count: instance.mcpServerCount })}
@@ -191,15 +197,15 @@ function ComputerCard({
               onClick={startStopAction}
             />
           </Tooltip>
-          {hasClientConnection ? (
+          {showDisconnect ? (
             <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')} placement="right">
               <Button
                 aria-label={t('connection.disconnect')}
                 type="text"
                 danger
                 icon={<DisconnectOutlined />}
-                disabled={!instance.runtime.actions.disconnect.enabled}
-                loading={loading}
+                disabled={!connectionActions.disconnect.enabled}
+                loading={connectionStatus === 'disconnecting'}
                 onClick={onDisconnect}
               />
             </Tooltip>
@@ -210,7 +216,7 @@ function ComputerCard({
                 type="text"
                 icon={<LinkOutlined />}
                 disabled={!canConnect}
-                loading={loading}
+                loading={connectionStatus === 'connecting'}
                 style={{ color: canConnect ? '#1677ff' : undefined }}
                 onClick={onConnect}
               />
@@ -480,11 +486,20 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   }
 
   const selectedConnectionTarget = selectedInstance?.connectionPolicy.target;
-  const selectedHasClientConnection = selectedInstance?.clientConnectionPresent
-    ?? selectedInstance?.connectionStatus === 'connected';
+  const selectedConnectionState = selectedInstance?.connectionState;
+  const selectedConnectionActions = selectedConnectionState?.actions ?? (selectedInstance ? {
+    connect: selectedInstance.runtime.actions.connect,
+    disconnect: selectedInstance.runtime.actions.disconnect,
+  } : undefined);
+  const selectedConnectionStatus = selectedConnectionState?.status
+    ?? (selectedInstance?.clientConnectionPresent
+      ? 'connected'
+      : selectedInstance?.connectionStatus);
+  const selectedShowDisconnect = Boolean(selectedConnectionActions?.disconnect.enabled)
+    || selectedConnectionStatus === 'disconnecting';
   const selectedConnectionTargetSelected = Boolean(selectedConnectionTarget);
   const selectedConnectionTargetConnectable = isConnectionTargetConnectable(selectedConnectionTarget);
-  const selectedCanConnect = Boolean(selectedInstance?.runtime.actions.connect.enabled)
+  const selectedCanConnect = Boolean(selectedConnectionActions?.connect.enabled)
     && selectedConnectionTargetConnectable;
   const selectedStopAction = selectedInstance ? usesStopAction(selectedInstance.status) : false;
   const selectedStartStopCapability = selectedInstance
@@ -495,11 +510,11 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   const selectedStartStopDisabledReason = selectedStartStopCapability?.disabled_reason
     ? t(`computer.runtime.actionDisabledReasons.${selectedStartStopCapability.disabled_reason}`)
     : undefined;
-  const selectedDisconnectDisabledReason = selectedInstance?.runtime.actions.disconnect.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${selectedInstance.runtime.actions.disconnect.disabled_reason}`)
+  const selectedDisconnectDisabledReason = selectedConnectionActions?.disconnect.disabled_reason
+    ? t(`computer.connectionActions.disabledReasons.${selectedConnectionActions.disconnect.disabled_reason}`)
     : undefined;
-  const selectedConnectDisabledReason = !selectedInstance?.runtime.actions.connect.enabled
-    ? t(`computer.runtime.actionDisabledReasons.${selectedInstance?.runtime.actions.connect.disabled_reason}`)
+  const selectedConnectDisabledReason = !selectedConnectionActions?.connect.enabled
+    ? t(`computer.connectionActions.disabledReasons.${selectedConnectionActions?.connect.disabled_reason}`)
     : !selectedConnectionTargetSelected
       ? t('computer.connectionActions.requiresTarget')
       : !selectedConnectionTargetConnectable
@@ -521,8 +536,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                 <Tag color={statusColor[selectedInstance.status]}>
                   {t(`computer.status.${selectedInstance.status}`)}
                 </Tag>
-                <Tag color={selectedInstance.connectionStatus === 'connected' ? 'green' : 'default'}>
-                  {t(`computer.connection.${selectedInstance.connectionStatus}`)}
+                <Tag color={selectedConnectionStatus === 'connected' ? 'green' : 'default'}>
+                  {t(`computer.connection.${selectedConnectionStatus}`)}
                 </Tag>
                 <Text type="secondary">
                   {selectedInstance.robotName
@@ -559,13 +574,13 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               <Space direction="vertical" size={2}>
                 <Text type="secondary">{t('computer.actionGroups.runtime')}</Text>
                 <Space.Compact>
-                  {selectedHasClientConnection ? (
+                  {selectedShowDisconnect ? (
                     <Tooltip title={selectedDisconnectDisabledReason}>
                       <Button
                         danger
                         icon={<DisconnectOutlined />}
-                        disabled={!selectedInstance.runtime.actions.disconnect.enabled}
-                        loading={loading}
+                        disabled={!selectedConnectionActions?.disconnect.enabled}
+                        loading={selectedConnectionStatus === 'disconnecting'}
                         onClick={() => handleDisconnect(selectedInstance)}
                       >
                         {t('connection.disconnect')}
@@ -577,7 +592,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                         type="primary"
                         icon={<LinkOutlined />}
                         disabled={!selectedCanConnect}
-                        loading={loading}
+                        loading={selectedConnectionStatus === 'connecting'}
                         onClick={() => handleConnect(selectedInstance)}
                       >
                         {t('connection.connect')}

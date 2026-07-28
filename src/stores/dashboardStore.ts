@@ -4,7 +4,9 @@ import type { LogEntry } from './logStore';
 import { useComputerStore, type ConnectionStateSummary } from './computerStore';
 import {
   getClientConnectionAuthority,
+  legacyClientConnectionState,
   setClientConnectionAuthority,
+  type ClientConnectionAuthority,
 } from './connectionAuthority';
 import {
   isRuntimeSnapshotInstanceDeleted,
@@ -24,6 +26,7 @@ export interface DashboardComputerSummary {
   name: string;
   running: boolean;
   runtime: ComputerRuntimeSnapshot;
+  connection_state?: ClientConnectionAuthority;
   connected: boolean;
   client_connection_present?: boolean;
   connection_revision?: number;
@@ -64,22 +67,25 @@ const initialState = {
 function projectRuntime(
   computer: DashboardComputerSummary,
   runtime: ComputerRuntimeSnapshot,
-  clientConnectionPresent = computer.client_connection_present
-    ?? (computer.connection_context ? true : computer.connected),
-  connectionContext = computer.connection_context,
-  connectionRevision = computer.connection_revision,
+  connectionState = computer.connection_state ?? legacyClientConnectionState(
+    computer.client_connection_present ?? (computer.connection_context ? true : computer.connected),
+    computer.connection_context,
+    computer.connection_revision ?? 0,
+    runtime,
+  ),
 ): DashboardComputerSummary {
-  const projection = projectRuntimeSnapshot(runtime, clientConnectionPresent);
+  const projection = projectRuntimeSnapshot(runtime, connectionState.status === 'connected');
   return {
     ...computer,
     runtime,
     running: projection.running,
-    connected: projection.businessConnected,
-    client_connection_present: clientConnectionPresent,
-    connection_context: clientConnectionPresent ? connectionContext ?? null : null,
-    connection_revision: connectionRevision,
-    connection_profile: projection.businessConnected
-      ? connectionContext?.profile_name ?? computer.connection_profile
+    connection_state: connectionState,
+    connected: connectionState.status === 'connected',
+    client_connection_present: connectionState.present,
+    connection_context: connectionState.context,
+    connection_revision: connectionState.revision,
+    connection_profile: connectionState.present
+      ? connectionState.context?.profile_name ?? computer.connection_profile
       : undefined,
     mcp_server_count: projection.mcpServerCount,
   };
@@ -109,14 +115,18 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       const { useRuntimeStore } = await import('./runtimeStore');
       for (const computer of data.computers) {
         const connectionContext = computer.connection_context ?? null;
-        setClientConnectionAuthority(
-          computer.id,
+        const connectionState = computer.connection_state ?? legacyClientConnectionState(
           computer.client_connection_present ?? (connectionContext ? true : computer.connected),
           connectionContext,
           computer.connection_revision ?? 0,
           computer.runtime,
         );
-        useRuntimeStore.getState().receiveSnapshot(computer.id, computer.runtime);
+        setClientConnectionAuthority(computer.id, connectionState, computer.runtime);
+        useRuntimeStore.getState().receiveSnapshot(
+          computer.id,
+          computer.runtime,
+          connectionState,
+        );
       }
       set((state) => {
         if (state.requestId !== requestId) return {};
@@ -140,15 +150,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
           return projectRuntime(
             projectedComputer,
             resolvedRuntime,
-            authority?.present
+            authority
               ?? (computer.runtime.incarnation === resolvedRuntime.incarnation
-                ? computer.client_connection_present ?? computer.connected
-                : false),
-            authority?.context
-              ?? (computer.runtime.incarnation === resolvedRuntime.incarnation
-                ? computer.connection_context
-                : null),
-            authority?.revision ?? computer.connection_revision,
+                ? computer.connection_state
+                : undefined)
+              ?? legacyClientConnectionState(false, null, 0, resolvedRuntime),
           );
           });
         return { data: withRuntimeCounts({ ...data, computers }), loading: false };
@@ -170,15 +176,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         ...computer,
         connection_profile: instance?.connectionProfile,
       }, resolvedRuntime,
-      authority?.present
+      authority
         ?? (computer.runtime.incarnation === resolvedRuntime.incarnation
-          ? computer.client_connection_present ?? computer.connected
-          : false),
-      authority?.context
-        ?? (computer.runtime.incarnation === resolvedRuntime.incarnation
-          ? computer.connection_context
-          : null),
-      authority?.revision ?? computer.connection_revision);
+          ? computer.connection_state
+          : undefined)
+        ?? legacyClientConnectionState(false, null, 0, resolvedRuntime));
     });
     return {
       data: withRuntimeCounts({ ...state.data, computers }),

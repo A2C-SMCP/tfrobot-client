@@ -336,6 +336,40 @@ describe('Computer', () => {
     expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
   }, 20000);
 
+  it('offers orphan transport cleanup from both list and detail capabilities', async () => {
+    const orphanInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      connection: null,
+      runtime: runtimeSnapshot({ lifecycle: 'connected' }),
+      connection_state: {
+        status: 'disconnected',
+        present: false,
+        revision: 8,
+        context: null,
+        operation: null,
+        last_error: {
+          operation: 'disconnect',
+          message: 'Socket cleanup failed',
+          retryable: true,
+        },
+        actions: {
+          connect: { enabled: false, disabled_reason: 'connection_unavailable' },
+          disconnect: { enabled: true, disabled_reason: null },
+        },
+      },
+    };
+    mockInvoke.mockResolvedValueOnce([orphanInstance]);
+
+    render(<Computer />);
+
+    expect(await screen.findByRole('button', { name: 'Disconnect' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    expect(screen.getByRole('button', { name: /Disconnect$/ })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+  }, 20000);
+
   it('disables detail connect for a Manager Robot target without robotAccountId', async () => {
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],

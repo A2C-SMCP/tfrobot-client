@@ -4,7 +4,9 @@ import type { LogEntry } from './logStore';
 import { useComputerStore, type ConnectionStateSummary } from './computerStore';
 import {
   getClientConnectionAuthority,
+  legacyClientConnectionState,
   setClientConnectionAuthority,
+  type ClientConnectionAuthority,
 } from './connectionAuthority';
 import {
   isRuntimeSnapshotInstanceDeleted,
@@ -18,6 +20,7 @@ export interface ComputerOverviewData {
   name: string;
   running: boolean;
   runtime: ComputerRuntimeSnapshot;
+  connection_state?: ClientConnectionAuthority;
   connected: boolean;
   client_connection_present?: boolean;
   connection_revision?: number;
@@ -54,25 +57,28 @@ const initialState = {
 function projectRuntime(
   data: ComputerOverviewData,
   runtime: ComputerRuntimeSnapshot,
-  clientConnectionPresent = data.client_connection_present
-    ?? (data.connection_context ? true : data.connected),
-  connectionContext = data.connection_context,
-  connectionRevision = data.connection_revision,
+  connectionState = data.connection_state ?? legacyClientConnectionState(
+    data.client_connection_present ?? (data.connection_context ? true : data.connected),
+    data.connection_context,
+    data.connection_revision ?? 0,
+    runtime,
+  ),
 ): ComputerOverviewData {
-  const projection = projectRuntimeSnapshot(runtime, clientConnectionPresent);
+  const projection = projectRuntimeSnapshot(runtime, connectionState.status === 'connected');
   return {
     ...data,
     runtime,
     running: projection.running,
-    connected: projection.businessConnected,
-    client_connection_present: clientConnectionPresent,
-    connection_context: clientConnectionPresent ? connectionContext ?? null : null,
-    connection_revision: connectionRevision,
-    connection_url: projection.businessConnected
-      ? connectionContext?.url ?? data.connection_url
+    connection_state: connectionState,
+    connected: connectionState.status === 'connected',
+    client_connection_present: connectionState.present,
+    connection_context: connectionState.context,
+    connection_revision: connectionState.revision,
+    connection_url: connectionState.present
+      ? connectionState.context?.url ?? data.connection_url
       : undefined,
-    connection_profile: projection.businessConnected
-      ? connectionContext?.profile_name ?? data.connection_profile
+    connection_profile: connectionState.present
+      ? connectionState.context?.profile_name ?? data.connection_profile
       : undefined,
     mcp_total: projection.mcpServerCount,
     mcp_running: projection.activeMcpServerCount,
@@ -100,14 +106,14 @@ export const useComputerOverviewStore = create<ComputerOverviewState>((set, get)
       }
       const { useRuntimeStore } = await import('./runtimeStore');
       const connectionContext = data.connection_context ?? null;
-      setClientConnectionAuthority(
-        instanceId,
+      const connectionState = data.connection_state ?? legacyClientConnectionState(
         data.client_connection_present ?? (connectionContext ? true : data.connected),
         connectionContext,
         data.connection_revision ?? 0,
         data.runtime,
       );
-      useRuntimeStore.getState().receiveSnapshot(instanceId, data.runtime);
+      setClientConnectionAuthority(instanceId, connectionState, data.runtime);
+      useRuntimeStore.getState().receiveSnapshot(instanceId, data.runtime, connectionState);
       if (get().requestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
@@ -131,15 +137,11 @@ export const useComputerOverviewStore = create<ComputerOverviewState>((set, get)
         data: projectRuntime(
           projectedData,
           resolvedRuntime,
-          authority?.present
+          authority
             ?? (data.runtime.incarnation === resolvedRuntime.incarnation
-              ? data.client_connection_present ?? data.connected
-              : false),
-          authority?.context
-            ?? (data.runtime.incarnation === resolvedRuntime.incarnation
-              ? data.connection_context
-              : null),
-          authority?.revision ?? data.connection_revision,
+              ? data.connection_state
+              : undefined)
+            ?? legacyClientConnectionState(false, null, 0, resolvedRuntime),
         ),
         loading: false,
       }));
@@ -166,15 +168,11 @@ export const useComputerOverviewStore = create<ComputerOverviewState>((set, get)
           connection_url: instance.connectionUrl,
         } : state.data,
         resolvedRuntime,
-        authority?.present
+        authority
           ?? (state.data.runtime.incarnation === resolvedRuntime.incarnation
-            ? state.data.client_connection_present ?? state.data.connected
-            : false),
-        authority?.context
-          ?? (state.data.runtime.incarnation === resolvedRuntime.incarnation
-            ? state.data.connection_context
-            : null),
-        authority?.revision ?? state.data.connection_revision,
+            ? state.data.connection_state
+            : undefined)
+          ?? legacyClientConnectionState(false, null, 0, resolvedRuntime),
       ),
     };
   }),

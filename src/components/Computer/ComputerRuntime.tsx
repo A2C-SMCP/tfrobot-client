@@ -56,8 +56,15 @@ export function ComputerRuntime({
   const { t } = useTranslation();
   const runtime = instance.runtime;
   const actions = runtime.actions;
-  const hasClientConnection = instance.clientConnectionPresent
-    ?? instance.connectionStatus === 'connected';
+  const connectionState = instance.connectionState;
+  const connectionActions = connectionState?.actions ?? {
+    connect: actions.connect,
+    disconnect: actions.disconnect,
+  };
+  const connectionStatus = connectionState?.status
+    ?? (instance.clientConnectionPresent ? 'connected' : instance.connectionStatus);
+  const showDisconnect = connectionActions.disconnect.enabled
+    || connectionStatus === 'disconnecting';
   const recentEvents = useRuntimeStore((state) => state.eventsByInstance[instance.id])
     ?? EMPTY_RUNTIME_EVENTS;
   const primaryAction = ['running', 'degraded', 'stopping'].includes(runtime.user_state)
@@ -77,11 +84,11 @@ export function ComputerRuntime({
   const restartDisabledReason = actions.restart.disabled_reason
     ? t(`computer.runtime.actionDisabledReasons.${actions.restart.disabled_reason}`)
     : undefined;
-  const backendConnectDisabledReason = actions.connect.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${actions.connect.disabled_reason}`)
+  const backendConnectDisabledReason = connectionActions.connect.disabled_reason
+    ? t(`computer.connectionActions.disabledReasons.${connectionActions.connect.disabled_reason}`)
     : undefined;
-  const disconnectDisabledReason = actions.disconnect.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${actions.disconnect.disabled_reason}`)
+  const disconnectDisabledReason = connectionActions.disconnect.disabled_reason
+    ? t(`computer.connectionActions.disabledReasons.${connectionActions.disconnect.disabled_reason}`)
     : undefined;
   const mcpDisabledReason = actions.manage_mcp.disabled_reason
     ? t(`computer.runtime.actionDisabledReasons.${actions.manage_mcp.disabled_reason}`)
@@ -109,12 +116,15 @@ export function ComputerRuntime({
         return t('computer.runtime.eventCauses.capabilityRevisionBumped', {
           revision: cause.revision,
         });
-      case 'client_connection_authority_changed':
-        return t('computer.runtime.eventCauses.clientConnectionAuthorityChanged', {
+      case 'client_connection_state_changed':
+        return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
           revision: cause.revision,
-          status: cause.present
-            ? t('computer.runtime.eventCauses.connectionPresent')
-            : t('computer.runtime.eventCauses.connectionAbsent'),
+          status: t(`computer.connection.${cause.status}`),
+        });
+      case 'client_connection_authority_changed':
+        return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
+          revision: cause.revision,
+          status: t(`computer.connection.${cause.present ? 'connected' : 'disconnected'}`),
         });
       case 'client_diagnostic_changed':
         return t('computer.runtime.eventCauses.clientDiagnosticChanged', {
@@ -142,6 +152,14 @@ export function ComputerRuntime({
           description={runtime.last_error ?? runtime.degraded_reason}
         />
       )}
+      {connectionState?.last_error && (
+        <Alert
+          type={connectionState.last_error.retryable ? 'warning' : 'error'}
+          showIcon
+          message={t('computer.connectionActions.lastError')}
+          description={connectionState.last_error.message}
+        />
+      )}
 
       <Card
         title={t('computer.runtime.statusTitle')}
@@ -166,13 +184,13 @@ export function ComputerRuntime({
                 {t('computer.runtime.restart')}
               </Button>
             </Tooltip>
-            {hasClientConnection ? (
+            {showDisconnect ? (
               <Tooltip title={disconnectDisabledReason}>
                 <Button
                   danger
                   icon={<DisconnectOutlined />}
-                  disabled={!actions.disconnect.enabled}
-                  loading={loading}
+                  disabled={!connectionActions.disconnect.enabled}
+                  loading={connectionStatus === 'disconnecting'}
                   onClick={onDisconnect}
                 >
                   {t('connection.disconnect')}
@@ -182,8 +200,8 @@ export function ComputerRuntime({
               <Tooltip title={backendConnectDisabledReason ?? connectDisabledReason}>
                 <Button
                   icon={<LinkOutlined />}
-                  disabled={!canConnect || !actions.connect.enabled}
-                  loading={loading}
+                  disabled={!canConnect || !connectionActions.connect.enabled}
+                  loading={connectionStatus === 'connecting'}
                   onClick={onConnect}
                 >
                   {t('connection.connect')}
@@ -201,8 +219,8 @@ export function ComputerRuntime({
               </Tag>
             </Descriptions.Item>
           <Descriptions.Item label={t('computer.runtime.connection')}>
-            <Tag color={instance.connectionStatus === 'connected' ? 'green' : 'default'}>
-              {t(`computer.connection.${instance.connectionStatus}`)}
+            <Tag color={connectionStatus === 'connected' ? 'green' : 'default'}>
+              {t(`computer.connection.${connectionStatus}`)}
             </Tag>
           </Descriptions.Item>
           </Descriptions>

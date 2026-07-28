@@ -61,7 +61,9 @@
     },
     "connection": {
       "connected": "Connected",
-      "disconnected": "Disconnected"
+      "disconnected": "Disconnected",
+      "connecting": "Connecting",
+      "disconnecting": "Disconnecting"
     },
     "runtime": {
       "title": "Runtime",
@@ -105,7 +107,7 @@
         "lifecycleChanged": "Lifecycle changed to {{state}}",
         "configRevisionBumped": "Config revision changed to {{revision}}",
         "capabilityRevisionBumped": "Capability revision changed to {{revision}}",
-        "clientConnectionAuthorityChanged": "Connection authority revision {{revision}} is {{status}}",
+        "clientConnectionStateChanged": "Connection state revision {{revision}} changed to {{status}}",
         "connectionPresent": "present",
         "connectionAbsent": "absent",
         "clientDiagnosticChanged": "{{operation}} diagnostic {{status}}",
@@ -156,6 +158,14 @@
       "runtime": "Runtime"
     },
     "connectionActions": {
+      "lastError": "Connection Error",
+      "disabledReasons": {
+        "already_connected": "This Computer is already connected.",
+        "not_connected": "This Computer is not connected.",
+        "transition_in_progress": "Wait for the current connection operation to finish.",
+        "not_running": "Start this Computer before connecting.",
+        "connection_unavailable": "Connection is unavailable in the current runtime state."
+      },
       "targetTitle": "Connection Target",
       "selectTarget": "Select a Robot or Manual SMCP target",
       "requiresRunning": "Start this Computer before connecting.",
@@ -635,6 +645,7 @@
       "connect": "Connect",
       "connected": "Connected",
       "disconnect": "Disconnect",
+      "connectionCleanupRequired": "A stale connection must be cleaned up before reconnecting.",
       "disconnectSuccess": "Disconnected from SMCP server",
       "connectSuccess": "Connecting to {{name}}…",
       "noRobotAccount": "This robot can't be connected securely yet (no robot account ID).",

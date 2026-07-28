@@ -355,34 +355,72 @@ describe('runtimeStore', () => {
       },
     });
 
-    useRuntimeStore.getState().receiveSnapshot(
-      'computer-a',
-      runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 2 }),
-    );
-    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('disconnected');
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'client_connection_state_changed',
+        revision: 1,
+        status: 'connecting',
+      },
+      snapshot: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 2 }),
+      connection: {
+        status: 'connecting',
+        present: true,
+        revision: 1,
+        context: connectionContext,
+        operation: 'reconnect',
+        last_error: null,
+        actions: {
+          connect: { enabled: false, disabled_reason: 'transition_in_progress' },
+          disconnect: { enabled: false, disabled_reason: 'transition_in_progress' },
+        },
+      },
+    });
+    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connecting');
     expect(useComputerStore.getState().instances[0].connectionProfile).toBe('prod');
     expect(useComputerStore.getState().instances[0].connectionUrl).toBe('https://smcp.example.com');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(0);
-    expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBeUndefined();
+    expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
     expect(useComputerOverviewStore.getState().data?.connected).toBe(false);
-    expect(useComputerOverviewStore.getState().data?.connection_profile).toBeUndefined();
-    expect(useComputerOverviewStore.getState().data?.connection_url).toBeUndefined();
+    expect(useComputerOverviewStore.getState().data?.connection_profile).toBe('prod');
+    expect(useComputerOverviewStore.getState().data?.connection_url).toBe(
+      'https://smcp.example.com',
+    );
 
     useRuntimeStore.getState().receiveSnapshot(
       'computer-a',
       runtimeSnapshot({ lifecycle: 'connected', snapshot_revision: 3 }),
     );
-    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('disconnected');
+    expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connecting');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(0);
     expect(useComputerOverviewStore.getState().data?.connected).toBe(false);
-    expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBeUndefined();
-    expect(useComputerOverviewStore.getState().data?.connection_profile).toBeUndefined();
-    expect(useComputerOverviewStore.getState().data?.connection_url).toBeUndefined();
-
-    useRuntimeStore.getState().receiveSnapshot(
-      'computer-a',
-      runtimeSnapshot({ lifecycle: 'joined_office', snapshot_revision: 4 }),
+    expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
+    expect(useComputerOverviewStore.getState().data?.connection_profile).toBe('prod');
+    expect(useComputerOverviewStore.getState().data?.connection_url).toBe(
+      'https://smcp.example.com',
     );
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'client_connection_state_changed',
+        revision: 2,
+        status: 'connected',
+      },
+      snapshot: runtimeSnapshot({ lifecycle: 'joined_office', snapshot_revision: 4 }),
+      connection: {
+        status: 'connected',
+        present: true,
+        revision: 2,
+        context: connectionContext,
+        operation: null,
+        last_error: null,
+        actions: {
+          connect: { enabled: false, disabled_reason: 'already_connected' },
+          disconnect: { enabled: true, disabled_reason: null },
+        },
+      },
+    });
     expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connected');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(1);
     expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
@@ -443,7 +481,10 @@ describe('runtimeStore', () => {
       }),
       connection: { present: false, revision: 2, context: null },
     });
-    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+    expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
+      status: 'disconnected',
+      connected: false,
+    });
 
     useRuntimeStore.getState().receiveEvent({
       instance_id: 'computer-a',
@@ -458,7 +499,75 @@ describe('runtimeStore', () => {
       }),
       connection: { present: true, revision: 1, context },
     });
-    expect(useConnectionStore.getState().getStatus('computer-a')).toEqual({ connected: false });
+    expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
+      status: 'disconnected',
+      connected: false,
+    });
+  });
+
+  it('orders equal connection revisions by their paired runtime observation', () => {
+    const connection = {
+      status: 'disconnected' as const,
+      present: false,
+      revision: 7,
+      context: null,
+      operation: null,
+      last_error: null,
+      actions: {
+        connect: { enabled: false, disabled_reason: 'connection_unavailable' as const },
+        disconnect: { enabled: true, disabled_reason: null },
+      },
+    };
+    useRuntimeStore.getState().receiveSnapshot(
+      'computer-a',
+      runtimeSnapshot({ lifecycle: 'connected', snapshot_revision: 10 }),
+      connection,
+    );
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'observation_advanced' },
+      snapshot: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 9 }),
+      connection: {
+        ...connection,
+        actions: {
+          connect: { enabled: true, disabled_reason: null },
+          disconnect: { enabled: false, disabled_reason: 'not_connected' },
+        },
+      },
+    });
+    expect(useConnectionStore.getState().getStatus('computer-a').actions?.disconnect.enabled)
+      .toBe(true);
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'observation_advanced' },
+      snapshot: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 11 }),
+      connection: {
+        ...connection,
+        actions: {
+          connect: { enabled: true, disabled_reason: null },
+          disconnect: { enabled: false, disabled_reason: 'not_connected' },
+        },
+      },
+    });
+    expect(useConnectionStore.getState().getStatus('computer-a').actions).toEqual({
+      connect: { enabled: true, disabled_reason: null },
+      disconnect: { enabled: false, disabled_reason: 'not_connected' },
+    });
+  });
+
+  it('derives legacy disconnected capabilities from the paired runtime snapshot', () => {
+    useRuntimeStore.getState().receiveSnapshot(
+      'computer-a',
+      runtimeSnapshot({ lifecycle: 'connected' }),
+      { present: false, revision: 1, context: null },
+    );
+
+    expect(useConnectionStore.getState().getStatus('computer-a').actions).toEqual({
+      connect: { enabled: false, disabled_reason: 'connection_unavailable' },
+      disconnect: { enabled: true, disabled_reason: null },
+    });
   });
 
   it('does not reuse raw connection authority across runtime incarnations', () => {
