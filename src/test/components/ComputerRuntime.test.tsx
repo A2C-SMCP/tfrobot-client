@@ -5,8 +5,12 @@ import { useRuntimeStore } from '@/stores/runtimeStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 vi.mock('@/components/McpConfig/McpRuntimeControls', () => ({
-  McpRuntimeControls: ({ disabled }: { disabled: boolean }) => (
-    <div data-testid="runtime-mcp" data-disabled={String(disabled)} />
+  McpRuntimeControls: ({
+    capability,
+  }: {
+    capability: { enabled: boolean };
+  }) => (
+    <div data-testid="runtime-mcp" data-disabled={String(!capability.enabled)} />
   ),
 }));
 
@@ -153,7 +157,7 @@ describe('ComputerRuntime', () => {
     expect(screen.getByRole('button', { name: /Stop$/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Restart$/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Connect$/ })).toBeDisabled();
-    expect(screen.getAllByText('Wait for the current Runtime operation to finish.')).toHaveLength(2);
+    expect(screen.getAllByText('Wait for the current Runtime operation to finish.')).toHaveLength(1);
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
   });
 

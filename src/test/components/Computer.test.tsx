@@ -91,7 +91,33 @@ vi.mock('@/components/Computer/ComputerRuntimeSettings', () => ({
   ComputerRuntimeSettings: ({ instance }: { instance: { id: string } }) => <div data-testid="runtime-settings">RuntimeSettings:{instance.id}</div>,
 }));
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
-  ComputerRuntime: ({ instance }: { instance: { id: string } }) => <div data-testid="computer-runtime">ComputerRuntime:{instance.id}</div>,
+  ComputerRuntime: ({
+    instance,
+    onOpenPlugin,
+  }: {
+    instance: { id: string };
+    onOpenPlugin?: (owner: {
+      type: 'plugin';
+      marketplace: string;
+      plugin: string;
+      pluginId: string;
+    }) => void;
+  }) => (
+    <div data-testid="computer-runtime">
+      ComputerRuntime:{instance.id}
+      <button
+        type="button"
+        onClick={() => onOpenPlugin?.({
+          type: 'plugin',
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+        })}
+      >
+        Open Plugin from Runtime
+      </button>
+    </div>
+  ),
 }));
 vi.mock('@/components/Computer/ComputerOverview', () => ({
   ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
@@ -100,7 +126,24 @@ vi.mock('@/components/Computer/SkillsTab', () => ({
   SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
 }));
 vi.mock('@/components/Computer/MarketplaceTab', () => ({
-  MarketplaceTab: ({ instanceId }: { instanceId: string }) => <div data-testid="marketplace-tab">MarketplaceTab:{instanceId}</div>,
+  MarketplaceTab: ({
+    instanceId,
+    targetPlugin,
+    onTargetPluginConsumed,
+  }: {
+    instanceId: string;
+    targetPlugin?: { marketplace: string; plugin: string } | null;
+    onTargetPluginConsumed?: () => void;
+  }) => (
+    <div data-testid="marketplace-tab">
+      MarketplaceTab:{instanceId}:{targetPlugin?.marketplace}/{targetPlugin?.plugin}
+      {targetPlugin && (
+        <button type="button" onClick={onTargetPluginConsumed}>
+          Consume Plugin Target
+        </button>
+      )}
+    </div>
+  ),
 }));
 
 const { mockFetchManualTargets } = vi.hoisted(() => ({
@@ -219,6 +262,29 @@ describe('Computer', () => {
 
     render(<Computer initialView="detail" initialTab="runtime" />);
     expect(await screen.findByTestId('computer-runtime')).toHaveTextContent('computer-a');
+  }, 20000);
+
+  it('routes repeated Plugin-owned Runtime requests to the corresponding Marketplace Plugin', async () => {
+    render(<Computer initialView="detail" initialTab="runtime" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Plugin from Runtime' }));
+
+    expect(await screen.findByTestId('marketplace-tab')).toHaveTextContent(
+      'computer-a:acme/audit',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Consume Plugin Target' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('marketplace-tab')).toHaveTextContent(
+        'computer-a:/',
+      );
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: /Runtime$/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Plugin from Runtime' }));
+
+    expect(await screen.findByTestId('marketplace-tab')).toHaveTextContent(
+      'computer-a:acme/audit',
+    );
   }, 20000);
 
   it('can render the detail view directly', async () => {

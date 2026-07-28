@@ -1,33 +1,53 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Space, Typography } from 'antd';
 import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
-import { useMcpStore } from '@/stores/mcpStore';
+import {
+  useMcpStore,
+  type McpBatchOperationResult,
+  type McpServerManagedBy,
+} from '@/stores/mcpStore';
+import type { ComputerRuntimeActionCapability } from '@/stores/runtimeSnapshot';
+import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 import { McpServerList } from './McpServerList';
 import { useMcpRuntimeActions, type McpRuntimeAction } from './useMcpRuntimeActions';
 
 const { Title } = Typography;
+type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpRuntimeControlsProps {
   instanceId: string;
-  disabled?: boolean;
+  capability: ComputerRuntimeActionCapability;
+  onStartRuntime?: () => void;
+  onRestartRuntime?: () => void;
+  onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
 }
 
 function runtimeSuccessMessage(action: McpRuntimeAction) {
   switch (action.kind) {
     case 'start':
       return { key: 'mcp.messages.started' as const, options: { name: action.name } };
-    case 'startAll':
-      return { key: 'mcp.messages.allStarted' as const };
     default:
       return null;
   }
 }
 
-export function McpRuntimeControls({ instanceId, disabled = false }: McpRuntimeControlsProps) {
+export function McpRuntimeControls({
+  instanceId,
+  capability,
+  onStartRuntime,
+  onRestartRuntime,
+  onOpenPlugin,
+}: McpRuntimeControlsProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  const [batchFeedback, setBatchFeedback] = useState<{
+    action: 'start' | 'stop';
+    result: McpBatchOperationResult;
+  } | null>(null);
+  const activeInstanceRef = useRef<string | null>(instanceId);
+  activeInstanceRef.current = instanceId;
   const {
     servers,
     loading,
@@ -41,12 +61,23 @@ export function McpRuntimeControls({ instanceId, disabled = false }: McpRuntimeC
 
   useEffect(() => {
     void fetchServers(instanceId);
+    setBatchFeedback(null);
+    return () => {
+      if (activeInstanceRef.current === instanceId) {
+        activeInstanceRef.current = null;
+      }
+    };
   }, [fetchServers, instanceId]);
 
+  const disabled = !capability.enabled;
+  const disabledReason = capability.disabled_reason
+    ? t(`computer.runtime.actionDisabledReasons.${capability.disabled_reason}`)
+    : undefined;
   const runtimeActions = useMcpRuntimeActions({
     instanceId,
     startServer,
     startAll,
+    onBatchResult: (result) => setBatchFeedback({ action: 'start', result }),
     onError: (errorMessage) => message.error(errorMessage),
     onSuccess: (action) => {
       const success = runtimeSuccessMessage(action);
@@ -55,12 +86,97 @@ export function McpRuntimeControls({ instanceId, disabled = false }: McpRuntimeC
   });
 
   const handleStopAll = async () => {
+    const actionInstanceId = instanceId;
     try {
-      await stopAll(instanceId);
-      message.success(t('mcp.messages.allStopped'));
+      const result = await stopAll(actionInstanceId);
+      if (activeInstanceRef.current !== actionInstanceId) return;
+      setBatchFeedback({ action: 'stop', result });
     } catch (cause) {
-      message.error(String(cause));
+      if (activeInstanceRef.current !== actionInstanceId) return;
+      message.error(formatRuntimeActionError(cause));
     }
+  };
+
+  const handleStopServer = async (bundleId: string, name: string) => {
+    const actionInstanceId = instanceId;
+    try {
+      await stopServer(actionInstanceId, bundleId);
+      if (activeInstanceRef.current !== actionInstanceId) return;
+      message.success(t('mcp.messages.stopped', { name }));
+    } catch (cause) {
+      if (activeInstanceRef.current !== actionInstanceId) return;
+      message.error(formatRuntimeActionError(cause));
+    }
+  };
+
+  const renderDisabledGuidance = () => {
+    if (!disabledReason) return null;
+    const reason = capability.disabled_reason;
+    const nextAction = reason === 'not_running' && onStartRuntime
+      ? (
+          <Button size="small" type="primary" onClick={onStartRuntime}>
+            {t('mcp.disabledGuidance.startRuntime')}
+          </Button>
+        )
+      : reason === 'degraded' && onRestartRuntime
+        ? (
+            <Button size="small" onClick={onRestartRuntime}>
+              {t('mcp.disabledGuidance.restartRuntime')}
+            </Button>
+          )
+        : (
+            <Typography.Text>
+              {t('mcp.disabledGuidance.refreshAfterTransition')}
+            </Typography.Text>
+          );
+    return (
+      <Alert
+        type="info"
+        showIcon
+        message={t('mcp.disabledGuidance.title')}
+        description={(
+          <Space direction="vertical" size={8}>
+            <Typography.Text>{disabledReason}</Typography.Text>
+            {nextAction}
+          </Space>
+        )}
+        style={{ marginBottom: 16 }}
+      />
+    );
+  };
+
+  const renderBatchFeedback = () => {
+    if (!batchFeedback) return null;
+    const { action, result } = batchFeedback;
+    return (
+      <Alert
+        type={result.failures.length > 0 ? 'warning' : 'success'}
+        showIcon
+        closable
+        onClose={() => setBatchFeedback(null)}
+        message={t(`mcp.batch.${action}Summary`, {
+          candidates: result.candidate_count,
+          actual: result.actual_operation_count,
+          unchanged: result.unchanged_count,
+          excluded: result.excluded_plugin_owned_count,
+          failed: result.failures.length,
+        })}
+        description={result.failures.length > 0 && (
+          <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+            {result.failures.map((failure) => (
+              <li key={failure.bundleId}>
+                {t('mcp.batch.failure', {
+                  name: failure.name,
+                  bundleId: failure.bundleId,
+                  message: failure.error.message,
+                })}
+              </li>
+            ))}
+          </ul>
+        )}
+        style={{ marginBottom: 16 }}
+      />
+    );
   };
 
   return (
@@ -104,12 +220,16 @@ export function McpRuntimeControls({ instanceId, disabled = false }: McpRuntimeC
         />
       )}
 
+      {renderDisabledGuidance()}
+      {renderBatchFeedback()}
+
       <McpServerList
         servers={servers}
-        mode="runtime"
         actionsDisabled={disabled}
+        actionsDisabledReason={disabledReason}
         loading={loading}
-        onStop={(bundleId) => stopServer(instanceId, bundleId)}
+        onOpenPlugin={onOpenPlugin}
+        onStop={(bundleId, name) => handleStopServer(bundleId, name)}
         onStart={(bundleId) => {
           const server = servers.find((candidate) => candidate.bundleId === bundleId);
           return runtimeActions.run({ kind: 'start', bundleId, name: server?.name ?? bundleId });

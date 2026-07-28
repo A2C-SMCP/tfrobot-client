@@ -1255,6 +1255,10 @@ impl ComputerInstanceRuntime {
 
     pub async fn stop_mcp_server(&self, bundle_id: &BundleId) -> Result<bool, String> {
         let _guard = self.lifecycle_lock.lock().await;
+        self.stop_mcp_server_inner(bundle_id).await
+    }
+
+    async fn stop_mcp_server_inner(&self, bundle_id: &BundleId) -> Result<bool, String> {
         self.ensure_active()?;
         let result = self
             .computer
@@ -1267,6 +1271,19 @@ impl ComputerInstanceRuntime {
             self.mcp_start_diagnostics.write().await.remove(bundle_id);
         }
         result
+    }
+
+    pub async fn stop_mcp_servers_best_effort(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, Result<bool, String>)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let mut results = Vec::with_capacity(bundle_ids.len());
+        for bundle_id in bundle_ids {
+            let result = self.stop_mcp_server_inner(&bundle_id).await;
+            results.push((bundle_id, result));
+        }
+        results
     }
 
     pub async fn start_mcp_servers_best_effort(

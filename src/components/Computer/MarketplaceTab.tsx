@@ -33,6 +33,8 @@ const EMPTY_SKILLS: SkillRef[] = [];
 
 interface MarketplaceTabProps {
   instanceId: string;
+  targetPlugin?: Pick<PluginSummary, 'marketplace' | 'plugin' | 'pluginId'> | null;
+  onTargetPluginConsumed?: () => void;
 }
 
 interface MarketplaceFormValues {
@@ -81,7 +83,11 @@ function renderMarkdown(markdown: string) {
   });
 }
 
-export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
+export function MarketplaceTab({
+  instanceId,
+  targetPlugin,
+  onTargetPluginConsumed,
+}: MarketplaceTabProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [marketplaceForm] = Form.useForm<MarketplaceFormValues>();
@@ -155,6 +161,24 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       setSkillPreviewError(null);
     }
   }, [marketplacePlugins, selectedPluginKey]);
+
+  useEffect(() => {
+    if (!targetPlugin) return;
+    const target = plugins.find((plugin) => (
+      plugin.marketplace === targetPlugin.marketplace
+      && (
+        (targetPlugin.pluginId && plugin.pluginId === targetPlugin.pluginId)
+        || plugin.plugin === targetPlugin.plugin
+      )
+    ));
+    if (!target) return;
+    setSelectedMarketplaceName(target.marketplace);
+    setSelectedPluginKey(pluginKey(target));
+    setSelectedSkillName(null);
+    setSkillPreview(null);
+    setSkillPreviewError(null);
+    onTargetPluginConsumed?.();
+  }, [onTargetPluginConsumed, plugins, targetPlugin]);
 
   const selectedMarketplace = marketplaces.find((marketplace) => marketplace.name === selectedMarketplaceName) ?? null;
   const selectedPlugin = marketplacePlugins.find((plugin) => pluginKey(plugin) === selectedPluginKey) ?? null;

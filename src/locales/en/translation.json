@@ -342,13 +342,27 @@
     },
     "source": {
       "user": "User",
+      "plugin": "Plugin: {{plugin}}",
+      "marketplace": "Marketplace: {{marketplace}}",
       "bundled": "Bundled",
       "trusted": "Trusted"
     },
     "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
+    "batch": {
+      "startSummary": "Start complete: {{candidates}} candidates, {{actual}} started, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
+      "stopSummary": "Stop complete: {{candidates}} candidates, {{actual}} stopped, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
+      "failure": "{{name}} ({{bundleId}}): {{message}}"
+    },
+    "disabledGuidance": {
+      "title": "MCP lifecycle actions are unavailable",
+      "startRuntime": "Start Runtime",
+      "restartRuntime": "Restart Runtime",
+      "refreshAfterTransition": "Wait for the current Runtime action to finish, then refresh."
+    },
     "actions": {
       "start": "Start",
       "stop": "Stop",
+      "managePlugin": "Manage {{plugin}}",
       "edit": "Edit",
       "remove": "Remove",
       "toggleEnabled": "Toggle server {{name}} enabled state"

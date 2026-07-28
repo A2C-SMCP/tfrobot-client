@@ -1,61 +1,39 @@
-import { App, Table, Button, Space, Popconfirm, Tag, Tooltip } from 'antd';
+import { Table, Button, Space, Tag, Tooltip, Typography } from 'antd';
 import {
+  AppstoreOutlined,
   PlayCircleOutlined,
   PauseCircleOutlined,
-  EditOutlined,
-  DeleteOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { ServerStatusBadge } from './ServerStatusBadge';
-import type { McpServerStatus } from '@/stores/mcpStore';
+import type { McpServerManagedBy, McpServerStatus } from '@/stores/mcpStore';
+
+type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpServerListProps {
   servers: McpServerStatus[];
-  mode?: 'config' | 'runtime';
   actionsDisabled?: boolean;
+  actionsDisabledReason?: string;
   loading?: boolean;
   onStart?: (bundleId: string) => Promise<void>;
-  onStop?: (bundleId: string) => Promise<void>;
-  onEdit?: (name: string) => void;
-  onRemove?: (name: string) => Promise<void>;
+  onStop?: (bundleId: string, name: string) => Promise<void>;
+  onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
 }
 
 export function McpServerList({
   servers,
-  mode = 'config',
   actionsDisabled = false,
+  actionsDisabledReason,
   loading,
   onStart,
   onStop,
-  onEdit,
-  onRemove,
+  onOpenPlugin,
 }: McpServerListProps) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
 
   const handleStart = async (bundleId: string) => {
     await onStart?.(bundleId);
   };
-
-  const handleStop = async (bundleId: string, name: string) => {
-    try {
-      await onStop?.(bundleId);
-      message.success(t('mcp.messages.stopped', { name }));
-    } catch (e) {
-      message.error(String(e));
-    }
-  };
-
-  const handleRemove = async (name: string) => {
-    try {
-      await onRemove?.(name);
-      message.success(t('mcp.messages.removed', { name }));
-    } catch (e) {
-      message.error(String(e));
-    }
-  };
-
-  const isPluginOwned = (record: McpServerStatus) => record.managedBy.type === 'plugin';
 
   const pluginLifecycleMessage = (record: McpServerStatus) => {
     if (record.managedBy.type !== 'plugin') {
@@ -67,22 +45,25 @@ export function McpServerList({
     });
   };
 
-  const sourceLabel = (record: McpServerStatus) => {
-    if (record.managedBy.type === 'plugin') {
-      return `${record.managedBy.plugin}@${record.managedBy.marketplace}`;
-    }
-    return t('mcp.source.user');
-  };
-
   const columns = [
     {
       title: t('mcp.table.source'),
       key: 'source',
-      render: (_: unknown, record: McpServerStatus) => (
-        <Tag color={isPluginOwned(record) ? 'purple' : 'default'}>
-          {sourceLabel(record)}
-        </Tag>
-      ),
+      render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'plugin') {
+          return (
+            <Space direction="vertical" size={2}>
+              <Tag color="purple">
+                {t('mcp.source.plugin', { plugin: record.managedBy.plugin })}
+              </Tag>
+              <Typography.Text type="secondary">
+                {t('mcp.source.marketplace', { marketplace: record.managedBy.marketplace })}
+              </Typography.Text>
+            </Space>
+          );
+        }
+        return <Tag>{t('mcp.source.user')}</Tag>;
+      },
     },
     {
       title: t('mcp.table.name'),
@@ -108,65 +89,54 @@ export function McpServerList({
     {
       title: t('mcp.table.actions'),
       key: 'actions',
-      render: (_: unknown, record: McpServerStatus) => (
-        <Space size="small">
-          {mode === 'runtime' && (record.running ? (
-            <Tooltip title={pluginLifecycleMessage(record)}>
-              <span>
-                <Button
-                  type="text"
-                  icon={<PauseCircleOutlined />}
-                  onClick={() => handleStop(record.bundleId, record.name)}
-                  title={t('mcp.actions.stop')}
-                  disabled={actionsDisabled || isPluginOwned(record)}
-                />
-              </span>
-            </Tooltip>
-          ) : (
-            <Tooltip title={pluginLifecycleMessage(record)}>
-              <span>
-                <Button
-                  type="text"
-                  icon={<PlayCircleOutlined />}
-                  onClick={() => handleStart(record.bundleId)}
-                  title={t('mcp.actions.start')}
-                  disabled={actionsDisabled || isPluginOwned(record)}
-                />
-              </span>
-            </Tooltip>
-          ))}
-          {mode === 'config' && <Tooltip title={pluginLifecycleMessage(record)}>
-            <span>
+      render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'plugin') {
+          return (
+            <Space direction="vertical" size={2}>
+              <Typography.Text type="secondary">
+                {pluginLifecycleMessage(record)}
+              </Typography.Text>
               <Button
-                type="text"
-                icon={<EditOutlined />}
-                onClick={() => onEdit?.(record.name)}
-                title={t('mcp.actions.edit')}
-                disabled={isPluginOwned(record)}
-              />
-            </span>
-          </Tooltip>}
-          {mode === 'config' && <Popconfirm
-            title={t('mcp.confirmRemove')}
-            onConfirm={() => handleRemove(record.name)}
-            okText={t('common.yes')}
-            cancelText={t('common.no')}
-            disabled={isPluginOwned(record)}
-          >
-            <Tooltip title={pluginLifecycleMessage(record)}>
-              <span>
-                <Button
-                  type="text"
-                  danger
-                  icon={<DeleteOutlined />}
-                  title={t('mcp.actions.remove')}
-                  disabled={isPluginOwned(record)}
-                />
-              </span>
-            </Tooltip>
-          </Popconfirm>}
-        </Space>
-      ),
+                type="link"
+                size="small"
+                icon={<AppstoreOutlined />}
+                onClick={() => onOpenPlugin?.(record.managedBy as PluginMcpServerOwner)}
+              >
+                {t('mcp.actions.managePlugin', { plugin: record.managedBy.plugin })}
+              </Button>
+            </Space>
+          );
+        }
+        return (
+          <Space size="small">
+            {record.running ? (
+              <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
+                <span>
+                  <Button
+                    type="text"
+                    icon={<PauseCircleOutlined />}
+                    onClick={() => onStop?.(record.bundleId, record.name)}
+                    title={t('mcp.actions.stop')}
+                    disabled={actionsDisabled}
+                  />
+                </span>
+              </Tooltip>
+            ) : (
+              <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
+                <span>
+                  <Button
+                    type="text"
+                    icon={<PlayCircleOutlined />}
+                    onClick={() => handleStart(record.bundleId)}
+                    title={t('mcp.actions.start')}
+                    disabled={actionsDisabled}
+                  />
+                </span>
+              </Tooltip>
+            )}
+          </Space>
+        );
+      },
     },
   ];
 

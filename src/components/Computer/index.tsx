@@ -18,7 +18,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
@@ -38,6 +38,7 @@ import { DebugPanel } from '@/components/DebugPanel';
 import { LogViewer } from '@/components/LogViewer';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
+import type { McpServerManagedBy } from '@/stores/mcpStore';
 import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
 import { ComputerOverview } from './ComputerOverview';
 import { ComputerRuntimeSettings } from './ComputerRuntimeSettings';
@@ -46,6 +47,7 @@ import { MarketplaceTab } from './MarketplaceTab';
 import { SkillsTab } from './SkillsTab';
 
 const { Title, Text } = Typography;
+type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 const statusColor: Record<ComputerStatus, string> = {
   running: 'success',
@@ -261,6 +263,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
   const [activeTab, setActiveTab] = useState<ComputerDetailTab>(initialTab);
+  const [focusedPlugin, setFocusedPlugin] = useState<PluginMcpServerOwner | null>(null);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
@@ -284,6 +287,14 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     setView(initialView);
     setActiveTab(initialTab);
   }, [initialView, initialTab]);
+
+  useEffect(() => {
+    setFocusedPlugin(null);
+  }, [selectedInstanceId]);
+
+  const handleFocusedPluginConsumed = useCallback(() => {
+    setFocusedPlugin(null);
+  }, []);
 
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
@@ -627,7 +638,17 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               { key: 'overview', label: <><DesktopOutlined /> {t('dashboard.overview')}</>, children: <ComputerOverview instanceId={selectedInstance.id} onOpenTab={setActiveTab} /> },
               { key: 'mcp', label: <><ApiOutlined /> {t('mcp.servers')}</>, children: <McpConfig instanceId={selectedInstance.id} /> },
               { key: 'skills', label: <><ReadOutlined /> {t('skills.title')}</>, children: <SkillsTab instanceId={selectedInstance.id} onOpenMcpTab={() => setActiveTab('mcp')} /> },
-              { key: 'marketplace', label: <><AppstoreOutlined /> {t('marketplace.title')}</>, children: <MarketplaceTab instanceId={selectedInstance.id} /> },
+              {
+                key: 'marketplace',
+                label: <><AppstoreOutlined /> {t('marketplace.title')}</>,
+                children: (
+                  <MarketplaceTab
+                    instanceId={selectedInstance.id}
+                    targetPlugin={focusedPlugin}
+                    onTargetPluginConsumed={handleFocusedPluginConsumed}
+                  />
+                ),
+              },
               { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
               { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} onNavigate={onNavigate} /> },
               { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
@@ -647,6 +668,10 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                     onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
                     onConnect={() => { void handleConnect(selectedInstance); }}
                     onDisconnect={() => { void handleDisconnect(selectedInstance); }}
+                    onOpenPlugin={(owner) => {
+                      setFocusedPlugin(owner);
+                      setActiveTab('marketplace');
+                    }}
                   />
                 ),
               },

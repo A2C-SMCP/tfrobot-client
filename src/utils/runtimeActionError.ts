@@ -5,7 +5,7 @@ export type MissingRuntimeInputError = {
   message: string;
 };
 
-type RuntimeActionError = MissingRuntimeInputError | {
+export type RuntimeActionError = MissingRuntimeInputError | {
   code: 'resolver_failed' | 'runtime_error';
   input_id?: string;
   message: string;

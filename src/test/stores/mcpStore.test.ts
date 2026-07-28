@@ -177,15 +177,22 @@ describe('mcpStore', () => {
 
   describe('startAll / stopAll', () => {
     it('startAll invokes start_all_servers', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
+      const result = {
+        candidate_count: 1,
+        actual_operation_count: 1,
+        unchanged_count: 0,
+        excluded_plugin_owned_count: 0,
+        failures: [],
+      };
+      mockedInvoke.mockResolvedValueOnce(result);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().startAll(instanceId);
+      await expect(useMcpStore.getState().startAll(instanceId)).resolves.toEqual(result);
 
       expect(mockedInvoke).toHaveBeenCalledWith('start_all_servers', { instanceId });
     });
 
-    it('refreshes all rows when only some servers fail to start', async () => {
+    it('preserves structured partial failures and refreshes all rows', async () => {
       const mixedRows = [
         {
           bundleId: 'healthy',
@@ -204,24 +211,120 @@ describe('mcpStore', () => {
           managedBy: { type: 'user' as const },
         },
       ];
-      mockedInvoke.mockRejectedValueOnce('Some MCP servers failed to start: broken');
+      const result = {
+        candidate_count: 2,
+        actual_operation_count: 1,
+        unchanged_count: 0,
+        excluded_plugin_owned_count: 1,
+        failures: [{
+          bundleId: 'broken',
+          name: 'broken',
+          error: { code: 'runtime_error', message: 'process exited' },
+        }],
+      };
+      mockedInvoke.mockResolvedValueOnce(result);
       mockedInvoke.mockResolvedValueOnce(mixedRows);
 
-      await expect(useMcpStore.getState().startAll(instanceId))
-        .rejects.toBe('Some MCP servers failed to start: broken');
+      await expect(useMcpStore.getState().startAll(instanceId)).resolves.toEqual(result);
 
       expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'get_mcp_servers', { instanceId });
       expect(useMcpStore.getState().servers).toEqual(mixedRows);
-      expect(useMcpStore.getState().error).toBe('Some MCP servers failed to start: broken');
+      expect(useMcpStore.getState().error).toBeNull();
     });
 
     it('stopAll invokes stop_all_servers', async () => {
-      mockedInvoke.mockResolvedValueOnce(undefined);
+      const result = {
+        candidate_count: 2,
+        actual_operation_count: 1,
+        unchanged_count: 1,
+        excluded_plugin_owned_count: 2,
+        failures: [],
+      };
+      mockedInvoke.mockResolvedValueOnce(result);
       mockedInvoke.mockResolvedValueOnce([]);
 
-      await useMcpStore.getState().stopAll(instanceId);
+      await expect(useMcpStore.getState().stopAll(instanceId)).resolves.toEqual(result);
 
       expect(mockedInvoke).toHaveBeenCalledWith('stop_all_servers', { instanceId });
+    });
+
+    it('preserves structured stop failures and refreshes all rows', async () => {
+      const mixedRows = [
+        {
+          bundleId: 'healthy',
+          name: 'healthy',
+          running: false,
+          status_message: 'Stopped',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+        {
+          bundleId: 'broken',
+          name: 'broken',
+          running: true,
+          status_message: 'Connected',
+          disabled: false,
+          managedBy: { type: 'user' as const },
+        },
+      ];
+      const result = {
+        candidate_count: 2,
+        actual_operation_count: 1,
+        unchanged_count: 0,
+        excluded_plugin_owned_count: 1,
+        failures: [{
+          bundleId: 'broken',
+          name: 'broken',
+          error: { code: 'runtime_error', message: 'disconnect failed' },
+        }],
+      };
+      mockedInvoke.mockResolvedValueOnce(result);
+      mockedInvoke.mockResolvedValueOnce(mixedRows);
+
+      await expect(useMcpStore.getState().stopAll(instanceId)).resolves.toEqual(result);
+
+      expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'get_mcp_servers', { instanceId });
+      expect(useMcpStore.getState().servers).toEqual(mixedRows);
+      expect(useMcpStore.getState().error).toBeNull();
+    });
+
+    it('does not refresh an old instance after its batch action finishes late', async () => {
+      const action = deferred<{
+        candidate_count: number;
+        actual_operation_count: number;
+        unchanged_count: number;
+        excluded_plugin_owned_count: number;
+        failures: [];
+      }>();
+      const result = {
+        candidate_count: 1,
+        actual_operation_count: 1,
+        unchanged_count: 0,
+        excluded_plugin_owned_count: 0,
+        failures: [] as [],
+      };
+      const serversB = [{
+        bundleId: 'b-only',
+        name: 'b-only',
+        running: true,
+        status_message: 'Running',
+        disabled: false,
+        managedBy: { type: 'user' as const },
+      }];
+      mockedInvoke.mockResolvedValueOnce([]);
+      mockedInvoke.mockReturnValueOnce(action.promise as Promise<unknown>);
+      mockedInvoke.mockResolvedValueOnce(serversB);
+
+      await useMcpStore.getState().fetchServers('computer-a');
+      const oldAction = useMcpStore.getState().startAll('computer-a');
+      await useMcpStore.getState().fetchServers('computer-b');
+      action.resolve(result);
+      await expect(oldAction).resolves.toEqual(result);
+
+      expect(mockedInvoke).toHaveBeenCalledTimes(3);
+      expect(useMcpStore.getState().activeInstanceId).toBe('computer-b');
+      expect(useMcpStore.getState().servers).toEqual(serversB);
+      expect(useMcpStore.getState().loading).toBe(false);
     });
   });
 

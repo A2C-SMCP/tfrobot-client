@@ -438,7 +438,7 @@ async fn test_legacy_profile_plugin_owner_does_not_block_sdk_owned_user_config()
 }
 
 #[tokio::test]
-async fn test_start_all_and_stop_all_skip_plugin_owned_mcp_servers() {
+async fn legacy_profile_plugin_metadata_does_not_enter_runtime_batch_inventory() {
     let tmp = tempfile::tempdir().unwrap();
     write_legacy_plugin_owned_mcp_profile(tmp.path());
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -448,12 +448,19 @@ async fn test_start_all_and_stop_all_skip_plugin_owned_mcp_servers() {
         .await
         .unwrap();
 
-    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+    let start_result = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
-    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+    let stop_result = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
+    for result in [start_result, stop_result] {
+        assert_eq!(result.candidate_count, 0);
+        assert_eq!(result.actual_operation_count, 0);
+        assert_eq!(result.unchanged_count, 0);
+        assert_eq!(result.excluded_plugin_owned_count, 0);
+        assert!(result.failures.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -704,6 +711,23 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
     );
     assert!(!broken.running);
     assert!(broken.status_message.starts_with("Start failed:"));
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("healthy-server"))
+        .await
+        .unwrap();
+    let batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(batch.candidate_count, 2);
+    assert_eq!(batch.actual_operation_count, 1);
+    assert_eq!(batch.unchanged_count, 0);
+    assert_eq!(batch.excluded_plugin_owned_count, 0);
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(batch.failures[0].name, "broken-server");
+    assert!(matches!(
+        &batch.failures[0].error,
+        tfrobot_client_lib::commands::runtime_error::RuntimeActionError::RuntimeError { .. }
+    ));
 }
 
 #[tokio::test]
@@ -777,9 +801,9 @@ async fn test_mcp_lifecycle_requires_started_computer() {
 
     for err in [
         start_err.to_string(),
-        stop_err,
+        stop_err.to_string(),
         start_all_err.to_string(),
-        stop_all_err,
+        stop_all_err.to_string(),
     ] {
         assert_eq!(
             err,
@@ -1024,18 +1048,32 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
         .restart()
         .await
         .unwrap();
-    mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+    let stopped = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert_eq!(stopped.candidate_count, 1);
+    assert_eq!(stopped.actual_operation_count, 1);
+    assert_eq!(stopped.unchanged_count, 0);
+    assert!(stopped.failures.is_empty());
+
+    let started = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(started.candidate_count, 1);
+    assert_eq!(started.actual_operation_count, 1);
+    assert_eq!(started.unchanged_count, 0);
+    assert!(started.failures.is_empty());
     let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
     assert_eq!(statuses[0].name, "sdk-all");
     assert!(statuses[0].running);
 
-    mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+    let stopped = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert_eq!(stopped.actual_operation_count, 1);
+    assert!(stopped.failures.is_empty());
 }
 
 #[tokio::test]
@@ -3236,6 +3274,12 @@ async fn test_sdk_computer_start_all_stop_all() {
         .start_runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    let initial_stop = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(initial_stop.candidate_count, 1);
+    assert_eq!(initial_stop.actual_operation_count, 1);
+    assert!(initial_stop.failures.is_empty());
 
     let result = tokio::time::timeout(
         MCP_RUNTIME_TIMEOUT,
@@ -3243,7 +3287,13 @@ async fn test_sdk_computer_start_all_stop_all() {
     )
     .await;
     match result {
-        Ok(Ok(())) => {}
+        Ok(Ok(result)) => {
+            assert_eq!(result.candidate_count, 1);
+            assert_eq!(result.actual_operation_count, 1);
+            assert_eq!(result.unchanged_count, 0);
+            assert_eq!(result.excluded_plugin_owned_count, 0);
+            assert!(result.failures.is_empty());
+        }
         Ok(Err(e)) => panic!("start_all_servers failed: {e}"),
         Err(_) => panic!("start_all_servers timed out after {MCP_RUNTIME_TIMEOUT:?}"),
     }

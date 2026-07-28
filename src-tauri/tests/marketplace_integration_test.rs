@@ -705,6 +705,56 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
     start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
+    mcp::add_mcp_server_core(
+        &restarted,
+        TEST_INSTANCE_ID,
+        echo_server_config("user-batch-mcp"),
+    )
+    .await
+    .unwrap();
+
+    let before_batch = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(before_batch.iter().any(|server| {
+        server.name == "audit-mcp"
+            && server.running
+            && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })
+    }));
+    assert!(before_batch.iter().any(|server| {
+        server.name == "user-batch-mcp"
+            && server.running
+            && matches!(server.managed_by, McpServerManagedBy::User)
+    }));
+
+    let start_batch = mcp::start_all_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(start_batch.candidate_count, 1);
+    assert_eq!(start_batch.actual_operation_count, 0);
+    assert_eq!(start_batch.unchanged_count, 1);
+    assert_eq!(start_batch.excluded_plugin_owned_count, 1);
+    assert!(start_batch.failures.is_empty());
+
+    let stop_batch = mcp::stop_all_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(stop_batch.candidate_count, 1);
+    assert_eq!(stop_batch.actual_operation_count, 1);
+    assert_eq!(stop_batch.unchanged_count, 0);
+    assert_eq!(stop_batch.excluded_plugin_owned_count, 1);
+    assert!(stop_batch.failures.is_empty());
+    let after_batch = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(after_batch.iter().any(|server| {
+        server.name == "audit-mcp"
+            && server.running
+            && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })
+    }));
+    assert!(after_batch
+        .iter()
+        .any(|server| server.name == "user-batch-mcp" && !server.running));
 
     let audit_bundle_id = BundleId::try_from("audit-mcp").unwrap();
     let start_error = mcp::start_mcp_server_core(&restarted, TEST_INSTANCE_ID, &audit_bundle_id)

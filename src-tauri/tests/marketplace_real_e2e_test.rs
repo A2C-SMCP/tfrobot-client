@@ -213,7 +213,7 @@ async fn assert_plugin_owned_mcp_server_visible_and_user_lifecycle_blocked(state
         update_err.to_string(),
         remove_err,
         start_err.to_string(),
-        stop_err,
+        stop_err.to_string(),
     ] {
         assert!(
             error.contains("Marketplace plugin"),

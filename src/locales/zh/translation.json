@@ -342,13 +342,27 @@
     },
     "source": {
       "user": "用户",
+      "plugin": "插件：{{plugin}}",
+      "marketplace": "Marketplace：{{marketplace}}",
       "bundled": "插件托管",
       "trusted": "可信来源"
     },
     "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在 Marketplace 中管理其生命周期。",
+    "batch": {
+      "startSummary": "批量启动完成：候选 {{candidates}} 个，实际启动 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
+      "stopSummary": "批量停止完成：候选 {{candidates}} 个，实际停止 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
+      "failure": "{{name}}（{{bundleId}}）：{{message}}"
+    },
+    "disabledGuidance": {
+      "title": "当前无法操作 MCP 生命周期",
+      "startRuntime": "启动 Runtime",
+      "restartRuntime": "重启 Runtime",
+      "refreshAfterTransition": "等待当前 Runtime 操作完成后刷新状态。"
+    },
     "actions": {
       "start": "启动",
       "stop": "停止",
+      "managePlugin": "管理 {{plugin}}",
       "edit": "编辑",
       "remove": "删除",
       "toggleEnabled": "切换服务器 {{name}} 的启用状态"

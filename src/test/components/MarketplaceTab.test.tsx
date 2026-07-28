@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useState } from 'react';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
 import { useSkillStore } from '@/stores/skillStore';
@@ -111,6 +112,86 @@ describe('MarketplaceTab', () => {
     expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.getByText('audit:code-review')).toBeInTheDocument();
+  });
+
+  it('opens the exact Marketplace Plugin requested by the Runtime workbench', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'tf-market', displayGitUrl: null, status: 'known', message: null },
+        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'tf-market',
+          plugin: 'desktop-tools',
+          pluginId: 'plugin-1',
+          version: null,
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['browser'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+          version: null,
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+      ],
+    }).mockResolvedValueOnce([]);
+
+    const targetPlugin = {
+      marketplace: 'acme',
+      plugin: 'audit',
+      pluginId: 'plugin-2',
+    };
+    function NavigationHarness() {
+      const [target, setTarget] = useState<typeof targetPlugin | null>(null);
+      const consumeTarget = useCallback(() => setTarget(null), []);
+      return (
+        <>
+          <button type="button" onClick={() => setTarget(targetPlugin)}>
+            Open audit Plugin
+          </button>
+          <span data-testid="plugin-navigation-state">{target ? 'pending' : 'idle'}</span>
+          <MarketplaceTab
+            instanceId="computer-a"
+            targetPlugin={target}
+            onTargetPluginConsumed={consumeTarget}
+          />
+        </>
+      );
+    }
+
+    render(<NavigationHarness />);
+    expect(await screen.findByText('Plugins in tf-market')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
+
+    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
+    expect(screen.getByText('audit-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('plugin-navigation-state')).toHaveTextContent('idle');
+    });
+
+    fireEvent.click(screen.getByText('tf-market'));
+    expect((await screen.findAllByText('desktop-tools')).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
+    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(screen.getByText('audit-mcp')).toBeInTheDocument();
   });
 
   it('preserves unknown, empty, declared, and installed capability semantics', async () => {

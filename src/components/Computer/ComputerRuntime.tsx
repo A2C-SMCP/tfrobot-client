@@ -24,6 +24,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 import type { ComputerInstance } from '@/stores/computerStore';
+import type { McpServerManagedBy } from '@/stores/mcpStore';
 import {
   useRuntimeStore,
   type ComputerRuntimeEventCause,
@@ -31,6 +32,7 @@ import {
 } from '@/stores/runtimeStore';
 
 const EMPTY_RUNTIME_EVENTS: ComputerRuntimeEventRecord[] = [];
+type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface ComputerRuntimeProps {
   instance: ComputerInstance;
@@ -41,6 +43,7 @@ interface ComputerRuntimeProps {
   onRestart: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
+  onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
 }
 
 export function ComputerRuntime({
@@ -52,6 +55,7 @@ export function ComputerRuntime({
   onRestart,
   onConnect,
   onDisconnect,
+  onOpenPlugin,
 }: ComputerRuntimeProps) {
   const { t } = useTranslation();
   const runtime = instance.runtime;
@@ -89,9 +93,6 @@ export function ComputerRuntime({
     : undefined;
   const disconnectDisabledReason = connectionActions.disconnect.disabled_reason
     ? t(`computer.connectionActions.disabledReasons.${connectionActions.disconnect.disabled_reason}`)
-    : undefined;
-  const mcpDisabledReason = actions.manage_mcp.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${actions.manage_mcp.disabled_reason}`)
     : undefined;
   const runtimeStateColor = runtime.user_state === 'error'
     ? 'red'
@@ -248,11 +249,11 @@ export function ComputerRuntime({
       <Card title={t('computer.runtime.mcpLifecycle')}>
         <McpRuntimeControls
           instanceId={instance.id}
-          disabled={!actions.manage_mcp.enabled}
+          capability={actions.manage_mcp}
+          onStartRuntime={onStartStop}
+          onRestartRuntime={onRestart}
+          onOpenPlugin={onOpenPlugin}
         />
-        {mcpDisabledReason && (
-          <Typography.Text type="secondary">{mcpDisabledReason}</Typography.Text>
-        )}
       </Card>
 
       <Collapse
