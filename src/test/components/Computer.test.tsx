@@ -67,17 +67,6 @@ function last<T>(items: T[]): T {
   return items[items.length - 1];
 }
 
-vi.mock('@/components/McpConfig', () => ({
-  McpConfig: ({ instanceId }: { instanceId: string }) => <div data-testid="mcp-config">McpConfig:{instanceId}</div>,
-}));
-vi.mock('@/components/InputVariables', () => ({
-  InputVariables: ({ instanceId }: { instanceId: string }) => <div data-testid="input-variables">InputVariables:{instanceId}</div>,
-}));
-vi.mock('@/components/RobotConnectionPanel', () => ({
-  RobotConnectionPanel: () => (
-    <div data-testid="robot-connection-panel">RobotConnectionPanel</div>
-  ),
-}));
 vi.mock('@/components/DesktopResources', () => ({
   DesktopResources: ({ instanceId }: { instanceId: string }) => <div data-testid="desktop-resources">DesktopResources:{instanceId}</div>,
 }));
@@ -86,9 +75,6 @@ vi.mock('@/components/DebugPanel', () => ({
 }));
 vi.mock('@/components/LogViewer', () => ({
   LogViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">LogViewer:{instanceId}</div>,
-}));
-vi.mock('@/components/Computer/ComputerRuntimeSettings', () => ({
-  ComputerRuntimeSettings: ({ instance }: { instance: { id: string } }) => <div data-testid="runtime-settings">RuntimeSettings:{instance.id}</div>,
 }));
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
@@ -125,27 +111,6 @@ vi.mock('@/components/Computer/ComputerOverview', () => ({
 vi.mock('@/components/Computer/SkillsTab', () => ({
   SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
 }));
-vi.mock('@/components/Computer/MarketplaceTab', () => ({
-  MarketplaceTab: ({
-    instanceId,
-    targetPlugin,
-    onTargetPluginConsumed,
-  }: {
-    instanceId: string;
-    targetPlugin?: { marketplace: string; plugin: string } | null;
-    onTargetPluginConsumed?: () => void;
-  }) => (
-    <div data-testid="marketplace-tab">
-      MarketplaceTab:{instanceId}:{targetPlugin?.marketplace}/{targetPlugin?.plugin}
-      {targetPlugin && (
-        <button type="button" onClick={onTargetPluginConsumed}>
-          Consume Plugin Target
-        </button>
-      )}
-    </div>
-  ),
-}));
-
 const { mockFetchManualTargets } = vi.hoisted(() => ({
   mockFetchManualTargets: vi.fn(),
 }));
@@ -223,20 +188,16 @@ describe('Computer', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'prod' }));
 
     expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('MCP Servers')).toBeInTheDocument();
     expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Marketplace')).toBeInTheDocument();
-    expect(screen.getByText('Input Variables')).toBeInTheDocument();
-    expect(screen.getByText('Robot Connection')).toBeInTheDocument();
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
     expect(screen.getByText('Logs')).toBeInTheDocument();
-    expect(screen.getByText('Profile & Configuration')).toBeInTheDocument();
     expect(screen.getAllByText('Runtime').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
   }, 20000);
 
-  it('opens the selected second Computer with scoped detail tabs', async () => {
+  it('opens the selected second Computer with scoped runtime tabs', async () => {
     mockInvoke.mockResolvedValueOnce(twoComputerInstances);
 
     render(<Computer />);
@@ -245,54 +206,39 @@ describe('Computer', () => {
 
     expect(screen.getByText('Second Computer')).toBeInTheDocument();
     expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-b');
-    fireEvent.click(screen.getByText('MCP Servers'));
-    expect(screen.getByTestId('mcp-config')).toHaveTextContent('computer-b');
     fireEvent.click(screen.getByText('Skills'));
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-b');
-    fireEvent.click(screen.getByText('Marketplace'));
-    expect(screen.getByTestId('marketplace-tab')).toHaveTextContent('computer-b');
-    fireEvent.click(screen.getByText('Input Variables'));
-    expect(screen.getByTestId('input-variables')).toHaveTextContent('computer-b');
   }, 20000);
 
-  it('opens configuration and runtime views directly even when tabs overflow', async () => {
-    const configuration = render(<Computer initialView="detail" initialTab="configuration" />);
-    expect(await screen.findByTestId('runtime-settings')).toHaveTextContent('computer-a');
-    configuration.unmount();
-
+  it('opens the runtime view directly', async () => {
     render(<Computer initialView="detail" initialTab="runtime" />);
     expect(await screen.findByTestId('computer-runtime')).toHaveTextContent('computer-a');
   }, 20000);
 
-  it('routes repeated Plugin-owned Runtime requests to the corresponding Marketplace Plugin', async () => {
-    render(<Computer initialView="detail" initialTab="runtime" />);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Plugin from Runtime' }));
-
-    expect(await screen.findByTestId('marketplace-tab')).toHaveTextContent(
-      'computer-a:acme/audit',
+  it('routes Plugin-owned Runtime requests to the corresponding settings Plugin', async () => {
+    const onNavigate = vi.fn();
+    render(
+      <Computer
+        initialView="detail"
+        initialTab="runtime"
+        onNavigate={onNavigate}
+      />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Consume Plugin Target' }));
-    await waitFor(() => {
-      expect(screen.getByTestId('marketplace-tab')).toHaveTextContent(
-        'computer-a:/',
-      );
-    });
 
-    fireEvent.click(screen.getByRole('tab', { name: /Runtime$/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Open Plugin from Runtime' }));
 
-    expect(await screen.findByTestId('marketplace-tab')).toHaveTextContent(
-      'computer-a:acme/audit',
+    expect(onNavigate).toHaveBeenCalledWith(
+      'computer-settings:plugins:acme:audit:plugin-2',
     );
   }, 20000);
 
-  it('can render the detail view directly', async () => {
-    render(<Computer initialView="detail" initialTab="connection" />);
+  it('opens settings from the detail gear', async () => {
+    const onNavigate = vi.fn();
+    render(<Computer initialView="detail" onNavigate={onNavigate} />);
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
-    expect(screen.getByText('Back to Computers')).toBeInTheDocument();
-    expect(screen.getByTestId('robot-connection-panel')).toHaveTextContent('RobotConnectionPanel');
+    fireEvent.click(screen.getByRole('button', { name: 'Open Computer settings' }));
+    expect(onNavigate).toHaveBeenCalledWith('computer-settings:general');
   });
 
   it('keeps detail tabs reachable from loaded Computer instances', async () => {

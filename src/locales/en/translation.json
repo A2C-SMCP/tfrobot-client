@@ -66,6 +66,44 @@
       "connecting": "Connecting",
       "disconnecting": "Disconnecting"
     },
+    "settings": {
+      "open": "Open Computer settings",
+      "title": "{{name}} Settings",
+      "pageLabel": "Computer settings",
+      "navigationLabel": "Computer settings sections",
+      "backToComputer": "Back to Computer",
+      "noComputer": "No Computer is available to configure",
+      "sections": {
+        "general": {
+          "title": "General",
+          "description": "Manage this Computer's saved name and description."
+        },
+        "skills": {
+          "title": "Skills",
+          "description": "Choose this Computer's Skill Home and open related capability management.",
+          "savedSkillHome": "Saved Skill Home",
+          "openDirectory": "Open local directory",
+          "openActiveSkills": "View active Skills in Computer",
+          "openPlugins": "Manage Plugins and Marketplace"
+        },
+        "plugins": {
+          "title": "Plugins & Marketplace",
+          "description": "Manage Marketplace sources and the Plugin installation lifecycle."
+        },
+        "mcp": {
+          "title": "MCP Servers",
+          "description": "Manage saved MCP declarations, sources, enablement, import, export, and validation."
+        },
+        "inputs": {
+          "title": "Inputs",
+          "description": "Manage user-created definitions, values, and Secrets for this Computer."
+        },
+        "connection": {
+          "title": "Connection Policy",
+          "description": "Choose the saved connection target and automatic connection policy."
+        }
+      }
+    },
     "runtime": {
       "title": "Runtime",
       "statusTitle": "Runtime Status",
@@ -187,9 +225,9 @@
       "chooseSkillHome": "Choose Skill Home",
       "resetSkillHome": "Use Default",
       "skillHomeDescription": "This directory is the instance capability governance root. Clearing it restores the default instance skill_home/.",
-      "nextSkillHome": "Next Skill Home",
+      "nextSkillHome": "Saved Skill Home",
       "skillHomeConfirmTitle": "Save Skill Home?",
-      "skillHomeConfirmDescription": "This saves the capability governance root without restarting the current Runtime. The new Skill Home is used the next time you start or restart Runtime.",
+      "skillHomeConfirmDescription": "This saves the capability governance root without automatically restarting the Computer.",
       "skillHomeConfirmOk": "Save"
     },
     "actionGroups": {
@@ -305,6 +343,8 @@
     },
     "actions": {
       "addMarketplace": "Add Marketplace",
+      "selectMarketplace": "Select marketplace {{marketplace}}",
+      "selectPlugin": "Select plugin {{plugin}} ({{pluginId}})",
       "refreshMarketplace": "Refresh Marketplace",
       "removeMarketplace": "Remove Marketplace",
       "updateMarketplace": "Update Marketplace",
@@ -361,6 +401,10 @@
     "validateConfig": "Validate Schema",
     "bundledConfigHint": "This declaration shares a name with an installed plugin bundle; its config declaration remains editable.",
     "readOnlyConfigHint": "This declaration comes from the read-only {{origin}} scope and cannot be edited here.",
+    "ownershipLoadingTitle": "Checking MCP declaration ownership",
+    "ownershipUnavailableTitle": "MCP declaration ownership is unavailable",
+    "ownershipUnavailableDescription": "Configuration changes remain disabled until authoritative ownership is loaded. Refresh to try again.",
+    "ownershipUnavailableHint": "Configuration changes are disabled until authoritative MCP ownership is available.",
     "validation": {
       "schemaOnlyTitle": "Schema validation only",
       "schemaOnlyDescription": "Validation checks the SDK-owned configuration structure. It does not check commands, paths, secrets, inputs, marketplaces, plugins, or MCP server runtime availability.",
@@ -463,6 +507,8 @@
     "title": "Input Variables",
     "addInput": "Add Variable",
     "editInput": "Edit Variable",
+    "editInputFor": "Edit variable {{id}}",
+    "removeInputFor": "Remove variable {{id}}",
     "setValue": "Set Value",
     "selectValue": "Select a value",
     "enterValue": "Enter value",

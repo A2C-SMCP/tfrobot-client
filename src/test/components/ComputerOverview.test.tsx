@@ -6,6 +6,7 @@ import { runtimeSnapshot } from '../helpers/store';
 
 const mockFetchOverview = vi.fn();
 const mockOpenTab = vi.fn();
+const mockOpenSettings = vi.fn();
 
 vi.mock('@/stores/computerOverviewStore', () => ({
   useComputerOverviewStore: vi.fn(() => ({
@@ -54,7 +55,13 @@ describe('ComputerOverview', () => {
   });
 
   it('fetches overview on mount and renders instance metrics', () => {
-    render(<ComputerOverview instanceId="computer-a" onOpenTab={mockOpenTab} />);
+    render(
+      <ComputerOverview
+        instanceId="computer-a"
+        onOpenTab={mockOpenTab}
+        onOpenSettings={mockOpenSettings}
+      />,
+    );
 
     expect(mockFetchOverview).toHaveBeenCalledWith('computer-a');
     expect(screen.getAllByText('Connected').length).toBeGreaterThan(0);
@@ -65,18 +72,24 @@ describe('ComputerOverview', () => {
     expect(screen.getByText('Server started')).toBeInTheDocument();
   });
 
-  it('opens detail tabs from overview actions', () => {
-    render(<ComputerOverview instanceId="computer-a" onOpenTab={mockOpenTab} />);
+  it('opens settings and runtime detail destinations from overview actions', () => {
+    render(
+      <ComputerOverview
+        instanceId="computer-a"
+        onOpenTab={mockOpenTab}
+        onOpenSettings={mockOpenSettings}
+      />,
+    );
 
     fireEvent.click(screen.getByText('Robot Connection'));
     fireEvent.click(screen.getAllByText('MCP Servers')[1]);
     fireEvent.click(screen.getByText('Debug Panel'));
     fireEvent.click(screen.getAllByText('Logs')[1]);
 
-    expect(mockOpenTab).toHaveBeenNthCalledWith(1, 'connection');
-    expect(mockOpenTab).toHaveBeenNthCalledWith(2, 'mcp');
-    expect(mockOpenTab).toHaveBeenNthCalledWith(3, 'debug');
-    expect(mockOpenTab).toHaveBeenNthCalledWith(4, 'logs');
+    expect(mockOpenSettings).toHaveBeenNthCalledWith(1, 'connection');
+    expect(mockOpenSettings).toHaveBeenNthCalledWith(2, 'mcp');
+    expect(mockOpenTab).toHaveBeenNthCalledWith(1, 'debug');
+    expect(mockOpenTab).toHaveBeenNthCalledWith(2, 'logs');
   });
 
   it('shows loading when data for this instance is not available', () => {
@@ -87,7 +100,13 @@ describe('ComputerOverview', () => {
       fetchOverview: mockFetchOverview,
     } as any);
 
-    const { container } = render(<ComputerOverview instanceId="computer-a" onOpenTab={mockOpenTab} />);
+    const { container } = render(
+      <ComputerOverview
+        instanceId="computer-a"
+        onOpenTab={mockOpenTab}
+        onOpenSettings={mockOpenSettings}
+      />,
+    );
 
     expect(container.querySelector('.ant-spin')).toBeInTheDocument();
   });

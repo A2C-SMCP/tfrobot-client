@@ -125,17 +125,23 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
             ? t('inputs.configuredSecret')
             : String(stored.value ?? '');
           return (
-            <Tag
-              color="cyan"
-              style={{ cursor: 'pointer' }}
+            <Button
+              type="link"
+              size="small"
+              aria-label={t('inputs.setValueFor', { id: record.id })}
               onClick={() => handleSetValue(record.id)}
             >
               {displayValue.length > 30 ? displayValue.substring(0, 30) + '...' : displayValue}
-            </Tag>
+            </Button>
           );
         }
         return (
-          <Button type="link" size="small" onClick={() => handleSetValue(record.id)}>
+          <Button
+            type="link"
+            size="small"
+            aria-label={t('inputs.setValueFor', { id: record.id })}
+            onClick={() => handleSetValue(record.id)}
+          >
             {t('inputs.setValue')}
           </Button>
         );
@@ -151,6 +157,8 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
             type="text"
             size="small"
             icon={<EditOutlined />}
+            aria-label={t('inputs.editInputFor', { id: record.id })}
+            title={t('inputs.editInputFor', { id: record.id })}
             onClick={() => handleEdit(record)}
           />
           <Popconfirm
@@ -159,7 +167,14 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
               removeInput(instanceId, record.id).catch((e) => message.error(String(e)));
             }}
           >
-            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+            <Button
+              type="text"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              aria-label={t('inputs.removeInputFor', { id: record.id })}
+              title={t('inputs.removeInputFor', { id: record.id })}
+            />
           </Popconfirm>
         </Space>
       ),
@@ -168,9 +183,18 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
         <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
-        <Space>
+        <Space wrap>
           <Button icon={<ReloadOutlined />} onClick={() => { fetchInputs(instanceId); fetchValues(instanceId); }} loading={loading}>
             {t('common.refresh')}
           </Button>
@@ -179,7 +203,12 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
               {t('inputs.clearValues')}
             </Button>
           </Popconfirm>
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            aria-label={t('inputs.addInput')}
+            onClick={handleAdd}
+          >
             {t('inputs.addInput')}
           </Button>
         </Space>
@@ -196,6 +225,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
         loading={loading}
         pagination={false}
         size="middle"
+        scroll={{ x: 'max-content' }}
       />
 
       <Modal

@@ -1,16 +1,13 @@
 import { App, Button, Card, Col, Empty, Form, Input, Modal, Popconfirm, Row, Select, Skeleton, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
-  AppstoreOutlined,
   BugOutlined,
-  CloudServerOutlined,
   CopyOutlined,
   DesktopOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
   FileTextOutlined,
-  FormOutlined,
   LinkOutlined,
   ReadOutlined,
   PlayCircleOutlined,
@@ -18,7 +15,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
@@ -29,24 +26,21 @@ import {
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
-import { McpConfig } from '@/components/McpConfig';
-import { InputVariables } from '@/components/InputVariables';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import { DesktopResources } from '@/components/DesktopResources';
 import { DebugPanel } from '@/components/DebugPanel';
 import { LogViewer } from '@/components/LogViewer';
-import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
-import type { McpServerManagedBy } from '@/stores/mcpStore';
-import { toComputerDetailTab, type ComputerDetailTab } from './tabs';
+import {
+  computerSettingsNavigationKey,
+  toComputerDetailTab,
+  type ComputerDetailTab,
+} from './tabs';
 import { ComputerOverview } from './ComputerOverview';
-import { ComputerRuntimeSettings } from './ComputerRuntimeSettings';
 import { ComputerRuntime } from './ComputerRuntime';
-import { MarketplaceTab } from './MarketplaceTab';
 import { SkillsTab } from './SkillsTab';
 
 const { Title, Text } = Typography;
-type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 const statusColor: Record<ComputerStatus, string> = {
   running: 'success',
@@ -262,7 +256,6 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
   const [activeTab, setActiveTab] = useState<ComputerDetailTab>(initialTab);
-  const [focusedPlugin, setFocusedPlugin] = useState<PluginMcpServerOwner | null>(null);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
@@ -286,14 +279,6 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     setView(initialView);
     setActiveTab(initialTab);
   }, [initialView, initialTab]);
-
-  useEffect(() => {
-    setFocusedPlugin(null);
-  }, [selectedInstanceId]);
-
-  const handleFocusedPluginConsumed = useCallback(() => {
-    setFocusedPlugin(null);
-  }, []);
 
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
@@ -565,6 +550,13 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               <Button onClick={() => setView('list')}>
                 {t('computer.backToList')}
               </Button>
+              <Tooltip title={t('computer.settings.open')}>
+                <Button
+                  aria-label={t('computer.settings.open')}
+                  icon={<SettingOutlined />}
+                  onClick={() => onNavigate?.('computer-settings:general')}
+                />
+              </Tooltip>
               <Space direction="vertical" size={2}>
                 <Text type="secondary">{t('computer.actionGroups.profile')}</Text>
                 <Space.Compact>
@@ -634,22 +626,29 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
             activeKey={activeTab}
             onChange={(key) => setActiveTab(toComputerDetailTab(key))}
             items={[
-              { key: 'overview', label: <><DesktopOutlined /> {t('dashboard.overview')}</>, children: <ComputerOverview instanceId={selectedInstance.id} onOpenTab={setActiveTab} /> },
-              { key: 'mcp', label: <><ApiOutlined /> {t('mcp.servers')}</>, children: <McpConfig instanceId={selectedInstance.id} /> },
-              { key: 'skills', label: <><ReadOutlined /> {t('skills.title')}</>, children: <SkillsTab instanceId={selectedInstance.id} onOpenMcpTab={() => setActiveTab('mcp')} /> },
               {
-                key: 'marketplace',
-                label: <><AppstoreOutlined /> {t('marketplace.title')}</>,
+                key: 'overview',
+                label: <><DesktopOutlined /> {t('dashboard.overview')}</>,
                 children: (
-                  <MarketplaceTab
+                  <ComputerOverview
                     instanceId={selectedInstance.id}
-                    targetPlugin={focusedPlugin}
-                    onTargetPluginConsumed={handleFocusedPluginConsumed}
+                    onOpenTab={setActiveTab}
+                    onOpenSettings={(section) => {
+                      onNavigate?.(computerSettingsNavigationKey(section));
+                    }}
                   />
                 ),
               },
-              { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
-              { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} onNavigate={onNavigate} /> },
+              {
+                key: 'skills',
+                label: <><ReadOutlined /> {t('skills.title')}</>,
+                children: (
+                  <SkillsTab
+                    instanceId={selectedInstance.id}
+                    onOpenMcpTab={() => setActiveTab('runtime')}
+                  />
+                ),
+              },
               {
                 key: 'resources',
                 label: <><DesktopOutlined /> {t('resources.title')}</>,
@@ -658,13 +657,12 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                     instanceId={selectedInstance.id}
                     runtime={selectedInstance.runtime}
                     onStartRuntime={() => { void runRuntimeAction(selectedInstance, 'start'); }}
-                    onOpenMcp={() => setActiveTab('mcp')}
+                    onOpenMcp={() => setActiveTab('runtime')}
                   />
                 ),
               },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
               { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
-              { key: 'configuration', label: <><SettingOutlined /> {t('common.configuration')}</>, children: <ComputerRuntimeSettings instance={selectedInstance} /> },
               {
                 key: 'runtime',
                 label: <><PlayCircleOutlined /> {t('computer.runtime.title')}</>,
@@ -680,8 +678,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                     onDisconnect={() => { void handleDisconnect(selectedInstance); }}
                     onViewLogs={() => setActiveTab('logs')}
                     onOpenPlugin={(owner) => {
-                      setFocusedPlugin(owner);
-                      setActiveTab('marketplace');
+                      onNavigate?.(computerSettingsNavigationKey('plugins', owner));
                     }}
                   />
                 ),

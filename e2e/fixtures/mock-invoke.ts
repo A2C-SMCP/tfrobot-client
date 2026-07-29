@@ -92,15 +92,30 @@ const mockResponses: Record<string, unknown> = {
   get_mcp_servers_by_instance: {
     'computer-a': [
       {
+        bundleId: 'computer-a-stdio-server',
         name: 'computer-a-stdio-server',
         running: false,
         disabled: false,
         status_message: 'Stopped',
         managedBy: { type: 'user' },
       },
+      {
+        bundleId: 'plugin-tools',
+        name: 'plugin-tools',
+        running: false,
+        disabled: false,
+        status_message: 'Stopped',
+        managedBy: {
+          type: 'plugin',
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+        },
+      },
     ],
     'computer-b': [
       {
+        bundleId: 'second-stdio-server',
         name: 'second-stdio-server',
         running: false,
         disabled: false,
@@ -117,6 +132,7 @@ const mockResponses: Record<string, unknown> = {
         mcp: {
           servers: [
             {
+              bundleId: 'computer-a-stdio-server',
               name: 'computer-a-stdio-server',
               origin: 'local',
               writable: true,
@@ -129,6 +145,22 @@ const mockResponses: Record<string, unknown> = {
                 forbidden_tools: [],
                 tool_meta: {},
                 server_parameters: { command: 'node', args: [], env: {} },
+              },
+            },
+            {
+              bundleId: 'plugin-tools',
+              name: 'plugin-tools',
+              origin: 'plugin',
+              writable: false,
+              trustedOrigin: true,
+              bundled: true,
+              config: {
+                type: 'Stdio',
+                name: 'plugin-tools',
+                disabled: false,
+                forbidden_tools: [],
+                tool_meta: {},
+                server_parameters: { command: 'plugin-tools', args: [], env: {} },
               },
             },
           ],
@@ -144,6 +176,7 @@ const mockResponses: Record<string, unknown> = {
         mcp: {
           servers: [
             {
+              bundleId: 'second-stdio-server',
               name: 'second-stdio-server',
               origin: 'local',
               writable: true,
@@ -335,6 +368,60 @@ const mockResponses: Record<string, unknown> = {
     custom_runtime_paths: {},
   },
   get_logs: [],
+  list_skills: [],
+  get_marketplace_governance: {
+    capabilities: {
+      computerLifecycleApiAvailable: true,
+      supportedOperations: [
+        'add_marketplace',
+        'update_marketplace',
+        'refresh_marketplace',
+        'remove_marketplace',
+        'install_plugin',
+        'enable_plugin',
+        'disable_plugin',
+        'uninstall_plugin',
+      ],
+      requiredSdkApis: [],
+      reason: 'available in E2E fixture',
+    },
+    marketplaces: [
+      {
+        name: 'acme',
+        displayGitUrl: 'https://example.com/acme.git',
+        status: 'ready',
+        message: null,
+      },
+    ],
+    plugins: [
+      {
+        marketplace: 'acme',
+        plugin: 'audit',
+        pluginId: 'plugin-old',
+        version: '0.9.0',
+        installed: true,
+        enabled: true,
+        status: 'enabled',
+        bundledMcpServers: ['legacy-audit-mcp'],
+        bundledSkills: [],
+        declared: null,
+        message: 'Previous owner',
+      },
+      {
+        marketplace: 'acme',
+        plugin: 'audit',
+        pluginId: 'plugin-2',
+        version: '1.0.0',
+        installed: true,
+        enabled: true,
+        status: 'enabled',
+        bundledMcpServers: ['plugin-tools'],
+        bundledSkills: [],
+        declared: null,
+        message: null,
+      },
+    ],
+  },
   list_inputs: [],
   list_input_values: {},
   get_available_tools: [],

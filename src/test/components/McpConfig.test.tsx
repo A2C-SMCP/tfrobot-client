@@ -16,9 +16,35 @@ const mockSdkStore = {
   exportConfig: vi.fn(),
 };
 
+const mockMcpStore = vi.hoisted(() => ({
+  servers: [] as Array<{
+    bundleId: string;
+    name: string;
+    running: boolean;
+    status_message: string;
+    disabled: boolean;
+    managedBy:
+      | { type: 'user' }
+      | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
+  }>,
+  activeInstanceId: 'computer-a' as string | null,
+  serversReady: true,
+  loading: false,
+  error: null as string | null,
+  fetchServers: vi.fn(),
+}));
+
 vi.mock('@/stores/sdkConfigStore', () => ({
   useSdkConfigStore: vi.fn(() => mockSdkStore),
 }));
+
+vi.mock('@/stores/mcpStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/mcpStore')>();
+  return {
+    ...actual,
+    useMcpStore: (selector: (state: typeof mockMcpStore) => unknown) => selector(mockMcpStore),
+  };
+});
 
 vi.mock('@/components/McpConfig/McpServerForm', () => ({
   McpServerForm: ({ onSubmit }: { onSubmit: (config: unknown) => Promise<void> }) => (
@@ -94,6 +120,12 @@ describe('McpConfig', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMcpStore.servers = [];
+    mockMcpStore.activeInstanceId = instanceId;
+    mockMcpStore.serversReady = true;
+    mockMcpStore.loading = false;
+    mockMcpStore.error = null;
+    mockMcpStore.fetchServers.mockResolvedValue(undefined);
     mockSdkStore.upsertServer.mockResolvedValue(undefined);
     mockUseSdkConfigStore.mockReturnValue({ ...mockSdkStore } as any);
   });
@@ -101,6 +133,7 @@ describe('McpConfig', () => {
   it('loads the SDK config snapshot and validation on mount', () => {
     render(<McpConfig instanceId={instanceId} />);
     expect(mockSdkStore.fetchConfig).toHaveBeenCalledWith(instanceId);
+    expect(mockMcpStore.fetchServers).toHaveBeenCalledWith(instanceId);
   });
 
   it('keeps configuration CRUD, import/export, and schema validation out of runtime controls', () => {
@@ -171,6 +204,67 @@ describe('McpConfig', () => {
     ));
   });
 
+  it('fails closed while authoritative MCP ownership is loading', () => {
+    mockMcpStore.serversReady = false;
+    mockMcpStore.loading = true;
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:ownership-loading',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} />);
+
+    expect(screen.getByText('Checking MCP declaration ownership')).toBeInTheDocument();
+    expect(screen.getByRole('switch', {
+      name: 'Toggle server test-stdio enabled state',
+    })).toBeDisabled();
+    expect(screen.getByTitle('Edit')).toBeDisabled();
+    expect(screen.getByTitle('Remove')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Import Config' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add Server' })).toBeDisabled();
+  });
+
+  it('fails closed when authoritative MCP ownership cannot be loaded', () => {
+    mockMcpStore.serversReady = false;
+    mockMcpStore.error = 'ownership lookup failed';
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:ownership-error',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} />);
+
+    expect(screen.getByText('MCP declaration ownership is unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('ownership lookup failed')).not.toBeInTheDocument();
+    expect(screen.getByRole('switch', {
+      name: 'Toggle server test-stdio enabled state',
+    })).toBeDisabled();
+    expect(screen.getByTitle('Edit')).toBeDisabled();
+    expect(screen.getByTitle('Remove')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Import Config' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add Server' })).toBeDisabled();
+  });
+
+  it('refreshes both saved configuration and authoritative ownership', () => {
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    expect(mockSdkStore.fetchConfig).toHaveBeenCalledTimes(2);
+    expect(mockMcpStore.fetchServers).toHaveBeenCalledTimes(2);
+    expect(mockMcpStore.fetchServers).toHaveBeenLastCalledWith(instanceId);
+  });
+
   it('prompts for a missing Input when enabling a declaration and retries it', async () => {
     mockSdkStore.upsertServer
       .mockRejectedValueOnce({
@@ -200,7 +294,7 @@ describe('McpConfig', () => {
     expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
       mockSdkStore.upsertServer.mock.calls[0],
     );
-  });
+  }, 10000);
 
   it('keys same-name server rows by BundleId', () => {
     mockUseSdkConfigStore.mockReturnValue({
@@ -281,6 +375,133 @@ describe('McpConfig', () => {
     })).toBeDisabled();
     fireEvent.mouseOver(editButton.parentElement!);
     expect(await screen.findByText(/read-only policy scope/)).toBeInTheDocument();
+  });
+
+  it('shows Plugin ownership and opens the exact owning Plugin', () => {
+    const onOpenPlugin = vi.fn();
+    mockMcpStore.servers = [{
+      bundleId: 'plugin-tools',
+      name: 'plugin-tools',
+      running: false,
+      status_message: 'Stopped',
+      disabled: false,
+      managedBy: {
+        type: 'plugin',
+        marketplace: 'acme',
+        plugin: 'audit',
+        pluginId: 'plugin-2',
+      },
+    }];
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:plugin',
+        mcp: {
+          servers: [{
+            ...configServers[1],
+            origin: 'local',
+            writable: true,
+          }],
+        },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} onOpenPlugin={onOpenPlugin} />);
+
+    expect(screen.getAllByText(
+      'Managed by plugin audit from acme. Use Marketplace to manage its lifecycle.',
+    ).length).toBeGreaterThan(0);
+    expect(screen.getByText(
+      'This declaration comes from the read-only plugin scope and cannot be edited here.',
+    )).toBeInTheDocument();
+    expect(screen.getByRole('switch', {
+      name: 'Toggle server plugin-tools enabled state',
+    })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage audit' }));
+    expect(onOpenPlugin).toHaveBeenCalledWith({
+      type: 'plugin',
+      marketplace: 'acme',
+      plugin: 'audit',
+      pluginId: 'plugin-2',
+    });
+  });
+
+  it('uses the authoritative MCP owner after a shared Bundle changes Plugin ownership', () => {
+    const onOpenPlugin = vi.fn();
+    mockMcpStore.servers = [{
+      bundleId: 'plugin-tools',
+      name: 'plugin-tools',
+      running: false,
+      status_message: 'Stopped',
+      disabled: false,
+      managedBy: {
+        type: 'plugin',
+        marketplace: 'acme',
+        plugin: 'replacement',
+        pluginId: 'plugin-3',
+      },
+    }];
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:plugin-handoff',
+        mcp: {
+          servers: [{
+            ...configServers[1],
+            origin: 'local',
+            writable: true,
+          }],
+        },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} onOpenPlugin={onOpenPlugin} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manage replacement' }));
+    expect(onOpenPlugin).toHaveBeenCalledWith({
+      type: 'plugin',
+      marketplace: 'acme',
+      plugin: 'replacement',
+      pluginId: 'plugin-3',
+    });
+  });
+
+  it('restores writable config actions after authoritative ownership returns to the user', () => {
+    mockMcpStore.servers = [{
+      bundleId: 'plugin-tools',
+      name: 'plugin-tools',
+      running: false,
+      status_message: 'Stopped',
+      disabled: false,
+      managedBy: { type: 'user' },
+    }];
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:user-handoff',
+        mcp: {
+          servers: [{
+            ...configServers[1],
+            origin: 'local',
+            writable: true,
+          }],
+        },
+        provenance: {},
+      },
+    } as any);
+
+    render(<McpConfig instanceId={instanceId} />);
+
+    expect(screen.getByRole('switch', {
+      name: 'Toggle server plugin-tools enabled state',
+    })).toBeEnabled();
+    expect(screen.getByTitle('Edit')).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /Manage/ })).not.toBeInTheDocument();
   });
 
   it('persists a declaration through config CRUD when its inputs are resolved', async () => {

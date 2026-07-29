@@ -108,6 +108,7 @@ export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse'
 
 interface McpServerState {
   servers: McpServerStatus[];
+  serversReady: boolean;
   loading: boolean;
   error: string | null;
   activeInstanceId: string | null;
@@ -123,6 +124,7 @@ interface McpServerState {
 
 const initialState = {
   servers: [] as McpServerStatus[],
+  serversReady: false,
   loading: false,
   error: null as string | null,
   activeInstanceId: null as string | null,
@@ -149,6 +151,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
       activeInstanceId: instanceId,
       serversRequestId: requestId,
       servers: [],
+      serversReady: false,
       loading: true,
       error: null,
     });
@@ -157,12 +160,16 @@ export const useMcpStore = create<McpServerState>((set, get) => {
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ servers, loading: false });
+      set({ servers, serversReady: true, loading: false });
     } catch (e) {
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({
+        serversReady: false,
+        error: formatRuntimeActionError(e),
+        loading: false,
+      });
     }
   },
 

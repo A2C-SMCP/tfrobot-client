@@ -1,3 +1,4 @@
+use crate::services::config::ConfigError;
 use crate::AppState;
 use a2c_smcp::smcp_computer::skills::SkillResourceView;
 use a2c_smcp::A2CSkillRef;
@@ -32,6 +33,9 @@ pub enum SkillCommandError {
         instance_id: String,
     },
     RuntimeUnavailable {
+        message: String,
+    },
+    ConfigurationUnavailable {
         message: String,
     },
     SkillNotFound {
@@ -148,6 +152,61 @@ pub async fn open_local_skills_root(
             .map_err(|error| error.to_string())
     })
     .await
+}
+
+#[tauri::command]
+pub async fn open_configured_local_skills_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), SkillCommandError> {
+    open_configured_local_skills_root_core(&state, &instance_id, |path| {
+        app.opener()
+            .open_path(path.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|error| error.to_string())
+    })
+}
+
+pub fn open_configured_local_skills_root_core<F>(
+    state: &AppState,
+    instance_id: &str,
+    open_path: F,
+) -> Result<(), SkillCommandError>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let root = configured_local_user_skills_root(state, instance_id)?;
+    std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
+        path: root.to_string_lossy().to_string(),
+        message: format!("Failed to create configured local skills root: {error}"),
+    })?;
+    open_path(&root).map_err(|message| SkillCommandError::OpenFailed {
+        path: root.to_string_lossy().to_string(),
+        message,
+    })
+}
+
+pub fn configured_local_user_skills_root(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<PathBuf, SkillCommandError> {
+    let instance_id = require_non_empty("instance_id", instance_id)?;
+    let instance =
+        state
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| match error {
+                ConfigError::NotFound(_) => SkillCommandError::InstanceNotFound {
+                    instance_id: instance_id.to_string(),
+                },
+                other => SkillCommandError::ConfigurationUnavailable {
+                    message: other.to_string(),
+                },
+            })?;
+    Ok(instance
+        .local_skills_root
+        .unwrap_or_else(|| state.config.default_local_skills_root(instance_id))
+        .join("user"))
 }
 
 pub async fn open_local_skills_root_core<F>(
@@ -541,6 +600,31 @@ mod tests {
                 instance_id: "missing".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn open_configured_local_skills_root_uses_saved_root_without_runtime_restart() {
+        let (state, dir) = test_state();
+        let configured_root = dir.path().join("saved-skill-home");
+        let runtime_root = state.config.default_local_skills_root("computer-a");
+        state
+            .config
+            .update_computer_instance("computer-a", |instance| {
+                instance.local_skills_root = Some(configured_root.clone());
+            })
+            .unwrap();
+
+        let mut opened = None;
+        open_configured_local_skills_root_core(&state, "computer-a", |path| {
+            opened = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        let expected = configured_root.join("user");
+        assert_eq!(opened.as_deref(), Some(expected.as_path()));
+        assert!(expected.is_dir());
+        assert_ne!(expected, runtime_root.join("user"));
     }
 
     #[tokio::test]

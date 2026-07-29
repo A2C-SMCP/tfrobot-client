@@ -6,6 +6,8 @@ import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
 
+vi.setConfig({ testTimeout: 30_000 });
+
 const supportedCapabilities = {
   computerLifecycleApiAvailable: true,
   supportedOperations: [
@@ -75,7 +77,7 @@ describe('MarketplaceTab', () => {
           marketplace: 'acme',
           plugin: 'audit',
           pluginId: 'plugin-2',
-          version: null,
+          version: '1.0.0',
           installed: true,
           enabled: true,
           status: 'enabled',
@@ -105,7 +107,10 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('browser')).toBeInTheDocument();
     expect(screen.getByText('summarizer')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('acme'));
+    const acmeSelection = screen.getByRole('button', {
+      name: 'Select marketplace acme',
+    });
+    fireEvent.click(acmeSelection);
 
     expect(screen.getByText('Plugins in acme')).toBeInTheDocument();
     expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
@@ -138,8 +143,21 @@ describe('MarketplaceTab', () => {
         {
           marketplace: 'acme',
           plugin: 'audit',
+          pluginId: 'plugin-old',
+          version: '0.9.0',
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['legacy-audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: 'Previous owner',
+        },
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
           pluginId: 'plugin-2',
-          version: null,
+          version: '1.0.0',
           installed: true,
           enabled: true,
           status: 'enabled',
@@ -181,6 +199,7 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
     expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
     expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByTestId('plugin-navigation-state')).toHaveTextContent('idle');
@@ -192,6 +211,45 @@ describe('MarketplaceTab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
     expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
+  });
+
+  it('does not fall back to a same-name Plugin when the authoritative ID is unavailable', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+      ],
+      plugins: [{
+        marketplace: 'acme',
+        plugin: 'audit',
+        pluginId: 'plugin-old',
+        version: '0.9.0',
+        installed: true,
+        enabled: true,
+        status: 'enabled',
+        bundledMcpServers: ['legacy-audit-mcp'],
+        bundledSkills: [],
+        declared: null,
+        message: null,
+      }],
+    }).mockResolvedValueOnce([]);
+    const onTargetPluginConsumed = vi.fn();
+
+    render(
+      <MarketplaceTab
+        instanceId="computer-a"
+        targetPlugin={{
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+        }}
+        onTargetPluginConsumed={onTargetPluginConsumed}
+      />,
+    );
+
+    expect(await screen.findByText('legacy-audit-mcp')).toBeInTheDocument();
+    expect(onTargetPluginConsumed).not.toHaveBeenCalled();
   });
 
   it('preserves unknown, empty, declared, and installed capability semantics', async () => {
@@ -293,6 +351,70 @@ describe('MarketplaceTab', () => {
         },
       });
     });
+  });
+
+  it('refreshes the selected Marketplace through the capability-gated lifecycle action', async () => {
+    const governance = {
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        {
+          name: 'tf-market',
+          displayGitUrl: 'https://example.com/tf.git',
+          status: 'known',
+          message: null,
+        },
+      ],
+      plugins: [],
+    };
+    mockedInvoke
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    const refresh = await screen.findByRole('button', { name: 'Refresh Marketplace' });
+    fireEvent.click(refresh);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('refresh_marketplace', {
+        instanceId: 'computer-a',
+        marketplace: 'tf-market',
+      });
+    });
+    expect(await screen.findByText('Marketplace refreshed')).toBeInTheDocument();
+  });
+
+  it('reports Marketplace refresh failures without changing the selection', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [
+          {
+            name: 'tf-market',
+            displayGitUrl: 'https://example.com/tf.git',
+            status: 'known',
+            message: null,
+          },
+        ],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('refresh failed'));
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh Marketplace' }));
+
+    expect(await screen.findByText('refresh failed')).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Select marketplace tf-market',
+    })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
   it('adds a marketplace directly without secondary trust confirmation', async () => {

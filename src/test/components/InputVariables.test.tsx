@@ -76,6 +76,17 @@ describe('InputVariables', () => {
     expect(screen.getByText('Configured secret')).toBeInTheDocument();
     expect(screen.queryByText('secret-123')).not.toBeInTheDocument();
     expect(screen.getByText('dev')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set value for: api-key' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Set value for: env' })).toBeVisible();
+  });
+
+  it('gives every row action an accessible name', () => {
+    mockUseInputStore.mockReturnValue({ ...mockStore, inputs: [mockInputs[0]] } as any);
+    render(<InputVariables instanceId="computer-a" />);
+
+    expect(screen.getByRole('button', { name: 'Set value for: api-key' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Edit variable api-key' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Remove variable api-key' })).toBeVisible();
   });
 
   it('renders error alert', () => {

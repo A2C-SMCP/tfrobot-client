@@ -6,6 +6,7 @@ const mockedInvoke = vi.mocked(invoke);
 function resetStore() {
   useMcpStore.setState({
     servers: [],
+    serversReady: false,
     loading: false,
     error: null,
     activeInstanceId: null,
@@ -48,6 +49,7 @@ describe('mcpStore', () => {
 
       expect(mockedInvoke).toHaveBeenCalledWith('get_mcp_servers', { instanceId });
       expect(useMcpStore.getState().servers).toEqual(mockServers);
+      expect(useMcpStore.getState().serversReady).toBe(true);
       expect(useMcpStore.getState().loading).toBe(false);
     });
 
@@ -79,6 +81,7 @@ describe('mcpStore', () => {
       await useMcpStore.getState().fetchServers(instanceId);
 
       expect(useMcpStore.getState().error).toBe('connection failed');
+      expect(useMcpStore.getState().serversReady).toBe(false);
     });
 
     it('ignores stale server responses from a previous computer instance', async () => {

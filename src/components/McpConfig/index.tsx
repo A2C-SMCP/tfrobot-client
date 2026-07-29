@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, App, Button, Modal, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   DeleteOutlined,
@@ -8,9 +8,14 @@ import {
   ImportOutlined,
   ExportOutlined,
   SafetyCertificateOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import type { McpServerConfig } from '@/stores/mcpStore';
+import {
+  useMcpStore,
+  type McpServerConfig,
+  type McpServerManagedBy,
+} from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
@@ -23,9 +28,10 @@ const { Title } = Typography;
 
 interface McpConfigProps {
   instanceId: string;
+  onOpenPlugin?: (owner: Extract<McpServerManagedBy, { type: 'plugin' }>) => void;
 }
 
-export function McpConfig({ instanceId }: McpConfigProps) {
+export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -41,6 +47,22 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     importConfig,
     exportConfig,
   } = useSdkConfigStore();
+  const managedServers = useMcpStore((state) => (
+    state.activeInstanceId === instanceId ? state.servers : []
+  ));
+  const managedServersReady = useMcpStore((state) => (
+    state.activeInstanceId === instanceId && state.serversReady
+  ));
+  const managedServersLoading = useMcpStore((state) => (
+    state.activeInstanceId !== instanceId || state.loading
+  ));
+  const managedServersError = useMcpStore((state) => (
+    state.activeInstanceId === instanceId ? state.error : null
+  ));
+  const fetchManagedServers = useMcpStore((state) => state.fetchServers);
+  const ownershipReady = managedServersReady
+    && !managedServersLoading
+    && managedServersError === null;
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
@@ -53,17 +75,34 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     void fetchConfig(instanceId);
   }, [fetchConfig, instanceId]);
 
+  useEffect(() => {
+    void fetchManagedServers(instanceId);
+  }, [fetchManagedServers, instanceId]);
+
+  const pluginOwnerByBundleId = useMemo(() => {
+    const result = new Map<string, Extract<McpServerManagedBy, { type: 'plugin' }>>();
+    for (const server of managedServers) {
+      if (server.managedBy.type === 'plugin') {
+        result.set(server.bundleId, server.managedBy);
+      }
+    }
+    return result;
+  }, [managedServers]);
+
   const handleAdd = () => {
+    if (!ownershipReady) return;
     setEditingServer(undefined);
     setFormVisible(true);
   };
 
   const handleEdit = (record: SdkConfigServer) => {
+    if (!ownershipReady) return;
     setEditingServer(record.config);
     setFormVisible(true);
   };
 
   const handleFormSubmit = async (config: McpServerConfig) => {
+    if (!ownershipReady) return;
     try {
       await upsertServer(instanceId, config);
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
@@ -77,19 +116,25 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         return;
       }
       message.error(t('mcp.messages.operationFailed'));
+    } finally {
+      await fetchManagedServers(instanceId);
     }
   };
 
   const handleRemove = async (name: string) => {
+    if (!ownershipReady) return;
     try {
       await removeServer(instanceId, name);
       message.success(t('mcp.messages.removed', { name }));
     } catch {
       message.error(t('mcp.messages.operationFailed'));
+    } finally {
+      await fetchManagedServers(instanceId);
     }
   };
 
   const handleEnabledChange = async (record: SdkConfigServer, enabled: boolean) => {
+    if (!ownershipReady) return;
     const config = { ...record.config, disabled: !enabled };
     try {
       await upsertServer(instanceId, config);
@@ -102,10 +147,13 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         return;
       }
       message.error(t('mcp.messages.operationFailed'));
+    } finally {
+      await fetchManagedServers(instanceId);
     }
   };
 
   const handleImport = async () => {
+    if (!ownershipReady) return;
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const path = await open({
@@ -113,7 +161,13 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         multiple: false,
       });
       if (path) {
-        const result = await importConfig(instanceId, path as string);
+        const result = await (async () => {
+          try {
+            return await importConfig(instanceId, path as string);
+          } finally {
+            await fetchManagedServers(instanceId);
+          }
+        })();
         message.success(t('mcp.messages.importSuccess', { servers: result.servers_imported, inputs: result.inputs_imported }));
       }
     } catch {
@@ -141,13 +195,28 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     {
       title: t('mcp.table.source'),
       key: 'source',
-      render: (_: unknown, record: SdkConfigServer) => (
-        <Space size="small">
-          <Tag color={record.bundled ? 'purple' : 'blue'}>{record.origin}</Tag>
-          {record.bundled && <Tag>{t('mcp.source.bundled')}</Tag>}
-          {record.trustedOrigin && <Tag color="green">{t('mcp.source.trusted')}</Tag>}
-        </Space>
-      ),
+      render: (_: unknown, record: SdkConfigServer) => {
+        const pluginOwner = ownershipReady
+          ? pluginOwnerByBundleId.get(record.bundleId)
+          : undefined;
+        return (
+          <Space direction="vertical" size={2}>
+            <Space size="small" wrap>
+              <Tag color={record.origin === 'plugin' ? 'purple' : 'blue'}>{record.origin}</Tag>
+              {record.bundled && <Tag>{t('mcp.source.bundled')}</Tag>}
+              {record.trustedOrigin && <Tag color="green">{t('mcp.source.trusted')}</Tag>}
+            </Space>
+            {pluginOwner && (
+              <Typography.Text type="secondary">
+                {t('mcp.pluginManagedHint', {
+                  plugin: pluginOwner.plugin,
+                  marketplace: pluginOwner.marketplace,
+                })}
+              </Typography.Text>
+            )}
+          </Space>
+        );
+      },
     },
     {
       title: t('mcp.table.name'),
@@ -168,15 +237,23 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       title: t('mcp.table.enabled'),
       key: 'enabled',
       render: (_: unknown, record: SdkConfigServer) => {
-        const hint = record.writable
+        const pluginOwner = ownershipReady
+          ? pluginOwnerByBundleId.get(record.bundleId)
+          : undefined;
+        const writable = ownershipReady && record.writable && !pluginOwner;
+        const hint = writable
           ? undefined
-          : t('mcp.readOnlyConfigHint', { origin: record.origin });
+          : ownershipReady
+            ? t('mcp.readOnlyConfigHint', {
+              origin: pluginOwner ? 'plugin' : record.origin,
+            })
+            : t('mcp.ownershipUnavailableHint');
         return (
           <Tooltip title={hint}>
             <span>
               <Switch
                 checked={!record.config.disabled}
-                disabled={!record.writable}
+                disabled={!writable}
                 onChange={(enabled) => void handleEnabledChange(record, enabled)}
                 aria-label={t('mcp.actions.toggleEnabled', { name: record.name })}
               />
@@ -189,9 +266,33 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       title: t('mcp.table.actions'),
       key: 'actions',
       render: (_: unknown, record: SdkConfigServer) => {
-        const actionHint = record.writable
+        const pluginOwner = ownershipReady
+          ? pluginOwnerByBundleId.get(record.bundleId)
+          : undefined;
+        if (pluginOwner) {
+          return (
+            <Space direction="vertical" size={2}>
+              <Typography.Text type="secondary">
+                {t('mcp.readOnlyConfigHint', { origin: 'plugin' })}
+              </Typography.Text>
+              <Button
+                type="link"
+                size="small"
+                icon={<AppstoreOutlined />}
+                aria-label={t('mcp.actions.managePlugin', { plugin: pluginOwner.plugin })}
+                onClick={() => onOpenPlugin?.(pluginOwner)}
+              >
+                {t('mcp.actions.managePlugin', { plugin: pluginOwner.plugin })}
+              </Button>
+            </Space>
+          );
+        }
+        const writable = ownershipReady && record.writable;
+        const actionHint = writable
           ? (record.bundled ? t('mcp.bundledConfigHint') : undefined)
-          : t('mcp.readOnlyConfigHint', { origin: record.origin });
+          : ownershipReady
+            ? t('mcp.readOnlyConfigHint', { origin: record.origin })
+            : t('mcp.ownershipUnavailableHint');
         return (
           <Space size="small">
             <Tooltip title={actionHint}>
@@ -200,7 +301,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
                   type="text"
                   icon={<EditOutlined />}
                   title={t('mcp.actions.edit')}
-                  disabled={!record.writable}
+                  disabled={!writable}
                   onClick={() => handleEdit(record)}
                 />
               </span>
@@ -210,7 +311,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
               onConfirm={() => handleRemove(record.name)}
               okText={t('common.yes')}
               cancelText={t('common.no')}
-              disabled={!record.writable}
+              disabled={!writable}
             >
               <Tooltip title={actionHint}>
                 <span>
@@ -219,7 +320,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
                     danger
                     icon={<DeleteOutlined />}
                     title={t('mcp.actions.remove')}
-                    disabled={!record.writable}
+                    disabled={!writable}
                   />
                 </span>
               </Tooltip>
@@ -232,7 +333,16 @@ export function McpConfig({ instanceId }: McpConfigProps) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
         <Space direction="vertical" size={0}>
           <Title level={4} style={{ margin: 0 }}>{t('mcp.configTitle')}</Title>
           {snapshot && (
@@ -241,16 +351,23 @@ export function McpConfig({ instanceId }: McpConfigProps) {
             </Typography.Text>
           )}
         </Space>
-        <Space>
+        <Space wrap>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => fetchConfig(instanceId)}
-            loading={configLoading}
+            aria-label={t('common.refresh')}
+            onClick={() => {
+              void Promise.all([
+                fetchConfig(instanceId),
+                fetchManagedServers(instanceId),
+              ]);
+            }}
+            loading={configLoading || managedServersLoading}
           >
             {t('common.refresh')}
           </Button>
           <Button
             icon={<SafetyCertificateOutlined />}
+            aria-label={t('mcp.validateConfig')}
             onClick={() => validateConfig(instanceId)}
             loading={validating}
           >
@@ -258,12 +375,15 @@ export function McpConfig({ instanceId }: McpConfigProps) {
           </Button>
           <Button
             icon={<ImportOutlined />}
+            aria-label={t('mcp.importConfig')}
             onClick={handleImport}
+            disabled={!ownershipReady}
           >
             {t('mcp.importConfig')}
           </Button>
           <Button
             icon={<ExportOutlined />}
+            aria-label={t('mcp.exportConfig')}
             onClick={handleExport}
           >
             {t('mcp.exportConfig')}
@@ -271,7 +391,9 @@ export function McpConfig({ instanceId }: McpConfigProps) {
           <Button
             type="primary"
             icon={<PlusOutlined />}
+            aria-label={t('mcp.addServer')}
             onClick={handleAdd}
+            disabled={!ownershipReady}
           >
             {t('mcp.addServer')}
           </Button>
@@ -316,6 +438,18 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         />
       )}
 
+      {!ownershipReady && (
+        <Alert
+          message={managedServersError
+            ? t('mcp.ownershipUnavailableTitle')
+            : t('mcp.ownershipLoadingTitle')}
+          description={t('mcp.ownershipUnavailableDescription')}
+          type={managedServersError ? 'error' : 'info'}
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       <Table
         dataSource={snapshot?.mcp.servers ?? []}
         columns={columns}
@@ -323,6 +457,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         loading={configLoading}
         pagination={false}
         size="middle"
+        scroll={{ x: 'max-content' }}
       />
 
       <Modal

@@ -330,6 +330,7 @@ pub fn run() {
             commands::skills::get_skill,
             commands::skills::refresh_skills,
             commands::skills::open_local_skills_root,
+            commands::skills::open_configured_local_skills_root,
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,

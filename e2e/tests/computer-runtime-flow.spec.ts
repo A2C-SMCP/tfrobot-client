@@ -45,7 +45,11 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(runtimeGroup.getByRole('button', { name: 'Duplicate' })).not.toBeVisible();
     await expect(runtimeGroup.getByRole('button', { name: 'Delete' })).not.toBeVisible();
 
-    await openComputerTab(page, 'MCP Servers');
+    await page.getByRole('button', { name: 'Open Computer settings' }).click();
+    await page
+      .getByRole('menu', { name: 'Computer settings sections' })
+      .getByText('MCP Servers', { exact: true })
+      .click();
     await expect(page.getByRole('button', { name: 'Add Server' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import Config' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).toBeVisible();
@@ -53,6 +57,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Start All' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Stop All' })).not.toBeVisible();
 
+    await page.getByRole('button', { name: 'Back to Computer' }).click();
     await openComputerTab(page, 'Runtime');
     await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible();
     await expect(page.getByRole('button', { name: /Reload$/ })).not.toBeVisible();
@@ -73,7 +78,6 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.getByText('Advanced Runtime Diagnostics').click();
     await expect(page.getByRole('cell', { name: /Snapshot Revision\s*:\s*1/ })).toBeVisible();
     await expect(page.getByRole('cell', { name: /Capability Revision\s*:\s*1/ })).toBeVisible();
-    await page.getByText('Advanced Runtime Diagnostics').click();
 
     await expect.poll(() => page.evaluate(() => {
       const invokes = (window as any).__TAURI_INVOKES__ as Array<{
@@ -139,6 +143,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       (window as any).__TAURI_INVOKES__ as Array<{ cmd: string; args?: unknown }>
     ).filter((entry) => entry.cmd === 'get_mcp_servers'
       && JSON.stringify(entry.args) === JSON.stringify({ instanceId: 'computer-a' })).length)).toBeGreaterThan(1);
+    await page.getByText('Advanced Runtime Diagnostics').click();
 
     await page.evaluate(() => {
       const invokes = (window as any).__TAURI_INVOKES__ as Array<{

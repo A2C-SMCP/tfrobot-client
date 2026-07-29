@@ -66,6 +66,44 @@
       "connecting": "连接中",
       "disconnecting": "断开中"
     },
+    "settings": {
+      "open": "打开 Computer 设置",
+      "title": "{{name}} 设置",
+      "pageLabel": "Computer 设置",
+      "navigationLabel": "Computer 设置模块",
+      "backToComputer": "返回 Computer",
+      "noComputer": "没有可配置的 Computer",
+      "sections": {
+        "general": {
+          "title": "常规",
+          "description": "管理当前 Computer 保存的名称和描述。"
+        },
+        "skills": {
+          "title": "Skills",
+          "description": "选择当前 Computer 的 Skill Home，并进入相关能力治理入口。",
+          "savedSkillHome": "已保存的 Skill Home",
+          "openDirectory": "打开本地目录",
+          "openActiveSkills": "查看 Computer 中的 active Skills",
+          "openPlugins": "管理插件与 Marketplace"
+        },
+        "plugins": {
+          "title": "插件与 Marketplace",
+          "description": "管理 Marketplace 来源和 Plugin 安装生命周期。"
+        },
+        "mcp": {
+          "title": "MCP 服务器",
+          "description": "管理保存的 MCP 声明、来源、启用配置、导入、导出和校验。"
+        },
+        "inputs": {
+          "title": "输入项",
+          "description": "管理当前 Computer 中用户创建的定义、值和 Secret。"
+        },
+        "connection": {
+          "title": "连接策略",
+          "description": "选择保存的连接目标与自动连接策略。"
+        }
+      }
+    },
     "runtime": {
       "title": "运行时",
       "statusTitle": "运行时状态",
@@ -187,9 +225,9 @@
       "chooseSkillHome": "选择 Skill Home",
       "resetSkillHome": "使用默认值",
       "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。",
-      "nextSkillHome": "目标 Skill Home",
+      "nextSkillHome": "保存后的 Skill Home",
       "skillHomeConfirmTitle": "保存 Skill Home？",
-      "skillHomeConfirmDescription": "此操作只保存新的能力治理根目录，不会重启当前 Runtime。下次启动或主动重启 Runtime 时使用新的 Skill Home。",
+      "skillHomeConfirmDescription": "此操作会保存能力治理根目录，但不会自动重启 Computer。",
       "skillHomeConfirmOk": "保存"
     },
     "actionGroups": {
@@ -305,6 +343,8 @@
     },
     "actions": {
       "addMarketplace": "添加 Marketplace",
+      "selectMarketplace": "选择 Marketplace {{marketplace}}",
+      "selectPlugin": "选择 Plugin {{plugin}}（{{pluginId}}）",
       "refreshMarketplace": "刷新 Marketplace",
       "removeMarketplace": "删除 Marketplace",
       "updateMarketplace": "更新 Marketplace",
@@ -361,6 +401,10 @@
     "validateConfig": "校验 Schema",
     "bundledConfigHint": "该声明与已安装插件的 bundled server 同名，但配置声明仍可编辑。",
     "readOnlyConfigHint": "该声明来自只读的 {{origin}} scope，无法在此处编辑。",
+    "ownershipLoadingTitle": "正在检查 MCP 声明归属",
+    "ownershipUnavailableTitle": "无法获取 MCP 声明归属",
+    "ownershipUnavailableDescription": "在权威归属加载成功前，配置变更保持禁用。请刷新后重试。",
+    "ownershipUnavailableHint": "在权威 MCP 归属可用前，配置变更保持禁用。",
     "validation": {
       "schemaOnlyTitle": "仅校验配置 Schema",
       "schemaOnlyDescription": "校验只检查 SDK-owned 配置结构，不检查命令、路径、secret、input、marketplace、plugin 或 MCP server 的运行可用性。",
@@ -463,6 +507,8 @@
     "title": "输入变量",
     "addInput": "添加变量",
     "editInput": "编辑变量",
+    "editInputFor": "编辑变量 {{id}}",
+    "removeInputFor": "删除变量 {{id}}",
     "setValue": "设置值",
     "selectValue": "请选择一个值",
     "enterValue": "请输入值",

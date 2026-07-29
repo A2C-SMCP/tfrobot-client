@@ -91,6 +91,16 @@ describe('skillStore', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('list_skills', { instanceId: 'computer-a' });
   });
 
+  it('opens the saved Skill Home through the settings-specific backend command', async () => {
+    mockedInvoke.mockResolvedValueOnce(undefined);
+
+    await useSkillStore.getState().openConfiguredLocalSkillsRoot('computer-a');
+
+    expect(mockedInvoke).toHaveBeenCalledWith('open_configured_local_skills_root', {
+      instanceId: 'computer-a',
+    });
+  });
+
   it('ignores stale refresh responses from a previous instance', async () => {
     const refreshA = deferred<void>();
     const fetchB = deferred<Array<{ name: string; source: string; path: string; description: string }>>();

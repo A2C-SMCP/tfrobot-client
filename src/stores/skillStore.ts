@@ -103,6 +103,7 @@ interface SkillState extends InstanceSkillRecord {
   refreshSkills: (instanceId: string) => Promise<void>;
   selectSkill: (instanceId: string, name: string) => Promise<void>;
   openLocalSkillsRoot: (instanceId: string) => Promise<void>;
+  openConfiguredLocalSkillsRoot: (instanceId: string) => Promise<void>;
   fetchMarketplaceCapabilities: (instanceId: string) => Promise<void>;
   fetchMarketplaceGovernance: (instanceId: string) => Promise<void>;
   addMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
@@ -333,6 +334,10 @@ export const useSkillStore = create<SkillState>((set, get) => ({
 
   openLocalSkillsRoot: async (instanceId) => {
     await invoke('open_local_skills_root', { instanceId });
+  },
+
+  openConfiguredLocalSkillsRoot: async (instanceId) => {
+    await invoke('open_configured_local_skills_root', { instanceId });
   },
 
   fetchMarketplaceCapabilities: async (instanceId) => {

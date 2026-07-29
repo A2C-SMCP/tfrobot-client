@@ -10,7 +10,7 @@ import {
 import dayjs from 'dayjs';
 import { useTranslation } from 'react-i18next';
 import { useComputerOverviewStore } from '@/stores/computerOverviewStore';
-import type { ComputerDetailTab } from './tabs';
+import type { ComputerDetailTab, ComputerSettingsSection } from './tabs';
 import { affectedCapabilityLabel } from './runtimeProblemPresentation';
 
 const { Text } = Typography;
@@ -18,9 +18,14 @@ const { Text } = Typography;
 interface ComputerOverviewProps {
   instanceId: string;
   onOpenTab: (tab: ComputerDetailTab) => void;
+  onOpenSettings: (section: ComputerSettingsSection) => void;
 }
 
-export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProps) {
+export function ComputerOverview({
+  instanceId,
+  onOpenTab,
+  onOpenSettings,
+}: ComputerOverviewProps) {
   const { t } = useTranslation();
   const { data, loading, error, fetchOverview } = useComputerOverviewStore();
 
@@ -101,7 +106,7 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
                 {t('computer.boundRobot', { name: data.robot_name })}
               </Text>
             )}
-            <Button type="link" style={{ paddingLeft: 0 }} onClick={() => onOpenTab('connection')}>
+            <Button type="link" style={{ paddingLeft: 0 }} onClick={() => onOpenSettings('connection')}>
               {t('computer.robotConnection')}
             </Button>
           </Card>
@@ -114,7 +119,7 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
               <Tag color="green">{t('dashboard.running')}: {data.mcp_running}</Tag>
               <Tag color="default">{t('dashboard.stopped')}: {data.mcp_stopped}</Tag>
             </Space>
-            <Button type="link" style={{ paddingLeft: 0 }} onClick={() => onOpenTab('mcp')}>
+            <Button type="link" style={{ paddingLeft: 0 }} onClick={() => onOpenSettings('mcp')}>
               {t('mcp.servers')}
             </Button>
           </Card>
