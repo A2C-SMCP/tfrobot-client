@@ -18,6 +18,23 @@ pub struct DesktopWindow {
     pub mime_type: Option<String>,
 }
 
+/// Confidence of a Desktop Resources enumeration.
+///
+/// The currently pinned SDK returns only the resources it could enumerate and logs per-MCP
+/// failures internally. Until rust-sdk#161 lands, the Client must report the result as unverified
+/// instead of presenting an empty vector as authoritative proof that no resources exist.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopEnumerationStatus {
+    Unverified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopEnumerationResult {
+    pub status: DesktopEnumerationStatus,
+    pub windows: Vec<DesktopWindow>,
+}
+
 /// Window content item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowContent {
@@ -51,24 +68,33 @@ pub async fn get_desktop(
     state: State<'_, AppState>,
     instance_id: String,
     uri: Option<String>,
-) -> Result<Vec<DesktopWindow>, String> {
+) -> Result<DesktopEnumerationResult, String> {
+    get_desktop_core(&state, &instance_id, uri.as_deref()).await
+}
+
+pub async fn get_desktop_core(
+    state: &AppState,
+    instance_id: &str,
+    uri: Option<&str>,
+) -> Result<DesktopEnumerationResult, String> {
+    let instance_id = require_instance_id(instance_id)?;
     let runtime = state
         .computer_registry
-        .runtime(require_instance_id(&instance_id)?)
+        .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
     log::info!("get_desktop called with uri filter: {:?}", uri);
 
-    // Desktop window discovery is owned by SDK Computer; command handlers stay out of MCP runtime
-    // internals.
-    let windows = runtime.desktop_windows(uri.as_deref()).await?;
+    // The SDK identity-only API performs resources/list without resources/read. Window content is
+    // fetched exclusively through `get_window_detail` after an explicit user expansion.
+    let windows = runtime.desktop_windows(uri).await?;
 
     log::info!("Found {} window resources", windows.len());
 
-    Ok(windows
+    let windows = windows
         .into_iter()
-        .map(|(bundle_id, server, resource, _detail)| DesktopWindow {
+        .map(|(bundle_id, server, resource)| DesktopWindow {
             bundle_id,
             uri: resource.raw.uri.clone(),
             title: resource.raw.name.clone(),
@@ -76,7 +102,12 @@ pub async fn get_desktop(
             description: resource.raw.description.clone(),
             mime_type: resource.raw.mime_type.clone(),
         })
-        .collect())
+        .collect();
+
+    Ok(DesktopEnumerationResult {
+        status: DesktopEnumerationStatus::Unverified,
+        windows,
+    })
 }
 
 /// Get single window detail with content
@@ -87,14 +118,24 @@ pub async fn get_window_detail(
     bundle_id: BundleId,
     uri: String,
 ) -> Result<WindowDetail, String> {
+    get_window_detail_core(&state, &instance_id, &bundle_id, &uri).await
+}
+
+pub async fn get_window_detail_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    uri: &str,
+) -> Result<WindowDetail, String> {
+    let instance_id = require_instance_id(instance_id)?;
     let runtime = state
         .computer_registry
-        .runtime(require_instance_id(&instance_id)?)
+        .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
     let server_name = runtime
-        .mcp_server_display_name(&bundle_id)
+        .mcp_server_display_name(bundle_id)
         .await
         .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
@@ -106,11 +147,11 @@ pub async fn get_window_detail(
     );
 
     // Create a Resource object for the request
-    let resource = make_resource(uri.clone(), uri.clone(), None, None);
+    let resource = make_resource(uri.to_string(), uri.to_string(), None, None);
 
     // Window detail reads are owned by SDK Computer for the same reason as window discovery.
     let result = runtime
-        .window_detail(&bundle_id, resource)
+        .window_detail(bundle_id, resource)
         .await
         .map_err(|e| format!("Failed to get window detail: {}", e))?;
 
@@ -147,8 +188,8 @@ pub async fn get_window_detail(
         .collect();
 
     Ok(WindowDetail {
-        bundle_id,
-        uri: uri.clone(),
+        bundle_id: bundle_id.clone(),
+        uri: uri.to_string(),
         title: None, // Title not available in detail response
         server: server_name,
         contents,
@@ -162,11 +203,6 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
     }
     Ok(instance_id)
 }
-
-// SDK blocker: https://github.com/A2C-SMCP/rust-sdk/issues/153
-// `get_windows_details` is currently the only enumeration API carrying BundleId, but it eagerly
-// reads every resource and omits windows whose detail read fails. Switch to the identity-only API
-// once rust-sdk exposes it.
 
 #[cfg(test)]
 mod tests {
@@ -206,6 +242,16 @@ mod tests {
         // Optional fields should not be serialized when None
         assert!(!json.contains("description"));
         assert!(!json.contains("mime_type"));
+    }
+
+    #[test]
+    fn test_desktop_enumeration_serialization_is_explicitly_unverified() {
+        let result = DesktopEnumerationResult {
+            status: DesktopEnumerationStatus::Unverified,
+            windows: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(json, r#"{"status":"unverified","windows":[]}"#);
     }
 
     #[test]

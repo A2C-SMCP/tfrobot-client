@@ -651,7 +651,18 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
               },
               { key: 'inputs', label: <><FormOutlined /> {t('inputs.title')}</>, children: <InputVariables instanceId={selectedInstance.id} /> },
               { key: 'connection', label: <><CloudServerOutlined /> {t('computer.robotConnection')}</>, children: <RobotConnectionPanel instanceId={selectedInstance.id} onNavigate={onNavigate} /> },
-              { key: 'resources', label: <><DesktopOutlined /> {t('resources.title')}</>, children: <DesktopResources instanceId={selectedInstance.id} /> },
+              {
+                key: 'resources',
+                label: <><DesktopOutlined /> {t('resources.title')}</>,
+                children: (
+                  <DesktopResources
+                    instanceId={selectedInstance.id}
+                    runtime={selectedInstance.runtime}
+                    onStartRuntime={() => { void runRuntimeAction(selectedInstance, 'start'); }}
+                    onOpenMcp={() => setActiveTab('mcp')}
+                  />
+                ),
+              },
               { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
               { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
               { key: 'configuration', label: <><SettingOutlined /> {t('common.configuration')}</>, children: <ComputerRuntimeSettings instance={selectedInstance} /> },

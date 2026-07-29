@@ -1387,13 +1387,13 @@ impl ComputerInstanceRuntime {
     pub async fn desktop_windows(
         &self,
         window_uri: Option<&str>,
-    ) -> Result<Vec<(BundleId, ServerName, Resource, ReadResourceResult)>, String> {
+    ) -> Result<Vec<(BundleId, ServerName, Resource)>, String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         self.computer
             .read()
             .await
-            .get_windows_details(window_uri)
+            .list_windows_with_identity(window_uri)
             .await
             .map_err(|error| error.to_string())
     }

@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { formatRuntimeActionError } from '@/utils/runtimeActionError';
+import type { ComputerRuntimeSnapshot } from '@/stores/runtimeSnapshot';
 
 export interface DesktopWindow {
   bundleId: string;
@@ -26,53 +28,217 @@ export interface WindowDetail {
   contents: WindowContent[];
 }
 
-interface DesktopState {
+export type DesktopEnumerationStatus =
+  | 'complete'
+  | 'partial'
+  | 'unavailable'
+  | 'failed'
+  | 'unverified';
+
+export interface DesktopEnumerationResult {
+  status: DesktopEnumerationStatus;
   windows: DesktopWindow[];
+}
+
+export interface DesktopInstanceState {
+  runtimeKey: string | null;
+  windows: DesktopWindow[];
+  enumerationStatus: DesktopEnumerationStatus | null;
+  loaded: boolean;
   loading: boolean;
   error: string | null;
-
-  // Window detail states
+  listRequestId: number;
   windowDetails: Record<string, WindowDetail>;
   loadingDetails: Record<string, boolean>;
   detailErrors: Record<string, string>;
+  detailRequestIds: Record<string, number>;
+}
 
-  fetchDesktop: (instanceId: string, uri?: string) => Promise<void>;
-  fetchWindowDetail: (instanceId: string, bundleId: string, uri: string) => Promise<void>;
+interface DesktopState {
+  instances: Record<string, DesktopInstanceState>;
+  bindRuntime: (instanceId: string, runtimeKey: string) => void;
+  fetchDesktop: (instanceId: string, runtimeKey: string, uri?: string) => Promise<void>;
+  fetchWindowDetail: (
+    instanceId: string,
+    runtimeKey: string,
+    bundleId: string,
+    uri: string,
+  ) => Promise<void>;
   reset: () => void;
 }
 
-const initialState = {
-  windows: [] as DesktopWindow[],
+const emptyInstanceState: DesktopInstanceState = {
+  runtimeKey: null,
+  windows: [],
+  enumerationStatus: null,
+  loaded: false,
   loading: false,
-  error: null as string | null,
-  windowDetails: {} as Record<string, WindowDetail>,
-  loadingDetails: {} as Record<string, boolean>,
-  detailErrors: {} as Record<string, string>,
+  error: null,
+  listRequestId: 0,
+  windowDetails: {},
+  loadingDetails: {},
+  detailErrors: {},
+  detailRequestIds: {},
 };
+
+const initialState = {
+  instances: {} as Record<string, DesktopInstanceState>,
+};
+
+let nextRequestToken = 1;
+
+function requestToken(): number {
+  const token = nextRequestToken;
+  nextRequestToken += 1;
+  return token;
+}
+
+function emptyStateForRuntime(runtimeKey: string): DesktopInstanceState {
+  return {
+    ...emptyInstanceState,
+    runtimeKey,
+  };
+}
+
+function instanceState(
+  instances: Record<string, DesktopInstanceState>,
+  instanceId: string,
+): DesktopInstanceState {
+  return instances[instanceId] ?? emptyInstanceState;
+}
+
+function updateInstance(
+  instances: Record<string, DesktopInstanceState>,
+  instanceId: string,
+  update: (current: DesktopInstanceState) => DesktopInstanceState,
+): Record<string, DesktopInstanceState> {
+  return {
+    ...instances,
+    [instanceId]: update(instanceState(instances, instanceId)),
+  };
+}
+
+export function desktopWindowKey(
+  window: Pick<DesktopWindow, 'bundleId' | 'uri'>,
+): string {
+  return JSON.stringify([window.bundleId, window.uri]);
+}
+
+export function desktopRuntimeKey(
+  runtime: Pick<
+    ComputerRuntimeSnapshot,
+    'incarnation' | 'generation' | 'capability_revision' | 'mcp_servers' | 'active_mcp_servers'
+  >,
+): string {
+  return [
+    runtime.incarnation,
+    runtime.generation,
+    runtime.capability_revision,
+    runtime.mcp_servers,
+    runtime.active_mcp_servers,
+  ].join(':');
+}
+
+export function selectDesktopInstance(
+  state: DesktopState,
+  instanceId: string,
+  runtimeKey?: string,
+): DesktopInstanceState {
+  const current = instanceState(state.instances, instanceId);
+  return runtimeKey === undefined || current.runtimeKey === runtimeKey
+    ? current
+    : emptyInstanceState;
+}
 
 export const useDesktopStore = create<DesktopState>((set) => ({
   ...initialState,
 
   reset: () => set(initialState),
 
-  fetchDesktop: async (instanceId: string, uri?: string) => {
-    set({ loading: true, error: null });
+  bindRuntime: (instanceId, runtimeKey) => {
+    set((state) => {
+      const current = instanceState(state.instances, instanceId);
+      if (current.runtimeKey === runtimeKey) return state;
+      return {
+        instances: {
+          ...state.instances,
+          [instanceId]: emptyStateForRuntime(runtimeKey),
+        },
+      };
+    });
+  },
+
+  fetchDesktop: async (instanceId: string, runtimeKey: string, uri?: string) => {
+    const requestId = requestToken();
+    set((state) => ({
+      instances: updateInstance(state.instances, instanceId, (current) => ({
+        ...(current.runtimeKey === runtimeKey ? current : emptyStateForRuntime(runtimeKey)),
+        loading: true,
+        error: null,
+        listRequestId: requestId,
+        windowDetails: {},
+        loadingDetails: {},
+        detailErrors: {},
+        detailRequestIds: {},
+      })),
+    }));
+
     try {
-      const windows = await invoke<DesktopWindow[]>('get_desktop', {
+      const result = await invoke<DesktopEnumerationResult>('get_desktop', {
         instanceId,
         uri: uri ?? null,
       });
-      set({ windows, loading: false });
-    } catch (e) {
-      set({ error: String(e), loading: false });
+      set((state) => {
+        const current = instanceState(state.instances, instanceId);
+        if (current.runtimeKey !== runtimeKey || current.listRequestId !== requestId) return state;
+        return {
+          instances: updateInstance(state.instances, instanceId, (latest) => ({
+            ...latest,
+            windows: result.windows,
+            enumerationStatus: result.status,
+            loaded: true,
+            loading: false,
+            error: null,
+          })),
+        };
+      });
+    } catch (error) {
+      set((state) => {
+        const current = instanceState(state.instances, instanceId);
+        if (current.runtimeKey !== runtimeKey || current.listRequestId !== requestId) return state;
+        return {
+          instances: updateInstance(state.instances, instanceId, (latest) => ({
+            ...latest,
+            loading: false,
+            error: formatRuntimeActionError(error),
+          })),
+        };
+      });
     }
   },
 
-  fetchWindowDetail: async (instanceId: string, bundleId: string, uri: string) => {
-    const key = `${bundleId}:${uri}`;
-    // Add to loading record
+  fetchWindowDetail: async (
+    instanceId: string,
+    runtimeKey: string,
+    bundleId: string,
+    uri: string,
+  ) => {
+    const key = desktopWindowKey({ bundleId, uri });
+    const requestId = requestToken();
     set((state) => ({
-      loadingDetails: { ...state.loadingDetails, [key]: true },
+      instances: updateInstance(state.instances, instanceId, (latest) => {
+        const current = latest.runtimeKey === runtimeKey
+          ? latest
+          : emptyStateForRuntime(runtimeKey);
+        return {
+          ...current,
+          loadingDetails: { ...current.loadingDetails, [key]: true },
+          detailErrors: Object.fromEntries(
+            Object.entries(current.detailErrors).filter(([entryKey]) => entryKey !== key),
+          ),
+          detailRequestIds: { ...current.detailRequestIds, [key]: requestId },
+        };
+      }),
     }));
 
     try {
@@ -82,20 +248,37 @@ export const useDesktopStore = create<DesktopState>((set) => ({
         uri,
       });
       set((state) => {
-        const { [key]: _, ...remainingLoading } = state.loadingDetails;
-        const { [key]: __, ...remainingErrors } = state.detailErrors;
+        const latest = instanceState(state.instances, instanceId);
+        if (
+          latest.runtimeKey !== runtimeKey
+          || latest.detailRequestIds[key] !== requestId
+        ) return state;
+        const { [key]: _loading, ...loadingDetails } = latest.loadingDetails;
         return {
-          windowDetails: { ...state.windowDetails, [key]: detail },
-          loadingDetails: remainingLoading,
-          detailErrors: remainingErrors,
+          instances: updateInstance(state.instances, instanceId, (entry) => ({
+            ...entry,
+            windowDetails: { ...entry.windowDetails, [key]: detail },
+            loadingDetails,
+          })),
         };
       });
-    } catch (e) {
+    } catch (error) {
       set((state) => {
-        const { [key]: _, ...remainingLoading } = state.loadingDetails;
+        const latest = instanceState(state.instances, instanceId);
+        if (
+          latest.runtimeKey !== runtimeKey
+          || latest.detailRequestIds[key] !== requestId
+        ) return state;
+        const { [key]: _loading, ...loadingDetails } = latest.loadingDetails;
         return {
-          loadingDetails: remainingLoading,
-          detailErrors: { ...state.detailErrors, [key]: String(e) },
+          instances: updateInstance(state.instances, instanceId, (entry) => ({
+            ...entry,
+            loadingDetails,
+            detailErrors: {
+              ...entry.detailErrors,
+              [key]: formatRuntimeActionError(error),
+            },
+          })),
         };
       });
     }
