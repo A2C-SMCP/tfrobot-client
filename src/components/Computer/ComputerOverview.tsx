@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import { useTranslation } from 'react-i18next';
 import { useComputerOverviewStore } from '@/stores/computerOverviewStore';
 import type { ComputerDetailTab } from './tabs';
+import { affectedCapabilityLabel } from './runtimeProblemPresentation';
 
 const { Text } = Typography;
 
@@ -38,6 +39,9 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
   if (!data || data.id !== instanceId) {
     return null;
   }
+  const currentProblem = (data.runtime.problems ?? [])
+    .find((problem) => problem.current && problem.severity === 'error')
+    ?? (data.runtime.problems ?? []).find((problem) => problem.current);
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -47,12 +51,16 @@ export function ComputerOverview({ instanceId, onOpenTab }: ComputerOverviewProp
         </Button>
       </div>
 
-      {(data.runtime.last_error || data.runtime.degraded_reason) && (
+      {currentProblem && (
         <Alert
-          type={data.runtime.last_error ? 'error' : 'warning'}
+          type={currentProblem.severity === 'error' ? 'error' : 'warning'}
           showIcon
-          message={data.runtime.last_error ? t('computer.runtime.lastError') : t('computer.runtime.degraded')}
-          description={data.runtime.last_error ?? data.runtime.degraded_reason}
+          message={t(`computer.runtime.problems.messages.${currentProblem.message}`)}
+          description={t('computer.runtime.problems.affected', {
+            capabilities: currentProblem.affected_capabilities
+              .map((capability) => affectedCapabilityLabel(capability, t))
+              .join(', '),
+          })}
         />
       )}
 

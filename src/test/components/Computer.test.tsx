@@ -346,6 +346,31 @@ describe('Computer', () => {
     expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
   }, 20000);
 
+  it('keeps Runtime action technical errors out of the ordinary Computer UI', async () => {
+    const stoppedInstance = {
+      ...mockComputerInstances[0],
+      running: false,
+      connected: false,
+      runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
+      connection: null,
+    };
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_computer_instances') return [stoppedInstance];
+      if (cmd === 'start_computer_instance') {
+        throw new Error('spawn /secret/path failed with token=private');
+      }
+      return null;
+    });
+
+    render(<Computer />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Start' }))[0]);
+
+    expect(await screen.findByText(
+      'The Runtime operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
+  }, 20000);
+
   it('connects the selected target from the list action', async () => {
     const disconnectedInstance = {
       ...mockComputerInstances[0],
@@ -384,6 +409,31 @@ describe('Computer', () => {
     });
   }, 20000);
 
+  it('keeps connection action technical errors out of the ordinary Computer UI', async () => {
+    const disconnectedInstance = {
+      ...mockComputerInstances[0],
+      connected: false,
+      runtime: runtimeSnapshot(),
+      connection: null,
+      connection_policy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
+    };
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_computer_instances') return [disconnectedInstance];
+      if (cmd === 'connect_computer_connection_target') {
+        throw new Error('https://private.example.test failed with token=private');
+      }
+      return null;
+    });
+
+    render(<Computer />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByText(
+      'The connection operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
+  }, 20000);
+
   it('offers disconnect from list and detail when connection authority precedes joined-office', async () => {
     const authorityConnectedInstance = {
       ...mockComputerInstances[0],
@@ -418,6 +468,7 @@ describe('Computer', () => {
           operation: 'disconnect',
           message: 'Socket cleanup failed',
           retryable: true,
+          occurred_at: '2026-07-29T02:00:00Z',
         },
         actions: {
           connect: { enabled: false, disabled_reason: 'connection_unavailable' },

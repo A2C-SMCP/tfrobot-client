@@ -42,6 +42,40 @@ export interface ComputerRuntimeActionCapabilities {
   manage_mcp: ComputerRuntimeActionCapability;
 }
 
+export type ComputerRuntimeProblemSource = 'sdk' | 'client_connection' | 'mcp';
+export type ComputerRuntimeProblemSeverity = 'error' | 'degraded';
+export type ComputerRuntimeProblemMessage =
+  | 'sdk_runtime_error'
+  | 'sdk_runtime_degraded'
+  | 'connection_failed'
+  | 'disconnection_failed'
+  | 'reconnection_failed'
+  | 'mcp_start_failed'
+  | 'mcp_configuration_apply_failed';
+export type ComputerRuntimeProblemAction =
+  | 'start_runtime'
+  | 'restart_runtime'
+  | 'retry_connection'
+  | 'retry_disconnection'
+  | 'view_logs';
+export type ComputerRuntimeAffectedCapability =
+  | { kind: 'runtime' }
+  | { kind: 'connection' }
+  | { kind: 'mcp_server'; bundle_id: string; name?: string | null };
+
+export interface ComputerRuntimeProblem {
+  id: string;
+  source: ComputerRuntimeProblemSource;
+  operation: string;
+  severity: ComputerRuntimeProblemSeverity;
+  affected_capabilities: ComputerRuntimeAffectedCapability[];
+  occurred_at: string;
+  current: boolean;
+  message: ComputerRuntimeProblemMessage;
+  recommended_actions: ComputerRuntimeProblemAction[];
+  technical_detail?: string | null;
+}
+
 export interface ComputerRuntimeSnapshot {
   incarnation: number;
   generation: number;
@@ -55,6 +89,7 @@ export interface ComputerRuntimeSnapshot {
   active_mcp_servers: number;
   tools: number;
   skills: number;
+  problems: ComputerRuntimeProblem[];
   last_error?: string | null;
   degraded_reason?: string | null;
 }

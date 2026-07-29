@@ -161,8 +161,8 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
       if (!instanceId) return;
       await disconnectSmcp(instanceId);
       message.success(t('managerAccount.employees.disconnectSuccess'));
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('computer.messages.connectionOperationFailed'));
     }
   };
 
@@ -248,13 +248,6 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
             type="error"
             showIcon
             message={t(errorI18nKey(error))}
-            description={
-              error.kind === 'network_error'
-                ? error.detail
-                : error.kind === 'other'
-                ? `HTTP ${error.detail.status}: ${error.detail.body}`
-                : undefined
-            }
             closable
             onClose={clearError}
           />
@@ -265,7 +258,7 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
             type="warning"
             showIcon
             message={t('managerAccount.employees.connectionCleanupRequired')}
-            description={connectionStatus.last_error?.message}
+            description={t('managerAccount.employees.connectionCleanupGuidance')}
             action={(
               <Button
                 danger

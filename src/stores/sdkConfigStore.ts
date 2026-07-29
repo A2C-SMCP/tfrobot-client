@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import type { McpServerConfig } from './mcpStore';
-import { formatRuntimeActionError } from '@/utils/runtimeActionError';
+
+type SdkConfigError = 'operation_failed';
 
 export interface SdkConfigServer {
   bundleId: string;
@@ -48,7 +49,7 @@ interface SdkConfigState {
   validation: SdkConfigValidation | null;
   loading: boolean;
   validating: boolean;
-  error: string | null;
+  error: SdkConfigError | null;
   activeInstanceId: string | null;
   requestId: number;
   validationRequestId: number;
@@ -67,7 +68,7 @@ const initialState = {
   validation: null as SdkConfigValidation | null,
   loading: false,
   validating: false,
-  error: null as string | null,
+  error: null as SdkConfigError | null,
   activeInstanceId: null as string | null,
   requestId: 0,
   validationRequestId: 0,
@@ -106,10 +107,9 @@ function reportMutationError(
   set: SdkConfigSet,
   get: SdkConfigGet,
   instanceId: string,
-  cause: unknown,
 ) {
   if (get().activeInstanceId === instanceId) {
-    set({ error: formatRuntimeActionError(cause) });
+    set({ error: 'operation_failed' });
   }
 }
 
@@ -142,14 +142,14 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
         loading: (current.pendingMutations[instanceId] ?? 0) > 0,
         ...(validationIsCurrent ? { snapshot, validation, validating: false } : {}),
       });
-    } catch (cause) {
+    } catch {
       const current = get();
       if (current.requestId !== requestId || current.activeInstanceId !== instanceId) return;
       const validationIsCurrent = current.validationRequestId === validationRequestId;
       set({
         loading: (current.pendingMutations[instanceId] ?? 0) > 0,
         ...(validationIsCurrent
-          ? { error: formatRuntimeActionError(cause), validating: false }
+          ? { error: 'operation_failed', validating: false }
           : {}),
       });
     }
@@ -174,13 +174,13 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
         || current.activeInstanceId !== instanceId
       ) return;
       set({ snapshot, validation, validating: false });
-    } catch (cause) {
+    } catch {
       const current = get();
       if (
         current.validationRequestId !== validationRequestId
         || current.activeInstanceId !== instanceId
       ) return;
-      set({ error: formatRuntimeActionError(cause), validating: false });
+      set({ error: 'operation_failed', validating: false });
     }
   },
 
@@ -191,7 +191,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
-      reportMutationError(set, get, instanceId, cause);
+      reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
       finishMutation(set, get, instanceId);
@@ -205,7 +205,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
-      reportMutationError(set, get, instanceId, cause);
+      reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
       finishMutation(set, get, instanceId);
@@ -223,7 +223,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
       return result;
     } catch (cause) {
-      reportMutationError(set, get, instanceId, cause);
+      reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
       finishMutation(set, get, instanceId);
@@ -235,7 +235,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
     try {
       await invoke('export_config', { path, instanceId, serverNames: serverNames ?? null });
     } catch (cause) {
-      reportMutationError(set, get, instanceId, cause);
+      reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
       finishMutation(set, get, instanceId);

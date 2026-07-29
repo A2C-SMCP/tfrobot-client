@@ -30,6 +30,10 @@ use tfrobot_client_lib::services::computer::{
     ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState,
     RobotBindingMetadata,
 };
+use tfrobot_client_lib::services::computer_runtime_events::{
+    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
+    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+};
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tfrobot_client_lib::AppState;
@@ -2613,8 +2617,30 @@ async fn reconnect_with_token_records_diagnostic_on_sdk_build_failure() {
         "expected Retry on build failure"
     );
     assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
+    let snapshot = runtime.runtime_snapshot().await;
     assert_eq!(
-        runtime.runtime_snapshot().await.last_error.as_deref(),
+        snapshot.last_error, None,
+        "client-owned diagnostics must not be projected as SDK last_error"
+    );
+    let problem = snapshot
+        .problems
+        .iter()
+        .find(|problem| problem.source == ComputerRuntimeProblemSource::ClientConnection)
+        .expect("failed reconnect should surface a current structured problem");
+    assert_eq!(problem.severity, ComputerRuntimeProblemSeverity::Degraded);
+    assert_eq!(
+        problem.message,
+        ComputerRuntimeProblemMessage::ReconnectionFailed
+    );
+    assert_eq!(problem.operation, "reconnect");
+    assert!(problem.current);
+    assert!(problem.occurred_at.contains('T'));
+    assert_eq!(
+        problem.affected_capabilities,
+        vec![ComputerRuntimeAffectedCapability::Connection]
+    );
+    assert_eq!(
+        problem.technical_detail.as_deref(),
         Some("SMCP reconnect failed; retrying")
     );
     assert!(!runtime.is_connected().await);

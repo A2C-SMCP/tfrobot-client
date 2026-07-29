@@ -263,12 +263,60 @@ describe('runtimeStore', () => {
       capability_revision: 99,
       lifecycle: 'error',
       last_error: 'stale handle failed',
+      problems: [{
+        id: 'sdk:1:runtime_error',
+        source: 'sdk',
+        operation: 'runtime',
+        severity: 'error',
+        affected_capabilities: [{ kind: 'runtime' }],
+        occurred_at: '2026-07-29T02:00:00Z',
+        current: true,
+        message: 'sdk_runtime_error',
+        recommended_actions: ['start_runtime'],
+      }],
     });
 
     useRuntimeStore.getState().receiveSnapshot('computer-a', current);
     useRuntimeStore.getState().receiveSnapshot('computer-a', stale);
 
     expect(useRuntimeStore.getState().snapshots['computer-a']).toEqual(current);
+  });
+
+  it('clears recovered problems and does not carry them into a replacement generation', () => {
+    const failed = runtimeSnapshot({
+      generation: 2,
+      snapshot_revision: 4,
+      lifecycle: 'degraded',
+      problems: [{
+        id: 'mcp:2:server-a:start',
+        source: 'mcp',
+        operation: 'start',
+        severity: 'degraded',
+        affected_capabilities: [{ kind: 'mcp_server', bundle_id: 'server-a' }],
+        occurred_at: '2026-07-29T02:00:00Z',
+        current: true,
+        message: 'mcp_start_failed',
+        recommended_actions: ['restart_runtime'],
+      }],
+    });
+    const recovered = runtimeSnapshot({
+      generation: 2,
+      snapshot_revision: 5,
+      lifecycle: 'started',
+      problems: [],
+    });
+    const replacement = runtimeSnapshot({
+      generation: 3,
+      snapshot_revision: 1,
+      lifecycle: 'started',
+      problems: [],
+    });
+
+    useRuntimeStore.getState().receiveSnapshot('computer-a', failed);
+    useRuntimeStore.getState().receiveSnapshot('computer-a', recovered);
+    expect(useRuntimeStore.getState().snapshots['computer-a'].problems).toEqual([]);
+    useRuntimeStore.getState().receiveSnapshot('computer-a', replacement);
+    expect(useRuntimeStore.getState().snapshots['computer-a'].problems).toEqual([]);
   });
 
   it('accepts a newer runtime incarnation even when its handle counters restart', () => {

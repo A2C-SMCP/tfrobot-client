@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import dayjs from 'dayjs';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useComputerStore } from '@/stores/computerStore';
+import { affectedCapabilityLabel } from '@/components/Computer/runtimeProblemPresentation';
 
 const { Title, Text } = Typography;
 
@@ -69,8 +70,12 @@ export function Dashboard({ onNavigate }: DashboardProps) {
           <List
             dataSource={data.computers}
             locale={{ emptyText: t('computer.empty') }}
-            renderItem={(computer) => (
-              <List.Item
+            renderItem={(computer) => {
+              const currentProblem = (computer.runtime.problems ?? [])
+                .find((problem) => problem.current && problem.severity === 'error')
+                ?? (computer.runtime.problems ?? []).find((problem) => problem.current);
+              return (
+                <List.Item
                 style={{ padding: '14px 0' }}
                 actions={[
                   <Button
@@ -103,14 +108,23 @@ export function Dashboard({ onNavigate }: DashboardProps) {
                       <Tag>{t('skills.title')}: {computer.runtime.skills}</Tag>
                       {computer.robot_name && <Text type="secondary">{computer.robot_name}</Text>}
                       {computer.connection_profile && <Text type="secondary">{computer.connection_profile}</Text>}
-                      {(computer.runtime.last_error || computer.runtime.degraded_reason) && (
-                        <Text type="danger">{computer.runtime.last_error ?? computer.runtime.degraded_reason}</Text>
+                      {currentProblem && (
+                        <Text type={currentProblem.severity === 'error' ? 'danger' : 'warning'}>
+                          {t(`computer.runtime.problems.messages.${currentProblem.message}`)}
+                          {' '}
+                          {t('computer.runtime.problems.affected', {
+                            capabilities: currentProblem.affected_capabilities
+                              .map((capability) => affectedCapabilityLabel(capability, t))
+                              .join(', '),
+                          })}
+                        </Text>
                       )}
                     </Space>
                   )}
                 />
-              </List.Item>
-            )}
+                </List.Item>
+              );
+            }}
           />
         </Card>
 

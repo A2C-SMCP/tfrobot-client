@@ -362,6 +362,7 @@ describe('ManagerAccount', () => {
               operation: 'disconnect',
               message: 'Socket cleanup failed',
               retryable: true,
+              occurred_at: '2026-07-29T02:00:00Z',
             },
             actions: {
               connect: { enabled: false, disabled_reason: 'connection_unavailable' },
@@ -376,9 +377,58 @@ describe('ManagerAccount', () => {
       expect(screen.getByText(
         'A stale connection must be cleaned up before reconnecting.',
       )).toBeInTheDocument();
-      expect(screen.getByText('Socket cleanup failed')).toBeInTheDocument();
+      expect(screen.getByText(
+        'Retry the disconnect action. If cleanup still fails, view Runtime diagnostics or logs.',
+      )).toBeInTheDocument();
+      expect(screen.queryByText('Socket cleanup failed')).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Disconnect/i })).toBeEnabled();
       expect(screen.getByText('Connect').closest('button')).toBeDisabled();
+    });
+
+    it('does not expose a technical error when orphan cleanup fails', async () => {
+      applyMock({ session: user, employees: [employee], loading: false });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnected',
+            connected: false,
+            actions: {
+              connect: { enabled: false, disabled_reason: 'connection_unavailable' },
+              disconnect: { enabled: true, disabled_reason: null },
+            },
+          },
+        },
+      });
+      mockedInvoke.mockReset();
+      mockedInvoke.mockRejectedValueOnce(
+        new Error('cleanup https://private.example failed with token=private'),
+      );
+
+      render(<EmployeeList instanceId="computer-a" />);
+      fireEvent.click(screen.getByRole('button', { name: /Disconnect/i }));
+
+      expect(await screen.findByText(
+        'The connection operation failed. View Runtime diagnostics or logs for details.',
+      )).toBeInTheDocument();
+      expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
+    }, 10000);
+
+    it('does not expose Manager connection details in the ordinary error alert', () => {
+      applyMock({
+        session: user,
+        employees: [employee],
+        error: {
+          kind: 'network_error',
+          detail: 'https://private.example failed with token=private',
+        },
+      });
+
+      render(<EmployeeList instanceId="computer-a" />);
+
+      expect(screen.getByText(
+        'Cannot reach the Manager server. Check your connection or the Manager URL.',
+      )).toBeInTheDocument();
+      expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
     });
 
     it('disables connect button for non-running status', async () => {

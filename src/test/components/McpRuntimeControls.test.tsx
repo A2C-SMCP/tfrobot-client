@@ -86,6 +86,21 @@ describe('McpRuntimeControls', () => {
     expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
   });
 
+  it('keeps a single-server technical failure out of the ordinary UI', async () => {
+    mockStore.startServer.mockRejectedValueOnce({
+      code: 'runtime_error',
+      message: 'spawn /secret/path failed with token=private',
+    });
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    fireEvent.click(screen.getByTitle('Start'));
+
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
+  });
+
   it('shows Plugin-owned diagnostics without lifecycle buttons and opens the matching Plugin', () => {
     const owner = {
       type: 'plugin' as const,
@@ -113,7 +128,8 @@ describe('McpRuntimeControls', () => {
 
     expect(screen.getByText('Plugin: desktop-tools')).toBeInTheDocument();
     expect(screen.getByText('Marketplace: tf-market')).toBeInTheDocument();
-    expect(screen.getByText('Connected with 3 tools')).toBeInTheDocument();
+    expect(screen.getAllByText('Running').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Connected with 3 tools')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Start')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Stop')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Manage desktop-tools$/ }));
@@ -140,7 +156,10 @@ describe('McpRuntimeControls', () => {
     expect(await screen.findByText(
       'Start complete: 3 candidates, 1 started, 1 unchanged, 2 plugin-managed excluded, 1 failed.',
     )).toBeInTheDocument();
-    expect(screen.getByText('Broken server (broken): process exited')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Broken server (broken): operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText('process exited')).not.toBeInTheDocument();
   });
 
   it('reports partial stop failures with changed, unchanged, and excluded counts', async () => {
@@ -163,7 +182,10 @@ describe('McpRuntimeControls', () => {
     expect(await screen.findByText(
       'Stop complete: 3 candidates, 1 stopped, 1 unchanged, 2 plugin-managed excluded, 1 failed.',
     )).toBeInTheDocument();
-    expect(screen.getByText('Broken server (broken): disconnect failed')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Broken server (broken): operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText('disconnect failed')).not.toBeInTheDocument();
   });
 
   it('ignores start feedback and input prompts that finish after switching instances', async () => {

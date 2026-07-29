@@ -39,6 +39,12 @@ export type ComputerRuntimeEventCause =
   /** @deprecated Compatibility with runtime events emitted before TFRC-73. */
   | { kind: 'client_connection_authority_changed'; revision: number; present: boolean }
   | { kind: 'client_diagnostic_changed'; operation: string; has_error: boolean }
+  | {
+      kind: 'mcp_diagnostic_changed';
+      bundle_id: string;
+      operation: string;
+      has_error: boolean;
+    }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
   | { kind: 'resync'; skipped_events: number };

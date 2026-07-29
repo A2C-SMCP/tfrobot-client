@@ -26,7 +26,6 @@ import {
   type ComputerStatus,
 } from '@/stores/computerStore';
 import {
-  formatRuntimeActionError,
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
@@ -382,7 +381,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
         setRuntimeInputPrompt({ instanceId: instance.id, error: e, action });
         return;
       }
-      message.error(formatRuntimeActionError(e));
+      message.error(t('computer.messages.runtimeOperationFailed'));
     }
   };
 
@@ -394,8 +393,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     try {
       await stopInstance(instance.id);
       message.success(t('computer.messages.stopped'));
-    } catch (e) {
-      message.error(formatRuntimeActionError(e));
+    } catch {
+      message.error(t('computer.messages.runtimeOperationFailed'));
     }
   };
 
@@ -403,8 +402,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     try {
       await connectSelectedTarget(instance.id);
       message.success(t('connection.messages.connected'));
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('computer.messages.connectionOperationFailed'));
     }
   };
 
@@ -412,8 +411,8 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     try {
       await disconnectConnection(instance.id);
       message.success(t('connection.messages.disconnected'));
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('computer.messages.connectionOperationFailed'));
     }
   };
 
@@ -679,6 +678,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
                     onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
                     onConnect={() => { void handleConnect(selectedInstance); }}
                     onDisconnect={() => { void handleDisconnect(selectedInstance); }}
+                    onViewLogs={() => setActiveTab('logs')}
                     onOpenPlugin={(owner) => {
                       setFocusedPlugin(owner);
                       setActiveTab('marketplace');

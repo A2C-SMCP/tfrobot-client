@@ -90,19 +90,28 @@ impl ComputerInstanceRuntime {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
             let generation = self.runtime_generation();
             let snapshot = self.computer.read().await.status().await;
-            let client_last_error = self.client_runtime_diagnostic.read().await.clone();
             if generation == self.runtime_generation() {
                 let snapshot_revision = self
                     .runtime_snapshot_revision
                     .fetch_add(1, Ordering::AcqRel)
                     + 1;
-                return ComputerRuntimeSnapshot::from_sdk(
+                let mut runtime_snapshot = ComputerRuntimeSnapshot::from_sdk(
                     self.runtime_incarnation,
                     generation,
                     snapshot_revision,
                     snapshot,
-                    client_last_error,
                 );
+                runtime_snapshot.problems = collect_runtime_problems(
+                    &runtime_snapshot,
+                    &self.sdk_problem_observations,
+                    &self.client_runtime_diagnostic,
+                    &self.connection_operation,
+                    &self.mcp_start_diagnostics,
+                    &self.mcp_config_apply_diagnostics,
+                    &self.sdk_servers,
+                )
+                .await;
+                return runtime_snapshot;
             }
         }
     }
@@ -145,7 +154,11 @@ impl ComputerInstanceRuntime {
         let sink = self.runtime_event_sink.clone();
         let instance_id = self.instance.id.clone();
         let incarnation = self.runtime_incarnation;
+        let sdk_problem_observations = self.sdk_problem_observations.clone();
         let client_runtime_diagnostic = self.client_runtime_diagnostic.clone();
+        let mcp_start_diagnostics = self.mcp_start_diagnostics.clone();
+        let mcp_config_apply_diagnostics = self.mcp_config_apply_diagnostics.clone();
+        let sdk_servers = self.sdk_servers.clone();
         let connection = self.connection.clone();
         let connection_operation = self.connection_operation.clone();
         let connection_authority_revision = self.connection_authority_revision.clone();
@@ -194,17 +207,26 @@ impl ComputerInstanceRuntime {
                         break;
                     }
                     let snapshot = computer.read().await.status().await;
-                    let client_last_error = client_runtime_diagnostic.read().await.clone();
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
-                    ComputerRuntimeSnapshot::from_sdk(
+                    let mut runtime_snapshot = ComputerRuntimeSnapshot::from_sdk(
                         incarnation,
                         generation,
                         snapshot_revision.fetch_add(1, Ordering::AcqRel) + 1,
                         snapshot,
-                        client_last_error,
+                    );
+                    runtime_snapshot.problems = collect_runtime_problems(
+                        &runtime_snapshot,
+                        &sdk_problem_observations,
+                        &client_runtime_diagnostic,
+                        &connection_operation,
+                        &mcp_start_diagnostics,
+                        &mcp_config_apply_diagnostics,
+                        &sdk_servers,
                     )
+                    .await;
+                    runtime_snapshot
                 };
                 let Some(sink) = sink.read().await.clone() else {
                     break;
@@ -359,6 +381,13 @@ impl ComputerInstanceRuntime {
         if self.shutdown_completed.load(Ordering::Acquire) {
             return Ok(());
         }
+        #[cfg(debug_assertions)]
+        if self.fail_sdk_shutdown_once.swap(false, Ordering::SeqCst) {
+            return Err(format!(
+                "Injected SDK shutdown failure for instance {}",
+                self.instance.id
+            ));
+        }
 
         let shutdown_result = timeout(SDK_COMPUTER_SHUTDOWN_TIMEOUT, async {
             self.computer.read().await.shutdown().await
@@ -449,5 +478,125 @@ impl ComputerInstanceRuntime {
         } else {
             Ok(guard)
         }
+    }
+}
+
+async fn collect_runtime_problems(
+    snapshot: &ComputerRuntimeSnapshot,
+    sdk_problem_observations: &Mutex<SdkProblemObservations>,
+    client_runtime_diagnostic: &RwLock<Option<RuntimeDiagnosticRecord>>,
+    connection_operation: &RwLock<ClientConnectionOperationState>,
+    mcp_start_diagnostics: &RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>,
+    mcp_config_apply_diagnostics: &RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>,
+    sdk_servers: &RwLock<HashMap<BundleId, ServerName>>,
+) -> Vec<ComputerRuntimeProblem> {
+    let (sdk_error, sdk_degraded) = sdk_problem_observations.lock().await.observe(
+        snapshot.generation,
+        snapshot.lifecycle,
+        snapshot.last_error.as_deref(),
+        snapshot.degraded_reason.as_deref(),
+    );
+    let mut problems = Vec::new();
+    if let Some(diagnostic) = sdk_error {
+        problems.push(ComputerRuntimeProblem::sdk_error(
+            snapshot.generation,
+            diagnostic,
+        ));
+    }
+    if let Some(diagnostic) = sdk_degraded {
+        problems.push(ComputerRuntimeProblem::sdk_degraded(
+            snapshot.generation,
+            diagnostic,
+        ));
+    }
+
+    // Read both client-owned records coherently. Reconnect completion acquires the corresponding
+    // write locks in this order so a product snapshot cannot observe a half-cleared problem.
+    let client_diagnostic_guard = client_runtime_diagnostic.read().await;
+    let connection_operation_guard = connection_operation.read().await;
+    let client_diagnostic = client_diagnostic_guard.clone();
+    let mut connection_error = connection_operation_guard.last_error();
+    drop(connection_operation_guard);
+    drop(client_diagnostic_guard);
+    if let (Some(error), Some(diagnostic)) = (connection_error.as_mut(), client_diagnostic.as_ref())
+    {
+        let operation = match error.operation {
+            ClientConnectionOperation::Connect => "connect",
+            ClientConnectionOperation::Disconnect => "disconnect",
+            ClientConnectionOperation::Reconnect => "reconnect",
+        };
+        if diagnostic.operation == operation {
+            // Both records describe one product problem. Preserve the earliest owner observation
+            // when the richer connection-state projection supersedes the low-level diagnostic.
+            error.occurred_at = earliest_runtime_occurrence(
+                error.occurred_at.as_str(),
+                diagnostic.occurred_at.as_str(),
+            );
+        }
+    }
+    if let Some(error) = connection_error.as_ref() {
+        problems.push(ComputerRuntimeProblem::connection(
+            snapshot.generation,
+            error,
+        ));
+    }
+    if let Some(diagnostic) = client_diagnostic {
+        let already_projected = connection_error.as_ref().is_some_and(|error| {
+            diagnostic.operation
+                == match error.operation {
+                    ClientConnectionOperation::Connect => "connect",
+                    ClientConnectionOperation::Disconnect => "disconnect",
+                    ClientConnectionOperation::Reconnect => "reconnect",
+                }
+        });
+        if !already_projected {
+            problems.push(ComputerRuntimeProblem::client_diagnostic(
+                snapshot.generation,
+                diagnostic,
+            ));
+        }
+    }
+
+    if snapshot.is_running() {
+        let server_names = sdk_servers.read().await.clone();
+        let start_diagnostics = mcp_start_diagnostics.read().await.clone();
+        let apply_diagnostics = mcp_config_apply_diagnostics.read().await.clone();
+        let mut mcp_diagnostics: Vec<_> = start_diagnostics
+            .into_iter()
+            .chain(apply_diagnostics.into_iter())
+            .filter(|(bundle_id, diagnostic)| {
+                server_names.contains_key(bundle_id) || diagnostic.mcp_server_name.is_some()
+            })
+            .collect();
+        mcp_diagnostics.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.operation.cmp(&right.1.operation))
+        });
+        for (bundle_id, diagnostic) in mcp_diagnostics {
+            let server_name = server_names
+                .get(&bundle_id)
+                .map(ToString::to_string)
+                .or_else(|| diagnostic.mcp_server_name.clone());
+            problems.push(ComputerRuntimeProblem::mcp(
+                snapshot.generation,
+                bundle_id.as_str(),
+                server_name,
+                diagnostic,
+            ));
+        }
+    }
+    problems
+}
+
+fn earliest_runtime_occurrence(left: &str, right: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left_time), Ok(right_time)) if right_time < left_time => right.to_string(),
+        (Ok(_), Ok(_)) => left.to_string(),
+        _ if right < left => right.to_string(),
+        _ => left.to_string(),
     }
 }

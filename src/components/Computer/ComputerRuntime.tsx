@@ -1,12 +1,8 @@
 import {
-  Alert,
   Button,
   Card,
   Col,
-  Collapse,
   Descriptions,
-  Empty,
-  List,
   Row,
   Space,
   Statistic,
@@ -27,9 +23,10 @@ import type { ComputerInstance } from '@/stores/computerStore';
 import type { McpServerManagedBy } from '@/stores/mcpStore';
 import {
   useRuntimeStore,
-  type ComputerRuntimeEventCause,
   type ComputerRuntimeEventRecord,
 } from '@/stores/runtimeStore';
+import { RuntimeDiagnostics } from './RuntimeDiagnostics';
+import { RuntimeProblems } from './RuntimeProblems';
 
 const EMPTY_RUNTIME_EVENTS: ComputerRuntimeEventRecord[] = [];
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
@@ -43,6 +40,7 @@ interface ComputerRuntimeProps {
   onRestart: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
+  onViewLogs: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
 }
 
@@ -55,6 +53,7 @@ export function ComputerRuntime({
   onRestart,
   onConnect,
   onDisconnect,
+  onViewLogs,
   onOpenPlugin,
 }: ComputerRuntimeProps) {
   const { t } = useTranslation();
@@ -103,64 +102,21 @@ export function ComputerRuntime({
         : runtime.user_state === 'starting' || runtime.user_state === 'stopping'
           ? 'blue'
         : 'default';
-  const describeEventCause = (cause: ComputerRuntimeEventCause): string => {
-    switch (cause.kind) {
-      case 'lifecycle_changed':
-        return t('computer.runtime.eventCauses.lifecycleChanged', {
-          state: t(`computer.runtime.lifecycleStates.${cause.state}`),
-        });
-      case 'config_revision_bumped':
-        return t('computer.runtime.eventCauses.configRevisionBumped', {
-          revision: cause.revision,
-        });
-      case 'capability_revision_bumped':
-        return t('computer.runtime.eventCauses.capabilityRevisionBumped', {
-          revision: cause.revision,
-        });
-      case 'client_connection_state_changed':
-        return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
-          revision: cause.revision,
-          status: t(`computer.connection.${cause.status}`),
-        });
-      case 'client_connection_authority_changed':
-        return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
-          revision: cause.revision,
-          status: t(`computer.connection.${cause.present ? 'connected' : 'disconnected'}`),
-        });
-      case 'client_diagnostic_changed':
-        return t('computer.runtime.eventCauses.clientDiagnosticChanged', {
-          operation: cause.operation,
-          status: cause.has_error
-            ? t('computer.runtime.eventCauses.diagnosticFailed')
-            : t('computer.runtime.eventCauses.diagnosticCleared'),
-        });
-      case 'handle_replaced':
-        return t('computer.runtime.eventCauses.handleReplaced', { reason: cause.reason });
-      case 'observation_advanced':
-        return t('computer.runtime.eventCauses.observationAdvanced');
-      case 'resync':
-        return t('computer.runtime.eventCauses.resync', { count: cause.skipped_events });
-    }
-  };
-
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      {(runtime.last_error || runtime.degraded_reason) && (
-        <Alert
-          type={runtime.last_error ? 'error' : 'warning'}
-          showIcon
-          message={runtime.last_error ? t('computer.runtime.lastError') : t('computer.runtime.degraded')}
-          description={runtime.last_error ?? runtime.degraded_reason}
-        />
-      )}
-      {connectionState?.last_error && (
-        <Alert
-          type={connectionState.last_error.retryable ? 'warning' : 'error'}
-          showIcon
-          message={t('computer.connectionActions.lastError')}
-          description={connectionState.last_error.message}
-        />
-      )}
+      <RuntimeProblems
+        problems={runtime.problems ?? []}
+        runtimeActions={actions}
+        connectionActions={connectionActions}
+        canConnect={canConnect}
+        connectDisabledReason={backendConnectDisabledReason ?? connectDisabledReason}
+        loading={loading}
+        onStartRuntime={onStartStop}
+        onRestartRuntime={onRestart}
+        onRetryConnection={onConnect}
+        onRetryDisconnection={onDisconnect}
+        onViewLogs={onViewLogs}
+      />
 
       <Card
         title={t('computer.runtime.statusTitle')}
@@ -256,61 +212,7 @@ export function ComputerRuntime({
         />
       </Card>
 
-      <Collapse
-        items={[{
-          key: 'advanced-runtime-diagnostics',
-          label: t('computer.runtime.advancedDiagnostics'),
-          children: (
-            <Space direction="vertical" size={16} style={{ width: '100%' }}>
-              <Descriptions column={{ xs: 1, sm: 2, lg: 3 }} size="small">
-                <Descriptions.Item label={t('computer.runtime.lifecycle')}>
-                  <Tag>{t(`computer.runtime.lifecycleStates.${runtime.lifecycle}`)}</Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label={t('computer.runtime.generation')}>
-                  {runtime.generation}
-                </Descriptions.Item>
-                <Descriptions.Item label={t('computer.runtime.snapshotRevision')}>
-                  {runtime.snapshot_revision}
-                </Descriptions.Item>
-                <Descriptions.Item label={t('computer.runtime.configRevision')}>
-                  {runtime.config_revision}
-                </Descriptions.Item>
-                <Descriptions.Item label={t('computer.runtime.capabilityRevision')}>
-                  {runtime.capability_revision}
-                </Descriptions.Item>
-              </Descriptions>
-              <Typography.Title level={5} style={{ margin: 0 }}>
-                {t('computer.runtime.recentEvents')}
-              </Typography.Title>
-              {recentEvents.length === 0 ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('computer.runtime.noEvents')} />
-              ) : (
-                <List
-                  size="small"
-                  dataSource={[...recentEvents].reverse()}
-                  renderItem={(event) => (
-                    <List.Item
-                      key={`${event.snapshot.incarnation}-${event.snapshot.generation}-${event.snapshot.snapshot_revision}`}
-                    >
-                      <List.Item.Meta
-                        title={describeEventCause(event.cause)}
-                        description={(
-                          <Typography.Text type="secondary">
-                            {t('computer.runtime.eventRevision', {
-                              revision: event.snapshot.snapshot_revision,
-                              receivedAt: new Date(event.received_at).toLocaleString(),
-                            })}
-                          </Typography.Text>
-                        )}
-                      />
-                    </List.Item>
-                  )}
-                />
-              )}
-            </Space>
-          ),
-        }]}
-      />
+      <RuntimeDiagnostics runtime={runtime} recentEvents={recentEvents} />
     </Space>
   );
 }

@@ -30,6 +30,12 @@ export function McpServerList({
   onOpenPlugin,
 }: McpServerListProps) {
   const { t } = useTranslation();
+  const safeStatusLabel = (record: McpServerStatus) => {
+    if (record.running) return t('mcp.status.running');
+    if (record.status_message === 'error') return t('mcp.status.error');
+    if (record.status_message === 'pending') return t('mcp.status.pending');
+    return t('mcp.status.stopped');
+  };
 
   const handleStart = async (bundleId: string) => {
     await onStart?.(bundleId);
@@ -82,9 +88,9 @@ export function McpServerList({
     },
     {
       title: t('mcp.table.message'),
-      dataIndex: 'status_message',
       key: 'status_message',
       ellipsis: true,
+      render: (_: unknown, record: McpServerStatus) => safeStatusLabel(record),
     },
     {
       title: t('mcp.table.actions'),

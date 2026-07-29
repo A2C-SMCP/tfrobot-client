@@ -115,10 +115,16 @@ describe('McpConfig', () => {
     expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
   });
 
-  it('renders error alert when error exists', () => {
-    mockUseSdkConfigStore.mockReturnValue({ ...mockSdkStore, error: 'Something broke' } as any);
+  it('renders a safe error alert without exposing the stored technical value', () => {
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      error: 'spawn /secret/path failed with token=private',
+    } as any);
     render(<McpConfig instanceId={instanceId} />);
-    expect(screen.getByText('Something broke')).toBeInTheDocument();
+    expect(screen.getByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   });
 
   it('renders SDK config revision, provenance, and schema result without runtime status', () => {
@@ -309,5 +315,93 @@ describe('McpConfig', () => {
     expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
       mockSdkStore.upsertServer.mock.calls[0],
     );
+  });
+
+  it('does not expose technical errors when adding a server fails at runtime', async () => {
+    mockSdkStore.upsertServer.mockRejectedValueOnce(
+      new Error('spawn /secret/add failed with token=private'),
+    );
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/add|token=private/)).not.toBeInTheDocument();
+  });
+
+  it('does not expose technical errors when editing a server fails at runtime', async () => {
+    mockSdkStore.upsertServer.mockRejectedValueOnce(
+      new Error('unmount /secret/edit failed with token=private'),
+    );
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByTitle('Edit'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/edit|token=private/)).not.toBeInTheDocument();
+  });
+
+  it('does not expose technical errors when toggling a server fails at runtime', async () => {
+    mockSdkStore.upsertServer.mockRejectedValueOnce(
+      new Error('mount https://private.example failed with token=private'),
+    );
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByRole('switch', {
+      name: 'Toggle server test-stdio enabled state',
+    }));
+
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
+  });
+
+  it('does not expose technical errors when removing a server fails at runtime', async () => {
+    mockSdkStore.removeServer.mockRejectedValueOnce(
+      new Error('cleanup /secret/remove failed with token=private'),
+    );
+    mockUseSdkConfigStore.mockReturnValue({
+      ...mockSdkStore,
+      snapshot: {
+        version: 1,
+        revision: 'sha256:config',
+        mcp: { servers: [configServers[0]] },
+        provenance: {},
+      },
+    } as any);
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByTitle('Remove'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/remove|token=private/)).not.toBeInTheDocument();
   });
 });

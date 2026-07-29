@@ -92,6 +92,7 @@ export function runtimeSnapshot(
     active_mcp_servers: 0,
     tools: 0,
     skills: 0,
+    problems: [],
     last_error: null,
     degraded_reason: null,
     ...overrides,

@@ -30,6 +30,7 @@ export interface ClientConnectionOperationError {
   operation: ClientConnectionOperation;
   message: string;
   retryable: boolean;
+  occurred_at: string;
 }
 
 export interface ClientConnectionActionCapability {

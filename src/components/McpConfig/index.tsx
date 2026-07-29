@@ -14,7 +14,6 @@ import type { McpServerConfig } from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
-  formatRuntimeActionError,
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
@@ -77,7 +76,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         setInputPrompt({ config, error: cause });
         return;
       }
-      message.error(formatRuntimeActionError(cause));
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -85,8 +84,8 @@ export function McpConfig({ instanceId }: McpConfigProps) {
     try {
       await removeServer(instanceId, name);
       message.success(t('mcp.messages.removed', { name }));
-    } catch (cause) {
-      message.error(String(cause));
+    } catch {
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -102,7 +101,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         setInputPrompt({ config, error: cause });
         return;
       }
-      message.error(formatRuntimeActionError(cause));
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -117,8 +116,8 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         const result = await importConfig(instanceId, path as string);
         message.success(t('mcp.messages.importSuccess', { servers: result.servers_imported, inputs: result.inputs_imported }));
       }
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -133,8 +132,8 @@ export function McpConfig({ instanceId }: McpConfigProps) {
         await exportConfig(instanceId, path);
         message.success(t('mcp.messages.exportSuccess'));
       }
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -310,7 +309,7 @@ export function McpConfig({ instanceId }: McpConfigProps) {
       {configError && (
         <Alert
           message={t('common.error')}
-          description={configError}
+          description={t('mcp.messages.operationFailed')}
           type="error"
           showIcon
           style={{ marginBottom: 16 }}

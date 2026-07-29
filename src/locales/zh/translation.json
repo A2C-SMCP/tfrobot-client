@@ -71,6 +71,7 @@
       "statusTitle": "运行时状态",
       "userState": "状态",
       "lifecycle": "生命周期",
+      "incarnation": "运行时实例代际",
       "generation": "运行时世代",
       "snapshotRevision": "快照 Revision",
       "connection": "连接",
@@ -112,11 +113,48 @@
         "connectionPresent": "存在",
         "connectionAbsent": "不存在",
         "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
+        "mcpDiagnosticChanged": "MCP {{bundleId}} 的 {{operation}} 诊断状态：{{status}}",
         "diagnosticFailed": "失败",
         "diagnosticCleared": "已清除",
         "handleReplaced": "运行时句柄已替换：{{reason}}",
         "observationAdvanced": "运行时观测已推进到触发事件之后",
         "resync": "跳过 {{count}} 个事件后已重新同步运行时状态"
+      },
+      "problems": {
+        "severity": {
+          "error": "运行异常",
+          "degraded": "运行受限"
+        },
+        "sources": {
+          "sdk": "Runtime SDK",
+          "client_connection": "连接",
+          "mcp": "MCP"
+        },
+        "messages": {
+          "sdk_runtime_error": "Runtime 核心能力当前不可用。",
+          "sdk_runtime_degraded": "Runtime 仍可使用，但部分能力受限。",
+          "connection_failed": "Runtime 仍可使用，但未能建立连接。",
+          "disconnection_failed": "Runtime 仍可使用，但连接清理尚未完成。",
+          "reconnection_failed": "Runtime 仍可使用，但自动重连失败。",
+          "mcp_start_failed": "Runtime 仍可使用，但一个 MCP 服务器启动失败。",
+          "mcp_configuration_apply_failed": "配置已保存，但未能应用到当前 MCP 进程。"
+        },
+        "capabilities": {
+          "runtime": "Runtime 核心能力",
+          "connection": "Robot 连接",
+          "mcpServer": "MCP 服务器 {{name}}"
+        },
+        "affected": "受影响能力：{{capabilities}}",
+        "occurredAt": "发生时间：{{time}}",
+        "actions": {
+          "retryConnection": "重试连接",
+          "retryDisconnection": "重试断开",
+          "viewLogs": "查看日志",
+          "unavailable": "当前状态下无法执行此操作。"
+        },
+        "actionUnavailable": "{{action}}不可用：{{reason}}",
+        "technicalDiagnostics": "当前技术诊断",
+        "noTechnicalDiagnostics": "当前没有技术诊断"
       },
       "lifecycleStates": {
         "created": "已创建",
@@ -201,7 +239,9 @@
       "deleted": "Computer 已删除",
       "started": "Computer 已启动",
       "stopped": "Computer 已停止",
-      "restarted": "Computer 已重启"
+      "restarted": "Computer 已重启",
+      "runtimeOperationFailed": "Runtime 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "connectionOperationFailed": "连接操作失败，请查看 Runtime 诊断或日志了解详情。"
     }
   },
   "skills": {
@@ -330,7 +370,8 @@
     "status": {
       "running": "运行中",
       "stopped": "已停止",
-      "error": "错误"
+      "error": "错误",
+      "pending": "等待中"
     },
     "table": {
       "name": "名称",
@@ -352,7 +393,7 @@
     "batch": {
       "startSummary": "批量启动完成：候选 {{candidates}} 个，实际启动 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
       "stopSummary": "批量停止完成：候选 {{candidates}} 个，实际停止 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
-      "failure": "{{name}}（{{bundleId}}）：{{message}}"
+      "failure": "{{name}}（{{bundleId}}）：操作失败，请查看 Runtime 诊断或日志了解详情。"
     },
     "disabledGuidance": {
       "title": "当前无法操作 MCP 生命周期",
@@ -409,6 +450,8 @@
       "removed": "服务器删除成功",
       "started": "服务器 {{name}} 已启动",
       "stopped": "服务器 {{name}} 已停止",
+      "operationFailed": "MCP 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
       "editNotImplemented": "编辑功能即将推出",
@@ -433,7 +476,9 @@
       "missingSecret": "启动需要补充密钥",
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
       "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
-      "createAsSecret": "将此 Input 作为 Secret 保存"
+      "createAsSecret": "将此 Input 作为 Secret 保存",
+      "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
+      "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
     },
     "table": {
       "id": "ID",
@@ -683,6 +728,7 @@
       "connected": "已连接",
       "disconnect": "断开连接",
       "connectionCleanupRequired": "重新连接前需要先清理残留连接。",
+      "connectionCleanupGuidance": "请重试断开操作；若清理仍失败，请查看 Runtime 诊断或日志。",
       "disconnectSuccess": "已断开 SMCP 连接",
       "connectSuccess": "正在连接 {{name}}…",
       "noRobotAccount": "该机器人暂不支持安全连接（缺少机器人账号 ID）。",

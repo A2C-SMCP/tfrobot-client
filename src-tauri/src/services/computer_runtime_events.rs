@@ -1,11 +1,321 @@
 use crate::services::computer::{
-    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerRuntimeActionCapabilities,
-    ComputerRuntimeUserState,
+    ClientConnectionOperation, ClientConnectionOperationError, ClientConnectionStateSnapshot,
+    ClientConnectionStatus, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
 };
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
 
 pub const COMPUTER_RUNTIME_STATUS_EVENT: &str = "computer-runtime-status";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeProblemSource {
+    Sdk,
+    ClientConnection,
+    Mcp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeProblemSeverity {
+    Error,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeProblemMessage {
+    SdkRuntimeError,
+    SdkRuntimeDegraded,
+    ConnectionFailed,
+    DisconnectionFailed,
+    ReconnectionFailed,
+    McpStartFailed,
+    McpConfigurationApplyFailed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeProblemAction {
+    StartRuntime,
+    RestartRuntime,
+    RetryConnection,
+    RetryDisconnection,
+    ViewLogs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerRuntimeAffectedCapability {
+    Runtime,
+    Connection,
+    McpServer {
+        bundle_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerRuntimeProblem {
+    pub id: String,
+    pub source: ComputerRuntimeProblemSource,
+    pub operation: String,
+    pub severity: ComputerRuntimeProblemSeverity,
+    pub affected_capabilities: Vec<ComputerRuntimeAffectedCapability>,
+    pub occurred_at: String,
+    pub current: bool,
+    pub message: ComputerRuntimeProblemMessage,
+    pub recommended_actions: Vec<ComputerRuntimeProblemAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technical_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeDiagnosticRecord {
+    pub operation: String,
+    pub message: String,
+    pub occurred_at: String,
+    pub mcp_server_name: Option<String>,
+}
+
+impl RuntimeDiagnosticRecord {
+    pub(crate) fn new(operation: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            message: message.into(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            mcp_server_name: None,
+        }
+    }
+
+    pub(crate) fn for_mcp(
+        operation: impl Into<String>,
+        message: impl Into<String>,
+        server_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation: operation.into(),
+            message: message.into(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            mcp_server_name: Some(server_name.into()),
+        }
+    }
+
+    pub(crate) fn preserve_occurrence_from(mut self, current: Option<&Self>) -> Self {
+        if let Some(current) = current.filter(|current| current.operation == self.operation) {
+            self.occurred_at.clone_from(&current.occurred_at);
+        }
+        self
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SdkProblemObservations {
+    generation: u64,
+    last_error: Option<SdkProblemObservation>,
+    degraded_reason: Option<SdkProblemObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SdkProblemObservation {
+    pub occurred_at: String,
+    pub technical_detail: Option<String>,
+}
+
+impl SdkProblemObservations {
+    pub(crate) fn observe(
+        &mut self,
+        generation: u64,
+        lifecycle: LifecycleState,
+        last_error: Option<&str>,
+        degraded_reason: Option<&str>,
+    ) -> (Option<SdkProblemObservation>, Option<SdkProblemObservation>) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.last_error = None;
+            self.degraded_reason = None;
+        }
+        observe_sdk_problem(
+            &mut self.last_error,
+            lifecycle == LifecycleState::Error,
+            last_error,
+        );
+        observe_sdk_problem(
+            &mut self.degraded_reason,
+            lifecycle == LifecycleState::Degraded,
+            degraded_reason,
+        );
+        (self.last_error.clone(), self.degraded_reason.clone())
+    }
+}
+
+fn observe_sdk_problem(
+    current: &mut Option<SdkProblemObservation>,
+    active: bool,
+    technical_detail: Option<&str>,
+) {
+    if !active {
+        *current = None;
+        return;
+    }
+    let technical_detail = technical_detail.map(ToString::to_string);
+    match current {
+        Some(observation) => {
+            observation.technical_detail = technical_detail;
+        }
+        None => {
+            *current = Some(SdkProblemObservation {
+                occurred_at: chrono::Utc::now().to_rfc3339(),
+                technical_detail,
+            });
+        }
+    }
+}
+
+impl ComputerRuntimeProblem {
+    pub(crate) fn sdk_error(generation: u64, observation: SdkProblemObservation) -> Self {
+        Self {
+            id: format!("sdk:{generation}:runtime_error"),
+            source: ComputerRuntimeProblemSource::Sdk,
+            operation: "runtime".to_string(),
+            severity: ComputerRuntimeProblemSeverity::Error,
+            affected_capabilities: vec![ComputerRuntimeAffectedCapability::Runtime],
+            occurred_at: observation.occurred_at,
+            current: true,
+            message: ComputerRuntimeProblemMessage::SdkRuntimeError,
+            recommended_actions: vec![
+                ComputerRuntimeProblemAction::StartRuntime,
+                ComputerRuntimeProblemAction::ViewLogs,
+            ],
+            technical_detail: observation.technical_detail,
+        }
+    }
+
+    pub(crate) fn sdk_degraded(generation: u64, observation: SdkProblemObservation) -> Self {
+        Self {
+            id: format!("sdk:{generation}:runtime_degraded"),
+            source: ComputerRuntimeProblemSource::Sdk,
+            operation: "runtime_degraded".to_string(),
+            severity: ComputerRuntimeProblemSeverity::Degraded,
+            affected_capabilities: vec![ComputerRuntimeAffectedCapability::Runtime],
+            occurred_at: observation.occurred_at,
+            current: true,
+            message: ComputerRuntimeProblemMessage::SdkRuntimeDegraded,
+            recommended_actions: vec![
+                ComputerRuntimeProblemAction::RestartRuntime,
+                ComputerRuntimeProblemAction::ViewLogs,
+            ],
+            technical_detail: observation.technical_detail,
+        }
+    }
+
+    pub(crate) fn connection(generation: u64, error: &ClientConnectionOperationError) -> Self {
+        let (message, retry_action) = match error.operation {
+            ClientConnectionOperation::Connect => (
+                ComputerRuntimeProblemMessage::ConnectionFailed,
+                ComputerRuntimeProblemAction::RetryConnection,
+            ),
+            ClientConnectionOperation::Disconnect => (
+                ComputerRuntimeProblemMessage::DisconnectionFailed,
+                ComputerRuntimeProblemAction::RetryDisconnection,
+            ),
+            ClientConnectionOperation::Reconnect => (
+                ComputerRuntimeProblemMessage::ReconnectionFailed,
+                ComputerRuntimeProblemAction::RetryConnection,
+            ),
+        };
+        let mut recommended_actions = Vec::new();
+        if error.retryable {
+            recommended_actions.push(retry_action);
+        }
+        recommended_actions.push(ComputerRuntimeProblemAction::ViewLogs);
+        Self {
+            id: format!(
+                "client_connection:{generation}:{}",
+                client_connection_operation_name(error.operation)
+            ),
+            source: ComputerRuntimeProblemSource::ClientConnection,
+            operation: client_connection_operation_name(error.operation).to_string(),
+            severity: ComputerRuntimeProblemSeverity::Degraded,
+            affected_capabilities: vec![ComputerRuntimeAffectedCapability::Connection],
+            occurred_at: error.occurred_at.clone(),
+            current: true,
+            message,
+            recommended_actions,
+            technical_detail: Some(error.message.clone()),
+        }
+    }
+
+    pub(crate) fn client_diagnostic(generation: u64, diagnostic: RuntimeDiagnosticRecord) -> Self {
+        let operation = diagnostic.operation.as_str();
+        let (message, retry_action) = match operation {
+            "disconnect" => (
+                ComputerRuntimeProblemMessage::DisconnectionFailed,
+                ComputerRuntimeProblemAction::RetryDisconnection,
+            ),
+            "reconnect" => (
+                ComputerRuntimeProblemMessage::ReconnectionFailed,
+                ComputerRuntimeProblemAction::RetryConnection,
+            ),
+            _ => (
+                ComputerRuntimeProblemMessage::ConnectionFailed,
+                ComputerRuntimeProblemAction::RetryConnection,
+            ),
+        };
+        Self {
+            id: format!("client_connection:{generation}:{operation}"),
+            source: ComputerRuntimeProblemSource::ClientConnection,
+            operation: diagnostic.operation,
+            severity: ComputerRuntimeProblemSeverity::Degraded,
+            affected_capabilities: vec![ComputerRuntimeAffectedCapability::Connection],
+            occurred_at: diagnostic.occurred_at,
+            current: true,
+            message,
+            recommended_actions: vec![retry_action, ComputerRuntimeProblemAction::ViewLogs],
+            technical_detail: Some(diagnostic.message),
+        }
+    }
+
+    pub(crate) fn mcp(
+        generation: u64,
+        bundle_id: &str,
+        name: Option<String>,
+        diagnostic: RuntimeDiagnosticRecord,
+    ) -> Self {
+        let message = if diagnostic.operation == "apply_configuration" {
+            ComputerRuntimeProblemMessage::McpConfigurationApplyFailed
+        } else {
+            ComputerRuntimeProblemMessage::McpStartFailed
+        };
+        Self {
+            id: format!("mcp:{generation}:{bundle_id}:{}", diagnostic.operation),
+            source: ComputerRuntimeProblemSource::Mcp,
+            operation: diagnostic.operation,
+            severity: ComputerRuntimeProblemSeverity::Degraded,
+            affected_capabilities: vec![ComputerRuntimeAffectedCapability::McpServer {
+                bundle_id: bundle_id.to_string(),
+                name,
+            }],
+            occurred_at: diagnostic.occurred_at,
+            current: true,
+            message,
+            recommended_actions: vec![
+                ComputerRuntimeProblemAction::RestartRuntime,
+                ComputerRuntimeProblemAction::ViewLogs,
+            ],
+            technical_detail: Some(diagnostic.message),
+        }
+    }
+}
+
+fn client_connection_operation_name(operation: ClientConnectionOperation) -> &'static str {
+    match operation {
+        ClientConnectionOperation::Connect => "connect",
+        ClientConnectionOperation::Disconnect => "disconnect",
+        ClientConnectionOperation::Reconnect => "reconnect",
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerRuntimeSnapshot {
@@ -21,6 +331,7 @@ pub struct ComputerRuntimeSnapshot {
     pub active_mcp_servers: usize,
     pub tools: usize,
     pub skills: usize,
+    pub problems: Vec<ComputerRuntimeProblem>,
     pub last_error: Option<String>,
     pub degraded_reason: Option<String>,
 }
@@ -31,9 +342,7 @@ impl ComputerRuntimeSnapshot {
         generation: u64,
         snapshot_revision: u64,
         snapshot: ComputerStatusSnapshot,
-        client_last_error: Option<String>,
     ) -> Self {
-        let last_error = snapshot.last_error.or(client_last_error);
         let lifecycle = snapshot.lifecycle;
         Self {
             incarnation,
@@ -48,7 +357,8 @@ impl ComputerRuntimeSnapshot {
             active_mcp_servers: snapshot.active_mcp_servers,
             tools: snapshot.tools,
             skills: snapshot.skills,
-            last_error,
+            problems: Vec::new(),
+            last_error: snapshot.last_error,
             degraded_reason: snapshot.degraded_reason,
         }
     }
@@ -86,6 +396,11 @@ pub enum ComputerRuntimeEventCause {
         status: ClientConnectionStatus,
     },
     ClientDiagnosticChanged {
+        operation: String,
+        has_error: bool,
+    },
+    McpDiagnosticChanged {
+        bundle_id: String,
         operation: String,
         has_error: bool,
     },
@@ -127,8 +442,33 @@ impl ComputerRuntimeEventCause {
             Self::ClientConnectionStateChanged { revision, status } => {
                 connection.revision == *revision && connection.status == *status
             }
-            Self::ClientDiagnosticChanged { has_error, .. } => {
-                snapshot.last_error.is_some() == *has_error
+            Self::ClientDiagnosticChanged {
+                operation,
+                has_error,
+            } => {
+                snapshot.problems.iter().any(|problem| {
+                    problem.source == ComputerRuntimeProblemSource::ClientConnection
+                        && problem.operation == *operation
+                }) == *has_error
+            }
+            Self::McpDiagnosticChanged {
+                bundle_id,
+                operation,
+                has_error,
+            } => {
+                snapshot.problems.iter().any(|problem| {
+                    problem.source == ComputerRuntimeProblemSource::Mcp
+                        && problem.operation == *operation
+                        && problem.affected_capabilities.iter().any(|capability| {
+                            matches!(
+                                capability,
+                                ComputerRuntimeAffectedCapability::McpServer {
+                                    bundle_id: problem_bundle_id,
+                                    ..
+                                } if problem_bundle_id == bundle_id
+                            )
+                        })
+                }) == *has_error
             }
             Self::HandleReplaced { .. } | Self::ObservationAdvanced | Self::Resync { .. } => true,
         }
@@ -226,13 +566,8 @@ mod tests {
 
     #[test]
     fn snapshot_preserves_sdk_runtime_fields_and_generation() {
-        let snapshot = ComputerRuntimeSnapshot::from_sdk(
-            5,
-            7,
-            11,
-            sdk_snapshot(LifecycleState::Degraded),
-            None,
-        );
+        let snapshot =
+            ComputerRuntimeSnapshot::from_sdk(5, 7, 11, sdk_snapshot(LifecycleState::Degraded));
 
         assert_eq!(snapshot.incarnation, 5);
         assert_eq!(snapshot.generation, 7);
@@ -253,38 +588,118 @@ mod tests {
             LifecycleState::Error,
         ] {
             assert!(
-                !ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(lifecycle), None)
-                    .is_running()
+                !ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(lifecycle)).is_running()
             );
         }
     }
 
     #[test]
-    fn sdk_error_takes_priority_over_client_diagnostic() {
-        let snapshot = ComputerRuntimeSnapshot::from_sdk(
-            1,
-            1,
-            1,
-            sdk_snapshot(LifecycleState::Started),
-            Some("client_error".to_string()),
-        );
+    fn snapshot_keeps_raw_sdk_diagnostics_out_of_the_problem_projection() {
+        let snapshot =
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(LifecycleState::Started));
 
         assert_eq!(snapshot.last_error.as_deref(), Some("runtime_error"));
+        assert!(snapshot.problems.is_empty());
     }
 
     #[test]
-    fn client_diagnostic_fills_missing_sdk_error() {
-        let mut sdk_snapshot = sdk_snapshot(LifecycleState::Started);
-        sdk_snapshot.last_error = None;
-        let snapshot = ComputerRuntimeSnapshot::from_sdk(
-            1,
-            1,
-            1,
-            sdk_snapshot,
-            Some("client_error".to_string()),
+    fn sdk_problem_observation_time_is_stable_until_recovery_or_replacement() {
+        let mut observations = SdkProblemObservations::default();
+        observations.observe(3, LifecycleState::Error, Some("failed"), None);
+        observations.last_error.as_mut().unwrap().occurred_at = "first-occurrence".to_string();
+        let (same, _) = observations.observe(
+            3,
+            LifecycleState::Error,
+            Some("updated failure detail"),
+            None,
+        );
+        observations.observe(3, LifecycleState::Started, None, None);
+        let (recovered, _) = observations.observe(3, LifecycleState::Error, Some("failed"), None);
+        observations.last_error.as_mut().unwrap().occurred_at = "second-occurrence".to_string();
+        let (replacement, _) = observations.observe(4, LifecycleState::Error, Some("failed"), None);
+
+        let same = same.unwrap();
+        assert_eq!(same.occurred_at, "first-occurrence");
+        assert_eq!(
+            same.technical_detail.as_deref(),
+            Some("updated failure detail")
+        );
+        assert_ne!(recovered.unwrap().occurred_at, "first-occurrence");
+        assert_ne!(replacement.unwrap().occurred_at, "second-occurrence");
+    }
+
+    #[test]
+    fn sdk_lifecycle_projects_a_safe_problem_without_optional_diagnostic_text() {
+        let mut observations = SdkProblemObservations::default();
+        let (error, degraded) = observations.observe(2, LifecycleState::Error, None, None);
+        let problem = ComputerRuntimeProblem::sdk_error(2, error.unwrap());
+
+        assert!(degraded.is_none());
+        assert_eq!(
+            problem.message,
+            ComputerRuntimeProblemMessage::SdkRuntimeError
+        );
+        assert_eq!(
+            problem.affected_capabilities,
+            vec![ComputerRuntimeAffectedCapability::Runtime]
+        );
+        assert!(problem.technical_detail.is_none());
+
+        let (recovered, _) = observations.observe(2, LifecycleState::Started, None, None);
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn runtime_problem_serialization_preserves_the_tauri_contract() {
+        let problem = ComputerRuntimeProblem::sdk_error(
+            4,
+            SdkProblemObservation {
+                occurred_at: "2026-07-29T10:00:00Z".to_string(),
+                technical_detail: Some("safe public SDK detail".to_string()),
+            },
         );
 
-        assert_eq!(snapshot.last_error.as_deref(), Some("client_error"));
+        assert_eq!(
+            serde_json::to_value(problem).unwrap(),
+            serde_json::json!({
+                "id": "sdk:4:runtime_error",
+                "source": "sdk",
+                "operation": "runtime",
+                "severity": "error",
+                "affected_capabilities": [{ "kind": "runtime" }],
+                "occurred_at": "2026-07-29T10:00:00Z",
+                "current": true,
+                "message": "sdk_runtime_error",
+                "recommended_actions": ["start_runtime", "view_logs"],
+                "technical_detail": "safe public SDK detail"
+            })
+        );
+    }
+
+    #[test]
+    fn connection_problem_preserves_ownership_impact_and_recovery_action() {
+        let problem = ComputerRuntimeProblem::connection(
+            7,
+            &ClientConnectionOperationError {
+                operation: ClientConnectionOperation::Reconnect,
+                message: "token refresh failed".to_string(),
+                retryable: true,
+                occurred_at: "2026-07-29T10:00:00Z".to_string(),
+            },
+        );
+
+        assert_eq!(
+            problem.source,
+            ComputerRuntimeProblemSource::ClientConnection
+        );
+        assert_eq!(problem.severity, ComputerRuntimeProblemSeverity::Degraded);
+        assert_eq!(
+            problem.affected_capabilities,
+            vec![ComputerRuntimeAffectedCapability::Connection]
+        );
+        assert!(problem
+            .recommended_actions
+            .contains(&ComputerRuntimeProblemAction::RetryConnection));
     }
 
     #[test]
@@ -294,13 +709,7 @@ mod tests {
             ComputerRuntimeEventCause::LifecycleChanged {
                 state: LifecycleState::Connecting,
             },
-            ComputerRuntimeSnapshot::from_sdk(
-                1,
-                1,
-                1,
-                sdk_snapshot(LifecycleState::JoinedOffice),
-                None,
-            ),
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(LifecycleState::JoinedOffice)),
             connection_state(0, false),
         );
 
@@ -315,13 +724,7 @@ mod tests {
                 revision: 4,
                 status: ClientConnectionStatus::Connected,
             },
-            ComputerRuntimeSnapshot::from_sdk(
-                1,
-                1,
-                1,
-                sdk_snapshot(LifecycleState::JoinedOffice),
-                None,
-            ),
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(LifecycleState::JoinedOffice)),
             connection_state(4, true),
         );
 
@@ -330,6 +733,40 @@ mod tests {
             ComputerRuntimeEventCause::ClientConnectionStateChanged {
                 revision: 4,
                 status: ClientConnectionStatus::Connected,
+            }
+        );
+    }
+
+    #[test]
+    fn client_diagnostic_cause_matches_its_operation_instead_of_any_connection_problem() {
+        let mut snapshot =
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, sdk_snapshot(LifecycleState::Started));
+        snapshot
+            .problems
+            .push(ComputerRuntimeProblem::client_diagnostic(
+                1,
+                RuntimeDiagnosticRecord {
+                    operation: "disconnect".to_string(),
+                    message: "disconnect cleanup failed".to_string(),
+                    occurred_at: "2026-07-29T10:00:00Z".to_string(),
+                    mcp_server_name: None,
+                },
+            ));
+        let event = ComputerRuntimeStatusEvent::from_observation(
+            "computer-a".to_string(),
+            ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                operation: "connect".to_string(),
+                has_error: false,
+            },
+            snapshot,
+            connection_state(0, false),
+        );
+
+        assert_eq!(
+            event.cause,
+            ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                operation: "connect".to_string(),
+                has_error: false,
             }
         );
     }

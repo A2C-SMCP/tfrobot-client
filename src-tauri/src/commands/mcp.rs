@@ -85,7 +85,7 @@ pub async fn get_mcp_servers_core(
         .mcp_server_statuses()
         .await
         .into_iter()
-        .map(|(bundle_id, _name, running, status_message)| (bundle_id, (running, status_message)))
+        .map(|(bundle_id, _name, running, _status_message)| (bundle_id, running))
         .collect();
     let diagnostics = runtime.mcp_start_diagnostics().await;
     let mut metadata = mcp_server_runtime_metadata(&runtime).await;
@@ -106,18 +106,19 @@ pub async fn get_mcp_servers_core(
         .into_iter()
         .filter(|(_, metadata)| metadata.managed_by.is_plugin_owned() || !metadata.disabled)
         .map(|(bundle_id, metadata)| {
-            let (running, status_message) = runtime_statuses
-                .get(&bundle_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    (
-                        false,
-                        diagnostics
-                            .get(&bundle_id)
-                            .cloned()
-                            .unwrap_or_else(|| "pending".to_string()),
-                    )
-                });
+            let running = runtime_statuses.get(&bundle_id).copied().unwrap_or(false);
+            // This field is rendered in the ordinary MCP table, so expose only a stable,
+            // presentation-safe status. Owner diagnostics remain in RuntimeProblem.technical_detail.
+            let status_message = if running {
+                "running"
+            } else if diagnostics.contains_key(&bundle_id) {
+                "error"
+            } else if runtime_statuses.contains_key(&bundle_id) {
+                "stopped"
+            } else {
+                "pending"
+            }
+            .to_string();
             McpServerStatus {
                 disabled: metadata.disabled,
                 bundle_id,

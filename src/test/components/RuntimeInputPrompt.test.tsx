@@ -120,7 +120,9 @@ describe('RuntimeInputPrompt', () => {
   });
 
   it('keeps the prompt open and reports a storage failure without retrying', async () => {
-    setValue.mockRejectedValueOnce(new Error('keychain unavailable'));
+    setValue.mockRejectedValueOnce(
+      new Error('keychain /secret/path unavailable with token=private'),
+    );
     const onSubmitted = vi.fn().mockResolvedValue(undefined);
     render(
       <RuntimeInputPrompt
@@ -141,10 +143,37 @@ describe('RuntimeInputPrompt', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByText('Error: keychain unavailable')).toBeInTheDocument();
+    expect(await screen.findByText(
+      'The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
     expect(onSubmitted).not.toHaveBeenCalled();
     expect(screen.getByPlaceholderText('Enter value')).toBeInTheDocument();
   }, 10000);
+
+  it('does not expose technical details when loading the Input fails', async () => {
+    getInput.mockRejectedValueOnce(
+      new Error('read /secret/input failed with token=private'),
+    );
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'api-key',
+          env_hint: 'A2C_SMCP_api_key',
+          message: 'Required secret input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText(
+      'The Input could not be loaded. Retry or view logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/input|token=private/)).not.toBeInTheDocument();
+  });
 
   it('creates a missing per-Computer definition before storing its value', async () => {
     getInput.mockResolvedValueOnce(null);
@@ -243,11 +272,40 @@ describe('RuntimeInputPrompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText(
-      "Error: Runtime input definition 'audit@acme/api-key' is no longer available",
+      'The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs.',
     )).toBeInTheDocument();
     expect(addOrUpdateInput).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
     expect(onSubmitted).not.toHaveBeenCalled();
+  });
+
+  it('keeps a Runtime retry error out of the ordinary prompt', async () => {
+    const onSubmitted = vi.fn().mockRejectedValue(
+      new Error('spawn /secret/runtime failed with token=private'),
+    );
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'api-key',
+          env_hint: 'A2C_SMCP_api_key',
+          message: 'Required secret input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
+      target: { value: 'top-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(
+      'The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/secret\/runtime|token=private/)).not.toBeInTheDocument();
   });
 
   it('lets the user mark a missing value definition as secret', async () => {

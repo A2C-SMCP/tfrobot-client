@@ -9,7 +9,6 @@ import {
   type McpServerManagedBy,
 } from '@/stores/mcpStore';
 import type { ComputerRuntimeActionCapability } from '@/stores/runtimeSnapshot';
-import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 import { McpServerList } from './McpServerList';
 import { useMcpRuntimeActions, type McpRuntimeAction } from './useMcpRuntimeActions';
 
@@ -78,7 +77,7 @@ export function McpRuntimeControls({
     startServer,
     startAll,
     onBatchResult: (result) => setBatchFeedback({ action: 'start', result }),
-    onError: (errorMessage) => message.error(errorMessage),
+    onError: () => message.error(t('mcp.messages.operationFailed')),
     onSuccess: (action) => {
       const success = runtimeSuccessMessage(action);
       if (success) message.success(t(success.key, success.options));
@@ -91,9 +90,9 @@ export function McpRuntimeControls({
       const result = await stopAll(actionInstanceId);
       if (activeInstanceRef.current !== actionInstanceId) return;
       setBatchFeedback({ action: 'stop', result });
-    } catch (cause) {
+    } catch {
       if (activeInstanceRef.current !== actionInstanceId) return;
-      message.error(formatRuntimeActionError(cause));
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -103,9 +102,9 @@ export function McpRuntimeControls({
       await stopServer(actionInstanceId, bundleId);
       if (activeInstanceRef.current !== actionInstanceId) return;
       message.success(t('mcp.messages.stopped', { name }));
-    } catch (cause) {
+    } catch {
       if (activeInstanceRef.current !== actionInstanceId) return;
-      message.error(formatRuntimeActionError(cause));
+      message.error(t('mcp.messages.operationFailed'));
     }
   };
 
@@ -168,7 +167,6 @@ export function McpRuntimeControls({
                 {t('mcp.batch.failure', {
                   name: failure.name,
                   bundleId: failure.bundleId,
-                  message: failure.error.message,
                 })}
               </li>
             ))}
@@ -213,7 +211,7 @@ export function McpRuntimeControls({
       {error && (
         <Alert
           message={t('common.error')}
-          description={error}
+          description={t('mcp.messages.statusLoadFailed')}
           type="error"
           showIcon
           style={{ marginBottom: 16 }}

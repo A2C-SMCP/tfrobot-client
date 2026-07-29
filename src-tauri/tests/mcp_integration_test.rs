@@ -29,6 +29,10 @@ use tfrobot_client_lib::commands::{
     debug, inputs, sdk_config,
 };
 use tfrobot_client_lib::services::computer::ComputerInstance;
+use tfrobot_client_lib::services::computer_runtime_events::{
+    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
+    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+};
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
@@ -576,7 +580,7 @@ async fn test_get_mcp_servers_uses_sdk_computer_status() {
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].name, "sdk-status");
     assert!(statuses[0].running);
-    assert_eq!(statuses[0].status_message, "connected");
+    assert_eq!(statuses[0].status_message, "running");
 }
 
 #[tokio::test]
@@ -710,7 +714,39 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         "healthy MCP must not be blocked by another failure"
     );
     assert!(!broken.running);
-    assert!(broken.status_message.starts_with("Start failed:"));
+    assert_eq!(broken.status_message, "error");
+    let snapshot = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .runtime_snapshot()
+        .await;
+    let problem = snapshot
+        .problems
+        .iter()
+        .find(|problem| problem.source == ComputerRuntimeProblemSource::Mcp)
+        .expect("failed MCP startup should surface a current structured problem");
+    assert_eq!(problem.severity, ComputerRuntimeProblemSeverity::Degraded);
+    assert_eq!(
+        problem.message,
+        ComputerRuntimeProblemMessage::McpStartFailed
+    );
+    assert!(problem.current);
+    assert!(problem.occurred_at.contains('T'));
+    assert!(problem.affected_capabilities.iter().any(|capability| {
+        matches!(
+            capability,
+            ComputerRuntimeAffectedCapability::McpServer {
+                bundle_id,
+                name: Some(name),
+            } if bundle_id == "broken-server" && name == "broken-server"
+        )
+    }));
+    assert!(problem
+        .technical_detail
+        .as_deref()
+        .is_some_and(|detail| detail.starts_with("Start failed:")));
 
     mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("healthy-server"))
         .await

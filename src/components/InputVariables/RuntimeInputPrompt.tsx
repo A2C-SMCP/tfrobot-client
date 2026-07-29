@@ -30,23 +30,23 @@ export function RuntimeInputPrompt({
     key: string;
     value: InputDefinition | null;
   }>();
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [submitError, setSubmitError] = useState(false);
   const [createAsSecret, setCreateAsSecret] = useState(error.code === 'missing_secret');
   const submittingRef = useRef(false);
 
   useEffect(() => {
     let active = true;
     setLoadedDefinition(undefined);
-    setLoadError(null);
-    setSubmitError(null);
+    setLoadError(false);
+    setSubmitError(false);
     setCreateAsSecret(error.code === 'missing_secret');
     getInput(instanceId, error.input_id)
       .then((input) => {
         if (active) setLoadedDefinition({ key: promptKey, value: input });
       })
-      .catch((cause) => {
-        if (active) setLoadError(String(cause));
+      .catch(() => {
+        if (active) setLoadError(true);
       });
     return () => {
       active = false;
@@ -60,7 +60,7 @@ export function RuntimeInputPrompt({
   const handleSubmit = async (value: string) => {
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setSubmitError(null);
+    setSubmitError(false);
     try {
       if (definition === null) {
         const storedForRuntimeDefinition = await setRuntimeValue(
@@ -87,8 +87,8 @@ export function RuntimeInputPrompt({
         await setValue(instanceId, error.input_id, value);
       }
       await onSubmitted();
-    } catch (cause) {
-      setSubmitError(String(cause));
+    } catch {
+      setSubmitError(true);
     } finally {
       submittingRef.current = false;
     }
@@ -107,8 +107,12 @@ export function RuntimeInputPrompt({
       <Typography.Paragraph type="secondary">
         {t('inputs.runtime.envHint', { env: error.env_hint })}
       </Typography.Paragraph>
-      {loadError && <Alert type="error" showIcon message={loadError} />}
-      {submitError && <Alert type="error" showIcon message={submitError} />}
+      {loadError && (
+        <Alert type="error" showIcon message={t('inputs.runtime.loadFailed')} />
+      )}
+      {submitError && (
+        <Alert type="error" showIcon message={t('inputs.runtime.submitFailed')} />
+      )}
       {definition === undefined && <Spin />}
       {definition === null && (
         <>

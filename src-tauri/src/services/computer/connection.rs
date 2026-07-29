@@ -63,6 +63,35 @@ pub struct ClientConnectionOperationError {
     pub operation: ClientConnectionOperation,
     pub message: String,
     pub retryable: bool,
+    pub occurred_at: String,
+}
+
+impl ClientConnectionOperationError {
+    fn new(operation: ClientConnectionOperation, message: String, retryable: bool) -> Self {
+        Self {
+            operation,
+            message,
+            retryable,
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn replace_current(
+        current: &mut Option<Self>,
+        operation: ClientConnectionOperation,
+        message: String,
+        retryable: bool,
+    ) {
+        match current.as_mut() {
+            Some(error) if error.operation == operation => {
+                error.message = message;
+                error.retryable = retryable;
+            }
+            _ => {
+                *current = Some(Self::new(operation, message, retryable));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +151,12 @@ pub(super) struct ClientConnectionOperationState {
     generation: Option<u64>,
     last_error: Option<ClientConnectionOperationError>,
     epoch: u64,
+}
+
+impl ClientConnectionOperationState {
+    pub(super) fn last_error(&self) -> Option<ClientConnectionOperationError> {
+        self.last_error.clone()
+    }
 }
 
 impl ClientConnectionStateSnapshot {
@@ -382,8 +417,6 @@ impl ComputerInstanceRuntime {
             .await;
             return Err(error);
         }
-        self.set_client_runtime_diagnostic("reconnect", None).await;
-
         if self
             .refresh_connection_timestamp_for_generation(generation)
             .await
@@ -511,7 +544,6 @@ impl ComputerInstanceRuntime {
         state.operation = Some(operation);
         state.operation_target = operation_target;
         state.generation = None;
-        state.last_error = None;
         let token = ClientConnectionOperationToken {
             operation,
             epoch: state.epoch,
@@ -614,11 +646,12 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = Some(ClientConnectionOperationError {
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
             operation,
             message,
             retryable,
-        });
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -643,11 +676,12 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = Some(ClientConnectionOperationError {
-            operation: token.operation,
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
+            token.operation,
             message,
             retryable,
-        });
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -663,10 +697,16 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = None;
         self.advance_connection_revision();
         drop(state);
         self.publish_connection_state().await;
+    }
+
+    pub(super) async fn clear_connection_diagnostic_for_handle_replacement_silent(&self) {
+        let mut state = self.connection_operation.write().await;
+        if state.last_error.take().is_some() {
+            self.advance_connection_revision();
+        }
     }
 
     pub async fn reconcile_disconnect_failure(&self, message: String) {
@@ -679,11 +719,12 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = Some(ClientConnectionOperationError {
-            operation: ClientConnectionOperation::Disconnect,
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
+            ClientConnectionOperation::Disconnect,
             message,
-            retryable: true,
-        });
+            true,
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -710,11 +751,12 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = Some(ClientConnectionOperationError {
-            operation: ClientConnectionOperation::Disconnect,
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
+            ClientConnectionOperation::Disconnect,
             message,
-            retryable: true,
-        });
+            true,
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -736,11 +778,12 @@ impl ComputerInstanceRuntime {
         {
             return false;
         }
-        state.last_error = Some(ClientConnectionOperationError {
-            operation: ClientConnectionOperation::Reconnect,
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
+            ClientConnectionOperation::Reconnect,
             message,
-            retryable: true,
-        });
+            true,
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -756,11 +799,20 @@ impl ComputerInstanceRuntime {
         {
             return false;
         }
+        // Keep the low-level diagnostic and the connection-state error coherent for snapshot
+        // readers. The product projection acquires these locks in the same order.
+        let mut diagnostic = self.client_runtime_diagnostic.write().await;
         let mut state = self.connection_operation.write().await;
         if state.operation != Some(ClientConnectionOperation::Reconnect)
             || state.generation != Some(generation)
         {
             return false;
+        }
+        let diagnostic_cleared = diagnostic
+            .as_ref()
+            .is_some_and(|value| value.operation == "reconnect");
+        if diagnostic_cleared {
+            *diagnostic = None;
         }
         state.operation = None;
         state.operation_target = None;
@@ -768,8 +820,16 @@ impl ComputerInstanceRuntime {
         state.last_error = None;
         self.advance_connection_revision();
         drop(state);
+        drop(diagnostic);
         drop(connection);
         self.publish_connection_state().await;
+        if diagnostic_cleared {
+            self.publish_runtime_status(ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                operation: "reconnect".to_string(),
+                has_error: false,
+            })
+            .await;
+        }
         true
     }
 
@@ -796,11 +856,12 @@ impl ComputerInstanceRuntime {
         state.operation = None;
         state.operation_target = None;
         state.generation = None;
-        state.last_error = Some(ClientConnectionOperationError {
-            operation: ClientConnectionOperation::Reconnect,
+        ClientConnectionOperationError::replace_current(
+            &mut state.last_error,
+            ClientConnectionOperation::Reconnect,
             message,
             retryable,
-        });
+        );
         self.advance_connection_revision();
         drop(state);
         drop(connection);
@@ -846,16 +907,17 @@ impl ComputerInstanceRuntime {
         operation.operation = None;
         operation.operation_target = None;
         operation.generation = None;
-        operation.last_error = Some(ClientConnectionOperationError {
-            operation: ClientConnectionOperation::Reconnect,
-            message: match cleanup_error {
+        ClientConnectionOperationError::replace_current(
+            &mut operation.last_error,
+            ClientConnectionOperation::Reconnect,
+            match cleanup_error {
                 Some(cleanup_error) => {
                     format!("{message}; failed to close stale SMCP transport: {cleanup_error}")
                 }
                 None => message,
             },
             retryable,
-        });
+        );
         self.advance_connection_revision();
         drop(operation);
         drop(connection);
@@ -916,9 +978,25 @@ impl ComputerInstanceRuntime {
             );
         }
         *connection = Some(state);
+        // Installing new connection authority is the product-level recovery point for any
+        // previous connect/reconnect transport diagnostic, even when the recovery operation has a
+        // different name (for example a manual Connect after automatic reconnect exhaustion).
+        let mut diagnostic = self.client_runtime_diagnostic.write().await;
+        let mut operation = self.connection_operation.write().await;
+        let cleared_diagnostic_operation = diagnostic.take().map(|diagnostic| diagnostic.operation);
+        operation.last_error = None;
         self.advance_connection_revision();
+        drop(operation);
+        drop(diagnostic);
         drop(connection);
         self.publish_connection_state().await;
+        if let Some(operation) = cleared_diagnostic_operation {
+            self.publish_runtime_status(ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                operation,
+                has_error: false,
+            })
+            .await;
+        }
         Ok(())
     }
 
@@ -1072,11 +1150,31 @@ impl ComputerInstanceRuntime {
         let has_error = diagnostic.is_some();
         let changed = {
             let mut current = self.client_runtime_diagnostic.write().await;
-            if *current == diagnostic {
-                false
-            } else {
-                *current = diagnostic;
-                true
+            match diagnostic {
+                Some(message)
+                    if current.as_ref().is_some_and(|value| {
+                        value.operation == operation && value.message == message
+                    }) =>
+                {
+                    false
+                }
+                Some(message) => {
+                    *current = Some(
+                        RuntimeDiagnosticRecord::new(operation, message)
+                            .preserve_occurrence_from(current.as_ref()),
+                    );
+                    true
+                }
+                None if current
+                    .as_ref()
+                    .is_none_or(|value| value.operation != operation) =>
+                {
+                    false
+                }
+                None => {
+                    *current = None;
+                    true
+                }
             }
         };
         if changed {

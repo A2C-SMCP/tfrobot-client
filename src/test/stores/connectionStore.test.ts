@@ -79,6 +79,7 @@ describe('connectionStore', () => {
         operation: 'reconnect',
         message: 'retry 1/3',
         retryable: true,
+        occurred_at: '2026-07-29T02:00:00Z',
       },
       actions: {
         connect: { enabled: false, disabled_reason: 'transition_in_progress' },

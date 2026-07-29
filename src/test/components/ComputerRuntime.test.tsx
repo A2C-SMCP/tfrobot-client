@@ -55,6 +55,7 @@ describe('ComputerRuntime', () => {
         onRestart={onRestart}
         onConnect={onConnect}
         onDisconnect={vi.fn()}
+        onViewLogs={vi.fn()}
       />,
     );
 
@@ -62,6 +63,7 @@ describe('ComputerRuntime', () => {
     expect(screen.queryByRole('button', { name: /Reload$/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByText('Advanced Runtime Diagnostics'));
     expect(screen.getByText('Started')).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'Runtime Incarnation 1' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Runtime Generation 2' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Config Revision 4' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Capability Revision 7' })).toBeInTheDocument();
@@ -103,6 +105,7 @@ describe('ComputerRuntime', () => {
         onRestart={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
+        onViewLogs={vi.fn()}
       />,
     );
 
@@ -112,7 +115,8 @@ describe('ComputerRuntime', () => {
     expect(screen.getByText('Config revision changed to 4')).toBeInTheDocument();
   });
 
-  it('surfaces structured runtime failures and disables runtime-only MCP actions', () => {
+  it('shows a safe structured Runtime error and keeps technical detail in diagnostics', () => {
+    const onViewLogs = vi.fn();
     render(
       <ComputerRuntime
         instance={instance({
@@ -120,6 +124,18 @@ describe('ComputerRuntime', () => {
           runtime: runtimeSnapshot({
             lifecycle: 'error',
             last_error: 'runtime boot failed',
+            problems: [{
+              id: 'sdk:2:runtime_error',
+              source: 'sdk',
+              operation: 'runtime',
+              severity: 'error',
+              affected_capabilities: [{ kind: 'runtime' }],
+              occurred_at: '2026-07-29T02:00:00Z',
+              current: true,
+              message: 'sdk_runtime_error',
+              recommended_actions: ['start_runtime', 'view_logs'],
+              technical_detail: 'runtime boot failed',
+            }],
           }),
         })}
         loading={false}
@@ -129,13 +145,67 @@ describe('ComputerRuntime', () => {
         onRestart={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
+        onViewLogs={onViewLogs}
       />,
     );
 
+    expect(screen.getByText('Core Runtime capabilities are unavailable.')).toBeInTheDocument();
+    expect(screen.getByText('Affected: core Runtime')).toBeInTheDocument();
+    expect(screen.queryByText('runtime boot failed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'View logs' }));
+    expect(onViewLogs).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByText('Advanced Runtime Diagnostics'));
     expect(screen.getByText('runtime boot failed')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Restart$/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Connect$/ })).toBeDisabled();
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
+  });
+
+  it('renders degraded MCP impact separately and explains an unavailable recovery action', () => {
+    render(
+      <ComputerRuntime
+        instance={instance({
+          status: 'degraded',
+          runtime: runtimeSnapshot({
+            lifecycle: 'degraded',
+            problems: [{
+              id: 'mcp:2:server-a:start',
+              source: 'mcp',
+              operation: 'start',
+              severity: 'degraded',
+              affected_capabilities: [{
+                kind: 'mcp_server',
+                bundle_id: 'server-a',
+                name: 'Browser MCP',
+              }],
+              occurred_at: '2026-07-29T02:00:00Z',
+              current: true,
+              message: 'mcp_start_failed',
+              recommended_actions: ['restart_runtime', 'view_logs'],
+              technical_detail: 'process exited',
+            }],
+            actions: {
+              ...runtimeSnapshot({ lifecycle: 'degraded' }).actions,
+              restart: { enabled: false, disabled_reason: 'transition_in_progress' },
+            },
+          }),
+        })}
+        loading={false}
+        canConnect={false}
+        onStartStop={vi.fn()}
+        onRestart={vi.fn()}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onViewLogs={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('The Runtime is available, but an MCP server could not start.'))
+      .toBeInTheDocument();
+    expect(screen.getByText('Affected: MCP server Browser MCP')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Restart unavailable: Wait for the current Runtime operation to finish.',
+    )).toBeInTheDocument();
   });
 
   it('disables every conflicting action while the SDK lifecycle is transitional', () => {
@@ -151,6 +221,7 @@ describe('ComputerRuntime', () => {
         onRestart={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={vi.fn()}
+        onViewLogs={vi.fn()}
       />,
     );
 
@@ -182,6 +253,7 @@ describe('ComputerRuntime', () => {
           onRestart={vi.fn()}
           onConnect={vi.fn()}
           onDisconnect={onDisconnect}
+          onViewLogs={vi.fn()}
         />,
       );
 
@@ -223,6 +295,7 @@ describe('ComputerRuntime', () => {
           onRestart={vi.fn()}
           onConnect={vi.fn()}
           onDisconnect={vi.fn()}
+          onViewLogs={vi.fn()}
         />,
       );
 
@@ -250,6 +323,7 @@ describe('ComputerRuntime', () => {
               operation: 'disconnect',
               message: 'Socket cleanup failed',
               retryable: true,
+              occurred_at: '2026-07-29T02:00:00Z',
             },
             actions: {
               connect: { enabled: false, disabled_reason: 'connection_unavailable' },
@@ -263,6 +337,7 @@ describe('ComputerRuntime', () => {
         onRestart={vi.fn()}
         onConnect={vi.fn()}
         onDisconnect={onDisconnect}
+        onViewLogs={vi.fn()}
       />,
     );
 
