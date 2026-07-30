@@ -3033,7 +3033,7 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
         .unwrap();
     let other_runtime = state
         .computer_registry
-        .update_runtime_instance(other_instance)
+        .upsert_runtime(other_instance)
         .await
         .unwrap();
     let import_path = tmp.path().join("import-with-input.json");

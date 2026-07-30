@@ -1,5 +1,6 @@
 use crate::commands::connection::{
-    connect_connection_target_locked, connect_manager_robot_target_locked, disconnect_smcp_locked,
+    connect_connection_target_for_policy_core, connect_manager_robot_target_for_policy,
+    disconnect_smcp_core,
 };
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
@@ -545,7 +546,7 @@ pub async fn start_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -567,6 +568,7 @@ pub async fn start_computer_instance_core(
         .await
         .map_err(RuntimeActionError::from)?;
     runtime.start().await.map_err(RuntimeActionError::from)?;
+    drop(lifecycle_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             if let Err(error) =
@@ -631,7 +633,7 @@ pub async fn restart_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -653,6 +655,7 @@ pub async fn restart_computer_instance_core(
         .await
         .map_err(RuntimeActionError::from)?;
     runtime.restart().await.map_err(RuntimeActionError::from)?;
+    drop(lifecycle_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             connect_computer_connection_target_by_policy(app, state, &id, target)
@@ -759,7 +762,7 @@ pub async fn disconnect_computer_connection_target(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
-    disconnect_smcp_locked(&state, &id).await
+    disconnect_smcp_core(&state, &id).await
 }
 
 async fn connect_computer_connection_target_by_policy(
@@ -770,7 +773,7 @@ async fn connect_computer_connection_target_by_policy(
 ) -> Result<(), String> {
     match target.target_type {
         ComputerConnectionTargetType::ManualSmcp => {
-            connect_connection_target_locked(state, id, &target.id).await
+            connect_connection_target_for_policy_core(state, id, target).await
         }
         ComputerConnectionTargetType::ManagerRobot => {
             let app = app.ok_or_else(|| {
@@ -783,9 +786,16 @@ async fn connect_computer_connection_target_by_policy(
             let robot_account_id = target
                 .robot_account_id
                 .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
-            connect_manager_robot_target_locked(app, state, id, employee_id, robot_account_id)
-                .await
-                .map_err(|error| error.to_string())
+            connect_manager_robot_target_for_policy(
+                app,
+                state,
+                id,
+                employee_id,
+                robot_account_id,
+                target,
+            )
+            .await
+            .map_err(|error| error.to_string())
         }
     }
 }

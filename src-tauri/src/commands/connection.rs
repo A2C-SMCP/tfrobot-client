@@ -1,9 +1,10 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationTarget, ClientConnectionOperationToken,
-    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionTarget,
-    ComputerConnectionTargetType, ComputerInstanceRuntime, ComputerRuntimeAction,
-    ComputerRuntimeState, RobotBindingMetadata, SmcpReconnectOutcome,
+    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance,
+    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeState, RobotBindingMetadata,
+    SmcpReconnectOutcome,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
@@ -71,6 +72,36 @@ pub enum SwapResult {
 enum ManagerConnectionDecision {
     Proceed,
     AlreadyConnected,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectionProfileSnapshot {
+    name: String,
+    connection_policy: ComputerConnectionPolicy,
+    robot_binding: Option<RobotBindingMetadata>,
+}
+
+impl ConnectionProfileSnapshot {
+    fn capture(instance: &ComputerInstance) -> Self {
+        Self {
+            name: instance.name.clone(),
+            connection_policy: instance.connection_policy.clone(),
+            robot_binding: instance.robot_binding.clone(),
+        }
+    }
+
+    fn ensure_unchanged(&self, current: &ComputerInstance) -> Result<(), String> {
+        if current.name == self.name
+            && current.connection_policy == self.connection_policy
+            && current.robot_binding == self.robot_binding
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Computer profile {} changed while the connection was being established",
+            current.id
+        ))
+    }
 }
 
 const SOURCE_MANUAL_SMCP: &str = "manual_smcp";
@@ -205,15 +236,35 @@ pub async fn connect_connection_target_core(
     instance_id: &str,
     target_id: &str,
 ) -> Result<(), String> {
-    connect_connection_target_locked(state, instance_id, target_id).await
+    connect_connection_target_with_policy(state, instance_id, target_id, None).await
 }
 
-pub(crate) async fn connect_connection_target_locked(
+pub async fn connect_connection_target_for_policy_core(
+    state: &AppState,
+    instance_id: &str,
+    target: &ComputerConnectionTarget,
+) -> Result<(), String> {
+    connect_connection_target_with_policy(state, instance_id, &target.id, Some(target)).await
+}
+
+async fn connect_connection_target_with_policy(
     state: &AppState,
     instance_id: &str,
     target_id: &str,
+    required_policy_target: Option<&ComputerConnectionTarget>,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
+    // The connection mutation is a two-phase transaction. Validate its authoritative inputs and
+    // publish the operation token under the Computer lifecycle lock, then release the lock before
+    // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
+    // runtimes, or operation tokens.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?.to_string();
+    let instance = state
+        .config
+        .get_computer_instance(&instance_id)
+        .map_err(|error| error.to_string())?;
+    ensure_required_policy_target(&instance, required_policy_target)?;
+    let profile_snapshot = ConnectionProfileSnapshot::capture(&instance);
     let target = state
         .config
         .get_manual_smcp_target(target_id)
@@ -224,18 +275,18 @@ pub(crate) async fn connect_connection_target_locked(
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
-        .runtime(instance_id)
+        .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     if matches!(
-        check_connection_target_allowed(state, instance_id, &target.id, &target.office_id)
+        check_connection_target_allowed(state, &instance_id, &target.id, &target.office_id)
             .await
             .map_err(|error| error.to_string())?,
         ManagerConnectionDecision::AlreadyConnected
     ) {
         return Ok(());
     }
-    let operation_token = prepare_connect_operation(
+    let operation_token = begin_connect_operation_locked(
         &runtime,
         ClientConnectionOperationTarget {
             source_type: SOURCE_MANUAL_SMCP.to_string(),
@@ -244,13 +295,15 @@ pub(crate) async fn connect_connection_target_locked(
         },
     )
     .await?;
+    drop(lifecycle_guard);
+    finish_connect_preparation(&runtime, operation_token).await?;
 
     let connect_result = async {
         let _reservation =
-            reserve_connection_target(state, instance_id, &target.id, &target.office_id)?;
+            reserve_connection_target(state, &instance_id, &target.id, &target.office_id)?;
         let result = async {
             if matches!(
-                check_connection_target_allowed(state, instance_id, &target.id, &target.office_id)
+                check_connection_target_allowed(state, &instance_id, &target.id, &target.office_id)
                     .await
                     .map_err(|e| e.to_string())?,
                 ManagerConnectionDecision::AlreadyConnected
@@ -291,9 +344,10 @@ pub(crate) async fn connect_connection_target_locked(
                 state,
                 &runtime,
                 operation_token,
-                instance_id,
+                &instance_id,
                 &target,
                 api_key.as_deref(),
+                &profile_snapshot,
             )
             .await
         }
@@ -325,7 +379,7 @@ pub(crate) async fn connect_connection_target_locked(
         "connection",
         &format!("Connected to manual SMCP target {}", target.name),
         None,
-        Some(instance_id),
+        Some(&instance_id),
     );
     Ok(())
 }
@@ -337,6 +391,7 @@ async fn commit_manual_connection_target(
     instance_id: &str,
     expected_target: &ManualSmcpTarget,
     expected_api_key: Option<&str>,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime.ensure_connection_operation(operation_token).await?;
@@ -369,7 +424,7 @@ async fn commit_manual_connection_target(
         .config
         .get_computer_instance(instance_id)
         .map_err(|error| error.to_string())?;
-    ensure_connection_profile_unchanged(&previous, runtime)?;
+    expected_profile.ensure_unchanged(&previous)?;
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
@@ -434,14 +489,20 @@ fn connection_snapshot_blocks_target(state: ComputerRuntimeState, same_instance:
 
 async fn clear_unhealthy_connection_snapshot(
     runtime: &ComputerInstanceRuntime,
+    token: ClientConnectionOperationToken,
 ) -> Result<(), String> {
-    if runtime.has_smcp_transport().await && !runtime.is_connected().await {
-        runtime.clear_smcp_connection().await?;
+    if runtime.has_smcp_transport().await
+        && !runtime.is_connected().await
+        && !runtime.clear_smcp_connection_for_operation(token).await?
+    {
+        return Err(
+            "Connection operation was superseded before stale transport cleanup".to_string(),
+        );
     }
     Ok(())
 }
 
-async fn prepare_connect_operation(
+async fn begin_connect_operation_locked(
     runtime: &ComputerInstanceRuntime,
     operation_target: ClientConnectionOperationTarget,
 ) -> Result<ClientConnectionOperationToken, String> {
@@ -457,7 +518,16 @@ async fn prepare_connect_operation(
     let token = runtime
         .begin_connection_operation(ClientConnectionOperation::Connect, Some(operation_target))
         .await?;
-    if let Err(error) = clear_unhealthy_connection_snapshot(runtime).await {
+    Ok(token)
+}
+
+async fn finish_connect_preparation(
+    runtime: &ComputerInstanceRuntime,
+    token: ClientConnectionOperationToken,
+) -> Result<(), String> {
+    // Transport teardown can wait for the SDK/socket close timeout. Keep it outside the global
+    // Computer lifecycle transaction and use the token to reject a superseded cleanup.
+    if let Err(error) = clear_unhealthy_connection_snapshot(runtime, token).await {
         runtime
             .fail_connection_operation_for_token(token, error.clone(), true)
             .await;
@@ -473,7 +543,29 @@ async fn prepare_connect_operation(
             .await;
         return Err(message);
     }
-    Ok(token)
+    if let Err(error) = runtime.ensure_connection_operation(token).await {
+        runtime
+            .fail_connection_operation_for_token(token, error.clone(), false)
+            .await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn ensure_required_policy_target(
+    instance: &ComputerInstance,
+    required_policy_target: Option<&ComputerConnectionTarget>,
+) -> Result<(), String> {
+    let Some(required) = required_policy_target else {
+        return Ok(());
+    };
+    if instance.connection_policy.target.as_ref() == Some(required) {
+        return Ok(());
+    }
+    Err(format!(
+        "Computer connection policy for {} changed before the connection could start",
+        instance.id
+    ))
 }
 
 /// Disconnect from SMCP server
@@ -485,24 +577,21 @@ pub async fn disconnect_smcp(
     disconnect_smcp_core(&state, &instance_id).await
 }
 
-pub(crate) async fn disconnect_smcp_core(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<(), String> {
-    disconnect_smcp_locked(state, instance_id).await
-}
-
-pub(crate) async fn disconnect_smcp_locked(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
+pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    // Publish the operation while the authoritative runtime is protected, release the global
+    // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?.to_string();
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
         .computer_registry
-        .runtime(instance_id)
+        .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await?;
 
     let current = runtime.connection_snapshot().await;
     if !current.actions.disconnect.enabled {
@@ -534,15 +623,34 @@ pub(crate) async fn disconnect_smcp_locked(
             .await;
         return Err(message);
     }
+    drop(lifecycle_guard);
 
     if runtime.has_smcp_transport().await {
         if let Err(error) = close_smcp_transport(&runtime).await {
-            runtime
-                .reconcile_disconnect_failure_for_token(operation_token, error.clone())
-                .await;
+            let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+            if state
+                .computer_registry
+                .ensure_current_runtime(&runtime)
+                .await
+                .is_ok()
+                && runtime
+                    .ensure_connection_operation(operation_token)
+                    .await
+                    .is_ok()
+            {
+                runtime
+                    .reconcile_disconnect_failure_for_token(operation_token, error.clone())
+                    .await;
+            }
             return Err(error);
         }
     }
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await?;
+    runtime.ensure_connection_operation(operation_token).await?;
     if !runtime
         .complete_connection_operation_for_token(operation_token)
         .await
@@ -557,7 +665,7 @@ pub(crate) async fn disconnect_smcp_locked(
         "connection",
         "Disconnected from SMCP server",
         None,
-        Some(instance_id),
+        Some(&instance_id),
     );
     Ok(())
 }
@@ -647,8 +755,8 @@ pub async fn manager_connect_smcp(
     let instance_id = require_instance_id(&instance_id)
         .map_err(ManagerError::InvalidResponse)?
         .to_string();
-    let (runtime, operation_token) =
-        begin_manager_connect(state.inner(), &instance_id, employee_id).await?;
+    let (runtime, operation_token, profile_snapshot) =
+        begin_manager_connect(state.inner(), &instance_id, employee_id, None).await?;
     log::info!(
         "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
     );
@@ -722,6 +830,7 @@ pub async fn manager_connect_smcp(
             operation_token,
             params,
             token,
+            &profile_snapshot,
         )
         .await
     }
@@ -729,14 +838,21 @@ pub async fn manager_connect_smcp(
     finish_manager_connect(runtime, operation_token, result).await
 }
 
-pub(crate) async fn connect_manager_robot_target_locked(
+pub(crate) async fn connect_manager_robot_target_for_policy(
     app: &AppHandle,
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
     robot_account_id: u64,
+    required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
-    let (runtime, operation_token) = begin_manager_connect(state, instance_id, employee_id).await?;
+    let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
+        state,
+        instance_id,
+        employee_id,
+        Some(required_policy_target),
+    )
+    .await?;
     let result = async {
         let employee = validate_manager_robot_account(state, employee_id, robot_account_id).await?;
         runtime
@@ -790,7 +906,16 @@ pub(crate) async fn connect_manager_robot_target_locked(
             },
         };
 
-        establish_manager_connection(app, state, &runtime, operation_token, params, token).await
+        establish_manager_connection(
+            app,
+            state,
+            &runtime,
+            operation_token,
+            params,
+            token,
+            &profile_snapshot,
+        )
+        .await
     }
     .await;
     finish_manager_connect(runtime, operation_token, result).await
@@ -800,7 +925,23 @@ async fn begin_manager_connect(
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
-) -> Result<(ComputerInstanceRuntime, ClientConnectionOperationToken), ManagerError> {
+    required_policy_target: Option<&ComputerConnectionTarget>,
+) -> Result<
+    (
+        ComputerInstanceRuntime,
+        ClientConnectionOperationToken,
+        ConnectionProfileSnapshot,
+    ),
+    ManagerError,
+> {
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    ensure_required_policy_target(&instance, required_policy_target)
+        .map_err(ManagerError::InvalidResponse)?;
+    let profile_snapshot = ConnectionProfileSnapshot::capture(&instance);
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -808,7 +949,12 @@ async fn begin_manager_connect(
         .ok_or_else(|| {
             ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}"))
         })?;
-    let operation_token = prepare_connect_operation(
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    let operation_token = begin_connect_operation_locked(
         &runtime,
         ClientConnectionOperationTarget {
             source_type: SOURCE_MANAGER_ROBOT.to_string(),
@@ -818,7 +964,11 @@ async fn begin_manager_connect(
     )
     .await
     .map_err(ManagerError::InvalidResponse)?;
-    Ok((runtime, operation_token))
+    drop(lifecycle_guard);
+    finish_connect_preparation(&runtime, operation_token)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    Ok((runtime, operation_token, profile_snapshot))
 }
 
 async fn finish_manager_connect(
@@ -935,6 +1085,7 @@ async fn establish_manager_connection(
     operation_token: ClientConnectionOperationToken,
     params: ManagerConnectionParams,
     token: ExchangedToken,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
     let instance_id = runtime.instance.id.as_str();
     let _reservation = reserve_connection_target(
@@ -961,6 +1112,7 @@ async fn establish_manager_connection(
                 operation_token,
                 instance_id,
                 &params.robot_binding,
+                expected_profile,
             )
             .await?;
             return Ok(());
@@ -988,6 +1140,7 @@ async fn establish_manager_connection(
             operation_token,
             instance_id,
             &params.robot_binding,
+            expected_profile,
         )
         .await?;
         runtime
@@ -1039,6 +1192,7 @@ async fn commit_robot_binding(
     operation_token: ClientConnectionOperationToken,
     instance_id: &str,
     robot_binding: &RobotBindingMetadata,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
@@ -1054,7 +1208,8 @@ async fn commit_robot_binding(
         .config
         .get_computer_instance(instance_id)
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
-    ensure_connection_profile_unchanged(&previous, runtime)
+    expected_profile
+        .ensure_unchanged(&previous)
         .map_err(ManagerError::InvalidResponse)?;
     let updated = state
         .config
@@ -1071,23 +1226,6 @@ async fn commit_robot_binding(
         .await
         .map_err(ManagerError::InvalidResponse)?;
     Ok(())
-}
-
-fn ensure_connection_profile_unchanged(
-    current: &crate::services::computer::ComputerInstance,
-    connection_runtime: &ComputerInstanceRuntime,
-) -> Result<(), String> {
-    let started = &connection_runtime.instance;
-    if current.name == started.name
-        && current.connection_policy == started.connection_policy
-        && current.robot_binding == started.robot_binding
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "Computer profile {} changed while the connection was being established",
-        current.id
-    ))
 }
 
 fn manager_connection_decision(

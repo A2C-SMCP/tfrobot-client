@@ -18,6 +18,7 @@ use a2c_smcp::smcp_computer::mcp_clients::model::{
     ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use a2c_smcp::smcp_computer::settings::{
     resolve_policy_settings, resolve_settings, AddMarketplaceParams, DisableOptions, EnableOptions,
     InstallOptions, MarketplaceRefreshRow, MarketplaceRemoveOutcome, McpHookError, McpInstallHooks,
@@ -1950,6 +1951,10 @@ fn build_sdk_computer(
         .mcp
         .servers
         .into_iter()
+        // Plugin servers are a read-side projection derived from the governance ledger, not
+        // durable declarations. Feeding them back into a fresh Computer would make governance
+        // reconciliation treat them as pre-existing and skip input injection/remount.
+        .filter(|server| server.origin != ProvenanceScope::Plugin)
         .map(|server| (server.name, normalize_mcp_server_tool_meta(server.config)))
         .collect();
     let sdk_servers = mcp_servers
@@ -1983,6 +1988,7 @@ struct RuntimeMcpHooks {
     plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     existing_servers: HashMap<BundleId, ServerName>,
     bundled_server_ids: HashSet<BundleId>,
+    disabled_independent_server_ids: HashSet<BundleId>,
     root_ownership: HashMap<PathBuf, (String, String)>,
     registered_server_ids: Arc<Mutex<Vec<BundleId>>>,
     diagnostic_reset_ids: Arc<Mutex<Vec<BundleId>>>,
@@ -2022,6 +2028,24 @@ impl RuntimeMcpHooks {
                 bundled_server_ids.insert(bundle_id);
             }
         }
+        let disabled_independent_server_ids =
+            instance_config_context(&runtime.instance, &runtime.skill_home_base)
+                .load()
+                .mcp
+                .servers
+                .into_iter()
+                .filter(|server| {
+                    server.origin != ProvenanceScope::Plugin && server.config.disabled()
+                })
+                .map(|server| resolve_bundle_id(&server.config))
+                .collect::<HashSet<_>>();
+        let existing_servers = existing_servers
+            .into_iter()
+            .filter(|(bundle_id, _)| {
+                !bundled_server_ids.contains(bundle_id)
+                    || !disabled_independent_server_ids.contains(bundle_id)
+            })
+            .collect();
         Ok(Self {
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
@@ -2030,6 +2054,7 @@ impl RuntimeMcpHooks {
             plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
             existing_servers,
             bundled_server_ids,
+            disabled_independent_server_ids,
             root_ownership,
             registered_server_ids: Arc::new(Mutex::new(Vec::new())),
             diagnostic_reset_ids: Arc::new(Mutex::new(Vec::new())),
@@ -2065,7 +2090,9 @@ impl McpInstallHooks for RuntimeMcpHooks {
                 "Missing plugin ownership metadata for bundled MCP server '{bundle_id}'"
             )));
         }
-        if self.sdk_servers.read().await.contains_key(&bundle_id) {
+        if self.sdk_servers.read().await.contains_key(&bundle_id)
+            && !self.disabled_independent_server_ids.contains(&bundle_id)
+        {
             *self
                 .preserved_registration_counts
                 .lock()
@@ -2079,6 +2106,11 @@ impl McpInstallHooks for RuntimeMcpHooks {
             self.registered_server_ids.lock().await.push(bundle_id);
             return Ok(());
         }
+        let cfg = if self.disabled_independent_server_ids.contains(&bundle_id) {
+            force_mcp_server_enabled(cfg)
+        } else {
+            cfg
+        };
         let mount_result = self
             .computer
             .read()
@@ -2169,6 +2201,15 @@ impl McpInstallHooks for RuntimeMcpHooks {
         }
         Ok(())
     }
+}
+
+pub(crate) fn force_mcp_server_enabled(mut config: MCPServerConfig) -> MCPServerConfig {
+    match &mut config {
+        MCPServerConfig::Stdio(server) => server.disabled = false,
+        MCPServerConfig::Sse(server) => server.disabled = false,
+        MCPServerConfig::Http(server) => server.disabled = false,
+    }
+    config
 }
 
 fn instance_config_context(
@@ -2588,6 +2629,7 @@ mod tests {
             plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
             existing_servers: runtime.sdk_servers.read().await.clone(),
             bundled_server_ids: HashSet::from([bundle_id.clone()]),
+            disabled_independent_server_ids: HashSet::new(),
             root_ownership: HashMap::new(),
             registered_server_ids: Arc::new(Mutex::new(Vec::new())),
             diagnostic_reset_ids: Arc::new(Mutex::new(Vec::new())),

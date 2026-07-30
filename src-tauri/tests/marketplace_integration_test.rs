@@ -481,6 +481,110 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
 }
 
 #[tokio::test]
+async fn plugin_runtime_input_is_excluded_from_client_crud_import_and_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("runtime-input-import-export-marketplace");
+    build_runtime_input_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingSecret {
+            ref input_id,
+            ..
+        } if input_id == "audit@acme/api_token"
+    ));
+    assert!(inputs::set_runtime_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "audit@acme/api_token".to_string(),
+        serde_json::json!("runtime-secret"),
+    )
+    .await
+    .unwrap());
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
+
+    let import_path = tmp.path().join("client-owned-input.json");
+    fs::write(
+        &import_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": [],
+            "inputs": [{
+                "type": "PromptString",
+                "id": "client-note",
+                "label": "Client note",
+                "default": "saved by the user"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let imported = config_io::import_config_core(
+        &state,
+        import_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(imported.inputs_imported, 1);
+
+    get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let persisted_input_ids = inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
+        .unwrap()
+        .into_iter()
+        .map(|input| input.id().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_input_ids, vec!["client-note".to_string()]);
+
+    let export_path = tmp.path().join("client-owned-export.json");
+    config_io::export_config_core(
+        &state,
+        export_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+    let exported: serde_json::Value =
+        serde_json::from_slice(&fs::read(export_path).unwrap()).unwrap();
+    let exported_input_ids = exported["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|input| input["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(exported_input_ids, vec!["client-note"]);
+}
+
+#[tokio::test]
 async fn duplicate_copies_only_user_skills_and_keeps_plugin_governance_isolated() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;

@@ -46,9 +46,19 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.computer.read().await.boot_up().await {
             return Err(ComputerRuntimeStartError::Sdk(error));
         }
-        self.reconcile_sdk_governance_inner()
-            .await
-            .map_err(ComputerRuntimeStartError::Sdk)?;
+        if let Err(error) = self.reconcile_sdk_governance_inner().await {
+            // boot_up has already moved the SDK lifecycle to Started. A governance failure is
+            // still a failed Computer start transaction, so roll the partially started handle
+            // back to Shutdown; otherwise the public Start action becomes unavailable and the
+            // user cannot save the missing runtime input and retry.
+            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                start_error = start_error.append_context(format!(
+                    "failed to roll back the partially started Computer: {cleanup_error}"
+                ));
+            }
+            return Err(start_error);
+        }
         let failures = self.start_desired_mcp_servers_inner().await;
         self.log_mcp_start_failures(&failures, "Computer startup");
 

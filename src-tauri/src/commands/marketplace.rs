@@ -1,4 +1,5 @@
 use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::computer::force_mcp_server_enabled;
 use crate::AppState;
 use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
@@ -1122,15 +1123,6 @@ impl McpInstallHooks for MarketplaceMcpHooks {
         }
         Ok(())
     }
-}
-
-fn force_mcp_server_enabled(mut config: MCPServerConfig) -> MCPServerConfig {
-    match &mut config {
-        MCPServerConfig::Stdio(server) => server.disabled = false,
-        MCPServerConfig::Sse(server) => server.disabled = false,
-        MCPServerConfig::Http(server) => server.disabled = false,
-    }
-    config
 }
 
 #[cfg(test)]

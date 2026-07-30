@@ -17,9 +17,37 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     const back = page.getByRole('button', { name: 'Back to Computers' });
     await expect(back).toBeVisible();
     await expect(back).toHaveText('');
+    await back.hover();
+    await expect(page.getByRole('tooltip', { name: 'Back to Computers' })).toBeVisible();
+    const backHitTarget = await back.boundingBox();
+    if (!backHitTarget) throw new Error('Back to Computers hit target is not measurable');
+    expect(backHitTarget.width).toBeGreaterThanOrEqual(40);
+    expect(backHitTarget.height).toBeGreaterThanOrEqual(40);
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Duplicate' })).toHaveCount(0);
+    await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toBeVisible();
+    for (const configurationAction of [
+      'Add Server',
+      'Import Config',
+      'Export Config',
+      'Add Variable',
+      'Open local directory',
+      'Install Plugin',
+      'Enable Plugin',
+      'Disable Plugin',
+      'Uninstall Plugin',
+    ]) {
+      await expect(page.getByRole('button', {
+        name: configurationAction,
+        exact: true,
+      })).toHaveCount(0);
+    }
+    await expect(page.getByRole('combobox', {
+      name: 'Select a Robot or Manual SMCP target',
+    })).toHaveCount(0);
+    await expect(page.getByText('Apply configuration', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Reload required', { exact: true })).toHaveCount(0);
 
     await page.getByRole('button', { name: 'More Computer actions' }).click();
     await expect(page.getByText('Restart', { exact: true })).toBeVisible();
@@ -32,10 +60,17 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.getByRole('button', { name: 'Cancel' }).click();
 
     await page.getByRole('button', { name: 'Open Computer settings' }).click();
-    await page
-      .getByRole('menu', { name: 'Computer settings sections' })
-      .getByText('MCP Servers', { exact: true })
-      .click();
+    const settingsNavigation = page.getByRole('menu', {
+      name: 'Computer settings sections',
+    });
+    await settingsNavigation.getByText('Skills', { exact: true }).click();
+    await expect(page.getByRole('button', { name: /keyboard-helper/i })).toHaveCount(0);
+    await expect(page.getByRole('button', {
+      name: 'View active Skills in Computer',
+    })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open local directory' })).toBeVisible();
+
+    await settingsNavigation.getByText('MCP Servers', { exact: true }).click();
     await expect(page.getByRole('button', { name: 'Add Server' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import Config' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).toBeVisible();

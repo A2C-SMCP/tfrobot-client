@@ -13,9 +13,13 @@ use tfrobot_client_lib::commands::computer::{
     start_computer_instance_core, stop_computer_instance_core, CreateComputerInstanceRequest,
     DuplicateComputerInstanceRequest, DuplicateSkillHomeMode, RenameComputerInstanceRequest,
 };
-use tfrobot_client_lib::commands::connection::connect_connection_target_core;
+use tfrobot_client_lib::commands::connection::{
+    connect_connection_target_core, connect_connection_target_for_policy_core, disconnect_smcp_core,
+};
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
-use tfrobot_client_lib::services::computer::{ComputerInstance, RobotBindingMetadata};
+use tfrobot_client_lib::services::computer::{
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance, RobotBindingMetadata,
+};
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
@@ -464,6 +468,83 @@ async fn connection_mutations_wait_for_the_computer_lifecycle_transaction_lock()
     drop(guard);
 
     assert!(operation.await.unwrap().is_err());
+
+    let guard = state.computer_lifecycle_lock.lock().await;
+    let operation_state = state.clone();
+    let mut operation =
+        tokio::spawn(
+            async move { disconnect_smcp_core(operation_state.as_ref(), "missing").await },
+        );
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
+            .await
+            .is_err(),
+        "disconnect mutation escaped the Computer lifecycle transaction"
+    );
+    drop(guard);
+
+    assert!(operation.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn policy_connect_rejects_a_target_replaced_before_transaction_prepare() {
+    let dir = TempDir::new().unwrap();
+    let state = create_test_app_state(dir.path());
+    let created = create_computer_instance_core(
+        &state,
+        CreateComputerInstanceRequest {
+            name: "Policy Race".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    for (id, office_id) in [("target-a", "office-a"), ("target-b", "office-b")] {
+        state
+            .config
+            .save_manual_smcp_target(ManualSmcpTarget {
+                id: id.to_string(),
+                name: id.to_string(),
+                url: "https://smcp.example.com".to_string(),
+                namespace: "/smcp".to_string(),
+                office_id: office_id.to_string(),
+                headers: HashMap::new(),
+            })
+            .unwrap();
+    }
+    let stale_target = ComputerConnectionTarget {
+        target_type: ComputerConnectionTargetType::ManualSmcp,
+        id: "target-a".to_string(),
+        robot_account_id: None,
+    };
+    state
+        .config
+        .update_computer_instance(&created.id, |instance| {
+            instance.connection_policy.target = Some(ComputerConnectionTarget {
+                target_type: ComputerConnectionTargetType::ManualSmcp,
+                id: "target-b".to_string(),
+                robot_account_id: None,
+            });
+        })
+        .unwrap();
+
+    let error = connect_connection_target_for_policy_core(&state, &created.id, &stale_target)
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("changed before the connection could start"));
+    assert_eq!(
+        state
+            .config
+            .get_computer_instance(&created.id)
+            .unwrap()
+            .connection_policy
+            .target
+            .unwrap()
+            .id,
+        "target-b"
+    );
 }
 
 #[tokio::test]

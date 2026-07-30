@@ -25,36 +25,82 @@ test.describe('Computer settings navigation and runtime boundary', () => {
       await expect(navigation.getByText(section, { exact: true })).toBeVisible();
     }
 
+    const expectNoRuntimeActions = async () => {
+      for (const runtimeAction of ['Start', 'Stop', 'Restart', 'Connect', 'Disconnect']) {
+        await expect(page.getByRole('button', {
+          name: runtimeAction,
+          exact: true,
+        })).toHaveCount(0);
+      }
+      await expect(page.getByRole('button', { name: 'Start All' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Stop All' })).toHaveCount(0);
+    };
+    await expectNoRuntimeActions();
+
     await navigation.getByText('Skills', { exact: true }).click();
+    await expectNoRuntimeActions();
+    await expect(page.getByRole('button', { name: /keyboard-helper/i })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'View active Skills in Computer' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open local directory' })).toBeVisible();
 
     await navigation.getByText('Plugins & Marketplace', { exact: true }).click();
+    await expectNoRuntimeActions();
     await expect(page.getByRole('heading', { name: 'Marketplace', exact: true })).toBeVisible();
 
     await navigation.getByText('MCP Servers', { exact: true }).click();
+    await expectNoRuntimeActions();
     await expect(page.getByRole('button', { name: 'Add Server' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import Config' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Validate Schema' })).toBeVisible();
 
     await navigation.getByText('Inputs', { exact: true }).click();
+    await expectNoRuntimeActions();
     await expect(page.getByRole('button', { name: 'Add Variable' })).toBeVisible();
 
     await navigation.getByText('Connection Policy', { exact: true }).click();
+    await expectNoRuntimeActions();
     await expect(page.getByText('Connection Target', { exact: true })).toBeVisible();
     await expect(page.getByRole('combobox', {
       name: 'Select a Robot or Manual SMCP target',
     })).toBeVisible();
     await expect(page.getByRole('switch', { name: 'Auto Connect' })).toBeVisible();
 
-    for (const runtimeAction of ['Start', 'Stop', 'Restart', 'Connect', 'Disconnect']) {
-      await expect(page.getByRole('button', { name: runtimeAction, exact: true })).toHaveCount(0);
-    }
-
     await page.getByRole('button', { name: 'Back to Computer' }).click();
     await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByText('Advanced Runtime Diagnostics')).toBeVisible();
+  });
+
+  test('reports a profile mutation as saved without inferring active Runtime effect', async ({
+    page,
+  }) => {
+    const invokeCountBeforeSave = await page.evaluate(() => {
+      const tauriWindow = window as typeof window & {
+        __TAURI_INVOKES__?: Array<{ cmd: string }>;
+      };
+      return tauriWindow.__TAURI_INVOKES__?.length ?? 0;
+    });
+    await page.getByRole('textbox', { name: 'Name' }).fill('Renamed Computer');
+    const saveButton = page.getByRole('button', { name: /Save$/ });
+    await saveButton.focus();
+    await saveButton.press('Enter');
+
+    await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+    await expect(page.getByText(/\bApplied\b/i)).toHaveCount(0);
+    await expect(page.getByText(/\bEffective\b/i)).toHaveCount(0);
+
+    const saveCommands = await page.evaluate((startIndex) => {
+      const tauriWindow = window as typeof window & {
+        __TAURI_INVOKES__?: Array<{ cmd: string }>;
+      };
+      return (tauriWindow.__TAURI_INVOKES__ ?? [])
+        .slice(startIndex)
+        .map(({ cmd }) => cmd);
+    }, invokeCountBeforeSave);
+    expect(saveCommands).toContain('rename_computer_instance');
+    expect(saveCommands.filter((command) => (
+      /(^|_)(start|stop|restart|reload|apply)(_|$)/i.test(command)
+    ))).toEqual([]);
   });
 
   test('keeps vertical settings navigation usable in a narrow window', async ({ page }) => {
