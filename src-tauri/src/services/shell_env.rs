@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "windows"))]
 use std::path::Path;
 use std::sync::OnceLock;
 

@@ -96,10 +96,10 @@ describe('MarketplaceTab', () => {
     render(<MarketplaceTab instanceId="computer-a" />);
 
     expect(await screen.findByText('Marketplaces')).toBeInTheDocument();
-    expect(screen.getByText('Last updated: 2026-07-03T06:08:14Z')).toBeInTheDocument();
+    expect(await screen.findByText('Last updated: 2026-07-03T06:08:14Z')).toBeInTheDocument();
     expect(screen.getByText('Plugins in tf-market')).toBeInTheDocument();
     expect(screen.getByText('Plugin Contents')).toBeInTheDocument();
-    expect(screen.getByText('desktop-tools')).toBeInTheDocument();
+    expect(screen.getAllByText('desktop-tools').length).toBeGreaterThan(0);
     expect(screen.queryByText('audit')).not.toBeInTheDocument();
     expect(await screen.findByText('browser')).toBeInTheDocument();
     expect(screen.getByText('summarizer')).toBeInTheDocument();

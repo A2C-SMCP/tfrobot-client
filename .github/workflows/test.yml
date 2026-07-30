@@ -45,6 +45,9 @@ jobs:
             patchelf
 
       - run: pnpm install --frozen-lockfile
+      # Tauri's generate_context! validates frontendDist while clippy compiles
+      # the Rust library, so a clean checkout must build the frontend first.
+      - run: pnpm build
 
       # Rust 格式（只检查不改文件）
       - run: pnpm fmt:check
@@ -133,8 +136,50 @@ jobs:
       - run: pnpm build
 
       - name: Run tests
+        if: runner.os != 'Windows'
         working-directory: src-tauri
         run: cargo test
+
+      # GitHub's Windows runner PATH can contain JDK-provided api-ms-win DLL
+      # forwarders. They shadow the operating system API-set mapping and make
+      # Rust test harnesses abort before main with STATUS_ENTRYPOINT_NOT_FOUND.
+      - name: Run tests
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $separator = [IO.Path]::PathSeparator
+          $dropped = [System.Collections.Generic.List[string]]::new()
+          $kept = foreach ($directory in ($env:Path -split $separator)) {
+            if (-not $directory) {
+              continue
+            }
+            $shipsApiSet = $false
+            if (Test-Path -LiteralPath $directory -PathType Container -ErrorAction SilentlyContinue) {
+              $shipsApiSet = [bool](
+                Get-ChildItem -LiteralPath $directory -Filter 'api-ms-win-*.dll' -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+              )
+            }
+            if ($shipsApiSet) {
+              [void]$dropped.Add($directory)
+              continue
+            }
+            $directory
+          }
+
+          if ($dropped.Count) {
+            Write-Host 'Dropping PATH entries that ship api-ms-win-*.dll:'
+            foreach ($directory in $dropped) {
+              Write-Host "  - $directory"
+            }
+            $env:Path = ($kept -join $separator)
+          } else {
+            Write-Host 'No PATH entry ships api-ms-win-*.dll'
+          }
+
+          cargo test
 
       # Coverage only on Linux (avoid duplication)
       - name: Generate coverage

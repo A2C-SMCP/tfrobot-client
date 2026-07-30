@@ -11,7 +11,7 @@
     "tauri": "tauri",
     "test": "vitest run --maxWorkers=2",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --maxWorkers=2",
     "test:rust": "cargo nextest run --manifest-path src-tauri/Cargo.toml",
     "test:rust:lib": "cargo nextest run --manifest-path src-tauri/Cargo.toml --lib",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
