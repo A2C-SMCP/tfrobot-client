@@ -419,7 +419,7 @@ describe('Computer', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
     const deleteConfirmation = await screen.findByText('Delete this Computer?');
-    const deletePopover = deleteConfirmation.closest('.ant-popover');
+    const deletePopover = deleteConfirmation.closest<HTMLElement>('.ant-popover');
     expect(deletePopover).not.toBeNull();
     fireEvent.click(within(deletePopover!).getByRole('button', { name: 'OK' }));
     expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
