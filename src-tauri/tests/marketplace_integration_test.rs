@@ -34,6 +34,29 @@ use tfrobot_client_lib::AppState;
 const TEST_INSTANCE_ID: &str = "computer-a";
 const TEST_SECOND_INSTANCE_ID: &str = "computer-b";
 
+fn file_url(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .expect("test repository path should convert to a file URL")
+        .to_string()
+}
+
+fn write_mcp_server_config(path: &Path, name: &str) {
+    fs::write(
+        path,
+        serde_json::to_vec(&serde_json::json!({
+            "type": "stdio",
+            "name": name,
+            "server_parameters": {
+                "command": "node",
+                "args": [echo_server_path()],
+                "env": {}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
     let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
     value["disabled"] = serde_json::Value::Bool(disabled);
@@ -172,7 +195,7 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -318,7 +341,7 @@ async fn duplicate_copies_only_user_skills_and_keeps_plugin_governance_isolated(
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -410,7 +433,7 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -637,7 +660,7 @@ async fn plugin_disable_removes_skills_from_active_skill_registry() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -712,7 +735,7 @@ async fn shared_plugin_dependency_hands_off_and_is_reclaimed_after_the_last_disa
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -840,7 +863,7 @@ async fn enabling_plugin_starts_a_stopped_independent_bundle_dependency() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -890,7 +913,7 @@ async fn plugin_enable_claims_an_existing_user_bundle_dependency_until_disabled(
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -957,7 +980,7 @@ async fn enabled_plugin_overrides_disabled_user_fallback_until_plugin_is_disable
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1048,7 +1071,7 @@ async fn direct_plugin_uninstall_restores_a_disabled_user_fallback() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1104,7 +1127,7 @@ async fn config_import_is_independent_from_dynamic_plugin_runtime_ownership() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1206,7 +1229,7 @@ async fn computer_bootup_starts_enabled_plugin_mcp_servers() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1272,7 +1295,7 @@ async fn plugin_install_and_enable_start_mcp_when_computer_is_running() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1327,7 +1350,7 @@ async fn enabled_plugin_mcp_remounts_from_ledger_after_app_restart() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1402,7 +1425,7 @@ async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1444,7 +1467,7 @@ async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", first_repo.display()),
+            git_url: file_url(&first_repo),
         },
     )
     .await
@@ -1455,7 +1478,7 @@ async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
         TEST_INSTANCE_ID,
         UpdateMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", second_repo.display()),
+            git_url: file_url(&second_repo),
         },
     )
     .await
@@ -1467,7 +1490,7 @@ async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
     assert_eq!(governance.marketplaces.len(), 1);
     assert_eq!(
         governance.marketplaces[0].display_git_url.as_deref(),
-        Some(format!("file://{}", second_repo.display()).as_str())
+        Some(file_url(&second_repo).as_str())
     );
     assert_eq!(governance.plugins.len(), 1);
     assert_eq!(governance.plugins[0].plugin, "tf45-audit");
@@ -1488,7 +1511,7 @@ async fn marketplace_update_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", first_repo.display()),
+            git_url: file_url(&first_repo),
         },
     )
     .await
@@ -1509,7 +1532,7 @@ async fn marketplace_update_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         UpdateMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", second_repo.display()),
+            git_url: file_url(&second_repo),
         },
     )
     .await
@@ -1538,7 +1561,7 @@ async fn plugin_enable_state_is_isolated_per_computer_instance() {
         .unwrap();
     let repo = tmp.path().join("marketplace-repo");
     build_marketplace_repo(&repo);
-    let git_url = format!("file://{}", repo.display());
+    let git_url = file_url(&repo);
 
     for instance_id in [TEST_INSTANCE_ID, TEST_SECOND_INSTANCE_ID] {
         add_marketplace_core(
@@ -1644,7 +1667,7 @@ async fn plugin_install_materializes_mcp_and_skills_only_for_current_instance() 
         FIRST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: MARKETPLACE.to_string(),
-            git_url: format!("file://{}", repo.display()),
+            git_url: file_url(&repo),
         },
     )
     .await
@@ -1736,15 +1759,7 @@ fn build_marketplace_repo(repo: &Path) {
     .unwrap();
     let servers = repo.join("plugins/audit/mcp-servers");
     fs::create_dir_all(&servers).unwrap();
-    let server_path = echo_server_path();
-    fs::write(
-        servers.join("audit-mcp.json"),
-        format!(
-            r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
-            server_path.display()
-        ),
-    )
-    .unwrap();
+    write_mcp_server_config(&servers.join("audit-mcp.json"), "audit-mcp");
     fs::write(
         servers.join("inputs.json"),
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
@@ -1774,7 +1789,6 @@ fn build_duplicate_mcp_marketplace_repo(repo: &Path) {
         r#"{"plugins":[{"name":"audit","source":"./plugins/audit"},{"name":"duplicate","source":"./plugins/duplicate"}]}"#,
     )
     .unwrap();
-    let server_path = echo_server_path();
     for plugin in ["audit", "duplicate"] {
         let skill = repo.join(format!("plugins/{plugin}/skills/code-review"));
         fs::create_dir_all(&skill).unwrap();
@@ -1785,14 +1799,7 @@ fn build_duplicate_mcp_marketplace_repo(repo: &Path) {
         .unwrap();
         let servers = repo.join(format!("plugins/{plugin}/mcp-servers"));
         fs::create_dir_all(&servers).unwrap();
-        fs::write(
-            servers.join("audit-mcp.json"),
-            format!(
-                r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
-                server_path.display()
-            ),
-        )
-        .unwrap();
+        write_mcp_server_config(&servers.join("audit-mcp.json"), "audit-mcp");
     }
 
     run_git(repo, &["init", "-q"]);
@@ -1827,15 +1834,7 @@ fn build_tf45_isolation_marketplace_repo(repo: &Path) {
     .unwrap();
     let servers = repo.join("plugins/tf45-audit/mcp-servers");
     fs::create_dir_all(&servers).unwrap();
-    let server_path = echo_server_path();
-    fs::write(
-        servers.join("tf45-audit-mcp.json"),
-        format!(
-            r#"{{"type":"stdio","name":"tf45-audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{}}}}}}"#,
-            server_path.display()
-        ),
-    )
-    .unwrap();
+    write_mcp_server_config(&servers.join("tf45-audit-mcp.json"), "tf45-audit-mcp");
 
     run_git(repo, &["init", "-q"]);
     run_git(repo, &["add", "-A"]);
