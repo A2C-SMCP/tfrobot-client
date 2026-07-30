@@ -1280,8 +1280,13 @@ mod tests {
 
         match error {
             SdkConfigPortabilityError::InvalidSource { errors, .. } => {
+                let expected_suffix = Path::new(".tfrobot").join("mcp.json");
                 assert!(errors.iter().any(|error| {
-                    error.field == "<file>" && error.source_path.as_deref() == source_mcp.to_str()
+                    error.field == "<file>"
+                        && error
+                            .source_path
+                            .as_deref()
+                            .is_some_and(|path| Path::new(path).ends_with(&expected_suffix))
                 }));
             }
             other => panic!("expected invalid source error, got {other:?}"),

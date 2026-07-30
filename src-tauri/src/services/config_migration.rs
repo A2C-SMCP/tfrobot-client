@@ -955,6 +955,7 @@ mod tests {
         config.inject_directory_rename_actions([
             DirectoryRenameTestAction::Proceed,
             DirectoryRenameTestAction::FailAfterCreatingDestinationFile,
+            DirectoryRenameTestAction::Fail,
         ]);
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
