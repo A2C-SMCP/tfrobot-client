@@ -9,6 +9,7 @@ function resetStore() {
     loading: false,
     error: null,
     filter: { limit: 50, offset: 0 },
+    logsRequestId: 0,
   });
 }
 
@@ -19,6 +20,16 @@ const mockLog: LogEntry = {
   category: 'system',
   message: 'App started',
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('logStore', () => {
   beforeEach(() => {
@@ -69,6 +80,77 @@ describe('logStore', () => {
         keyword: 'test',
         levels: ['error'],
       });
+    });
+  });
+
+  describe('setFilterAndFetch', () => {
+    it('fetches with the merged filter in the same action', async () => {
+      mockedInvoke.mockResolvedValueOnce([mockLog]);
+
+      await useLogStore.getState().setFilterAndFetch({
+        keyword: 'test',
+        offset: 0,
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('get_logs', {
+        filter: { limit: 50, offset: 0, keyword: 'test' },
+      });
+      expect(useLogStore.getState().filter).toEqual({
+        limit: 50,
+        offset: 0,
+        keyword: 'test',
+      });
+      expect(useLogStore.getState().logs).toEqual([mockLog]);
+    });
+
+    it('ignores stale responses from a previous log filter request', async () => {
+      const first = deferred<LogEntry[]>();
+      const second = deferred<LogEntry[]>();
+      const logA = { ...mockLog, id: 2, computer_instance_id: 'computer-a', message: 'Computer A log' };
+      const logB = { ...mockLog, id: 3, computer_instance_id: 'computer-b', message: 'Computer B log' };
+      mockedInvoke.mockReturnValueOnce(first.promise as Promise<unknown>);
+      mockedInvoke.mockReturnValueOnce(second.promise as Promise<unknown>);
+
+      const firstFetch = useLogStore.getState().setFilterAndFetch({
+        computer_instance_id: 'computer-a',
+        offset: 0,
+      });
+      const secondFetch = useLogStore.getState().setFilterAndFetch({
+        computer_instance_id: 'computer-b',
+        offset: 0,
+      });
+
+      second.resolve([logB]);
+      await secondFetch;
+      first.resolve([logA]);
+      await firstFetch;
+
+      expect(useLogStore.getState().logs).toEqual([logB]);
+      expect(useLogStore.getState().filter).toEqual({
+        limit: 50,
+        offset: 0,
+        computer_instance_id: 'computer-b',
+      });
+      expect(useLogStore.getState().loading).toBe(false);
+    });
+
+    it('ignores stale errors from a previous log filter request', async () => {
+      const first = deferred<LogEntry[]>();
+      const second = deferred<LogEntry[]>();
+      mockedInvoke.mockReturnValueOnce(first.promise as Promise<unknown>);
+      mockedInvoke.mockReturnValueOnce(second.promise as Promise<unknown>);
+
+      const firstFetch = useLogStore.getState().setFilterAndFetch({ keyword: 'old', offset: 0 });
+      const secondFetch = useLogStore.getState().setFilterAndFetch({ keyword: 'new', offset: 0 });
+
+      second.resolve([mockLog]);
+      await secondFetch;
+      first.reject('old db error');
+      await firstFetch;
+
+      expect(useLogStore.getState().logs).toEqual([mockLog]);
+      expect(useLogStore.getState().error).toBeNull();
+      expect(useLogStore.getState().loading).toBe(false);
     });
   });
 

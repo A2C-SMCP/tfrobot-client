@@ -1,6 +1,6 @@
 [package]
 name = "tfrobot-client"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "TFRobot Client - A2C-SMCP Computer GUI"
 authors = ["TFRobot Team"]
@@ -18,13 +18,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-smcp-computer = "0.1.14"
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "ff544d1c3eba205953cb9f4c643bad6e1bab51db", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -39,9 +41,11 @@ keyring = "3"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
 
 # SQLite for log storage
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -52,10 +56,25 @@ tauri-plugin-dialog = "2.6.0"
 tauri-plugin-single-instance = "2"
 dirs = "6.0.0"
 
-[dev-dependencies]
+# HTTP client for TFRSManager REST APIs (rustls to avoid OpenSSL dep)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Hashing for keychain key derivation (base_url → stable short hash)
+sha2 = "0.10"
+hex = "0.4"
 tempfile = "3"
+
+[dev-dependencies]
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1", "full"] }
+hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
+smcp-server-core = "0.2.3"
+socketioxide = { version = "0.16.3", features = ["state"] }
+tf-rust-socketio = "0.8.1"
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "benchmarks"

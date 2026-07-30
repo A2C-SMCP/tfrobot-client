@@ -1,4 +1,10 @@
-import { parseToolMetaJson } from '@/components/McpConfig/McpServerForm';
+import { render, screen } from '../helpers/render';
+import {
+  McpServerForm,
+  normalizeToolMeta,
+  normalizeToolMetaMap,
+  parseToolMetaJson,
+} from '@/components/McpConfig/McpServerForm';
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -58,5 +64,42 @@ describe('parseToolMetaJson', () => {
   it('rejects mixed valid/invalid — fails on first invalid value', () => {
     const input = '{"good": {"auto_apply": true}, "bad": true}';
     expect(parseToolMetaJson(input)).toEqual({ ok: false, error: 'invalid_format' });
+  });
+});
+
+describe('normalizeToolMeta', () => {
+  it('removes blank aliases so default metadata does not collapse all tool names', () => {
+    expect(normalizeToolMeta({ alias: '' })).toBeNull();
+    expect(normalizeToolMeta({ alias: '   ', auto_apply: true })).toEqual({ auto_apply: true });
+  });
+
+  it('drops blank aliases from parsed per-tool metadata', () => {
+    expect(normalizeToolMetaMap({
+      echo: { alias: '', tags: ['debug', ''] },
+      ping: { alias: 'pong' },
+    })).toEqual({
+      echo: { tags: ['debug'] },
+      ping: { alias: 'pong' },
+    });
+  });
+});
+
+describe('McpServerForm input attributes (issue #26)', () => {
+  // macOS WKWebView auto-capitalizes / auto-corrects technical input
+  // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
+  it('disables auto-capitalization/correction/autofill on the command field', () => {
+    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+
+    const command = screen.getByPlaceholderText('npx, python, node...');
+    expect(command).toHaveAttribute('autocapitalize', 'off');
+    expect(command).toHaveAttribute('autocorrect', 'off');
+    expect(command).toHaveAttribute('spellcheck', 'false');
+    expect(command).toHaveAttribute('autocomplete', 'off');
+  });
+
+  it('does not present default tool alias as a server-wide prefix', () => {
+    render(<McpServerForm onSubmit={async () => {}} onCancel={() => {}} />);
+
+    expect(screen.queryByText('Alias Prefix')).not.toBeInTheDocument();
   });
 });

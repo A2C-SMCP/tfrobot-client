@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 
 export interface DesktopWindow {
+  bundleId: string;
   uri: string;
   title: string;
   server: string;
@@ -18,6 +19,7 @@ export interface WindowContent {
 }
 
 export interface WindowDetail {
+  bundleId: string;
   uri: string;
   title?: string;
   server: string;
@@ -34,8 +36,8 @@ interface DesktopState {
   loadingDetails: Record<string, boolean>;
   detailErrors: Record<string, string>;
 
-  fetchDesktop: (uri?: string) => Promise<void>;
-  fetchWindowDetail: (server: string, uri: string) => Promise<void>;
+  fetchDesktop: (instanceId: string, uri?: string) => Promise<void>;
+  fetchWindowDetail: (instanceId: string, bundleId: string, uri: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -53,10 +55,11 @@ export const useDesktopStore = create<DesktopState>((set) => ({
 
   reset: () => set(initialState),
 
-  fetchDesktop: async (uri?: string) => {
+  fetchDesktop: async (instanceId: string, uri?: string) => {
     set({ loading: true, error: null });
     try {
       const windows = await invoke<DesktopWindow[]>('get_desktop', {
+        instanceId,
         uri: uri ?? null,
       });
       set({ windows, loading: false });
@@ -65,32 +68,34 @@ export const useDesktopStore = create<DesktopState>((set) => ({
     }
   },
 
-  fetchWindowDetail: async (server: string, uri: string) => {
+  fetchWindowDetail: async (instanceId: string, bundleId: string, uri: string) => {
+    const key = `${bundleId}:${uri}`;
     // Add to loading record
     set((state) => ({
-      loadingDetails: { ...state.loadingDetails, [uri]: true },
+      loadingDetails: { ...state.loadingDetails, [key]: true },
     }));
 
     try {
       const detail = await invoke<WindowDetail>('get_window_detail', {
-        serverName: server,
+        instanceId,
+        bundleId,
         uri,
       });
       set((state) => {
-        const { [uri]: _, ...remainingLoading } = state.loadingDetails;
-        const { [uri]: __, ...remainingErrors } = state.detailErrors;
+        const { [key]: _, ...remainingLoading } = state.loadingDetails;
+        const { [key]: __, ...remainingErrors } = state.detailErrors;
         return {
-          windowDetails: { ...state.windowDetails, [uri]: detail },
+          windowDetails: { ...state.windowDetails, [key]: detail },
           loadingDetails: remainingLoading,
           detailErrors: remainingErrors,
         };
       });
     } catch (e) {
       set((state) => {
-        const { [uri]: _, ...remainingLoading } = state.loadingDetails;
+        const { [key]: _, ...remainingLoading } = state.loadingDetails;
         return {
           loadingDetails: remainingLoading,
-          detailErrors: { ...state.detailErrors, [uri]: String(e) },
+          detailErrors: { ...state.detailErrors, [key]: String(e) },
         };
       });
     }

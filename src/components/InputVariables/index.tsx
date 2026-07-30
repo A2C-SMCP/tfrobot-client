@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Modal, Typography, message, Alert, Table, Tag, Popconfirm } from 'antd';
+import { App, Button, Space, Modal, Typography, Alert, Table, Tag, Popconfirm } from 'antd';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -14,8 +14,13 @@ import { InputValueEditor } from './InputValueEditor';
 
 const { Title } = Typography;
 
-export function InputVariables() {
+interface InputVariablesProps {
+  instanceId: string;
+}
+
+export function InputVariables({ instanceId }: InputVariablesProps) {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
     inputs,
     values,
@@ -35,9 +40,9 @@ export function InputVariables() {
   const [editingValueId, setEditingValueId] = useState<string>('');
 
   useEffect(() => {
-    fetchInputs();
-    fetchValues();
-  }, [fetchInputs, fetchValues]);
+    fetchInputs(instanceId);
+    fetchValues(instanceId);
+  }, [fetchInputs, fetchValues, instanceId]);
 
   const handleAdd = () => {
     setEditingInput(undefined);
@@ -51,7 +56,7 @@ export function InputVariables() {
 
   const handleFormSubmit = async (input: InputDefinition) => {
     try {
-      await addOrUpdateInput(input);
+      await addOrUpdateInput(instanceId, input);
       message.success(t('inputs.messages.saved'));
       setFormVisible(false);
     } catch (e) {
@@ -66,7 +71,7 @@ export function InputVariables() {
 
   const handleValueSubmit = async (value: string) => {
     try {
-      await setValue(editingValueId, value);
+      await setValue(instanceId, editingValueId, value);
       message.success(t('inputs.messages.valueSet'));
       setValueEditorVisible(false);
     } catch (e) {
@@ -76,7 +81,7 @@ export function InputVariables() {
 
   const handleClearAll = async () => {
     try {
-      await clearValues();
+      await clearValues(instanceId);
       message.success(t('inputs.messages.valuesCleared'));
     } catch (e) {
       message.error(String(e));
@@ -114,15 +119,18 @@ export function InputVariables() {
       key: 'value',
       width: 200,
       render: (_: unknown, record: InputDefinition) => {
-        const val = values[record.id];
-        if (val !== undefined && val !== null) {
+        const stored = values[record.id];
+        if (stored?.configured) {
+          const displayValue = record.type === 'PromptString' && record.password
+            ? t('inputs.configuredSecret')
+            : String(stored.value ?? '');
           return (
             <Tag
               color="cyan"
               style={{ cursor: 'pointer' }}
               onClick={() => handleSetValue(record.id)}
             >
-              {String(val).length > 30 ? String(val).substring(0, 30) + '...' : String(val)}
+              {displayValue.length > 30 ? displayValue.substring(0, 30) + '...' : displayValue}
             </Tag>
           );
         }
@@ -148,7 +156,7 @@ export function InputVariables() {
           <Popconfirm
             title={t('inputs.confirmRemove')}
             onConfirm={() => {
-              removeInput(record.id).catch((e) => message.error(String(e)));
+              removeInput(instanceId, record.id).catch((e) => message.error(String(e)));
             }}
           >
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
@@ -163,7 +171,7 @@ export function InputVariables() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchInputs(); fetchValues(); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchInputs(instanceId); fetchValues(instanceId); }} loading={loading}>
             {t('common.refresh')}
           </Button>
           <Popconfirm title={t('inputs.confirmClearValues')} onConfirm={handleClearAll}>
@@ -217,7 +225,7 @@ export function InputVariables() {
         <InputValueEditor
           inputId={editingValueId}
           inputs={inputs}
-          currentValue={values[editingValueId]}
+          currentValue={values[editingValueId]?.value}
           onSubmit={handleValueSubmit}
           onCancel={() => setValueEditorVisible(false)}
         />

@@ -1,91 +1,88 @@
 import { useEffect, useState } from 'react';
-import { Button, Space, Modal, Typography, message, Alert } from 'antd';
+import { Alert, App, Button, Modal, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
+  DeleteOutlined,
+  EditOutlined,
   PlusOutlined,
-  PlayCircleOutlined,
-  PauseCircleOutlined,
   ReloadOutlined,
   ImportOutlined,
   ExportOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useMcpStore, type McpServerConfig } from '@/stores/mcpStore';
-import { McpServerList } from './McpServerList';
+import type { McpServerConfig } from '@/stores/mcpStore';
+import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
 import { McpServerForm } from './McpServerForm';
 
 const { Title } = Typography;
 
-export function McpConfig() {
+interface McpConfigProps {
+  instanceId: string;
+}
+
+export function McpConfig({ instanceId }: McpConfigProps) {
   const { t } = useTranslation();
+  const { message } = App.useApp();
   const {
-    servers,
-    loading,
-    error,
-    fetchServers,
-    addServer,
-    updateServer,
+    snapshot,
+    validation,
+    loading: configLoading,
+    validating,
+    error: configError,
+    fetchConfig,
+    validateConfig,
+    upsertServer,
     removeServer,
-    startServer,
-    stopServer,
-    startAll,
-    stopAll,
-    getServerConfig,
     importConfig,
     exportConfig,
-  } = useMcpStore();
+  } = useSdkConfigStore();
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
 
   useEffect(() => {
-    fetchServers();
-  }, [fetchServers]);
+    void fetchConfig(instanceId);
+  }, [fetchConfig, instanceId]);
 
   const handleAdd = () => {
     setEditingServer(undefined);
     setFormVisible(true);
   };
 
-  const handleEdit = async (name: string) => {
-    try {
-      const config = await getServerConfig(name);
-      setEditingServer(config);
-      setFormVisible(true);
-    } catch (e) {
-      message.error(String(e));
-    }
+  const handleEdit = (record: SdkConfigServer) => {
+    setEditingServer(record.config);
+    setFormVisible(true);
   };
 
   const handleFormSubmit = async (config: McpServerConfig) => {
     try {
-      if (editingServer) {
-        await updateServer(config);
-        message.success(t('mcp.messages.updated'));
-      } else {
-        await addServer(config);
-        message.success(t('mcp.messages.added'));
-      }
+      await upsertServer(instanceId, config);
+      message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
+        name: config.name,
+      }));
       setFormVisible(false);
-    } catch (e) {
-      message.error(String(e));
+    } catch (cause) {
+      message.error(String(cause));
     }
   };
 
-  const handleStartAll = async () => {
+  const handleRemove = async (name: string) => {
     try {
-      await startAll();
-      message.success(t('mcp.messages.allStarted'));
-    } catch (e) {
-      message.error(String(e));
+      await removeServer(instanceId, name);
+      message.success(t('mcp.messages.removed', { name }));
+    } catch (cause) {
+      message.error(String(cause));
     }
   };
 
-  const handleStopAll = async () => {
+  const handleEnabledChange = async (record: SdkConfigServer, enabled: boolean) => {
     try {
-      await stopAll();
-      message.success(t('mcp.messages.allStopped'));
-    } catch (e) {
-      message.error(String(e));
+      await upsertServer(instanceId, { ...record.config, disabled: !enabled });
+      message.success(t(enabled ? 'mcp.messages.enabled' : 'mcp.messages.disabled', {
+        name: record.name,
+      }));
+    } catch (cause) {
+      message.error(String(cause));
     }
   };
 
@@ -97,7 +94,7 @@ export function McpConfig() {
         multiple: false,
       });
       if (path) {
-        const result = await importConfig(path as string);
+        const result = await importConfig(instanceId, path as string);
         message.success(t('mcp.messages.importSuccess', { servers: result.servers_imported, inputs: result.inputs_imported }));
       }
     } catch (e) {
@@ -113,7 +110,7 @@ export function McpConfig() {
         defaultPath: 'mcp_config.json',
       });
       if (path) {
-        await exportConfig(path);
+        await exportConfig(instanceId, path);
         message.success(t('mcp.messages.exportSuccess'));
       }
     } catch (e) {
@@ -121,31 +118,124 @@ export function McpConfig() {
     }
   };
 
+  const columns = [
+    {
+      title: t('mcp.table.source'),
+      key: 'source',
+      render: (_: unknown, record: SdkConfigServer) => (
+        <Space size="small">
+          <Tag color={record.bundled ? 'purple' : 'blue'}>{record.origin}</Tag>
+          {record.bundled && <Tag>{t('mcp.source.bundled')}</Tag>}
+          {record.trustedOrigin && <Tag color="green">{t('mcp.source.trusted')}</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: t('mcp.table.name'),
+      dataIndex: 'name',
+      key: 'name',
+    },
+    {
+      title: t('mcp.form.bundleId'),
+      dataIndex: 'bundleId',
+      key: 'bundleId',
+    },
+    {
+      title: t('mcp.table.transport'),
+      key: 'transport',
+      render: (_: unknown, record: SdkConfigServer) => record.config.type,
+    },
+    {
+      title: t('mcp.table.enabled'),
+      key: 'enabled',
+      render: (_: unknown, record: SdkConfigServer) => {
+        const hint = record.writable
+          ? undefined
+          : t('mcp.readOnlyConfigHint', { origin: record.origin });
+        return (
+          <Tooltip title={hint}>
+            <span>
+              <Switch
+                checked={!record.config.disabled}
+                disabled={!record.writable}
+                onChange={(enabled) => void handleEnabledChange(record, enabled)}
+                aria-label={t('mcp.actions.toggleEnabled', { name: record.name })}
+              />
+            </span>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: t('mcp.table.actions'),
+      key: 'actions',
+      render: (_: unknown, record: SdkConfigServer) => {
+        const actionHint = record.writable
+          ? (record.bundled ? t('mcp.bundledConfigHint') : undefined)
+          : t('mcp.readOnlyConfigHint', { origin: record.origin });
+        return (
+          <Space size="small">
+            <Tooltip title={actionHint}>
+              <span>
+                <Button
+                  type="text"
+                  icon={<EditOutlined />}
+                  title={t('mcp.actions.edit')}
+                  disabled={!record.writable}
+                  onClick={() => handleEdit(record)}
+                />
+              </span>
+            </Tooltip>
+            <Popconfirm
+              title={t('mcp.confirmRemove')}
+              onConfirm={() => handleRemove(record.name)}
+              okText={t('common.yes')}
+              cancelText={t('common.no')}
+              disabled={!record.writable}
+            >
+              <Tooltip title={actionHint}>
+                <span>
+                  <Button
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    title={t('mcp.actions.remove')}
+                    disabled={!record.writable}
+                  />
+                </span>
+              </Tooltip>
+            </Popconfirm>
+          </Space>
+        );
+      },
+    },
+  ];
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{t('mcp.servers')}</Title>
+        <Space direction="vertical" size={0}>
+          <Title level={4} style={{ margin: 0 }}>{t('mcp.configTitle')}</Title>
+          {snapshot && (
+            <Typography.Text type="secondary">
+              {t('mcp.configRevision')}: <Typography.Text code>{snapshot.revision}</Typography.Text>
+            </Typography.Text>
+          )}
+        </Space>
         <Space>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => fetchServers()}
-            loading={loading}
+            onClick={() => fetchConfig(instanceId)}
+            loading={configLoading}
           >
             {t('common.refresh')}
           </Button>
           <Button
-            icon={<PlayCircleOutlined />}
-            onClick={handleStartAll}
-            loading={loading}
+            icon={<SafetyCertificateOutlined />}
+            onClick={() => validateConfig(instanceId)}
+            loading={validating}
           >
-            {t('mcp.startAll')}
-          </Button>
-          <Button
-            icon={<PauseCircleOutlined />}
-            onClick={handleStopAll}
-            loading={loading}
-          >
-            {t('mcp.stopAll')}
+            {t('mcp.validateConfig')}
           </Button>
           <Button
             icon={<ImportOutlined />}
@@ -169,24 +259,51 @@ export function McpConfig() {
         </Space>
       </div>
 
-      {error && (
+      <Alert
+        message={t('mcp.validation.schemaOnlyTitle')}
+        description={t('mcp.validation.schemaOnlyDescription')}
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+      />
+
+      {validation && (
         <Alert
-          message={t('common.error')}
-          description={error}
-          type="error"
+          message={validation.valid
+            ? t('mcp.validation.valid')
+            : t('mcp.validation.invalid', { count: validation.errors.length })}
+          description={!validation.valid && (
+            <Space direction="vertical" size={2}>
+              {validation.errors.map((item, index) => (
+                <Typography.Text key={`${item.source_path ?? item.scope}:${item.field}:${index}`}>
+                  {item.source_path ?? item.scope}:{item.field}: {item.reason}
+                </Typography.Text>
+              ))}
+            </Space>
+          )}
+          type={validation.valid ? 'success' : 'error'}
           showIcon
-          closable
           style={{ marginBottom: 16 }}
         />
       )}
 
-      <McpServerList
-        servers={servers}
-        loading={loading}
-        onStart={startServer}
-        onStop={stopServer}
-        onEdit={handleEdit}
-        onRemove={removeServer}
+      {configError && (
+        <Alert
+          message={t('common.error')}
+          description={configError}
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      <Table
+        dataSource={snapshot?.mcp.servers ?? []}
+        columns={columns}
+        rowKey="bundleId"
+        loading={configLoading}
+        pagination={false}
+        size="middle"
       />
 
       <Modal
@@ -201,7 +318,7 @@ export function McpConfig() {
           initialValues={editingServer}
           onSubmit={handleFormSubmit}
           onCancel={() => setFormVisible(false)}
-          loading={loading}
+          loading={configLoading}
         />
       </Modal>
     </div>

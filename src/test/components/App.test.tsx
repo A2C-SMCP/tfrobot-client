@@ -1,0 +1,105 @@
+import { act, render, screen, fireEvent, waitFor } from '../helpers/render';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
+import App from '@/App';
+
+const managerStoreMock = vi.hoisted(() => ({
+  restoreSession: vi.fn().mockResolvedValue(null),
+  handleAuthExpired: vi.fn(),
+}));
+
+const runtimeStoreMock = vi.hoisted(() => ({
+  error: null as string | null,
+  initialize: vi.fn().mockResolvedValue(undefined),
+  dispose: vi.fn().mockResolvedValue(undefined),
+  recover: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/stores/runtimeStore', () => ({
+  useRuntimeStore: (selector: (state: typeof runtimeStoreMock) => unknown) => selector(runtimeStoreMock),
+}));
+
+vi.mock('@/stores/themeStore', () => ({
+  useThemeStore: vi.fn(() => ({
+    resolved: 'light',
+    setMode: vi.fn(),
+    initFromSettings: vi.fn(),
+  })),
+}));
+
+vi.mock('@/stores/managerStore', () => ({
+  useManagerStore: vi.fn(() => ({
+    session: null,
+    pendingAccountSelection: null,
+    restoreAttempted: false,
+    restoreSession: managerStoreMock.restoreSession,
+    handleAuthExpired: managerStoreMock.handleAuthExpired,
+  })),
+}));
+
+vi.mock('@/components/Dashboard', () => ({
+  Dashboard: ({ onNavigate }: { onNavigate: (key: string) => void }) => (
+    <button onClick={() => onNavigate('computer-detail:overview')}>Open Computer Detail</button>
+  ),
+}));
+vi.mock('@/components/Computer', () => ({
+  Computer: ({ initialView, initialTab }: { initialView?: 'list' | 'detail'; initialTab?: string }) => (
+    <div>
+      {initialView === 'detail' ? `Computer Detail View: ${initialTab}` : 'Computer List View'}
+    </div>
+  ),
+}));
+vi.mock('@/components/ManagerAccount', () => ({
+  ManagerAccount: () => <div>ManagerAccount</div>,
+}));
+vi.mock('@/components/LogViewer', () => ({
+  LogViewer: () => <div>LogViewer</div>,
+}));
+vi.mock('@/components/Settings', () => ({
+  Settings: () => <div>Settings</div>,
+}));
+
+describe('App', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    managerStoreMock.restoreSession.mockResolvedValue(null);
+    runtimeStoreMock.error = null;
+    runtimeStoreMock.initialize.mockResolvedValue(undefined);
+    runtimeStoreMock.dispose.mockResolvedValue(undefined);
+    runtimeStoreMock.recover.mockResolvedValue(undefined);
+  });
+
+  it('shows runtime event initialization failures and retries recovery', async () => {
+    runtimeStoreMock.error = 'event bridge unavailable';
+    render(<App />);
+
+    expect(screen.getByText('Runtime status updates are unavailable')).toBeInTheDocument();
+    expect(screen.getByText('event bridge unavailable')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(runtimeStoreMock.recover).toHaveBeenCalledOnce());
+  });
+
+  it('restores Manager session at app startup', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(managerStoreMock.restoreSession).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {
+    render(<App />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Open Computer Detail'));
+    });
+    expect(screen.getByText('Computer Detail View: overview')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Computer'));
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Computer List View')).toBeInTheDocument();
+    });
+  });
+});

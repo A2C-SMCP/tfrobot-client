@@ -20,6 +20,12 @@ export interface AppSettings {
   language: string;
   log_retention_days: number;
   custom_runtime_paths: CustomRuntimePaths;
+  manager_session?: {
+    baseUrl: string;
+    userId: number;
+    accountId: number;
+    accountName: string;
+  } | null;
   custom_path?: string | null;
 }
 

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Button, Input, Select, Space } from 'antd';
+import { Button, Select, Space } from 'antd';
+import { Input } from '@/components/common/Input';
 import { useTranslation } from 'react-i18next';
 import type { InputDefinition } from '@/stores/inputStore';
 

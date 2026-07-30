@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { theme as antTheme, ConfigProvider } from 'antd';
+import { App as AntdApp, theme as antTheme, ConfigProvider } from 'antd';
 import App from './App';
 import { useThemeStore } from './stores/themeStore';
 import { initLogger } from './utils/logger';
@@ -29,7 +29,11 @@ function Root() {
         },
       }}
     >
-      <App />
+      {/* antd <App> provides context for Modal/message/notification hooks,
+          so App.useApp() consumers resolve theme tokens correctly (esp. dark). */}
+      <AntdApp>
+        <App />
+      </AntdApp>
     </ConfigProvider>
   );
 }

@@ -1,8 +1,13 @@
+use a2c_smcp::smcp_computer::settings::config::{
+    ConfigEdit, ConfigEntity, EditIntent, ProjectConfigDoc,
+};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use smcp_computer::mcp_clients::MCPServerConfig;
+use std::sync::Arc;
 use tempfile::tempdir;
+use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::logger::{LogFilter, LogService};
+use tfrobot_client_lib::services::sdk_config::SdkConfigService;
 
 // ── LogService Benchmarks ──
 
@@ -84,42 +89,64 @@ fn bench_log_cleanup(c: &mut Criterion) {
     });
 }
 
-// ── ConfigService Benchmarks ──
+// ── SDK Config Adapter Benchmarks ──
 
-fn make_test_config(name: &str) -> MCPServerConfig {
-    serde_json::from_value(serde_json::json!({
-        "type": "Stdio",
-        "name": name,
+fn make_test_config() -> serde_json::Value {
+    serde_json::json!({
+        "type": "stdio",
         "server_parameters": {
             "command": "node",
             "args": ["server.js"],
             "env": {}
         }
-    }))
-    .unwrap()
+    })
 }
 
 fn bench_config_load_save(c: &mut Criterion) {
     let tmp = tempdir().unwrap();
-    let svc = ConfigService::new(tmp.path().to_path_buf()).unwrap();
+    let config = Arc::new(ConfigService::new(tmp.path().to_path_buf()).unwrap());
+    let instance_id = "bench-computer";
+    config
+        .add_computer_instance(ComputerInstance::new(instance_id, "Bench Computer"))
+        .unwrap();
+    let sdk_config = SdkConfigService::new(config);
 
     // Pre-fill 50 server configs
-    let configs: Vec<MCPServerConfig> = (0..50).map(|i| make_test_config(&format!("server-{i}"))).collect();
-    svc.save_configs(&configs).unwrap();
+    let servers: serde_json::Map<String, serde_json::Value> = (0..50)
+        .map(|i| (format!("server-{i}"), make_test_config()))
+        .collect();
+    let document = ProjectConfigDoc {
+        mcp: Some(
+            serde_json::json!({ "servers": servers })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..Default::default()
+    };
+    sdk_config.save(instance_id, &document).unwrap();
 
-    let mut group = c.benchmark_group("config");
+    let mut group = c.benchmark_group("sdk_config");
 
     group.bench_function("load_50_configs", |b| {
-        b.iter(|| svc.load_configs().unwrap());
+        b.iter(|| sdk_config.load(instance_id));
     });
 
     group.bench_function("save_50_configs", |b| {
-        b.iter(|| svc.save_configs(&configs).unwrap());
+        b.iter(|| sdk_config.save(instance_id, &document).unwrap());
     });
 
     group.bench_function("add_config", |b| {
         b.iter(|| {
-            svc.add_config(make_test_config("bench-add")).unwrap();
+            sdk_config
+                .update(
+                    instance_id,
+                    &[ConfigEdit::new(
+                        ConfigEntity::McpServer("bench-add".to_string()),
+                        EditIntent::Upsert(make_test_config()),
+                    )],
+                )
+                .unwrap();
         });
     });
 

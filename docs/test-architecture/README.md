@@ -1,6 +1,10 @@
 # TFRobot Client 测试架构设计规格
 
 > 本文档定义了 tfrobot-client 项目的全面测试体系，覆盖单元测试、集成测试、E2E 测试，以及 CI/CD 编排策略。
+>
+> 历史说明：本目录中的早期测试方案可能仍以 `MCPServerManager` 为主要后端测试对象。
+> SDK Computer 架构对齐后的当前测试边界以
+> `plans/SDK_CLIENT_ARCHITECTURE_ALIGNMENT.md` 和现有 `src-tauri/tests/*` 为准。
 
 ---
 

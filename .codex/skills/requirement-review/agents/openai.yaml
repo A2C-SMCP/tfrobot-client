@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求评审"
+  short_description: "评审需求边界架构一致性职责分层和SDK最佳实践标准"
+  default_prompt: "Use $requirement-review 评审一个需求是否符合产品目标、架构一致性和 SDK/client 职责边界。"

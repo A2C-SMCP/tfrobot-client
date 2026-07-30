@@ -1,6 +1,15 @@
+pub mod client_computers;
+pub mod computer;
+pub mod computer_runtime_events;
 pub mod config;
+pub mod config_migration;
+pub mod connection_targets;
+pub mod input_resolver;
 pub mod keychain;
 pub mod logger;
+pub mod manager_client;
 pub mod runtime;
+pub mod sdk_config;
 pub mod settings;
 pub mod shell_env;
+pub mod storage;

@@ -19,14 +19,14 @@ describe('DebugPanel', () => {
   });
 
   it('renders tabs', () => {
-    render(<DebugPanel />);
+    render(<DebugPanel instanceId="computer-a" />);
     expect(screen.getByText('Tools')).toBeInTheDocument();
     expect(screen.getByText('Resources')).toBeInTheDocument();
     expect(screen.getByText('History')).toBeInTheDocument();
   });
 
   it('renders ToolBrowser as default active tab', () => {
-    render(<DebugPanel />);
+    render(<DebugPanel instanceId="computer-a" />);
     expect(screen.getByTestId('tool-browser')).toBeInTheDocument();
   });
 });

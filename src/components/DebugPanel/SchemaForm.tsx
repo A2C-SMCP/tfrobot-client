@@ -1,4 +1,5 @@
-import { Form, Input, InputNumber, Switch, Select } from 'antd';
+import { Form, InputNumber, Switch, Select } from 'antd';
+import { Input } from '@/components/common/Input';
 import type { FormInstance } from 'antd';
 
 interface SchemaFormProps {

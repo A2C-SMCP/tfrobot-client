@@ -7,7 +7,7 @@ import { SchemaForm } from './SchemaForm';
 
 const { Text } = Typography;
 
-export function ToolCallTest({ tool }: { tool: ToolInfo }) {
+export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
   const { t } = useTranslation();
   const { executeTool, lastCallResult, calling } = useDebugStore();
   const [form] = Form.useForm();
@@ -50,7 +50,7 @@ export function ToolCallTest({ tool }: { tool: ToolInfo }) {
       }
     }
 
-    await executeTool(tool.name, params, timeout);
+    await executeTool(instanceId, tool.name, params, timeout);
   };
 
   return (
@@ -103,8 +103,10 @@ export function ToolCallTest({ tool }: { tool: ToolInfo }) {
   );
 }
 
-function ToolCallResultView({ response }: { response: ToolCallResponse }) {
+export function ToolCallResultView({ response }: { response: ToolCallResponse }) {
   const { t } = useTranslation();
+  const errorCode = response.result?._meta?.error_code;
+  const isAuthorizationRequired = errorCode === 4006;
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -117,6 +119,15 @@ function ToolCallResultView({ response }: { response: ToolCallResponse }) {
 
       {response.error && (
         <Alert type="error" message={response.error} style={{ marginBottom: 8 }} />
+      )}
+
+      {response.result?.isError && errorCode !== undefined && (
+        <Alert
+          type="error"
+          message={isAuthorizationRequired ? t('debug.authorizationRequired') : t('common.error')}
+          description={t('debug.toolErrorCode', { code: String(errorCode) })}
+          style={{ marginBottom: 8 }}
+        />
       )}
 
       {response.result?.content.map((item, i) => {

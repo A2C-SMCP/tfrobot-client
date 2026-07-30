@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Descriptions, Space, Button, Modal, message } from 'antd';
+import { App, Descriptions, Space, Button } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';
 import { check } from '@tauri-apps/plugin-updater';
@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 
 export function AboutSection() {
   const { t } = useTranslation();
+  const { modal, message } = App.useApp();
   const { appInfo, fetchAppInfo } = useSettingsStore();
 
   useEffect(() => {
@@ -17,7 +18,7 @@ export function AboutSection() {
     try {
       const update = await check();
       if (update) {
-        Modal.confirm({
+        modal.confirm({
           title: t('settings.updateAvailable'),
           content: `${t('settings.newVersion')}: ${update.version}`,
           onOk: async () => {
