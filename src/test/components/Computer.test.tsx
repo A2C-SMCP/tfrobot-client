@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '../helpers/render';
+import { render, screen, fireEvent, waitFor, within } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { Computer } from '@/components/Computer';
@@ -418,7 +418,10 @@ describe('Computer', () => {
     expect(await screen.findByText('Running')).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
-    fireEvent.click(last(await screen.findAllByText('OK')));
+    const deleteConfirmation = await screen.findByText('Delete this Computer?');
+    const deletePopover = deleteConfirmation.closest('.ant-popover');
+    expect(deletePopover).not.toBeNull();
+    fireEvent.click(within(deletePopover!).getByRole('button', { name: 'OK' }));
     expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
   }, 80000);
 

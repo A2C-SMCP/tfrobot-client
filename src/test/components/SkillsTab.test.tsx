@@ -67,13 +67,17 @@ describe('SkillsTab', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('list_skills', { instanceId: 'computer-a' });
     });
 
-    fireEvent.click(screen.getByText('Refresh').closest('button')!);
+    const refreshButton = screen.getByText('Refresh').closest('button')!;
+    await waitFor(() => expect(refreshButton).toBeEnabled());
+    fireEvent.click(refreshButton);
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('refresh_skills', { instanceId: 'computer-a' });
     });
     await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('list_skills', { instanceId: 'computer-a' });
+      expect(
+        mockedInvoke.mock.calls.filter(([command]) => command === 'list_skills'),
+      ).toHaveLength(2);
     });
     expect(await screen.findByText('refreshed-helper')).toBeInTheDocument();
   });
