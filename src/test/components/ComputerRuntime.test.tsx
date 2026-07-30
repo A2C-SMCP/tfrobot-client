@@ -20,6 +20,9 @@ function instance(overrides: Partial<ComputerInstance> = {}): ComputerInstance {
     name: 'Computer A',
     status: 'running',
     connectionStatus: 'disconnected',
+    defaultSkillHome: '/app/computer_instances/computer-a/skill_home',
+    configuredSkillHome: '/app/computer_instances/computer-a/skill_home',
+    effectiveSkillHome: '/app/computer_instances/computer-a/skill_home',
     connectionPolicy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     mcpServerCount: 3,
     runtime: runtimeSnapshot({
@@ -59,41 +62,20 @@ describe('ComputerRuntime', () => {
   it('composes MCP runtime and active capability summary without duplicating header actions', () => {
     renderRuntime();
 
-    expect(screen.getByText('Connection')).toBeInTheDocument();
-    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
-    expect(screen.getByText('Active capability summary')).toBeInTheDocument();
+    expect(screen.queryByText('Connection')).not.toBeInTheDocument();
+    const capabilitySummary = screen.getByText('Active capability summary');
+    const runtimeMcp = screen.getByTestId('runtime-mcp');
+    expect(
+      capabilitySummary.compareDocumentPosition(runtimeMcp)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(runtimeMcp).toHaveAttribute('data-disabled', 'false');
     expect(screen.getByText('12')).toBeInTheDocument();
     expect(screen.getByText('5')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Stop$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Restart$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Connect$/ })).not.toBeInTheDocument();
     expect(screen.queryByText('Advanced Runtime Diagnostics')).not.toBeInTheDocument();
-  });
-
-  it('renders the authoritative connection operation and target', () => {
-    renderRuntime(instance({
-      connectionStatus: 'connecting',
-      connectionState: {
-        status: 'connecting',
-        present: true,
-        revision: 4,
-        context: null,
-        operation: 'reconnect',
-        operation_target: {
-          source_type: 'manager_robot',
-          target_id: 'manager:42',
-          employee_id: 42,
-        },
-        last_error: null,
-        actions: {
-          connect: { enabled: false, disabled_reason: 'transition_in_progress' },
-          disconnect: { enabled: false, disabled_reason: 'transition_in_progress' },
-        },
-      },
-    }));
-
-    expect(screen.getByText('Reconnect')).toBeInTheDocument();
-    expect(screen.getByText('manager_robot · 42')).toBeInTheDocument();
   });
 
   it('shows a safe structured Runtime error and delegates log navigation', () => {

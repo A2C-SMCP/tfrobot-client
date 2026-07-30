@@ -107,18 +107,6 @@
     "workbench": {
       "pageLabel": "Computer 运行工作台",
       "capabilitySummary": "当前能力摘要",
-      "connection": {
-        "title": "连接",
-        "status": "状态",
-        "operation": "当前操作",
-        "operationTarget": "操作目标",
-        "profile": "已连接配置",
-        "operations": {
-          "connect": "连接",
-          "disconnect": "断开连接",
-          "reconnect": "重新连接"
-        }
-      },
       "actions": {
         "more": "更多 Computer 操作",
         "copyId": "复制 ID"

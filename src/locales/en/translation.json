@@ -107,18 +107,6 @@
     "workbench": {
       "pageLabel": "Computer runtime workbench",
       "capabilitySummary": "Active capability summary",
-      "connection": {
-        "title": "Connection",
-        "status": "Status",
-        "operation": "Current operation",
-        "operationTarget": "Operation target",
-        "profile": "Connected profile",
-        "operations": {
-          "connect": "Connect",
-          "disconnect": "Disconnect",
-          "reconnect": "Reconnect"
-        }
-      },
       "actions": {
         "more": "More Computer actions",
         "copyId": "Copy ID"

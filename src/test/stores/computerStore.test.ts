@@ -12,6 +12,9 @@ const baseStatus = {
   id: 'computer-a',
   name: 'Computer A',
   description: 'Primary',
+  default_skill_home: '/app/computer_instances/computer-a/skill_home',
+  configured_skill_home: '/app/computer_instances/computer-a/skill_home',
+  effective_skill_home: '/app/computer_instances/computer-a/skill_home',
   running: false,
   runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
   connected: false,
@@ -66,6 +69,9 @@ describe('computerStore', () => {
       id: 'computer-a',
       name: 'Computer A',
       description: 'Primary',
+      defaultSkillHome: '/app/computer_instances/computer-a/skill_home',
+      configuredSkillHome: '/app/computer_instances/computer-a/skill_home',
+      effectiveSkillHome: '/app/computer_instances/computer-a/skill_home',
     });
     expect(useComputerStore.getState().selectedInstanceId).toBe('computer-a');
   });

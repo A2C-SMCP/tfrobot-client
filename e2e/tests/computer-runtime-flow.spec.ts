@@ -28,6 +28,11 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Duplicate' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Copy ID' })).toBeVisible();
     await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toBeVisible();
+    const runtimeCards = workbench.locator('.ant-card');
+    await expect(runtimeCards.first().getByText('Active capability summary', { exact: true }))
+      .toBeVisible();
+    await expect(workbench.locator('.ant-card-head-title', { hasText: 'Connection' }))
+      .toHaveCount(0);
     for (const configurationAction of [
       'Add Server',
       'Import Config',

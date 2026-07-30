@@ -42,6 +42,9 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     await expect(page.getByRole('button', { name: /keyboard-helper/i })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'View active Skills in Computer' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open local directory' })).toBeVisible();
+    await expect(page.getByText('/mock/computer_instances/computer-a/skill_home', {
+      exact: true,
+    })).toBeVisible();
 
     await navigation.getByText('Plugins & Marketplace', { exact: true }).click();
     await expectNoRuntimeActions();

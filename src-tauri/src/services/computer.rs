@@ -1575,6 +1575,16 @@ impl ComputerInstanceRuntime {
         self.computer.read().await.skill_home()
     }
 
+    pub fn default_skill_home(&self) -> PathBuf {
+        default_local_skills_root(&self.skill_home_base, &self.instance.id)
+    }
+
+    pub fn configured_skill_home(&self) -> PathBuf {
+        instance_config_context(&self.instance, &self.skill_home_base)
+            .skill_home()
+            .to_path_buf()
+    }
+
     pub async fn sdk_governance_snapshot(
         &self,
     ) -> Result<a2c_smcp::smcp_computer::GovernanceSnapshot, String> {

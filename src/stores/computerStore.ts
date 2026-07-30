@@ -55,7 +55,9 @@ export interface ComputerInstanceStatus {
   name: string;
   description?: string;
   local_skills_root?: string | null;
-  effective_skill_home?: string;
+  default_skill_home: string;
+  configured_skill_home: string;
+  effective_skill_home: string;
   running: boolean;
   runtime: ComputerRuntimeSnapshot;
   connection_state?: ClientConnectionAuthority;
@@ -85,6 +87,8 @@ export interface ComputerInstance {
   robotName?: string;
   robotBinding?: RobotBindingMetadata | null;
   localSkillsRoot?: string | null;
+  defaultSkillHome?: string;
+  configuredSkillHome?: string;
   effectiveSkillHome?: string;
   connectionPolicy: ComputerConnectionPolicy;
   mcpServerCount: number;
@@ -200,6 +204,8 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     robotName: status.robot_binding?.robot_name,
     robotBinding: status.robot_binding,
     localSkillsRoot: status.local_skills_root ?? null,
+    defaultSkillHome: status.default_skill_home,
+    configuredSkillHome: status.configured_skill_home,
     effectiveSkillHome: status.effective_skill_home,
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     mcpServerCount: projection.mcpServerCount,

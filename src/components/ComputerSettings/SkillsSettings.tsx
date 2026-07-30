@@ -37,6 +37,13 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
   const openConfiguredLocalSkillsRoot = useSkillStore(
     (state) => state.openConfiguredLocalSkillsRoot,
   );
+  const defaultSkillHome = instance.defaultSkillHome
+    ?? (instance.localSkillsRoot ? '' : instance.effectiveSkillHome)
+    ?? '';
+  const configuredSkillHome = instance.configuredSkillHome
+    ?? instance.localSkillsRoot
+    ?? instance.effectiveSkillHome
+    ?? '';
 
   useEffect(() => {
     form.setFieldsValue({ localSkillsRoot: instance.localSkillsRoot ?? '' });
@@ -84,7 +91,7 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
         <Descriptions column={1} size="small">
           <Descriptions.Item label={t('computer.settings.sections.skills.savedSkillHome')}>
             <Text code copyable>
-              {instance.localSkillsRoot ?? t('computer.runtime.defaultSkillHome')}
+              {configuredSkillHome}
             </Text>
           </Descriptions.Item>
         </Descriptions>
@@ -96,7 +103,7 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
                 <Input
                   aria-label={t('computer.runtime.localSkillsRoot')}
                   allowClear
-                  placeholder={t('computer.runtime.defaultSkillHome')}
+                  placeholder={defaultSkillHome}
                 />
               </Form.Item>
               <Button
@@ -162,12 +169,12 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
           <Descriptions column={1} size="small">
             <Descriptions.Item label={t('computer.settings.sections.skills.savedSkillHome')}>
               <Text code>
-                {instance.localSkillsRoot ?? t('computer.runtime.defaultSkillHome')}
+                {configuredSkillHome}
               </Text>
             </Descriptions.Item>
             <Descriptions.Item label={t('computer.runtime.nextSkillHome')}>
               <Text code>
-                {pendingSkillHomeRoot || t('computer.runtime.defaultSkillHome')}
+                {pendingSkillHomeRoot || defaultSkillHome}
               </Text>
             </Descriptions.Item>
           </Descriptions>

@@ -16,6 +16,8 @@ const instance: ComputerInstance = {
   status: 'running',
   connectionStatus: 'disconnected',
   localSkillsRoot: '/custom/skill-home',
+  defaultSkillHome: '/app/computer_instances/computer-a/skill_home',
+  configuredSkillHome: '/custom/skill-home',
   effectiveSkillHome: '/runtime/old-skill-home',
   connectionPolicy: { target: null, auto_connect: false },
   mcpServerCount: 0,
@@ -70,6 +72,67 @@ describe('SkillsSettings', () => {
     });
   });
 
+  it('shows the concrete default Skill Home without persisting it as an override', () => {
+    render(
+      <SkillsSettings
+        instance={{
+          ...instance,
+          localSkillsRoot: null,
+          configuredSkillHome: '/app/computer_instances/computer-a/skill_home',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('/app/computer_instances/computer-a/skill_home'))
+      .toBeInTheDocument();
+    expect(screen.getByLabelText('Instance Skill Home')).toHaveValue('');
+    expect(screen.getByLabelText('Instance Skill Home')).toHaveAttribute(
+      'placeholder',
+      '/app/computer_instances/computer-a/skill_home',
+    );
+  });
+
+  it('uses the concrete effective path when rendering a legacy Computer projection', () => {
+    render(
+      <SkillsSettings
+        instance={{
+          ...instance,
+          localSkillsRoot: null,
+          defaultSkillHome: undefined,
+          configuredSkillHome: undefined,
+          effectiveSkillHome: '/legacy/computer-a/skill_home',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('/legacy/computer-a/skill_home')).toBeInTheDocument();
+    expect(screen.queryByText('Default instance skill_home/')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Instance Skill Home')).toHaveAttribute(
+      'placeholder',
+      '/legacy/computer-a/skill_home',
+    );
+  });
+
+  it('does not mistake the effective runtime path for a legacy saved override', () => {
+    render(
+      <SkillsSettings
+        instance={{
+          ...instance,
+          localSkillsRoot: '/saved/new-skill-home',
+          defaultSkillHome: undefined,
+          configuredSkillHome: undefined,
+          effectiveSkillHome: '/runtime/old-skill-home',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('/saved/new-skill-home')).toBeInTheDocument();
+    expect(screen.queryByText('/runtime/old-skill-home')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Instance Skill Home')).toHaveValue(
+      '/saved/new-skill-home',
+    );
+  });
+
   it('chooses and opens the instance Skill Home and restores the default', async () => {
     mockOpen.mockResolvedValueOnce('/chosen/skill-home' as never);
     mockInvoke
@@ -104,6 +167,9 @@ describe('SkillsSettings', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Use Default' }));
     expect(await screen.findByText('Save Skill Home?')).toBeInTheDocument();
+    expect(within(screen.getByRole('dialog')).getByText(
+      '/app/computer_instances/computer-a/skill_home',
+    )).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {

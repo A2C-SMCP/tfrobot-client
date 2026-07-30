@@ -24,6 +24,8 @@ pub struct ComputerInstanceStatus {
     pub name: String,
     pub description: Option<String>,
     pub local_skills_root: Option<PathBuf>,
+    pub default_skill_home: PathBuf,
+    pub configured_skill_home: PathBuf,
     pub effective_skill_home: PathBuf,
     pub running: bool,
     pub runtime: ComputerRuntimeSnapshot,
@@ -845,6 +847,8 @@ async fn status_from_instance(
         name: instance.name.clone(),
         description: instance.description.clone(),
         local_skills_root: instance.local_skills_root.clone(),
+        default_skill_home: runtime.default_skill_home(),
+        configured_skill_home: runtime.configured_skill_home(),
         effective_skill_home: runtime.sdk_skill_home().await,
         running: runtime_snapshot.is_running(),
         runtime: runtime_snapshot,
@@ -1192,7 +1196,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(updated.local_skills_root, Some(custom_root.clone()));
-        assert_eq!(updated.effective_skill_home, default_root);
+        assert_eq!(updated.default_skill_home, default_root.clone());
+        assert_eq!(updated.configured_skill_home, custom_root.clone());
+        assert_eq!(updated.effective_skill_home, default_root.clone());
 
         let started = start_computer_instance_core(None, &state, "computer-a".to_string())
             .await
@@ -1211,6 +1217,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(restored.local_skills_root, None);
+        assert_eq!(restored.default_skill_home, default_root.clone());
+        assert_eq!(restored.configured_skill_home, default_root.clone());
         assert_eq!(restored.effective_skill_home, custom_root);
         assert_eq!(restored.runtime.generation, generation_before_save);
 

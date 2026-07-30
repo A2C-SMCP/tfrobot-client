@@ -3,10 +3,6 @@ import type {
   ComputerInstance,
   ComputerStatus,
 } from '@/stores/computerStore';
-import type {
-  ClientConnectionOperation,
-  ClientConnectionOperationTarget,
-} from '@/stores/connectionAuthority';
 
 export const computerStatusColor: Record<ComputerStatus, string> = {
   running: 'success',
@@ -81,16 +77,4 @@ export function connectDisabledReasonTranslationKey(
     return 'computer.connectionActions.missingRobotAccountId';
   }
   return undefined;
-}
-
-export function connectionOperationTargetLabel(
-  operation: ClientConnectionOperation,
-  target: ClientConnectionOperationTarget,
-): string {
-  const identifier = target.employee_id != null
-    ? String(target.employee_id)
-    : target.target_id;
-  return identifier
-    ? `${target.source_type} · ${identifier}`
-    : `${target.source_type} · ${operation}`;
 }

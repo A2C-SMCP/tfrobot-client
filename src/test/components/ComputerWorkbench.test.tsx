@@ -52,6 +52,9 @@ function instance(overrides: Partial<ComputerInstance> = {}): ComputerInstance {
     description: 'Primary runtime',
     status: 'running',
     connectionStatus: 'disconnected',
+    defaultSkillHome: '/app/computer_instances/computer-a/skill_home',
+    configuredSkillHome: '/app/computer_instances/computer-a/skill_home',
+    effectiveSkillHome: '/app/computer_instances/computer-a/skill_home',
     connectionPolicy: {
       target: { type: 'manual_smcp', id: 'target-a' },
       auto_connect: false,
