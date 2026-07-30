@@ -448,7 +448,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
           initialSection={initialSection}
           onBack={() => setView('list')}
           onOpenSettings={() => onNavigate?.('computer-settings:general')}
-          onEdit={() => openEditModal(selectedInstance)}
           onDelete={() => handleDelete(selectedInstance)}
           onStartStop={() => { void handleStartStop(selectedInstance); }}
           onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
@@ -458,7 +457,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
             onNavigate?.(computerSettingsNavigationKey('plugins', owner));
           }}
         />
-        {renderComputerModal()}
         {renderRuntimeInputPrompt()}
       </div>
     );

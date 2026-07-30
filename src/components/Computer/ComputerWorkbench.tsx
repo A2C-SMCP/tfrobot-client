@@ -25,7 +25,6 @@ interface ComputerWorkbenchProps {
   initialSection: ComputerWorkbenchSection;
   onBack: () => void;
   onOpenSettings: () => void;
-  onEdit: () => void;
   onDelete: () => Promise<void>;
   onStartStop: () => void;
   onRestart: () => void;
@@ -40,7 +39,6 @@ export function ComputerWorkbench({
   initialSection,
   onBack,
   onOpenSettings,
-  onEdit,
   onDelete,
   onStartStop,
   onRestart,
@@ -67,13 +65,11 @@ export function ComputerWorkbench({
         loading={loading}
         onBack={onBack}
         onOpenSettings={onOpenSettings}
-        onEdit={onEdit}
         onDelete={onDelete}
         onStartStop={onStartStop}
         onRestart={onRestart}
         onConnect={onConnect}
         onDisconnect={onDisconnect}
-        onOpenLogs={() => openSection('logs')}
       />
 
       <main>

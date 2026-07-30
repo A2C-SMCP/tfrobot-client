@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '../helpers/render';
+import { render, screen, fireEvent, waitFor, within } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { Computer } from '@/components/Computer';
@@ -240,21 +240,24 @@ describe('Computer', () => {
     expect(onNavigate).toHaveBeenCalledWith('computer-settings:general');
   });
 
-  it('keeps low-frequency and destructive detail actions in the more menu', async () => {
+  it('keeps ID copy next to the identity and only runtime or destructive actions in the more menu', async () => {
     render(<Computer initialView="detail" />);
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
+    const copyId = screen.getByRole('button', { name: 'Copy ID' });
+    expect(copyId).toBeInTheDocument();
+    fireEvent.click(copyId);
+    expect(await screen.findByRole('button', { name: 'Computer ID copied' })).toBeInTheDocument();
+
     expect(screen.queryByRole('button', { name: 'Duplicate' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'More Computer actions' }));
 
-    expect(await screen.findByText('Restart')).toBeInTheDocument();
-    expect(screen.getByText('View logs')).toBeInTheDocument();
-    expect(screen.getByText('Copy ID')).toBeInTheDocument();
-    expect(screen.getByText('Edit identity')).toBeInTheDocument();
-    expect(screen.getByText('Delete')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('View logs'));
-    expect(await screen.findByTestId('log-viewer')).toHaveTextContent('computer-a');
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByText('Restart')).toBeInTheDocument();
+    expect(within(menu).getByText('Delete')).toBeInTheDocument();
+    expect(within(menu).queryByText('View logs')).not.toBeInTheDocument();
+    expect(within(menu).queryByText('Copy ID')).not.toBeInTheDocument();
+    expect(within(menu).queryByText('Edit identity')).not.toBeInTheDocument();
   });
 
   it('maps the legacy debug destination to the expanded workbench section', async () => {

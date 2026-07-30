@@ -72,7 +72,6 @@ function renderWorkbench(
     initialSection,
     onBack: vi.fn(),
     onOpenSettings: vi.fn(),
-    onEdit: vi.fn(),
     onDelete: vi.fn().mockResolvedValue(undefined),
     onStartStop: vi.fn(),
     onRestart: vi.fn(),

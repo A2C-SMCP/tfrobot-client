@@ -1,5 +1,4 @@
 import {
-  App,
   Button,
   Dropdown,
   Modal,
@@ -8,10 +7,7 @@ import {
   type MenuProps,
 } from 'antd';
 import {
-  CopyOutlined,
   DeleteOutlined,
-  EditOutlined,
-  FileTextOutlined,
   MoreOutlined,
   RetweetOutlined,
 } from '@ant-design/icons';
@@ -25,48 +21,17 @@ interface ComputerWorkbenchMoreActionsProps {
   instance: ComputerInstance;
   loading: boolean;
   onRestart: () => void;
-  onOpenLogs: () => void;
-  onEdit: () => void;
   onDelete: () => Promise<void>;
-}
-
-function copyWithFallback(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(value);
-  }
-
-  const input = document.createElement('textarea');
-  input.value = value;
-  input.setAttribute('readonly', '');
-  input.style.position = 'fixed';
-  input.style.opacity = '0';
-  document.body.appendChild(input);
-  input.select();
-  const copied = document.execCommand('copy');
-  input.remove();
-  return copied ? Promise.resolve() : Promise.reject(new Error('copy failed'));
 }
 
 export function ComputerWorkbenchMoreActions({
   instance,
   loading,
   onRestart,
-  onOpenLogs,
-  onEdit,
   onDelete,
 }: ComputerWorkbenchMoreActionsProps) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
   const [deleteOpen, setDeleteOpen] = useState(false);
-
-  const handleCopyId = async () => {
-    try {
-      await copyWithFallback(instance.id);
-      message.success(t('computer.workbench.messages.idCopied'));
-    } catch {
-      message.error(t('computer.workbench.messages.copyFailed'));
-    }
-  };
 
   const handleDelete = async () => {
     await onDelete();
@@ -91,21 +56,6 @@ export function ComputerWorkbenchMoreActions({
         </Space>
       ),
     },
-    {
-      key: 'logs',
-      icon: <FileTextOutlined />,
-      label: t('computer.workbench.actions.viewLogs'),
-    },
-    {
-      key: 'copy-id',
-      icon: <CopyOutlined />,
-      label: t('computer.workbench.actions.copyId'),
-    },
-    {
-      key: 'edit',
-      icon: <EditOutlined />,
-      label: t('computer.workbench.actions.editIdentity'),
-    },
     { type: 'divider' },
     {
       key: 'delete',
@@ -119,15 +69,6 @@ export function ComputerWorkbenchMoreActions({
     switch (key) {
       case 'restart':
         onRestart();
-        break;
-      case 'logs':
-        onOpenLogs();
-        break;
-      case 'copy-id':
-        void handleCopyId();
-        break;
-      case 'edit':
-        onEdit();
         break;
       case 'delete':
         setDeleteOpen(true);

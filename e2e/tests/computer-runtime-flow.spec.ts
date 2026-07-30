@@ -26,6 +26,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Duplicate' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Copy ID' })).toBeVisible();
     await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toBeVisible();
     for (const configurationAction of [
       'Add Server',
@@ -51,9 +52,9 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
 
     await page.getByRole('button', { name: 'More Computer actions' }).click();
     await expect(page.getByText('Restart', { exact: true })).toBeVisible();
-    await expect(page.getByText('View logs', { exact: true })).toBeVisible();
-    await expect(page.getByText('Copy ID', { exact: true })).toBeVisible();
-    await expect(page.getByText('Edit identity', { exact: true })).toBeVisible();
+    await expect(page.getByText('View logs', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Copy ID', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Edit identity', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Delete', { exact: true })).toBeVisible();
     await page.getByText('Delete', { exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Delete this Computer?' })).toBeVisible();

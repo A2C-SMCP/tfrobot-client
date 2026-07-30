@@ -32,13 +32,11 @@ interface ComputerWorkbenchHeaderProps {
   loading: boolean;
   onBack: () => void;
   onOpenSettings: () => void;
-  onEdit: () => void;
   onDelete: () => Promise<void>;
   onStartStop: () => void;
   onRestart: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
-  onOpenLogs: () => void;
 }
 
 export function ComputerWorkbenchHeader({
@@ -47,13 +45,11 @@ export function ComputerWorkbenchHeader({
   loading,
   onBack,
   onOpenSettings,
-  onEdit,
   onDelete,
   onStartStop,
   onRestart,
   onConnect,
   onDisconnect,
-  onOpenLogs,
 }: ComputerWorkbenchHeaderProps) {
   const { t } = useTranslation();
   const stopAction = usesStopAction(instance.status);
@@ -96,7 +92,18 @@ export function ComputerWorkbenchHeader({
       <div className={styles.identity}>
         <Title level={3} style={{ margin: 0 }}>{instance.name}</Title>
         <div className={styles.identityMeta}>
-          <Text type="secondary">{instance.id}</Text>
+          <Text
+            type="secondary"
+            copyable={{
+              text: instance.id,
+              tooltips: [
+                t('computer.workbench.actions.copyId'),
+                t('computer.workbench.messages.idCopied'),
+              ],
+            }}
+          >
+            {instance.id}
+          </Text>
           {instance.description && <Text>{instance.description}</Text>}
           <Text type="secondary">
             {instance.robotName
@@ -167,8 +174,6 @@ export function ComputerWorkbenchHeader({
             instance={instance}
             loading={loading}
             onRestart={onRestart}
-            onOpenLogs={onOpenLogs}
-            onEdit={onEdit}
             onDelete={onDelete}
           />
         </div>
