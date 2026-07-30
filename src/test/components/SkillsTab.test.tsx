@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { SkillsTab } from '@/components/Computer/SkillsTab';
+import styles from '@/components/Computer/SkillsTab.module.css';
 import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
@@ -42,7 +43,10 @@ describe('SkillsTab', () => {
     expect(screen.getAllByText('Open Local Root')).toHaveLength(1);
     expect(screen.getByText('Open Local Root').closest('button')).toBeEnabled();
 
-    fireEvent.click(screen.getByText('local-helper'));
+    const skillButton = screen.getByRole('button', { name: /local-helper.*Local helper/i });
+    skillButton.focus();
+    expect(skillButton).toHaveFocus();
+    fireEvent.click(skillButton);
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('get_skill', {
@@ -100,7 +104,9 @@ describe('SkillsTab', () => {
     fireEvent.click(await screen.findByText('long-helper'));
 
     const heading = await screen.findByRole('heading', { name: 'Long Helper' });
-    expect(heading.closest('[style*="overflow-y: auto"]')).toBeInTheDocument();
+    const preview = screen.getByRole('region', { name: 'Skill preview' });
+    expect(preview).toHaveClass(styles.detail);
+    expect(preview).toContainElement(heading);
   });
 
   it('filters skills without hiding the preview pane behind the list scroll', async () => {
@@ -118,7 +124,9 @@ describe('SkillsTab', () => {
 
     expect(screen.queryByText('alpha-helper')).not.toBeInTheDocument();
     expect(screen.getByText('beta-helper')).toBeInTheDocument();
-    expect(screen.getByText('Select a skill to preview SKILL.md').closest('[style*="overflow-y: auto"]')).toBeInTheDocument();
+    const preview = screen.getByRole('region', { name: 'Skill preview' });
+    expect(preview).toHaveClass(styles.detail);
+    expect(preview).toHaveTextContent('Select a skill to preview SKILL.md');
   });
 
   it('shows clear states for missing and empty SKILL.md content', async () => {

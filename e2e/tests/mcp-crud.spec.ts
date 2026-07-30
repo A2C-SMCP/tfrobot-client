@@ -30,13 +30,7 @@ test.describe('MCP Server configuration', () => {
 
   test('shows Start All and Stop All buttons', async ({ page }) => {
     await page.getByRole('button', { name: 'Back to Computer' }).click();
-    const runtimeTab = page.getByRole('tab', { name: /Runtime/ });
-    if (await runtimeTab.isVisible()) {
-      await runtimeTab.click();
-    } else {
-      await page.locator('.ant-tabs-nav-more').click();
-      await page.getByText('Runtime', { exact: true }).last().click();
-    }
+    await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByText('Start All')).toBeVisible();
     await expect(page.getByText('Stop All')).toBeVisible();
   });

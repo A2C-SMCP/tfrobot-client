@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { create } from 'zustand';
 import { useComputerStore } from './computerStore';
-import { useComputerOverviewStore } from './computerOverviewStore';
 import { useDashboardStore } from './dashboardStore';
 import { useDebugStore } from './debugStore';
 import { useMcpStore } from './mcpStore';
@@ -130,7 +129,6 @@ function refreshRevisionConsumers(
 function applySnapshotToConsumers(instanceId: string, snapshot: ComputerRuntimeSnapshot) {
   useComputerStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useDashboardStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
-  useComputerOverviewStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useConnectionStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
 }
 

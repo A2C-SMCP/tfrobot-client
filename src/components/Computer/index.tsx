@@ -1,69 +1,44 @@
-import { App, Button, Card, Col, Empty, Form, Input, Modal, Popconfirm, Row, Select, Skeleton, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Col, Empty, Form, Input, Modal, Popconfirm, Row, Select, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
-  BugOutlined,
   CopyOutlined,
   DesktopOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
-  FileTextOutlined,
   LinkOutlined,
-  ReadOutlined,
   PlayCircleOutlined,
-  SettingOutlined,
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import {
   useComputerStore,
-  type ComputerConnectionTarget,
   type ComputerInstance,
-  type ComputerStatus,
 } from '@/stores/computerStore';
 import {
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
-import { DesktopResources } from '@/components/DesktopResources';
-import { DebugPanel } from '@/components/DebugPanel';
-import { LogViewer } from '@/components/LogViewer';
 import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 import {
   computerSettingsNavigationKey,
-  toComputerDetailTab,
-  type ComputerDetailTab,
+  type ComputerWorkbenchSection,
 } from './tabs';
-import { ComputerOverview } from './ComputerOverview';
-import { ComputerRuntime } from './ComputerRuntime';
-import { SkillsTab } from './SkillsTab';
+import { ComputerWorkbench } from './ComputerWorkbench';
+import {
+  computerStatusColor,
+  connectDisabledReasonTranslationKey,
+  resolveComputerConnection,
+  usesStopAction,
+} from './computerActions';
 
 const { Title, Text } = Typography;
 
-const statusColor: Record<ComputerStatus, string> = {
-  running: 'success',
-  not_running: 'default',
-  starting: 'processing',
-  stopping: 'processing',
-  degraded: 'warning',
-  error: 'error',
-};
-
-function usesStopAction(status: ComputerStatus): boolean {
-  return status === 'running' || status === 'degraded' || status === 'stopping';
-}
-
-function isConnectionTargetConnectable(target?: ComputerConnectionTarget | null): boolean {
-  if (!target) return false;
-  if (target.type === 'manager_robot') return target.robotAccountId != null;
-  return true;
-}
-
 interface ComputerProps {
   initialView?: 'list' | 'detail';
-  initialTab?: ComputerDetailTab;
+  initialSection?: ComputerWorkbenchSection;
   onNavigate?: (key: string) => void;
 }
 
@@ -109,28 +84,14 @@ function ComputerCard({
   const startStopDisabledReason = startStopCapability.disabled_reason
     ? t(`computer.runtime.actionDisabledReasons.${startStopCapability.disabled_reason}`)
     : undefined;
-  const connectionTarget = instance.connectionPolicy.target;
-  const connectionTargetSelected = Boolean(connectionTarget);
-  const connectionTargetConnectable = isConnectionTargetConnectable(connectionTarget);
-  const connectionActions = instance.connectionState?.actions ?? {
-    connect: instance.runtime.actions.connect,
-    disconnect: instance.runtime.actions.disconnect,
-  };
-  const connectionStatus = instance.connectionState?.status
-    ?? (instance.clientConnectionPresent ? 'connected' : instance.connectionStatus);
-  const canConnect = connectionActions.connect.enabled && connectionTargetConnectable;
-  const showDisconnect = connectionActions.disconnect.enabled
-    || connectionStatus === 'disconnecting';
-  const disconnectDisabledReason = connectionActions.disconnect.disabled_reason
-    ? t(`computer.connectionActions.disabledReasons.${connectionActions.disconnect.disabled_reason}`)
+  const connection = resolveComputerConnection(instance);
+  const disconnectDisabledReason = connection.actions.disconnect.disabled_reason
+    ? t(`computer.connectionActions.disabledReasons.${connection.actions.disconnect.disabled_reason}`)
     : undefined;
-  const connectDisabledReason = !connectionActions.connect.enabled
-    ? t(`computer.connectionActions.disabledReasons.${connectionActions.connect.disabled_reason}`)
-    : !connectionTargetSelected
-      ? t('computer.connectionActions.requiresTarget')
-      : !connectionTargetConnectable
-        ? t('computer.connectionActions.missingRobotAccountId')
-      : undefined;
+  const connectDisabledReasonKey = connectDisabledReasonTranslationKey(connection);
+  const connectDisabledReason = connectDisabledReasonKey
+    ? t(connectDisabledReasonKey)
+    : undefined;
 
   return (
     <Card
@@ -147,7 +108,7 @@ function ComputerCard({
         </Space>
       }
       extra={
-        <Tag color={statusColor[instance.status]}>
+        <Tag color={computerStatusColor[instance.status]}>
           {t(`computer.status.${instance.status}`)}
         </Tag>
       }
@@ -157,8 +118,8 @@ function ComputerCard({
           <Text type="secondary" copyable>{instance.id}</Text>
           {instance.description && <Text>{instance.description}</Text>}
           <Space wrap>
-            <Tag color={connectionStatus === 'connected' ? 'green' : 'default'}>
-              {t(`computer.connection.${connectionStatus}`)}
+            <Tag color={connection.status === 'connected' ? 'green' : 'default'}>
+              {t(`computer.connection.${connection.status}`)}
             </Tag>
             <Tag icon={<ApiOutlined />}>
               {t('computer.mcpServers', { count: instance.mcpServerCount })}
@@ -192,15 +153,15 @@ function ComputerCard({
               onClick={startStopAction}
             />
           </Tooltip>
-          {showDisconnect ? (
+          {connection.showDisconnect ? (
             <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')} placement="right">
               <Button
                 aria-label={t('connection.disconnect')}
                 type="text"
                 danger
                 icon={<DisconnectOutlined />}
-                disabled={!connectionActions.disconnect.enabled}
-                loading={connectionStatus === 'disconnecting'}
+                disabled={!connection.actions.disconnect.enabled}
+                loading={connection.isDisconnecting}
                 onClick={onDisconnect}
               />
             </Tooltip>
@@ -210,9 +171,9 @@ function ComputerCard({
                 aria-label={t('connection.connect')}
                 type="text"
                 icon={<LinkOutlined />}
-                disabled={!canConnect}
-                loading={connectionStatus === 'connecting'}
-                style={{ color: canConnect ? '#1677ff' : undefined }}
+                disabled={!connection.canConnect}
+                loading={connection.isConnecting}
+                style={{ color: connection.canConnect ? '#1677ff' : undefined }}
                 onClick={onConnect}
               />
             </Tooltip>
@@ -234,7 +195,7 @@ function ComputerCard({
   );
 }
 
-export function Computer({ initialView = 'list', initialTab = 'overview', onNavigate }: ComputerProps) {
+export function Computer({ initialView = 'list', initialSection = 'top', onNavigate }: ComputerProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -255,7 +216,6 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
   } = useComputerStore();
   const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
-  const [activeTab, setActiveTab] = useState<ComputerDetailTab>(initialTab);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
@@ -277,8 +237,7 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
 
   useEffect(() => {
     setView(initialView);
-    setActiveTab(initialTab);
-  }, [initialView, initialTab]);
+  }, [initialView]);
 
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
@@ -480,212 +439,25 @@ export function Computer({ initialView = 'list', initialTab = 'overview', onNavi
     return <Skeleton active paragraph={{ rows: 4 }} />;
   }
 
-  const selectedConnectionTarget = selectedInstance?.connectionPolicy.target;
-  const selectedConnectionState = selectedInstance?.connectionState;
-  const selectedConnectionActions = selectedConnectionState?.actions ?? (selectedInstance ? {
-    connect: selectedInstance.runtime.actions.connect,
-    disconnect: selectedInstance.runtime.actions.disconnect,
-  } : undefined);
-  const selectedConnectionStatus = selectedConnectionState?.status
-    ?? (selectedInstance?.clientConnectionPresent
-      ? 'connected'
-      : selectedInstance?.connectionStatus);
-  const selectedShowDisconnect = Boolean(selectedConnectionActions?.disconnect.enabled)
-    || selectedConnectionStatus === 'disconnecting';
-  const selectedConnectionTargetSelected = Boolean(selectedConnectionTarget);
-  const selectedConnectionTargetConnectable = isConnectionTargetConnectable(selectedConnectionTarget);
-  const selectedCanConnect = Boolean(selectedConnectionActions?.connect.enabled)
-    && selectedConnectionTargetConnectable;
-  const selectedStopAction = selectedInstance ? usesStopAction(selectedInstance.status) : false;
-  const selectedStartStopCapability = selectedInstance
-    ? selectedStopAction
-      ? selectedInstance.runtime.actions.stop
-      : selectedInstance.runtime.actions.start
-    : undefined;
-  const selectedStartStopDisabledReason = selectedStartStopCapability?.disabled_reason
-    ? t(`computer.runtime.actionDisabledReasons.${selectedStartStopCapability.disabled_reason}`)
-    : undefined;
-  const selectedDisconnectDisabledReason = selectedConnectionActions?.disconnect.disabled_reason
-    ? t(`computer.connectionActions.disabledReasons.${selectedConnectionActions.disconnect.disabled_reason}`)
-    : undefined;
-  const selectedConnectDisabledReason = !selectedConnectionActions?.connect.enabled
-    ? t(`computer.connectionActions.disabledReasons.${selectedConnectionActions?.connect.disabled_reason}`)
-    : !selectedConnectionTargetSelected
-      ? t('computer.connectionActions.requiresTarget')
-      : !selectedConnectionTargetConnectable
-        ? t('computer.connectionActions.missingRobotAccountId')
-        : undefined;
-
   if (showDetail) {
     return (
       <div>
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
-            <div>
-              <Title level={4} style={{ margin: 0 }}>{selectedInstance.name}</Title>
-              <Text type="secondary" copyable>{selectedInstance.id}</Text>
-              {selectedInstance.description && (
-                <Text style={{ display: 'block', marginTop: 8 }}>{selectedInstance.description}</Text>
-              )}
-              <Space wrap style={{ marginTop: 8 }}>
-                <Tag color={statusColor[selectedInstance.status]}>
-                  {t(`computer.status.${selectedInstance.status}`)}
-                </Tag>
-                <Tag color={selectedConnectionStatus === 'connected' ? 'green' : 'default'}>
-                  {t(`computer.connection.${selectedConnectionStatus}`)}
-                </Tag>
-                <Text type="secondary">
-                  {selectedInstance.robotName
-                    ? t('computer.boundRobot', { name: selectedInstance.robotName })
-                    : t('computer.noRobotBound')}
-                </Text>
-                {selectedInstance.connectionStatus === 'connected' && selectedInstance.connectionProfile && (
-                  <Text type="secondary">
-                    {t('computer.connectionProfile', { name: selectedInstance.connectionProfile })}
-                  </Text>
-                )}
-              </Space>
-            </div>
-            <Space wrap align="start">
-              <Button onClick={() => setView('list')}>
-                {t('computer.backToList')}
-              </Button>
-              <Tooltip title={t('computer.settings.open')}>
-                <Button
-                  aria-label={t('computer.settings.open')}
-                  icon={<SettingOutlined />}
-                  onClick={() => onNavigate?.('computer-settings:general')}
-                />
-              </Tooltip>
-              <Space direction="vertical" size={2}>
-                <Text type="secondary">{t('computer.actionGroups.profile')}</Text>
-                <Space.Compact>
-                  <Button icon={<EditOutlined />} onClick={() => openEditModal(selectedInstance)}>
-                    {t('computer.edit')}
-                  </Button>
-                  <Button icon={<CopyOutlined />} onClick={() => openDuplicateModal(selectedInstance)}>
-                    {t('computer.duplicate')}
-                  </Button>
-                  <Popconfirm title={t('computer.confirmDelete')} onConfirm={() => handleDelete(selectedInstance)}>
-                    <Button danger icon={<DeleteOutlined />} loading={loading}>
-                      {t('computer.delete')}
-                    </Button>
-                  </Popconfirm>
-                </Space.Compact>
-              </Space>
-              <Space direction="vertical" size={2}>
-                <Text type="secondary">{t('computer.actionGroups.runtime')}</Text>
-                <Space.Compact>
-                  {selectedShowDisconnect ? (
-                    <Tooltip title={selectedDisconnectDisabledReason}>
-                      <Button
-                        danger
-                        icon={<DisconnectOutlined />}
-                        disabled={!selectedConnectionActions?.disconnect.enabled}
-                        loading={selectedConnectionStatus === 'disconnecting'}
-                        onClick={() => handleDisconnect(selectedInstance)}
-                      >
-                        {t('connection.disconnect')}
-                      </Button>
-                    </Tooltip>
-                  ) : (
-                    <Tooltip title={selectedConnectDisabledReason}>
-                      <Button
-                        type="primary"
-                        icon={<LinkOutlined />}
-                        disabled={!selectedCanConnect}
-                        loading={selectedConnectionStatus === 'connecting'}
-                        onClick={() => handleConnect(selectedInstance)}
-                      >
-                        {t('connection.connect')}
-                      </Button>
-                    </Tooltip>
-                  )}
-                  <Tooltip title={selectedStartStopDisabledReason}>
-                    <Button
-                      icon={selectedStopAction ? <StopOutlined /> : <PlayCircleOutlined />}
-                      disabled={!selectedStartStopCapability?.enabled}
-                      loading={loading}
-                      onClick={() => handleStartStop(selectedInstance)}
-                    >
-                      {selectedInstance.status === 'starting'
-                        ? t('computer.runtime.actionProgress.starting')
-                        : selectedInstance.status === 'stopping'
-                          ? t('computer.runtime.actionProgress.stopping')
-                          : selectedStopAction
-                            ? t('computer.stop')
-                            : t('computer.start')}
-                    </Button>
-                  </Tooltip>
-                </Space.Compact>
-              </Space>
-            </Space>
-          </div>
-
-          <Tabs
-            activeKey={activeTab}
-            onChange={(key) => setActiveTab(toComputerDetailTab(key))}
-            items={[
-              {
-                key: 'overview',
-                label: <><DesktopOutlined /> {t('dashboard.overview')}</>,
-                children: (
-                  <ComputerOverview
-                    instanceId={selectedInstance.id}
-                    onOpenTab={setActiveTab}
-                    onOpenSettings={(section) => {
-                      onNavigate?.(computerSettingsNavigationKey(section));
-                    }}
-                  />
-                ),
-              },
-              {
-                key: 'skills',
-                label: <><ReadOutlined /> {t('skills.title')}</>,
-                children: (
-                  <SkillsTab
-                    instanceId={selectedInstance.id}
-                    onOpenMcpTab={() => setActiveTab('runtime')}
-                  />
-                ),
-              },
-              {
-                key: 'resources',
-                label: <><DesktopOutlined /> {t('resources.title')}</>,
-                children: (
-                  <DesktopResources
-                    instanceId={selectedInstance.id}
-                    runtime={selectedInstance.runtime}
-                    onStartRuntime={() => { void runRuntimeAction(selectedInstance, 'start'); }}
-                    onOpenMcp={() => setActiveTab('runtime')}
-                  />
-                ),
-              },
-              { key: 'debug', label: <><BugOutlined /> {t('nav.debugPanel')}</>, children: <DebugPanel instanceId={selectedInstance.id} /> },
-              { key: 'logs', label: <><FileTextOutlined /> {t('logs.title')}</>, children: <LogViewer instanceId={selectedInstance.id} /> },
-              {
-                key: 'runtime',
-                label: <><PlayCircleOutlined /> {t('computer.runtime.title')}</>,
-                children: (
-                  <ComputerRuntime
-                    instance={selectedInstance}
-                    loading={loading}
-                    canConnect={selectedCanConnect}
-                    connectDisabledReason={selectedConnectDisabledReason}
-                    onStartStop={() => { void handleStartStop(selectedInstance); }}
-                    onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
-                    onConnect={() => { void handleConnect(selectedInstance); }}
-                    onDisconnect={() => { void handleDisconnect(selectedInstance); }}
-                    onViewLogs={() => setActiveTab('logs')}
-                    onOpenPlugin={(owner) => {
-                      onNavigate?.(computerSettingsNavigationKey('plugins', owner));
-                    }}
-                  />
-                ),
-              },
-            ]}
-          />
-        </Space>
+        <ComputerWorkbench
+          instance={selectedInstance}
+          loading={loading}
+          initialSection={initialSection}
+          onBack={() => setView('list')}
+          onOpenSettings={() => onNavigate?.('computer-settings:general')}
+          onEdit={() => openEditModal(selectedInstance)}
+          onDelete={() => handleDelete(selectedInstance)}
+          onStartStop={() => { void handleStartStop(selectedInstance); }}
+          onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
+          onConnect={() => { void handleConnect(selectedInstance); }}
+          onDisconnect={() => { void handleDisconnect(selectedInstance); }}
+          onOpenPlugin={(owner) => {
+            onNavigate?.(computerSettingsNavigationKey('plugins', owner));
+          }}
+        />
         {renderComputerModal()}
         {renderRuntimeInputPrompt()}
       </div>

@@ -1,19 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { setupInvokeMock } from '../fixtures/mock-invoke';
-
-async function openComputerTab(page: Page, label: string) {
-  const visibleTab = page.getByRole('tab').filter({ hasText: label });
-  if (await visibleTab.isVisible()) {
-    await visibleTab.click();
-    return;
-  }
-
-  await page.locator('.ant-tabs-nav-more').click();
-  await page
-    .locator('.ant-tabs-dropdown:not(.ant-tabs-dropdown-hidden)')
-    .getByText(label, { exact: true })
-    .click();
-}
 
 test.describe('Computer configuration, runtime, and diagnostics boundaries', () => {
   test.beforeEach(async ({ page }) => {
@@ -23,27 +9,27 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.getByRole('button', { name: 'Computer A', exact: true }).click();
   });
 
-  test('keeps profile, config, runtime, and diagnostics operations semantically separate', async ({ page }) => {
-    const profileGroup = page
-      .getByText('Profile & Configuration', { exact: true })
-      .locator('..')
-      .locator('..');
-    await expect(profileGroup.getByRole('button', { name: 'Edit' })).toBeVisible();
-    await expect(profileGroup.getByRole('button', { name: 'Duplicate' })).toBeVisible();
-    await expect(profileGroup.getByRole('button', { name: 'Delete' })).toBeVisible();
-    await expect(profileGroup.getByRole('button', { name: 'Connect' })).not.toBeVisible();
-    await expect(profileGroup.getByRole('button', { name: 'Stop' })).not.toBeVisible();
+  test('keeps identity, config, runtime, and diagnostics operations semantically separate', async ({ page }) => {
+    const workbench = page.getByLabel('Computer runtime workbench');
+    await expect(workbench).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Overview' })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: 'Runtime' })).toHaveCount(0);
+    const back = page.getByRole('button', { name: 'Back to Computers' });
+    await expect(back).toBeVisible();
+    await expect(back).toHaveText('');
+    await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Duplicate' })).toHaveCount(0);
 
-    const runtimeGroup = page
-      .locator('.ant-typography-secondary')
-      .filter({ hasText: /^Runtime$/ })
-      .locator('..')
-      .locator('..');
-    await expect(runtimeGroup.getByRole('button', { name: 'Connect' })).toBeVisible();
-    await expect(runtimeGroup.getByRole('button', { name: 'Stop' })).toBeVisible();
-    await expect(runtimeGroup.getByRole('button', { name: 'Edit' })).not.toBeVisible();
-    await expect(runtimeGroup.getByRole('button', { name: 'Duplicate' })).not.toBeVisible();
-    await expect(runtimeGroup.getByRole('button', { name: 'Delete' })).not.toBeVisible();
+    await page.getByRole('button', { name: 'More Computer actions' }).click();
+    await expect(page.getByText('Restart', { exact: true })).toBeVisible();
+    await expect(page.getByText('View logs', { exact: true })).toBeVisible();
+    await expect(page.getByText('Copy ID', { exact: true })).toBeVisible();
+    await expect(page.getByText('Edit identity', { exact: true })).toBeVisible();
+    await expect(page.getByText('Delete', { exact: true })).toBeVisible();
+    await page.getByText('Delete', { exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Delete this Computer?' })).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel' }).click();
 
     await page.getByRole('button', { name: 'Open Computer settings' }).click();
     await page
@@ -58,23 +44,21 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Stop All' })).not.toBeVisible();
 
     await page.getByRole('button', { name: 'Back to Computer' }).click();
-    await openComputerTab(page, 'Runtime');
-    await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible();
+    await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByRole('button', { name: /Reload$/ })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Start All' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Stop All' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import Config' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).not.toBeVisible();
 
-    await openComputerTab(page, 'Debug Panel');
+    await page.getByText('Debug Panel', { exact: true }).click();
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Search tools...')).toBeVisible();
-    await openComputerTab(page, 'Logs');
+    await page.getByRole('button', { name: /Logs/ }).click();
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
   });
 
   test('projects runtime status events into the active Computer view and refreshes consumers', async ({ page }) => {
-    await openComputerTab(page, 'Runtime');
     await page.getByText('Advanced Runtime Diagnostics').click();
     await expect(page.getByRole('cell', { name: /Snapshot Revision\s*:\s*1/ })).toBeVisible();
     await expect(page.getByRole('cell', { name: /Capability Revision\s*:\s*1/ })).toBeVisible();
@@ -211,12 +195,39 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       });
     });
 
-    const runtimePanel = page.getByLabel('Runtime');
+    const runtimePanel = page.getByRole('region', { name: 'Runtime workbench' });
     await expect(runtimePanel.getByText('The Runtime is available, but an MCP server could not start.'))
       .toBeVisible();
     await expect(runtimePanel.getByText('Affected: MCP server Browser MCP')).toBeVisible();
     await expect(runtimePanel.getByText('process exited with code 1')).not.toBeVisible();
     await runtimePanel.getByRole('button', { name: 'View logs' }).click();
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
+  });
+
+  test('keeps the workbench accessible and responsive in a narrow desktop window', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 800, height: 760 });
+
+    const workbench = page.getByLabel('Computer runtime workbench');
+    await expect(workbench).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back to Computers' })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'Open Computer settings' })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'More Computer actions' })).toBeInViewport();
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth))
+      .toBeLessThanOrEqual(await page.evaluate(() => document.documentElement.clientWidth));
+
+    const skill = page.getByRole('button', { name: /keyboard-helper/i });
+    await skill.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('heading', { name: 'Keyboard Helper' })).toBeVisible();
+
+    const debugPanel = page.getByRole('button', { name: /Debug Panel/ });
+    await debugPanel.focus();
+    await debugPanel.press('Enter');
+    await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
   });
 });

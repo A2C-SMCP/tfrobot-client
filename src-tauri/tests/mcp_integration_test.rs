@@ -25,7 +25,7 @@ use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
     computer::{self, start_computer_instance_core},
     config_io,
-    dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
+    dashboard::get_dashboard_data_core,
     debug, inputs, sdk_config,
 };
 use tfrobot_client_lib::services::computer::ComputerInstance;
@@ -1049,13 +1049,9 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         dashboard_computer.runtime.capability_revision,
         final_snapshot.capability_revision
     );
-    let overview = get_computer_overview_data_core(&state, TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    assert!(overview.connected);
-    assert_eq!(overview.tools_count, final_snapshot.tools);
+    assert!(dashboard_computer.connected);
     assert_eq!(
-        overview.runtime.config_revision,
+        dashboard_computer.runtime.config_revision,
         final_snapshot.config_revision
     );
 

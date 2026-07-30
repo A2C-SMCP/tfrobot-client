@@ -1,11 +1,32 @@
 import type { McpServerManagedBy } from '@/stores/mcpStore';
 
-export const COMPUTER_DETAIL_TABS = ['overview', 'skills', 'resources', 'debug', 'logs', 'runtime'] as const;
+export const COMPUTER_WORKBENCH_SECTIONS = [
+  'top',
+  'skills',
+  'resources',
+  'debug',
+  'logs',
+] as const;
 
-export type ComputerDetailTab = (typeof COMPUTER_DETAIL_TABS)[number];
+export type ComputerWorkbenchSection = (typeof COMPUTER_WORKBENCH_SECTIONS)[number];
 
-export function toComputerDetailTab(value: string | undefined): ComputerDetailTab {
-  return COMPUTER_DETAIL_TABS.includes(value as ComputerDetailTab) ? (value as ComputerDetailTab) : 'overview';
+const LEGACY_WORKBENCH_SECTIONS: Record<string, ComputerWorkbenchSection> = {
+  overview: 'top',
+  runtime: 'top',
+  skills: 'skills',
+  resources: 'resources',
+  debug: 'debug',
+  logs: 'logs',
+};
+
+export function toComputerWorkbenchSection(
+  value: string | undefined,
+): ComputerWorkbenchSection {
+  if (!value) return 'top';
+  return LEGACY_WORKBENCH_SECTIONS[value]
+    ?? (COMPUTER_WORKBENCH_SECTIONS.includes(value as ComputerWorkbenchSection)
+      ? value as ComputerWorkbenchSection
+      : 'top');
 }
 
 export const COMPUTER_SETTINGS_SECTIONS = [

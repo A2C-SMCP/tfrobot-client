@@ -104,6 +104,39 @@
         }
       }
     },
+    "workbench": {
+      "pageLabel": "Computer 运行工作台",
+      "capabilitySummary": "当前能力摘要",
+      "connection": {
+        "title": "连接",
+        "status": "状态",
+        "operation": "当前操作",
+        "operationTarget": "操作目标",
+        "profile": "已连接配置",
+        "operations": {
+          "connect": "连接",
+          "disconnect": "断开连接",
+          "reconnect": "重新连接"
+        }
+      },
+      "actions": {
+        "more": "更多 Computer 操作",
+        "viewLogs": "查看日志",
+        "copyId": "复制 ID",
+        "editIdentity": "编辑身份信息"
+      },
+      "sections": {
+        "runtime": "Runtime 工作台",
+        "skills": "当前 Skills 与 Tools",
+        "resources": "桌面资源",
+        "diagnostics": "运行诊断"
+      },
+      "messages": {
+        "idCopied": "已复制 Computer ID",
+        "copyFailed": "无法复制 Computer ID"
+      },
+      "deleteDescription": "此操作将永久删除 {{name}} 及其保存的配置。"
+    },
     "runtime": {
       "title": "运行时",
       "statusTitle": "运行时状态",
@@ -287,6 +320,7 @@
     "empty": "暂无 active skills",
     "emptySearch": "没有匹配的 skills",
     "emptySelection": "选择一个 skill 预览 SKILL.md",
+    "preview": "Skill 预览",
     "searchPlaceholder": "搜索 skills",
     "openLocalRoot": "打开本地目录",
     "openMcpSource": "打开 MCP 服务器 {{server}}",

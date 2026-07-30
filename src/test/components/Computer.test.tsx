@@ -105,9 +105,6 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
     </div>
   ),
 }));
-vi.mock('@/components/Computer/ComputerOverview', () => ({
-  ComputerOverview: ({ instanceId }: { instanceId: string }) => <div data-testid="computer-overview">ComputerOverview:{instanceId}</div>,
-}));
 vi.mock('@/components/Computer/SkillsTab', () => ({
   SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
 }));
@@ -182,22 +179,24 @@ describe('Computer', () => {
     expect(screen.queryByRole('button', { name: 'Open Details' })).not.toBeInTheDocument();
   });
 
-  it('opens a Computer detail view from the list', async () => {
+  it('opens a Computer single-page runtime workbench from the list', async () => {
     render(<Computer />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'prod' }));
 
-    expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
+    expect(screen.getByLabelText('Computer runtime workbench')).toBeInTheDocument();
+    expect(screen.queryByText('Overview')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
     expect(screen.getByText('Logs')).toBeInTheDocument();
-    expect(screen.getAllByText('Runtime').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
-    expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('desktop-resources')).toHaveTextContent('computer-a');
   }, 20000);
 
-  it('opens the selected second Computer with scoped runtime tabs', async () => {
+  it('opens the selected second Computer with scoped workbench sections', async () => {
     mockInvoke.mockResolvedValueOnce(twoComputerInstances);
 
     render(<Computer />);
@@ -205,13 +204,13 @@ describe('Computer', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Second Computer' }));
 
     expect(screen.getByText('Second Computer')).toBeInTheDocument();
-    expect(screen.getByTestId('computer-overview')).toHaveTextContent('computer-b');
-    fireEvent.click(screen.getByText('Skills'));
+    expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-b');
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-b');
+    expect(screen.getByTestId('desktop-resources')).toHaveTextContent('computer-b');
   }, 20000);
 
   it('opens the runtime view directly', async () => {
-    render(<Computer initialView="detail" initialTab="runtime" />);
+    render(<Computer initialView="detail" initialSection="top" />);
     expect(await screen.findByTestId('computer-runtime')).toHaveTextContent('computer-a');
   }, 20000);
 
@@ -220,7 +219,7 @@ describe('Computer', () => {
     render(
       <Computer
         initialView="detail"
-        initialTab="runtime"
+        initialSection="top"
         onNavigate={onNavigate}
       />,
     );
@@ -241,18 +240,37 @@ describe('Computer', () => {
     expect(onNavigate).toHaveBeenCalledWith('computer-settings:general');
   });
 
-  it('keeps detail tabs reachable from loaded Computer instances', async () => {
-    render(<Computer initialView="detail" initialTab="debug" />);
+  it('keeps low-frequency and destructive detail actions in the more menu', async () => {
+    render(<Computer initialView="detail" />);
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
-    expect(screen.getByText('Back to Computers')).toBeInTheDocument();
-    expect(screen.getByTestId('debug-panel')).toHaveTextContent('computer-a');
+    expect(screen.queryByRole('button', { name: 'Duplicate' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'More Computer actions' }));
+
+    expect(await screen.findByText('Restart')).toBeInTheDocument();
+    expect(screen.getByText('View logs')).toBeInTheDocument();
+    expect(screen.getByText('Copy ID')).toBeInTheDocument();
+    expect(screen.getByText('Edit identity')).toBeInTheDocument();
+    expect(screen.getByText('Delete')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('View logs'));
+    expect(await screen.findByTestId('log-viewer')).toHaveTextContent('computer-a');
+  });
+
+  it('maps the legacy debug destination to the expanded workbench section', async () => {
+    render(<Computer initialView="detail" initialSection="debug" />);
+
+    expect(await screen.findByText('prod')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back to Computers' })).toBeInTheDocument();
+    expect(await screen.findByTestId('debug-panel')).toHaveTextContent('computer-a');
   });
 
   it('can return from detail to list', async () => {
     render(<Computer initialView="detail" />);
 
-    fireEvent.click(await screen.findByText('Back to Computers'));
+    const back = await screen.findByRole('button', { name: 'Back to Computers' });
+    expect(back).toHaveTextContent('');
+    fireEvent.click(back);
 
     expect(screen.getByText('Create Computer')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'prod' })).toBeInTheDocument();

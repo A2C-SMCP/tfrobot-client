@@ -154,6 +154,7 @@ export function McpServerList({
       loading={loading}
       pagination={false}
       size="middle"
+      scroll={{ x: 720 }}
     />
   );
 }

@@ -21,7 +21,7 @@ import { ComputerSettings } from './components/ComputerSettings';
 import {
   legacyComputerSettingsSection,
   parsePluginSettingsTarget,
-  toComputerDetailTab,
+  toComputerWorkbenchSection,
   toComputerSettingsSection,
 } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
@@ -170,7 +170,7 @@ function App() {
       );
     }
 
-    const detailTab = toComputerDetailTab(rawSubpage);
+    const workbenchSection = toComputerWorkbenchSection(rawSubpage);
     const settingsSection = toComputerSettingsSection(rawSubpage);
     const targetPlugin = settingsSection === 'plugins'
       ? parsePluginSettingsTarget(routeParts)
@@ -184,9 +184,9 @@ function App() {
       case 'computer-detail':
         return (
           <Computer
-            key={`computer-detail-${detailTab}`}
+            key={`computer-detail-${workbenchSection}`}
             initialView="detail"
-            initialTab={detailTab}
+            initialSection={workbenchSection}
             onNavigate={setSelectedKey}
           />
         );

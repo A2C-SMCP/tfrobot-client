@@ -104,6 +104,39 @@
         }
       }
     },
+    "workbench": {
+      "pageLabel": "Computer runtime workbench",
+      "capabilitySummary": "Active capability summary",
+      "connection": {
+        "title": "Connection",
+        "status": "Status",
+        "operation": "Current operation",
+        "operationTarget": "Operation target",
+        "profile": "Connected profile",
+        "operations": {
+          "connect": "Connect",
+          "disconnect": "Disconnect",
+          "reconnect": "Reconnect"
+        }
+      },
+      "actions": {
+        "more": "More Computer actions",
+        "viewLogs": "View logs",
+        "copyId": "Copy ID",
+        "editIdentity": "Edit identity"
+      },
+      "sections": {
+        "runtime": "Runtime workbench",
+        "skills": "Active Skills and Tools",
+        "resources": "Desktop Resources",
+        "diagnostics": "Runtime diagnostics"
+      },
+      "messages": {
+        "idCopied": "Computer ID copied",
+        "copyFailed": "Computer ID could not be copied"
+      },
+      "deleteDescription": "This permanently deletes {{name}} and its saved configuration."
+    },
     "runtime": {
       "title": "Runtime",
       "statusTitle": "Runtime Status",
@@ -287,6 +320,7 @@
     "empty": "No active skills",
     "emptySearch": "No skills match the search",
     "emptySelection": "Select a skill to preview SKILL.md",
+    "preview": "Skill preview",
     "searchPlaceholder": "Search skills",
     "openLocalRoot": "Open Local Root",
     "openMcpSource": "Open MCP server {{server}}",

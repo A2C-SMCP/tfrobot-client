@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useComputerStore } from '@/stores/computerStore';
-import { useComputerOverviewStore } from '@/stores/computerOverviewStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
 import { useConnectionStore } from '@/stores/connectionStore';
@@ -31,7 +30,6 @@ describe('runtimeStore', () => {
     await useRuntimeStore.getState().dispose();
     useRuntimeStore.getState().reset();
     useComputerStore.getState().reset();
-    useComputerOverviewStore.getState().reset();
     useDashboardStore.getState().reset();
     useMcpStore.getState().reset();
     useSdkConfigStore.getState().reset();
@@ -74,21 +72,6 @@ describe('runtimeStore', () => {
         runtimes: [],
       },
     });
-    useComputerOverviewStore.setState({
-      activeInstanceId: 'computer-a',
-      data: {
-        id: 'computer-a',
-        name: 'Computer A',
-        running: true,
-        connected: false,
-        mcp_total: 1,
-        mcp_running: 0,
-        mcp_stopped: 1,
-        tools_count: 0,
-        recent_logs: [],
-        runtime: initialRuntime,
-      },
-    });
     useMcpStore.setState({ activeInstanceId: 'computer-a' });
     useDebugStore.setState({ activeInstanceId: 'computer-a' });
     useSkillStore.setState({ activeInstanceId: 'computer-a' });
@@ -119,13 +102,6 @@ describe('runtimeStore', () => {
     expect(useDashboardStore.getState().data?.computers[0]).toMatchObject({
       running: true,
       mcp_server_count: 4,
-      runtime: nextRuntime,
-    });
-    expect(useComputerOverviewStore.getState().data).toMatchObject({
-      mcp_total: 4,
-      mcp_running: 3,
-      mcp_stopped: 1,
-      tools_count: 12,
       runtime: nextRuntime,
     });
     expect(fetchServers).toHaveBeenCalledWith('computer-a');
@@ -384,25 +360,6 @@ describe('runtimeStore', () => {
         runtimes: [],
       },
     });
-    useComputerOverviewStore.setState({
-      data: {
-        id: 'computer-a',
-        name: 'Computer A',
-        running: true,
-        connected: true,
-        client_connection_present: true,
-        connection_context: connectionContext,
-        connection_url: 'https://smcp.example.com',
-        connection_profile: 'prod',
-        mcp_total: 0,
-        mcp_running: 0,
-        mcp_stopped: 0,
-        tools_count: 0,
-        recent_logs: [],
-        runtime: connectedRuntime,
-      },
-    });
-
     useRuntimeStore.getState().receiveEvent({
       instance_id: 'computer-a',
       cause: {
@@ -429,11 +386,6 @@ describe('runtimeStore', () => {
     expect(useComputerStore.getState().instances[0].connectionUrl).toBe('https://smcp.example.com');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(0);
     expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connected).toBe(false);
-    expect(useComputerOverviewStore.getState().data?.connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connection_url).toBe(
-      'https://smcp.example.com',
-    );
 
     useRuntimeStore.getState().receiveSnapshot(
       'computer-a',
@@ -441,12 +393,7 @@ describe('runtimeStore', () => {
     );
     expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connecting');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(0);
-    expect(useComputerOverviewStore.getState().data?.connected).toBe(false);
     expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connection_url).toBe(
-      'https://smcp.example.com',
-    );
 
     useRuntimeStore.getState().receiveEvent({
       instance_id: 'computer-a',
@@ -472,11 +419,6 @@ describe('runtimeStore', () => {
     expect(useComputerStore.getState().instances[0].connectionStatus).toBe('connected');
     expect(useDashboardStore.getState().data?.computer_connected).toBe(1);
     expect(useDashboardStore.getState().data?.computers[0].connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connected).toBe(true);
-    expect(useComputerOverviewStore.getState().data?.connection_profile).toBe('prod');
-    expect(useComputerOverviewStore.getState().data?.connection_url).toBe(
-      'https://smcp.example.com',
-    );
   });
 
   it('applies a newer connection authority even when its paired runtime snapshot is older', () => {

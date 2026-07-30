@@ -40,6 +40,11 @@ vi.mock('@/components/Dashboard', () => ({
   Dashboard: ({ onNavigate }: { onNavigate: (key: string) => void }) => (
     <>
       <button onClick={() => onNavigate('computer-detail:overview')}>Open Computer Detail</button>
+      <button onClick={() => onNavigate('computer-detail:runtime')}>Open legacy Runtime</button>
+      <button onClick={() => onNavigate('computer-detail:skills')}>Open legacy Skills</button>
+      <button onClick={() => onNavigate('computer-detail:resources')}>Open legacy Resources</button>
+      <button onClick={() => onNavigate('computer-detail:debug')}>Open legacy Debug</button>
+      <button onClick={() => onNavigate('computer-detail:logs')}>Open legacy Logs</button>
       <button onClick={() => onNavigate('computer-detail:mcp')}>Open legacy MCP</button>
       <button onClick={() => onNavigate('computer-detail:marketplace')}>
         Open legacy marketplace
@@ -56,9 +61,9 @@ vi.mock('@/components/Dashboard', () => ({
   ),
 }));
 vi.mock('@/components/Computer', () => ({
-  Computer: ({ initialView, initialTab }: { initialView?: 'list' | 'detail'; initialTab?: string }) => (
+  Computer: ({ initialView, initialSection }: { initialView?: 'list' | 'detail'; initialSection?: string }) => (
     <div>
-      {initialView === 'detail' ? `Computer Detail View: ${initialTab}` : 'Computer List View'}
+      {initialView === 'detail' ? `Computer Detail View: ${initialSection}` : 'Computer List View'}
     </div>
   ),
 }));
@@ -121,7 +126,7 @@ describe('App', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Open Computer Detail'));
     });
-    expect(screen.getByText('Computer Detail View: overview')).toBeInTheDocument();
+    expect(screen.getByText('Computer Detail View: top')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByText('Computer'));
@@ -144,6 +149,24 @@ describe('App', () => {
       const view = render(<App />);
       fireEvent.click(screen.getByText(entry));
       expect(screen.getByText(`Computer Settings View: ${section}`)).toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it('maps legacy runtime routes to workbench sections without preserving tabs', () => {
+    const routes = [
+      ['Open Computer Detail', 'top'],
+      ['Open legacy Runtime', 'top'],
+      ['Open legacy Skills', 'skills'],
+      ['Open legacy Resources', 'resources'],
+      ['Open legacy Debug', 'debug'],
+      ['Open legacy Logs', 'logs'],
+    ] as const;
+
+    for (const [entry, section] of routes) {
+      const view = render(<App />);
+      fireEvent.click(screen.getByText(entry));
+      expect(screen.getByText(`Computer Detail View: ${section}`)).toBeInTheDocument();
       view.unmount();
     }
   });

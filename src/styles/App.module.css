@@ -40,4 +40,16 @@
   padding: 24px;
   border-radius: 8px;
   min-height: calc(100vh - 64px - 48px);
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .content {
+    padding: 12px;
+  }
+
+  .contentInner {
+    padding: 12px;
+    min-height: calc(100vh - 64px - 24px);
+  }
 }

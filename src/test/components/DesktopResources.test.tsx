@@ -96,6 +96,13 @@ describe('DesktopResources', () => {
     expect(mockedInvoke).not.toHaveBeenCalled();
   });
 
+  it('expands a legacy resources destination without eagerly loading resources', () => {
+    renderDesktop({ initiallyExpanded: true });
+
+    expect(screen.getByRole('button', { name: 'Load resources' })).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
   it('enumerates resources only after an explicit load action', async () => {
     mockedInvoke.mockResolvedValueOnce({ status: 'unverified', windows });
     renderDesktop();

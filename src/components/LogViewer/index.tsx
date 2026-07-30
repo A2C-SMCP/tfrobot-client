@@ -203,6 +203,7 @@ export function LogViewer({ instanceId }: LogViewerProps) {
         rowKey="id"
         loading={loading}
         size="small"
+        scroll={{ x: 760 }}
         expandable={{
           expandedRowRender: (record) =>
             record.details ? <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{record.details}</pre> : null,

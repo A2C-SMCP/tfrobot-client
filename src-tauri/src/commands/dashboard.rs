@@ -41,27 +41,6 @@ pub struct DashboardComputerSummary {
     pub connection_profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComputerOverviewData {
-    pub id: String,
-    pub name: String,
-    pub running: bool,
-    pub runtime: ComputerRuntimeSnapshot,
-    pub connection_state: ClientConnectionStateSnapshot,
-    pub connected: bool,
-    pub client_connection_present: bool,
-    pub connection_revision: u64,
-    pub connection_context: Option<ConnectionStateSummary>,
-    pub connection_url: Option<String>,
-    pub connection_profile: Option<String>,
-    pub robot_name: Option<String>,
-    pub mcp_total: usize,
-    pub mcp_running: usize,
-    pub mcp_stopped: usize,
-    pub tools_count: usize,
-    pub recent_logs: Vec<crate::services::logger::LogEntry>,
-}
-
 fn detect_runtime(name: &str, cmd: &str) -> RuntimeInfo {
     match which::which(cmd) {
         Ok(path) => RuntimeInfo {
@@ -158,78 +137,6 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
     })
 }
 
-#[tauri::command]
-pub async fn get_computer_overview_data(
-    state: State<'_, AppState>,
-    instance_id: String,
-) -> Result<ComputerOverviewData, String> {
-    get_computer_overview_data_core(&state, &instance_id).await
-}
-
-pub async fn get_computer_overview_data_core(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<ComputerOverviewData, String> {
-    if instance_id.trim().is_empty() {
-        return Err("instance_id is required".to_string());
-    }
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-
-    let runtime_snapshot = runtime.runtime_snapshot().await;
-    let running = runtime_snapshot.is_running();
-    let connection_state = runtime.connection_snapshot().await;
-    let connection_context = connection_state.context.clone();
-    let connected = connection_state.status == ClientConnectionStatus::Connected;
-    let connection_url = connected
-        .then(|| connection_context.as_ref().map(|c| c.url.clone()))
-        .flatten();
-    let connection_profile = connected
-        .then(|| connection_context.as_ref().map(|c| c.profile_name.clone()))
-        .flatten();
-
-    let mcp_total = runtime_snapshot.mcp_servers;
-    let mcp_running = runtime_snapshot.active_mcp_servers;
-    let tools_count = runtime_snapshot.tools;
-    let mcp_stopped = mcp_total.saturating_sub(mcp_running);
-
-    let recent_logs = state
-        .log_service
-        .query(&LogFilter {
-            computer_instance_id: Some(instance_id.to_string()),
-            limit: Some(10),
-            ..Default::default()
-        })
-        .unwrap_or_default();
-
-    Ok(ComputerOverviewData {
-        id: runtime.instance.id.clone(),
-        name: runtime.instance.name.clone(),
-        running,
-        runtime: runtime_snapshot,
-        connection_state: connection_state.clone(),
-        connected,
-        client_connection_present: connection_context.is_some(),
-        connection_revision: connection_state.revision,
-        connection_context,
-        connection_url,
-        connection_profile,
-        robot_name: runtime
-            .instance
-            .robot_binding
-            .as_ref()
-            .and_then(|binding| binding.robot_name.clone()),
-        mcp_total,
-        mcp_running,
-        mcp_stopped,
-        tools_count,
-        recent_logs,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,43 +214,5 @@ mod tests {
             .runtimes
             .iter()
             .any(|runtime| runtime.name == "Node.js"));
-    }
-
-    #[tokio::test]
-    async fn computer_overview_data_is_scoped_to_instance() {
-        let (state, _dir) = test_state();
-        state
-            .computer_registry
-            .start_runtime("computer-a")
-            .await
-            .unwrap();
-        state
-            .log_service
-            .write_for_instance("info", "mcp", "A log", None, Some("computer-a"))
-            .unwrap();
-        state
-            .log_service
-            .write_for_instance("info", "mcp", "B log", None, Some("computer-b"))
-            .unwrap();
-
-        let data = get_computer_overview_data_core(&state, "computer-a")
-            .await
-            .unwrap();
-
-        assert_eq!(data.id, "computer-a");
-        assert!(data.running);
-        assert_eq!(data.recent_logs.len(), 1);
-        assert_eq!(data.recent_logs[0].message, "A log");
-    }
-
-    #[tokio::test]
-    async fn computer_overview_requires_existing_instance() {
-        let (state, _dir) = test_state();
-
-        let err = get_computer_overview_data_core(&state, "missing")
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("Computer instance not found"));
     }
 }

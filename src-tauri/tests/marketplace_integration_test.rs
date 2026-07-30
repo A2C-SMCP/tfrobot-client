@@ -19,7 +19,7 @@ use tfrobot_client_lib::commands::{
         DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
     },
     config_io,
-    dashboard::{get_computer_overview_data_core, get_dashboard_data_core},
+    dashboard::get_dashboard_data_core,
     inputs,
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
@@ -529,12 +529,8 @@ async fn duplicate_copies_only_user_skills_and_keeps_plugin_governance_isolated(
         .iter()
         .find(|computer| computer.id == TEST_INSTANCE_ID)
         .unwrap();
-    let overview = get_computer_overview_data_core(&state, TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     assert_eq!(source_status.mcp_server_count, 1);
     assert_eq!(dashboard_source.mcp_server_count, 1);
-    assert_eq!(overview.mcp_total, 1);
 
     let duplicate = duplicate_computer_instance_core(
         &state,

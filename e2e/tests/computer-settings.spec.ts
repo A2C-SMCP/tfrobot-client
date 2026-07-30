@@ -53,7 +53,7 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     }
 
     await page.getByRole('button', { name: 'Back to Computer' }).click();
-    await expect(page.getByLabel('Runtime')).toBeVisible();
+    await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByText('Advanced Runtime Diagnostics')).toBeVisible();
   });
 
