@@ -501,7 +501,7 @@ describe('Computer', () => {
     });
   });
 
-  it('edits, duplicates, starts, stops, and deletes from the list actions', async () => {
+  it('edits, duplicates, stops, and starts from the list actions', async () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === 'list_computer_instances') return mockComputerInstances;
       if (cmd === 'rename_computer_instance') return { ...mockComputerInstances[0], name: 'Updated Computer', description: 'Updated description' };
@@ -530,7 +530,6 @@ describe('Computer', () => {
           snapshot_revision: 3,
         }),
       };
-      if (cmd === 'delete_computer_instance') return null;
       return null;
     });
 
@@ -579,8 +578,25 @@ describe('Computer', () => {
       expect(within(originalComputerCard()).getByText('Running')).toBeInTheDocument();
       expect(within(originalComputerCard()).getByRole('button', { name: 'Delete' })).toBeEnabled();
     });
+  }, 80000);
 
-    fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Delete' }));
+  it('deletes a Computer from the list actions after confirmation', async () => {
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_computer_instances') return mockComputerInstances;
+      if (cmd === 'delete_computer_instance') return null;
+      return null;
+    });
+
+    render(<Computer />);
+
+    const computerId = await screen.findByText('computer-a');
+    const computerCard = computerId.closest<HTMLElement>('.ant-card');
+    expect(computerCard).not.toBeNull();
+    await waitFor(() => {
+      expect(within(computerCard!).getByRole('button', { name: 'Delete' })).toBeEnabled();
+    });
+
+    fireEvent.click(within(computerCard!).getByRole('button', { name: 'Delete' }));
     const deleteConfirmation = await screen.findByText('Delete this Computer?');
     const deletePopover = deleteConfirmation.closest<HTMLElement>('.ant-popover');
     expect(deletePopover).not.toBeNull();
@@ -589,7 +605,7 @@ describe('Computer', () => {
       expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
       expect(screen.queryByText('computer-a')).not.toBeInTheDocument();
     });
-  }, 80000);
+  });
 
   it('prompts for consecutive missing values and retries only the original start action', async () => {
     const stopped = {
