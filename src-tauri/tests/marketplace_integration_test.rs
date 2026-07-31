@@ -2126,10 +2126,18 @@ fn build_runtime_input_marketplace_repo(repo: &Path) {
     let server_path = echo_server_path();
     fs::write(
         servers.join("audit-mcp.json"),
-        format!(
-            r#"{{"type":"stdio","name":"audit-mcp","server_parameters":{{"command":"node","args":["{}"],"env":{{"API_TOKEN":"${{input:audit@acme/api_token}}"}}}}}}"#,
-            server_path.display()
-        ),
+        serde_json::to_vec(&serde_json::json!({
+            "type": "stdio",
+            "name": "audit-mcp",
+            "server_parameters": {
+                "command": "node",
+                "args": [server_path],
+                "env": {
+                    "API_TOKEN": "${input:audit@acme/api_token}"
+                }
+            }
+        }))
+        .unwrap(),
     )
     .unwrap();
     fs::write(

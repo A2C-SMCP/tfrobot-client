@@ -135,14 +135,22 @@ pub fn everything_server_config_with_forbidden_tools(
         .iter()
         .map(|tool| (*tool).to_string())
         .collect();
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd",
+            vec!["/C", "npx", "-y", "@modelcontextprotocol/server-everything"],
+        )
+    } else {
+        ("npx", vec!["-y", "@modelcontextprotocol/server-everything"])
+    };
 
     serde_json::from_value(serde_json::json!({
         "type": "Stdio",
         "name": name,
         "forbidden_tools": forbidden_tools,
         "server_parameters": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-everything"],
+            "command": command,
+            "args": args,
             "env": {}
         }
     }))
