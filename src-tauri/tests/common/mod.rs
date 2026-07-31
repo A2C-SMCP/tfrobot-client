@@ -117,46 +117,6 @@ pub fn multi_tool_server_config(
     .expect("Failed to build multi-tool server config")
 }
 
-/// Build an MCPServerConfig for the official server-everything package.
-#[allow(dead_code)]
-pub fn everything_server_config(
-    name: &str,
-) -> a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig {
-    everything_server_config_with_forbidden_tools(name, &[])
-}
-
-/// Build an MCPServerConfig for server-everything with metadata changes.
-#[allow(dead_code)]
-pub fn everything_server_config_with_forbidden_tools(
-    name: &str,
-    forbidden_tools: &[&str],
-) -> a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig {
-    let forbidden_tools: Vec<String> = forbidden_tools
-        .iter()
-        .map(|tool| (*tool).to_string())
-        .collect();
-    let (command, args) = if cfg!(windows) {
-        (
-            "cmd",
-            vec!["/C", "npx", "-y", "@modelcontextprotocol/server-everything"],
-        )
-    } else {
-        ("npx", vec!["-y", "@modelcontextprotocol/server-everything"])
-    };
-
-    serde_json::from_value(serde_json::json!({
-        "type": "Stdio",
-        "name": name,
-        "forbidden_tools": forbidden_tools,
-        "server_parameters": {
-            "command": command,
-            "args": args,
-            "env": {}
-        }
-    }))
-    .expect("Failed to build server-everything config")
-}
-
 /// Compatibility helpers for runtime-focused integration tests.
 ///
 /// Production config CRUD is intentionally exposed only through `commands::sdk_config`. These

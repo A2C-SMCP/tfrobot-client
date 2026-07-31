@@ -8,8 +8,7 @@ use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
-    create_test_app_state, echo_server_config, everything_server_config,
-    everything_server_config_with_forbidden_tools, mcp, multi_tool_server_config,
+    create_test_app_state, echo_server_config, mcp, multi_tool_server_config,
     slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::{BodyExt, Full};
@@ -54,6 +53,15 @@ fn bundle_id(value: &str) -> BundleId {
 fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
     let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
     value["disabled"] = serde_json::Value::Bool(disabled);
+    serde_json::from_value(value).unwrap()
+}
+
+fn echo_server_config_with_forbidden_tools(
+    name: &str,
+    forbidden_tools: &[&str],
+) -> MCPServerConfig {
+    let mut value = serde_json::to_value(echo_server_config(name)).unwrap();
+    value["forbidden_tools"] = serde_json::json!(forbidden_tools);
     serde_json::from_value(value).unwrap()
 }
 
@@ -911,14 +919,14 @@ async fn test_connected_config_update_syncs_without_rejoining_computer() {
     sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
-        everything_server_config("everything-sync"),
+        echo_server_config("echo-sync"),
     )
     .await
     .unwrap();
     sdk_config::upsert_computer_mcp_config_core(
         &state,
         TEST_INSTANCE_ID,
-        everything_server_config_with_forbidden_tools("everything-sync", &["echo"]),
+        echo_server_config_with_forbidden_tools("echo-sync", &["echo"]),
     )
     .await
     .unwrap();
@@ -930,7 +938,7 @@ async fn test_connected_config_update_syncs_without_rejoining_computer() {
         "hot config apply must not reconnect"
     );
     let config_events_after_upsert = stats.update_config_events();
-    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "everything-sync")
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "echo-sync")
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
