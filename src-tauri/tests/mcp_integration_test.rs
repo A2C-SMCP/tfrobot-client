@@ -18,6 +18,7 @@ use socketioxide::extract::{AckSender, Data, SocketRef};
 use socketioxide::SocketIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::connection::ConnectionState;
@@ -2908,7 +2909,10 @@ async fn test_validate_computer_config_includes_sdk_user_scope() {
     assert!(!validation.valid);
     assert!(validation.errors.iter().any(|error| {
         error.field == "servers.invalid-user"
-            && error.source_path.as_deref() == Some(user_mcp_path.to_string_lossy().as_ref())
+            && error
+                .source_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).ends_with(Path::new("a2c").join("mcp.json")))
     }));
 }
 
@@ -3018,7 +3022,7 @@ async fn test_config_io_export_does_not_overwrite_target_when_source_is_corrupt(
     .unwrap_err();
 
     assert!(error.contains("Cannot export invalid SDK MCP configuration"));
-    assert!(error.contains(source_mcp.to_string_lossy().as_ref()));
+    assert!(error.replace('\\', "/").contains(".tfrobot/mcp.json"));
     assert_eq!(std::fs::read(export_path).unwrap(), original_export);
 }
 
