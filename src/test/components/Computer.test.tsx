@@ -566,17 +566,23 @@ describe('Computer', () => {
     };
 
     await waitFor(() => {
-      expect(within(originalComputerCard()).getByRole('button', { name: 'Stop' })).toBeEnabled();
+      const stopButton = within(originalComputerCard()).getByRole('button', { name: 'Stop' });
+      expect(stopButton).toBeEnabled();
+      expect(stopButton).not.toHaveClass('ant-btn-loading');
     });
     fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Stop' }));
     await waitFor(() => {
       expect(within(originalComputerCard()).getByText('Not Running')).toBeInTheDocument();
-      expect(within(originalComputerCard()).getByRole('button', { name: 'Start' })).toBeEnabled();
+      const startButton = within(originalComputerCard()).getByRole('button', { name: 'Start' });
+      expect(startButton).toBeEnabled();
+      expect(startButton).not.toHaveClass('ant-btn-loading');
     });
     fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Start' }));
     await waitFor(() => {
       expect(within(originalComputerCard()).getByText('Running')).toBeInTheDocument();
-      expect(within(originalComputerCard()).getByRole('button', { name: 'Delete' })).toBeEnabled();
+      const deleteButton = within(originalComputerCard()).getByRole('button', { name: 'Delete' });
+      expect(deleteButton).toBeEnabled();
+      expect(deleteButton).not.toHaveClass('ant-btn-loading');
     });
   }, 80000);
 
@@ -593,7 +599,9 @@ describe('Computer', () => {
     const computerCard = computerId.closest<HTMLElement>('.ant-card');
     expect(computerCard).not.toBeNull();
     await waitFor(() => {
-      expect(within(computerCard!).getByRole('button', { name: 'Delete' })).toBeEnabled();
+      const deleteButton = within(computerCard!).getByRole('button', { name: 'Delete' });
+      expect(deleteButton).toBeEnabled();
+      expect(deleteButton).not.toHaveClass('ant-btn-loading');
     });
 
     fireEvent.click(within(computerCard!).getByRole('button', { name: 'Delete' }));
