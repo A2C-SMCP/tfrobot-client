@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Real marketplace end-to-end coverage for TFRC-43.
 //!
 //! This test intentionally depends on the public CNB marketplace repository and

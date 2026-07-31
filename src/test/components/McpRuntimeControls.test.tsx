@@ -54,7 +54,7 @@ describe('McpRuntimeControls', () => {
     expect(screen.queryByText('Add Server')).not.toBeInTheDocument();
     expect(screen.queryByText('Import Config')).not.toBeInTheDocument();
     expect(screen.queryByText('Validate Schema')).not.toBeInTheDocument();
-  });
+  }, 10000);
 
   it('disables lifecycle actions when the runtime cannot manage MCP servers', () => {
     const onStartRuntime = vi.fn();

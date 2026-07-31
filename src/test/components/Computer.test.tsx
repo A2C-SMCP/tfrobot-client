@@ -515,9 +515,21 @@ describe('Computer', () => {
       if (cmd === 'stop_computer_instance') return {
         ...mockComputerInstances[0],
         running: false,
-        runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
+        runtime: runtimeSnapshot({
+          lifecycle: 'shutdown',
+          generation: 1,
+          snapshot_revision: 2,
+        }),
       };
-      if (cmd === 'start_computer_instance') return { ...mockComputerInstances[0], running: true };
+      if (cmd === 'start_computer_instance') return {
+        ...mockComputerInstances[0],
+        running: true,
+        runtime: runtimeSnapshot({
+          lifecycle: 'started',
+          generation: 2,
+          snapshot_revision: 3,
+        }),
+      };
       if (cmd === 'delete_computer_instance') return null;
       return null;
     });
@@ -548,17 +560,35 @@ describe('Computer', () => {
       },
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Stop' })[0]);
-    expect(await screen.findByText('Not Running')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Start' })[0]);
-    expect(await screen.findByText('Running')).toBeInTheDocument();
+    const originalComputerCard = () => {
+      const card = screen.getByText('computer-a').closest<HTMLElement>('.ant-card');
+      expect(card).not.toBeNull();
+      return card!;
+    };
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
+    await waitFor(() => {
+      expect(within(originalComputerCard()).getByRole('button', { name: 'Stop' })).toBeEnabled();
+    });
+    fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Stop' }));
+    await waitFor(() => {
+      expect(within(originalComputerCard()).getByText('Not Running')).toBeInTheDocument();
+      expect(within(originalComputerCard()).getByRole('button', { name: 'Start' })).toBeEnabled();
+    });
+    fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Start' }));
+    await waitFor(() => {
+      expect(within(originalComputerCard()).getByText('Running')).toBeInTheDocument();
+      expect(within(originalComputerCard()).getByRole('button', { name: 'Delete' })).toBeEnabled();
+    });
+
+    fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Delete' }));
     const deleteConfirmation = await screen.findByText('Delete this Computer?');
     const deletePopover = deleteConfirmation.closest<HTMLElement>('.ant-popover');
     expect(deletePopover).not.toBeNull();
     fireEvent.click(within(deletePopover!).getByRole('button', { name: 'OK' }));
-    expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
+      expect(screen.queryByText('computer-a')).not.toBeInTheDocument();
+    });
   }, 80000);
 
   it('prompts for consecutive missing values and retries only the original start action', async () => {

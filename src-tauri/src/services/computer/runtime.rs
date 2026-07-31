@@ -573,7 +573,7 @@ async fn collect_runtime_problems(
         let apply_diagnostics = mcp_config_apply_diagnostics.read().await.clone();
         let mut mcp_diagnostics: Vec<_> = start_diagnostics
             .into_iter()
-            .chain(apply_diagnostics.into_iter())
+            .chain(apply_diagnostics)
             .filter(|(bundle_id, diagnostic)| {
                 server_names.contains_key(bundle_id) || diagnostic.mcp_server_name.is_some()
             })
