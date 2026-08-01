@@ -1,8 +1,9 @@
 use crate::commands::connection::ConnectionState;
 use crate::commands::inputs::{InputDefinition, PickOption};
 use crate::services::computer_runtime_events::{
-    ComputerRuntimeEventCause, ComputerRuntimeEventSink, ComputerRuntimeSnapshot,
-    ComputerRuntimeStatusEvent,
+    ComputerRuntimeEventCause, ComputerRuntimeEventSink, ComputerRuntimeProblem,
+    ComputerRuntimeSnapshot, ComputerRuntimeStatusEvent, RuntimeDiagnosticRecord,
+    SdkProblemObservations,
 };
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_resolver::RuntimeInputResolver;
@@ -17,6 +18,7 @@ use a2c_smcp::smcp_computer::mcp_clients::model::{
     ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use a2c_smcp::smcp_computer::settings::{
     resolve_policy_settings, resolve_settings, AddMarketplaceParams, DisableOptions, EnableOptions,
     InstallOptions, MarketplaceRefreshRow, MarketplaceRemoveOutcome, McpHookError, McpInstallHooks,
@@ -27,7 +29,7 @@ use a2c_smcp::smcp_computer::skills::{
     SkillResourceView, SkillSandboxError, MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR,
 };
 use a2c_smcp::smcp_computer::{
-    inputs::load_plugin_inputs,
+    inputs::{load_plugin_inputs, InputKind, InputResolutionError},
     inventory::{McpOwnership, McpServerWithMetadata},
     LifecycleState,
 };
@@ -46,10 +48,18 @@ mod registry;
 mod runtime;
 pub mod runtime_lifecycle;
 
-pub use connection::{ClientConnectionAuthoritySnapshot, ConnectionStateSummary};
+use connection::ClientConnectionOperationState;
+pub use connection::{
+    ClientConnectionActionCapabilities, ClientConnectionActionCapability,
+    ClientConnectionActionDisabledReason, ClientConnectionOperation,
+    ClientConnectionOperationError, ClientConnectionOperationTarget,
+    ClientConnectionOperationToken, ClientConnectionStateSnapshot, ClientConnectionStatus,
+    ConnectionStateSummary,
+};
 pub use registry::ComputerRegistry;
 pub use runtime_lifecycle::{
-    ComputerRuntimeAction, ComputerRuntimeActionCapabilities, ComputerRuntimeActionUnavailable,
+    ComputerRuntimeAction, ComputerRuntimeActionCapabilities, ComputerRuntimeActionDisabledReason,
+    ComputerRuntimeActionUnavailable, ComputerRuntimeUserState,
 };
 
 pub type ComputerInstanceId = String;
@@ -193,7 +203,7 @@ pub struct ComputerInstance {
 }
 
 pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
-pub const GLOBAL_INPUTS_SCHEMA_VERSION: u32 = 1;
+pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 1;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 /// Client-owned, durable metadata for one Computer instance.
@@ -349,19 +359,19 @@ impl Default for SdkContextConfig {
     }
 }
 
-/// Global input definitions and UI schema owned by the client.
+/// Per-Computer input definitions and UI schema owned by the client.
 /// Resolved values and secrets are deliberately stored through `SecretStore`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalInputsConfig {
+pub struct ComputerInputsConfig {
     pub schema_version: u32,
     #[serde(default)]
-    pub inputs: Vec<GlobalInputDefinition>,
+    pub inputs: Vec<ComputerInputDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", deny_unknown_fields)]
-pub enum GlobalInputDefinition {
+pub enum ComputerInputDefinition {
     PromptString {
         id: String,
         label: String,
@@ -390,7 +400,7 @@ pub enum GlobalInputDefinition {
     },
 }
 
-impl GlobalInputDefinition {
+impl ComputerInputDefinition {
     pub fn id(&self) -> &str {
         match self {
             Self::PromptString { id, .. }
@@ -407,7 +417,7 @@ pub struct GlobalPickOption {
     pub value: String,
 }
 
-impl From<&InputDefinition> for GlobalInputDefinition {
+impl From<&InputDefinition> for ComputerInputDefinition {
     fn from(input: &InputDefinition) -> Self {
         match input {
             InputDefinition::PromptString {
@@ -457,10 +467,10 @@ impl From<&InputDefinition> for GlobalInputDefinition {
     }
 }
 
-impl From<&GlobalInputDefinition> for InputDefinition {
-    fn from(input: &GlobalInputDefinition) -> Self {
+impl From<&ComputerInputDefinition> for InputDefinition {
+    fn from(input: &ComputerInputDefinition) -> Self {
         match input {
-            GlobalInputDefinition::PromptString {
+            ComputerInputDefinition::PromptString {
                 id,
                 label,
                 description,
@@ -473,7 +483,7 @@ impl From<&GlobalInputDefinition> for InputDefinition {
                 default: default.clone(),
                 password: *password,
             },
-            GlobalInputDefinition::PickString {
+            ComputerInputDefinition::PickString {
                 id,
                 label,
                 description,
@@ -492,7 +502,7 @@ impl From<&GlobalInputDefinition> for InputDefinition {
                     .collect(),
                 default: default.clone(),
             },
-            GlobalInputDefinition::Command {
+            ComputerInputDefinition::Command {
                 id,
                 label,
                 command,
@@ -507,10 +517,10 @@ impl From<&GlobalInputDefinition> for InputDefinition {
     }
 }
 
-impl Default for GlobalInputsConfig {
+impl Default for ComputerInputsConfig {
     fn default() -> Self {
         Self {
-            schema_version: GLOBAL_INPUTS_SCHEMA_VERSION,
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: Vec::new(),
         }
     }
@@ -617,8 +627,30 @@ fn default_schema_version() -> u32 {
 pub enum ComputerRuntimeStartError {
     #[error(transparent)]
     Sdk(#[from] ComputerError),
+    #[error("{source}; {context}")]
+    SdkWithContext {
+        source: ComputerError,
+        context: String,
+    },
     #[error("{0}")]
     Client(String),
+}
+
+impl ComputerRuntimeStartError {
+    fn append_context(self, context: impl std::fmt::Display) -> Self {
+        let context = context.to_string();
+        match self {
+            Self::Sdk(source) => Self::SdkWithContext { source, context },
+            Self::SdkWithContext {
+                source,
+                context: existing,
+            } => Self::SdkWithContext {
+                source,
+                context: format!("{existing}; {context}"),
+            },
+            Self::Client(message) => Self::Client(format!("{message}; {context}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,16 +714,17 @@ impl Drop for RuntimeActivityGuard {
 pub struct ComputerInstanceRuntime {
     pub instance: ComputerInstance,
     pub inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    plugin_runtime_inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
     skill_home_base: PathBuf,
-    sdk_auto_connect: Arc<RwLock<bool>>,
     sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
     // Tracks only whether this client materialized a Marketplace dependency. Plugin ownership
     // itself is SDK ledger-derived and may hand off between multiple enabled plugins.
     plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     connection: Arc<RwLock<Option<ConnectionState>>>,
+    connection_operation: Arc<RwLock<ClientConnectionOperationState>>,
     connection_authority_revision: Arc<AtomicU64>,
     lifecycle_lock: Arc<Mutex<()>>,
     refresh_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -705,12 +738,18 @@ pub struct ComputerInstanceRuntime {
     runtime_event_sink: SharedRuntimeEventSink,
     runtime_event_task: Arc<Mutex<Option<RuntimeEventRelay>>>,
     shutdown_completed: Arc<AtomicBool>,
-    client_runtime_diagnostic: Arc<RwLock<Option<String>>>,
-    mcp_start_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
-    mcp_reload_diagnostics: Arc<RwLock<HashMap<BundleId, String>>>,
-    sdk_config_reload_required: Arc<AtomicBool>,
+    sdk_problem_observations: Arc<Mutex<SdkProblemObservations>>,
+    client_runtime_diagnostic: Arc<RwLock<Option<RuntimeDiagnosticRecord>>>,
+    mcp_start_diagnostics: Arc<RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>>,
+    mcp_config_apply_diagnostics: Arc<RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>>,
     #[cfg(debug_assertions)]
     fail_prepare_shutdown_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    fail_sdk_shutdown_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    fail_smcp_disconnect_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    hang_smcp_disconnect_once: Arc<AtomicBool>,
 }
 
 impl ComputerInstanceRuntime {
@@ -745,7 +784,7 @@ impl ComputerInstanceRuntime {
     ) -> Self {
         let inputs = input_definitions_to_mcp_map(&instance.inputs);
         let session = InstanceSession::new(instance.id.clone());
-        let input_resolver = Arc::new(RuntimeInputResolver::new(secret_store));
+        let input_resolver = Arc::new(RuntimeInputResolver::new(instance.id.clone(), secret_store));
         let (computer, sdk_servers) = build_sdk_computer(
             &instance,
             &inputs,
@@ -753,18 +792,18 @@ impl ComputerInstanceRuntime {
             input_resolver.clone(),
             &skill_home_base,
         );
-        let auto_connect = instance.connection_policy.auto_connect;
         Self {
             instance,
             inputs: Arc::new(RwLock::new(inputs)),
+            plugin_runtime_inputs: Arc::new(RwLock::new(HashMap::new())),
             computer: Arc::new(RwLock::new(computer)),
             session,
             input_resolver,
             skill_home_base,
-            sdk_auto_connect: Arc::new(RwLock::new(auto_connect)),
             sdk_servers: Arc::new(RwLock::new(sdk_servers)),
             plugin_mounted_server_ids: Arc::new(RwLock::new(HashSet::new())),
             connection: Arc::new(RwLock::new(None)),
+            connection_operation: Arc::new(RwLock::new(ClientConnectionOperationState::default())),
             connection_authority_revision: Arc::new(AtomicU64::new(0)),
             lifecycle_lock: Arc::new(Mutex::new(())),
             refresh_task: Arc::new(Mutex::new(None)),
@@ -778,12 +817,18 @@ impl ComputerInstanceRuntime {
             runtime_event_sink,
             runtime_event_task: Arc::new(Mutex::new(None)),
             shutdown_completed: Arc::new(AtomicBool::new(false)),
+            sdk_problem_observations: Arc::new(Mutex::new(SdkProblemObservations::default())),
             client_runtime_diagnostic: Arc::new(RwLock::new(None)),
             mcp_start_diagnostics: Arc::new(RwLock::new(HashMap::new())),
-            mcp_reload_diagnostics: Arc::new(RwLock::new(HashMap::new())),
-            sdk_config_reload_required: Arc::new(AtomicBool::new(false)),
+            mcp_config_apply_diagnostics: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            fail_sdk_shutdown_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            fail_smcp_disconnect_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            hang_smcp_disconnect_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -791,14 +836,15 @@ impl ComputerInstanceRuntime {
         Self {
             instance,
             inputs: self.inputs.clone(),
+            plugin_runtime_inputs: self.plugin_runtime_inputs.clone(),
             computer: self.computer.clone(),
             session: self.session.clone(),
             input_resolver: self.input_resolver.clone(),
             skill_home_base: self.skill_home_base.clone(),
-            sdk_auto_connect: self.sdk_auto_connect.clone(),
             sdk_servers: self.sdk_servers.clone(),
             plugin_mounted_server_ids: self.plugin_mounted_server_ids.clone(),
             connection: self.connection.clone(),
+            connection_operation: self.connection_operation.clone(),
             connection_authority_revision: self.connection_authority_revision.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
             refresh_task: self.refresh_task.clone(),
@@ -812,12 +858,18 @@ impl ComputerInstanceRuntime {
             runtime_event_sink: self.runtime_event_sink.clone(),
             runtime_event_task: self.runtime_event_task.clone(),
             shutdown_completed: self.shutdown_completed.clone(),
+            sdk_problem_observations: self.sdk_problem_observations.clone(),
             client_runtime_diagnostic: self.client_runtime_diagnostic.clone(),
             mcp_start_diagnostics: self.mcp_start_diagnostics.clone(),
-            mcp_reload_diagnostics: self.mcp_reload_diagnostics.clone(),
-            sdk_config_reload_required: self.sdk_config_reload_required.clone(),
+            mcp_config_apply_diagnostics: self.mcp_config_apply_diagnostics.clone(),
             #[cfg(debug_assertions)]
             fail_prepare_shutdown_once: self.fail_prepare_shutdown_once.clone(),
+            #[cfg(debug_assertions)]
+            fail_sdk_shutdown_once: self.fail_sdk_shutdown_once.clone(),
+            #[cfg(debug_assertions)]
+            fail_smcp_disconnect_once: self.fail_smcp_disconnect_once.clone(),
+            #[cfg(debug_assertions)]
+            hang_smcp_disconnect_once: self.hang_smcp_disconnect_once.clone(),
         }
     }
 
@@ -838,6 +890,18 @@ impl ComputerInstanceRuntime {
     #[doc(hidden)]
     pub fn can_begin_activity_for_test(&self) -> bool {
         self.begin_activity().is_ok()
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn fail_next_smcp_disconnect_for_test(&self) {
+        self.fail_smcp_disconnect_once.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn hang_next_smcp_disconnect_for_test(&self) {
+        self.hang_smcp_disconnect_once.store(true, Ordering::SeqCst);
     }
 
     #[cfg(debug_assertions)]
@@ -873,65 +937,66 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub async fn sync_runtime(&self) -> Result<(), String> {
+    pub async fn sync_runtime(&self) -> Result<(), ComputerRuntimeStartError> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
-        let was_running = self.is_running().await;
+        self.ensure_active()
+            .map_err(ComputerRuntimeStartError::Client)?;
 
-        let rebuilt = if self.sdk_requires_rebuild().await {
-            self.replace_sdk_computer(was_running, "runtime_configuration_changed")
-                .await?;
-            true
-        } else {
-            false
-        };
-
-        let mut inputs = self.inputs.write().await;
-        *inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        self.computer
-            .read()
-            .await
-            .update_inputs(inputs.clone())
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to sync SDK Computer inputs for instance {}: {}",
-                    self.instance.id, error
-                )
-            })?;
-        let _ = rebuilt;
+        let mut merged_inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+        merged_inputs.extend(self.plugin_runtime_inputs.read().await.clone());
+        {
+            let mut inputs = self.inputs.write().await;
+            *inputs = merged_inputs;
+            self.computer
+                .read()
+                .await
+                .update_inputs(inputs.clone())
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+        }
         *self.sdk_servers.write().await = self
             .sdk_user_mcp_server_config_map()
             .await
             .into_iter()
             .map(|(bundle_id, config)| (bundle_id, config.name().to_string()))
             .collect();
-        if was_running {
-            self.reconcile_sdk_governance_inner().await?;
+        if self.is_running().await {
+            self.reconcile_sdk_governance_inner()
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
         }
         Ok(())
     }
 
-    pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> Result<(), String> {
+    pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         let name = server.name().to_string();
         let bundle_id = resolve_bundle_id(&server);
         self.computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(server))
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         self.sdk_servers
             .write()
             .await
             .insert(bundle_id.clone(), name);
+        self.clear_mcp_start_diagnostic(&bundle_id).await;
+        self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
         self.plugin_mounted_server_ids
             .write()
             .await
             .insert(bundle_id);
         Ok(())
+    }
+
+    pub async fn runtime_input_kind(&self, input_id: &str) -> Option<InputKind> {
+        self.plugin_runtime_inputs
+            .read()
+            .await
+            .get(input_id)
+            .and_then(runtime_stored_input_kind)
     }
 
     /// Applies an already-persisted user MCP declaration to this runtime without rebuilding the
@@ -941,7 +1006,7 @@ impl ComputerInstanceRuntime {
     pub async fn apply_user_mcp_server_config(
         &self,
         server: MCPServerConfig,
-    ) -> Result<(), String> {
+    ) -> ComputerResult<()> {
         self.apply_user_mcp_server_config_inner(server, true)
             .await
             .map(|_| ())
@@ -954,7 +1019,8 @@ impl ComputerInstanceRuntime {
         let bundle_id = resolve_bundle_id(&server);
         if !self
             .apply_user_mcp_server_config_inner(server, false)
-            .await?
+            .await
+            .map_err(|error| error.to_string())?
         {
             return Err(format!(
                 "Failed to restore user MCP runtime after plugin release for {bundle_id}"
@@ -971,9 +1037,9 @@ impl ComputerInstanceRuntime {
         &self,
         server: MCPServerConfig,
         preserve_plugin_runtime: bool,
-    ) -> Result<bool, String> {
+    ) -> ComputerResult<bool> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         let bundle_id = resolve_bundle_id(&server);
         let computer_running = self.is_running().await;
 
@@ -991,7 +1057,7 @@ impl ComputerInstanceRuntime {
                 .write()
                 .await
                 .insert(bundle_id.clone());
-            self.mcp_start_diagnostics.write().await.remove(&bundle_id);
+            self.clear_mcp_start_diagnostic(&bundle_id).await;
             if computer_running {
                 if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
                     log::warn!(
@@ -1007,10 +1073,11 @@ impl ComputerInstanceRuntime {
 
         if computer_running {
             if let Err(error) = self.computer.read().await.stop_mcp_client(&bundle_id).await {
-                self.record_sdk_config_reload_required(
+                self.record_mcp_config_apply_diagnostic_for_server(
                     bundle_id.clone(),
+                    server.name().to_string(),
                     format!(
-                        "Configuration saved; runtime reload required after stop failed: {error}"
+                        "Configuration saved, but the active MCP process could not be stopped: {error}. Restart Runtime or inspect the logs before retrying."
                     ),
                 )
                 .await;
@@ -1031,9 +1098,12 @@ impl ComputerInstanceRuntime {
             .mount_server(normalize_mcp_server_tool_meta(server.clone()))
             .await
         {
-            self.record_sdk_config_reload_required(
+            self.record_mcp_config_apply_diagnostic_for_server(
                 bundle_id.clone(),
-                format!("Configuration saved; runtime activation failed: {error}"),
+                server.name().to_string(),
+                format!(
+                    "Configuration saved, but it could not be applied to the active Runtime: {error}. Restart Runtime or inspect the logs before retrying."
+                ),
             )
             .await;
             log::warn!(
@@ -1042,16 +1112,16 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
-            return Ok(false);
+            return Err(error);
         }
 
         self.sdk_servers
             .write()
             .await
             .insert(bundle_id.clone(), server.name().to_string());
-        self.clear_sdk_config_reload_required(&bundle_id).await;
+        self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
         if server.disabled() || !computer_running {
-            self.mcp_start_diagnostics.write().await.remove(&bundle_id);
+            self.clear_mcp_start_diagnostic(&bundle_id).await;
             return Ok(true);
         }
 
@@ -1062,30 +1132,86 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
+            return Err(error);
         }
         Ok(true)
     }
 
-    pub async fn mark_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
-        self.record_sdk_config_reload_required(bundle_id, message)
+    pub async fn record_mcp_config_apply_diagnostic(&self, bundle_id: BundleId, message: String) {
+        let server_name = self
+            .sdk_servers
+            .read()
+            .await
+            .get(&bundle_id)
+            .map(ToString::to_string);
+        self.record_mcp_config_apply_diagnostic_inner(bundle_id, server_name, message)
             .await;
     }
 
-    async fn record_sdk_config_reload_required(&self, bundle_id: BundleId, message: String) {
-        self.mcp_reload_diagnostics
-            .write()
-            .await
-            .insert(bundle_id, message);
-        self.sdk_config_reload_required
-            .store(true, Ordering::Release);
+    async fn record_mcp_config_apply_diagnostic_for_server(
+        &self,
+        bundle_id: BundleId,
+        server_name: String,
+        message: String,
+    ) {
+        self.record_mcp_config_apply_diagnostic_inner(bundle_id, Some(server_name), message)
+            .await;
     }
 
-    async fn clear_sdk_config_reload_required(&self, bundle_id: &BundleId) {
-        let mut diagnostics = self.mcp_reload_diagnostics.write().await;
-        diagnostics.remove(bundle_id);
-        if diagnostics.is_empty() {
-            self.sdk_config_reload_required
-                .store(false, Ordering::Release);
+    async fn record_mcp_config_apply_diagnostic_inner(
+        &self,
+        bundle_id: BundleId,
+        server_name: Option<String>,
+        message: String,
+    ) {
+        let operation = "apply_configuration";
+        let diagnostic = match server_name {
+            Some(server_name) => RuntimeDiagnosticRecord::for_mcp(operation, message, server_name),
+            None => RuntimeDiagnosticRecord::new(operation, message),
+        };
+        let mut diagnostics = self.mcp_config_apply_diagnostics.write().await;
+        let diagnostic = diagnostic.preserve_occurrence_from(diagnostics.get(&bundle_id));
+        diagnostics.insert(bundle_id.clone(), diagnostic);
+        drop(diagnostics);
+        self.publish_runtime_status(ComputerRuntimeEventCause::McpDiagnosticChanged {
+            bundle_id: bundle_id.into_string(),
+            operation: operation.to_string(),
+            has_error: true,
+        })
+        .await;
+    }
+
+    async fn clear_mcp_config_apply_diagnostic(&self, bundle_id: &BundleId) {
+        if self
+            .mcp_config_apply_diagnostics
+            .write()
+            .await
+            .remove(bundle_id)
+            .is_some()
+        {
+            self.publish_runtime_status(ComputerRuntimeEventCause::McpDiagnosticChanged {
+                bundle_id: bundle_id.to_string(),
+                operation: "apply_configuration".to_string(),
+                has_error: false,
+            })
+            .await;
+        }
+    }
+
+    async fn clear_mcp_start_diagnostic(&self, bundle_id: &BundleId) {
+        if self
+            .mcp_start_diagnostics
+            .write()
+            .await
+            .remove(bundle_id)
+            .is_some()
+        {
+            self.publish_runtime_status(ComputerRuntimeEventCause::McpDiagnosticChanged {
+                bundle_id: bundle_id.to_string(),
+                operation: "start".to_string(),
+                has_error: false,
+            })
+            .await;
         }
     }
 
@@ -1108,10 +1234,12 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(|error| error.to_string())?;
         self.sdk_servers.write().await.remove(bundle_id);
-        self.mcp_start_diagnostics.write().await.remove(bundle_id);
-        self.clear_sdk_config_reload_required(bundle_id).await;
+        self.clear_mcp_start_diagnostic(bundle_id).await;
+        self.clear_mcp_config_apply_diagnostic(bundle_id).await;
 
-        self.reconcile_sdk_governance_inner().await?;
+        self.reconcile_sdk_governance_inner()
+            .await
+            .map_err(|error| error.to_string())?;
         if computer_running {
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, "user MCP removal");
@@ -1127,29 +1255,35 @@ impl ComputerInstanceRuntime {
             &self.sdk_servers,
             &self.plugin_mounted_server_ids,
             async { self.computer.read().await.unmount_server(bundle_id).await },
+            async {
+                self.clear_mcp_start_diagnostic(bundle_id).await;
+                self.clear_mcp_config_apply_diagnostic(bundle_id).await;
+            },
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     pub async fn mcp_server_statuses(&self) -> Vec<(BundleId, ServerName, bool, String)> {
         let _guard = self.lifecycle_lock.lock().await;
-        let diagnostics = self.mcp_start_diagnostics().await;
-        self.computer
-            .read()
-            .await
-            .get_server_status()
-            .await
-            .into_iter()
-            .map(|(bundle_id, name, running, status)| {
-                let status = diagnostics.get(&bundle_id).cloned().unwrap_or(status);
-                (bundle_id, name, running, status)
-            })
-            .collect()
+        self.computer.read().await.get_server_status().await
     }
 
     pub async fn mcp_start_diagnostics(&self) -> HashMap<BundleId, String> {
-        let mut diagnostics = self.mcp_start_diagnostics.read().await.clone();
-        diagnostics.extend(self.mcp_reload_diagnostics.read().await.clone());
+        let mut diagnostics: HashMap<_, _> = self
+            .mcp_start_diagnostics
+            .read()
+            .await
+            .iter()
+            .map(|(bundle_id, diagnostic)| (bundle_id.clone(), diagnostic.message.clone()))
+            .collect();
+        diagnostics.extend(
+            self.mcp_config_apply_diagnostics
+                .read()
+                .await
+                .iter()
+                .map(|(bundle_id, diagnostic)| (bundle_id.clone(), diagnostic.message.clone())),
+        );
         diagnostics
     }
 
@@ -1192,20 +1326,42 @@ impl ComputerInstanceRuntime {
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
         let result = self.computer.read().await.start_mcp_client(bundle_id).await;
-        let mut diagnostics = self.mcp_start_diagnostics.write().await;
         match &result {
             Ok(()) => {
-                diagnostics.remove(bundle_id);
+                self.clear_mcp_start_diagnostic(bundle_id).await;
             }
             Err(error) => {
-                diagnostics.insert(bundle_id.clone(), format!("Start failed: {error}"));
+                self.record_mcp_start_diagnostic(
+                    bundle_id.clone(),
+                    format!("Start failed: {error}"),
+                )
+                .await;
             }
         }
         result
     }
 
+    async fn record_mcp_start_diagnostic(&self, bundle_id: BundleId, message: String) {
+        let operation = "start";
+        let mut diagnostics = self.mcp_start_diagnostics.write().await;
+        let diagnostic = RuntimeDiagnosticRecord::new(operation, message)
+            .preserve_occurrence_from(diagnostics.get(&bundle_id));
+        diagnostics.insert(bundle_id.clone(), diagnostic);
+        drop(diagnostics);
+        self.publish_runtime_status(ComputerRuntimeEventCause::McpDiagnosticChanged {
+            bundle_id: bundle_id.into_string(),
+            operation: operation.to_string(),
+            has_error: true,
+        })
+        .await;
+    }
+
     pub async fn stop_mcp_server(&self, bundle_id: &BundleId) -> Result<bool, String> {
         let _guard = self.lifecycle_lock.lock().await;
+        self.stop_mcp_server_inner(bundle_id).await
+    }
+
+    async fn stop_mcp_server_inner(&self, bundle_id: &BundleId) -> Result<bool, String> {
         self.ensure_active()?;
         let result = self
             .computer
@@ -1215,15 +1371,28 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(|error| error.to_string());
         if result.is_ok() {
-            self.mcp_start_diagnostics.write().await.remove(bundle_id);
+            self.clear_mcp_start_diagnostic(bundle_id).await;
         }
         result
+    }
+
+    pub async fn stop_mcp_servers_best_effort(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, Result<bool, String>)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let mut results = Vec::with_capacity(bundle_ids.len());
+        for bundle_id in bundle_ids {
+            let result = self.stop_mcp_server_inner(&bundle_id).await;
+            results.push((bundle_id, result));
+        }
+        results
     }
 
     pub async fn start_mcp_servers_best_effort(
         &self,
         bundle_ids: Vec<BundleId>,
-    ) -> Vec<(BundleId, String)> {
+    ) -> Vec<(BundleId, ComputerError)> {
         let _guard = self.lifecycle_lock.lock().await;
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
@@ -1231,17 +1400,17 @@ impl ComputerInstanceRuntime {
     async fn start_mcp_servers_best_effort_inner(
         &self,
         bundle_ids: Vec<BundleId>,
-    ) -> Vec<(BundleId, String)> {
+    ) -> Vec<(BundleId, ComputerError)> {
         let mut failures = Vec::new();
         for bundle_id in bundle_ids {
             if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
-                failures.push((bundle_id, error.to_string()));
+                failures.push((bundle_id, error));
             }
         }
         failures
     }
 
-    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, String)> {
+    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership()
             .await
@@ -1254,7 +1423,11 @@ impl ComputerInstanceRuntime {
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
-    pub(super) fn log_mcp_start_failures(&self, failures: &[(BundleId, String)], cause: &str) {
+    pub(super) fn log_mcp_start_failures(
+        &self,
+        failures: &[(BundleId, ComputerError)],
+        cause: &str,
+    ) {
         for (bundle_id, error) in failures {
             log::warn!(
                 "Failed to start MCP server for Computer instance {} during {}: {} ({})",
@@ -1266,9 +1439,9 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub async fn remount_enabled_plugin_servers(&self) -> Result<(), String> {
+    pub async fn remount_enabled_plugin_servers(&self) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
+        self.ensure_active_computer()?;
         self.reconcile_sdk_governance_inner().await.map(|_| ())
     }
 
@@ -1317,13 +1490,13 @@ impl ComputerInstanceRuntime {
     pub async fn desktop_windows(
         &self,
         window_uri: Option<&str>,
-    ) -> Result<Vec<(BundleId, ServerName, Resource, ReadResourceResult)>, String> {
+    ) -> Result<Vec<(BundleId, ServerName, Resource)>, String> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         self.computer
             .read()
             .await
-            .get_windows_details(window_uri)
+            .list_windows_with_identity(window_uri)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1373,6 +1546,10 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         let input_id = input.id().to_string();
+        self.plugin_runtime_inputs
+            .write()
+            .await
+            .insert(input_id.clone(), input.clone());
         self.inputs.write().await.insert(input_id, input.clone());
         self.computer
             .read()
@@ -1396,6 +1573,16 @@ impl ComputerInstanceRuntime {
 
     pub async fn sdk_skill_home(&self) -> PathBuf {
         self.computer.read().await.skill_home()
+    }
+
+    pub fn default_skill_home(&self) -> PathBuf {
+        default_local_skills_root(&self.skill_home_base, &self.instance.id)
+    }
+
+    pub fn configured_skill_home(&self) -> PathBuf {
+        instance_config_context(&self.instance, &self.skill_home_base)
+            .skill_home()
+            .to_path_buf()
     }
 
     pub async fn sdk_governance_snapshot(
@@ -1619,17 +1806,23 @@ impl ComputerInstanceRuntime {
             .filter(McpServerManagedBy::is_plugin_owned)
     }
 
-    async fn reconcile_sdk_governance_inner(&self) -> Result<Vec<String>, String> {
+    async fn reconcile_sdk_governance_inner(&self) -> ComputerResult<Vec<String>> {
         let config_context = instance_config_context(&self.instance, &self.skill_home_base);
         let declared = resolve_instance_settings(&config_context);
         let existing_servers = self.sdk_servers.read().await.clone();
-        let hooks = RuntimeMcpHooks::new(self, existing_servers).await?;
+        let hooks = RuntimeMcpHooks::new(self, existing_servers)
+            .await
+            .map_err(ComputerError::RuntimeError)?;
         let report = self
             .computer
             .read()
             .await
             .reconcile_governance(Some(&hooks), Some(&declared))
             .await;
+        for bundle_id in hooks.take_diagnostic_reset_ids().await {
+            self.clear_mcp_start_diagnostic(&bundle_id).await;
+            self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
+        }
         for marketplace in report.failed_marketplaces {
             log::warn!(
                 "Marketplace '{}' degraded during SDK governance recovery for instance '{}'",
@@ -1647,6 +1840,9 @@ impl ComputerInstanceRuntime {
             .write()
             .await
             .extend(plugin_owned_server_ids);
+        if let Some(error) = hooks.take_input_resolution_error().await {
+            return Err(ComputerError::InputResolution(error));
+        }
         Ok(hooks
             .registered_server_ids()
             .await
@@ -1655,8 +1851,13 @@ impl ComputerInstanceRuntime {
             .collect())
     }
 
-    async fn replace_sdk_computer(&self, was_running: bool, reason: &str) -> Result<(), String> {
-        let inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+    async fn replace_sdk_computer(
+        &self,
+        was_running: bool,
+        reason: &str,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        let mut inputs = input_definitions_to_mcp_map(&self.instance.inputs);
+        inputs.extend(self.plugin_runtime_inputs.read().await.clone());
         let (new_computer, sdk_servers) = build_sdk_computer(
             &self.instance,
             &inputs,
@@ -1667,30 +1868,37 @@ impl ComputerInstanceRuntime {
 
         if self.has_smcp_transport().await {
             self.clear_smcp_connection_inner().await.map_err(|error| {
-                format!(
+                ComputerRuntimeStartError::Client(format!(
                     "Failed to clear SMCP connection before rebuilding SDK Computer for instance {}: {}",
                     self.instance.id, error
-                )
+                ))
             })?;
         }
+        // Handle replacement invalidates every in-flight connection command, including a
+        // Manager connect still waiting on HTTP before any transport exists.
+        self.cancel_connection_operation_for_handle_replacement()
+            .await;
 
-        self.clear_client_runtime_diagnostic_silent().await;
-        self.mcp_start_diagnostics.write().await.clear();
-        self.mcp_reload_diagnostics.write().await.clear();
-        self.shutdown_sdk_computer_inner().await?;
+        self.shutdown_sdk_computer_inner()
+            .await
+            .map_err(ComputerRuntimeStartError::Client)?;
         self.stop_runtime_event_relay().await;
         {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
+            // Problem cleanup is part of the committed handle replacement. Until shutdown
+            // succeeds, the old generation remains authoritative and must retain its diagnostics.
+            self.clear_connection_diagnostic_for_handle_replacement_silent()
+                .await;
+            self.clear_client_runtime_diagnostic_silent().await;
+            self.mcp_start_diagnostics.write().await.clear();
+            self.mcp_config_apply_diagnostics.write().await.clear();
             let mut computer = self.computer.write().await;
             self.runtime_generation.fetch_add(1, Ordering::AcqRel);
             *computer = new_computer;
             self.shutdown_completed.store(false, Ordering::Release);
         }
         *self.sdk_servers.write().await = sdk_servers;
-        self.sdk_config_reload_required
-            .store(false, Ordering::Release);
         self.plugin_mounted_server_ids.write().await.clear();
-        *self.sdk_auto_connect.write().await = self.instance.connection_policy.auto_connect;
         self.start_runtime_event_relay().await;
         self.publish_runtime_status(ComputerRuntimeEventCause::HandleReplaced {
             reason: reason.to_string(),
@@ -1703,13 +1911,10 @@ impl ComputerInstanceRuntime {
                 .await
                 .boot_up()
                 .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to boot replacement SDK Computer for instance {}: {}",
-                        self.instance.id, error
-                    )
-                })?;
-            self.reconcile_sdk_governance_inner().await?;
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+            self.reconcile_sdk_governance_inner()
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, reason);
         }
@@ -1717,17 +1922,19 @@ impl ComputerInstanceRuntime {
     }
 }
 
-async fn remove_tracked_plugin_server<F>(
+async fn remove_tracked_plugin_server<F, C>(
     bundle_id: &BundleId,
     sdk_servers: &Arc<RwLock<HashMap<BundleId, ServerName>>>,
     plugin_mounted_server_ids: &Arc<RwLock<HashSet<BundleId>>>,
     unmount: F,
-) -> Result<(), String>
+    on_removed: C,
+) -> Result<bool, String>
 where
     F: std::future::Future<Output = ComputerResult<bool>>,
+    C: std::future::Future<Output = ()>,
 {
     if !plugin_mounted_server_ids.read().await.contains(bundle_id) {
-        return Ok(());
+        return Ok(false);
     }
 
     // Preserve ownership until the SDK confirms the runtime side was removed.
@@ -1735,7 +1942,8 @@ where
     unmount.await.map_err(|error| error.to_string())?;
     plugin_mounted_server_ids.write().await.remove(bundle_id);
     sdk_servers.write().await.remove(bundle_id);
-    Ok(())
+    on_removed.await;
+    Ok(true)
 }
 
 fn build_sdk_computer(
@@ -1753,6 +1961,10 @@ fn build_sdk_computer(
         .mcp
         .servers
         .into_iter()
+        // Plugin servers are a read-side projection derived from the governance ledger, not
+        // durable declarations. Feeding them back into a fresh Computer would make governance
+        // reconciliation treat them as pre-existing and skip input injection/remount.
+        .filter(|server| server.origin != ProvenanceScope::Plugin)
         .map(|server| (server.name, normalize_mcp_server_tool_meta(server.config)))
         .collect();
     let sdk_servers = mcp_servers
@@ -1781,13 +1993,17 @@ fn build_sdk_computer(
 struct RuntimeMcpHooks {
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
+    plugin_runtime_inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
     plugin_mounted_server_ids: Arc<RwLock<HashSet<BundleId>>>,
     existing_servers: HashMap<BundleId, ServerName>,
     bundled_server_ids: HashSet<BundleId>,
+    disabled_independent_server_ids: HashSet<BundleId>,
     root_ownership: HashMap<PathBuf, (String, String)>,
     registered_server_ids: Arc<Mutex<Vec<BundleId>>>,
+    diagnostic_reset_ids: Arc<Mutex<Vec<BundleId>>>,
     preserved_registration_counts: Arc<Mutex<HashMap<BundleId, usize>>>,
+    first_input_resolution_error: Arc<Mutex<Option<InputResolutionError>>>,
 }
 
 impl RuntimeMcpHooks {
@@ -1822,21 +2038,51 @@ impl RuntimeMcpHooks {
                 bundled_server_ids.insert(bundle_id);
             }
         }
+        let disabled_independent_server_ids =
+            instance_config_context(&runtime.instance, &runtime.skill_home_base)
+                .load()
+                .mcp
+                .servers
+                .into_iter()
+                .filter(|server| {
+                    server.origin != ProvenanceScope::Plugin && server.config.disabled()
+                })
+                .map(|server| resolve_bundle_id(&server.config))
+                .collect::<HashSet<_>>();
+        let existing_servers = existing_servers
+            .into_iter()
+            .filter(|(bundle_id, _)| {
+                !bundled_server_ids.contains(bundle_id)
+                    || !disabled_independent_server_ids.contains(bundle_id)
+            })
+            .collect();
         Ok(Self {
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
+            plugin_runtime_inputs: runtime.plugin_runtime_inputs.clone(),
             sdk_servers: runtime.sdk_servers.clone(),
             plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
             existing_servers,
             bundled_server_ids,
+            disabled_independent_server_ids,
             root_ownership,
             registered_server_ids: Arc::new(Mutex::new(Vec::new())),
+            diagnostic_reset_ids: Arc::new(Mutex::new(Vec::new())),
             preserved_registration_counts: Arc::new(Mutex::new(HashMap::new())),
+            first_input_resolution_error: Arc::new(Mutex::new(None)),
         })
     }
 
     async fn registered_server_ids(&self) -> Vec<BundleId> {
         self.registered_server_ids.lock().await.clone()
+    }
+
+    async fn take_diagnostic_reset_ids(&self) -> Vec<BundleId> {
+        std::mem::take(&mut *self.diagnostic_reset_ids.lock().await)
+    }
+
+    async fn take_input_resolution_error(&self) -> Option<InputResolutionError> {
+        self.first_input_resolution_error.lock().await.take()
     }
 }
 
@@ -1854,22 +2100,40 @@ impl McpInstallHooks for RuntimeMcpHooks {
                 "Missing plugin ownership metadata for bundled MCP server '{bundle_id}'"
             )));
         }
-        if self.sdk_servers.read().await.contains_key(&bundle_id) {
+        if self.sdk_servers.read().await.contains_key(&bundle_id)
+            && !self.disabled_independent_server_ids.contains(&bundle_id)
+        {
             *self
                 .preserved_registration_counts
                 .lock()
                 .await
                 .entry(bundle_id.clone())
                 .or_default() += 1;
+            self.diagnostic_reset_ids
+                .lock()
+                .await
+                .push(bundle_id.clone());
             self.registered_server_ids.lock().await.push(bundle_id);
             return Ok(());
         }
-        self.computer
+        let cfg = if self.disabled_independent_server_ids.contains(&bundle_id) {
+            force_mcp_server_enabled(cfg)
+        } else {
+            cfg
+        };
+        let mount_result = self
+            .computer
             .read()
             .await
             .mount_server(normalize_mcp_server_tool_meta(cfg))
-            .await
-            .map_err(|error| McpHookError(error.to_string()))?;
+            .await;
+        if let Err(ComputerError::InputResolution(error)) = &mount_result {
+            let mut first_error = self.first_input_resolution_error.lock().await;
+            if first_error.is_none() {
+                *first_error = Some(error.clone());
+            }
+        }
+        mount_result.map_err(|error| McpHookError(error.to_string()))?;
         self.sdk_servers
             .write()
             .await
@@ -1878,6 +2142,10 @@ impl McpInstallHooks for RuntimeMcpHooks {
             .write()
             .await
             .insert(bundle_id.clone());
+        self.diagnostic_reset_ids
+            .lock()
+            .await
+            .push(bundle_id.clone());
         self.registered_server_ids.lock().await.push(bundle_id);
         Ok(())
     }
@@ -1889,6 +2157,11 @@ impl McpInstallHooks for RuntimeMcpHooks {
             if *count == 0 {
                 preserved.remove(bundle_id);
             }
+            drop(preserved);
+            self.diagnostic_reset_ids
+                .lock()
+                .await
+                .push(bundle_id.clone());
             return Ok(());
         }
         drop(preserved);
@@ -1897,9 +2170,15 @@ impl McpInstallHooks for RuntimeMcpHooks {
             &self.sdk_servers,
             &self.plugin_mounted_server_ids,
             async { self.computer.read().await.unmount_server(bundle_id).await },
+            async {},
         )
         .await
-        .map_err(McpHookError)
+        .map_err(McpHookError)?;
+        self.diagnostic_reset_ids
+            .lock()
+            .await
+            .push(bundle_id.clone());
+        Ok(())
     }
 
     async fn inject_inputs(&self, plugin_root: &Path) -> Result<(), McpHookError> {
@@ -1914,9 +2193,15 @@ impl McpInstallHooks for RuntimeMcpHooks {
             return Ok(());
         }
 
-        let mut current = self.inputs.write().await;
         for input in inputs {
-            current.insert(input.id().to_string(), input.clone());
+            self.plugin_runtime_inputs
+                .write()
+                .await
+                .insert(input.id().to_string(), input.clone());
+            self.inputs
+                .write()
+                .await
+                .insert(input.id().to_string(), input.clone());
             self.computer
                 .read()
                 .await
@@ -1926,6 +2211,15 @@ impl McpInstallHooks for RuntimeMcpHooks {
         }
         Ok(())
     }
+}
+
+pub(crate) fn force_mcp_server_enabled(mut config: MCPServerConfig) -> MCPServerConfig {
+    match &mut config {
+        MCPServerConfig::Stdio(server) => server.disabled = false,
+        MCPServerConfig::Sse(server) => server.disabled = false,
+        MCPServerConfig::Http(server) => server.disabled = false,
+    }
+    config
 }
 
 fn instance_config_context(
@@ -2058,6 +2352,18 @@ fn input_definitions_to_mcp_map(
         .collect()
 }
 
+fn runtime_stored_input_kind(input: &MCPServerInput) -> Option<InputKind> {
+    match input {
+        MCPServerInput::PromptString(input) => Some(if input.password == Some(true) {
+            InputKind::Secret
+        } else {
+            InputKind::Value
+        }),
+        MCPServerInput::PickString(_) => Some(InputKind::Value),
+        MCPServerInput::Command(_) => None,
+    }
+}
+
 fn input_description(label: &str, description: &Option<String>) -> String {
     description
         .as_ref()
@@ -2124,6 +2430,7 @@ fn default_skill_home_base() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::connection::{settle_refresh_terminal, RefreshTerminalOutcome};
 
     #[derive(Default)]
     struct RecordingRuntimeEventSink {
@@ -2212,6 +2519,7 @@ mod tests {
             "Plugin MCP".to_string(),
         )])));
         let plugin_mounted_server_ids = Arc::new(RwLock::new(HashSet::from([bundle_id.clone()])));
+        let diagnostic_cleared = Arc::new(AtomicBool::new(false));
 
         let error = remove_tracked_plugin_server(
             &bundle_id,
@@ -2222,6 +2530,12 @@ mod tests {
                     "injected unmount failure".to_string(),
                 ))
             },
+            {
+                let diagnostic_cleared = diagnostic_cleared.clone();
+                async move {
+                    diagnostic_cleared.store(true, Ordering::SeqCst);
+                }
+            },
         )
         .await
         .unwrap_err();
@@ -2229,18 +2543,136 @@ mod tests {
         assert_eq!(error, "Runtime error: injected unmount failure");
         assert!(sdk_servers.read().await.contains_key(&bundle_id));
         assert!(plugin_mounted_server_ids.read().await.contains(&bundle_id));
+        assert!(
+            !diagnostic_cleared.load(Ordering::SeqCst),
+            "failed unmount must retain owner diagnostics"
+        );
 
         remove_tracked_plugin_server(
             &bundle_id,
             &sdk_servers,
             &plugin_mounted_server_ids,
             async { Ok(true) },
+            {
+                let diagnostic_cleared = diagnostic_cleared.clone();
+                async move {
+                    diagnostic_cleared.store(true, Ordering::SeqCst);
+                }
+            },
         )
         .await
         .unwrap();
 
         assert!(!sdk_servers.read().await.contains_key(&bundle_id));
         assert!(!plugin_mounted_server_ids.read().await.contains(&bundle_id));
+        assert!(diagnostic_cleared.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn successful_plugin_server_removal_clears_current_diagnostics() {
+        let runtime = ComputerInstanceRuntime::new(
+            instance("one", "One"),
+            std::env::temp_dir().join("tfrobot-client-test-skill-home"),
+        );
+        runtime.start().await.unwrap();
+        let server = server_config("plugin-mcp");
+        let bundle_id = resolve_bundle_id(&server);
+        runtime.add_or_update_plugin_server(server).await.unwrap();
+        runtime.mcp_start_diagnostics.write().await.insert(
+            bundle_id.clone(),
+            RuntimeDiagnosticRecord::new("start", "plugin start failed"),
+        );
+        runtime
+            .record_mcp_config_apply_diagnostic(
+                bundle_id.clone(),
+                "plugin configuration failed".to_string(),
+            )
+            .await;
+        assert_eq!(runtime.runtime_snapshot().await.problems.len(), 2);
+
+        runtime.remove_plugin_server(&bundle_id).await.unwrap();
+
+        assert!(!runtime.sdk_servers.read().await.contains_key(&bundle_id));
+        assert!(!runtime
+            .plugin_mounted_server_ids
+            .read()
+            .await
+            .contains(&bundle_id));
+        assert!(!runtime
+            .mcp_start_diagnostics
+            .read()
+            .await
+            .contains_key(&bundle_id));
+        assert!(!runtime
+            .mcp_config_apply_diagnostics
+            .read()
+            .await
+            .contains_key(&bundle_id));
+        assert!(runtime.runtime_snapshot().await.problems.is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn preserved_plugin_owner_transitions_request_published_diagnostic_cleanup() {
+        let runtime = ComputerInstanceRuntime::new(
+            instance("one", "One"),
+            std::env::temp_dir().join("tfrobot-client-test-skill-home"),
+        );
+        runtime.start().await.unwrap();
+        let server = server_config("shared-mcp");
+        let bundle_id = resolve_bundle_id(&server);
+        runtime
+            .sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), server.name().to_string());
+        runtime.mcp_start_diagnostics.write().await.insert(
+            bundle_id.clone(),
+            RuntimeDiagnosticRecord::new("start", "previous owner failed"),
+        );
+
+        let hooks = RuntimeMcpHooks {
+            computer: runtime.computer.clone(),
+            inputs: runtime.inputs.clone(),
+            plugin_runtime_inputs: runtime.plugin_runtime_inputs.clone(),
+            sdk_servers: runtime.sdk_servers.clone(),
+            plugin_mounted_server_ids: runtime.plugin_mounted_server_ids.clone(),
+            existing_servers: runtime.sdk_servers.read().await.clone(),
+            bundled_server_ids: HashSet::from([bundle_id.clone()]),
+            disabled_independent_server_ids: HashSet::new(),
+            root_ownership: HashMap::new(),
+            registered_server_ids: Arc::new(Mutex::new(Vec::new())),
+            diagnostic_reset_ids: Arc::new(Mutex::new(Vec::new())),
+            preserved_registration_counts: Arc::new(Mutex::new(HashMap::new())),
+            first_input_resolution_error: Arc::new(Mutex::new(None)),
+        };
+
+        hooks.register_server(server).await.unwrap();
+        for reset_id in hooks.take_diagnostic_reset_ids().await {
+            runtime.clear_mcp_start_diagnostic(&reset_id).await;
+            runtime.clear_mcp_config_apply_diagnostic(&reset_id).await;
+        }
+        assert!(
+            runtime.runtime_snapshot().await.problems.is_empty(),
+            "user-to-plugin owner transition must clear the previous owner's problem"
+        );
+
+        runtime
+            .record_mcp_config_apply_diagnostic(
+                bundle_id.clone(),
+                "plugin owner failed".to_string(),
+            )
+            .await;
+        hooks.remove_server(&bundle_id).await.unwrap();
+        for reset_id in hooks.take_diagnostic_reset_ids().await {
+            runtime.clear_mcp_start_diagnostic(&reset_id).await;
+            runtime.clear_mcp_config_apply_diagnostic(&reset_id).await;
+        }
+        assert!(
+            runtime.runtime_snapshot().await.problems.is_empty(),
+            "plugin-to-user owner transition must clear the previous owner's problem"
+        );
+        runtime.shutdown().await;
     }
 
     #[test]
@@ -2478,9 +2910,51 @@ mod tests {
                 .count(),
             1
         );
+        let snapshot = runtime.runtime_snapshot().await;
+        assert_eq!(snapshot.problems.len(), 1);
+        assert_eq!(snapshot.problems[0].operation, "connect");
         assert_eq!(
-            runtime.runtime_snapshot().await.last_error.as_deref(),
+            snapshot.problems[0].technical_detail.as_deref(),
             Some("SMCP connection failed; see logs for details")
+        );
+
+        runtime
+            .client_runtime_diagnostic
+            .write()
+            .await
+            .as_mut()
+            .unwrap()
+            .occurred_at = "first-occurrence".to_string();
+        runtime
+            .set_client_runtime_diagnostic(
+                "connect",
+                Some("SMCP connection still unavailable; see logs for details".to_string()),
+            )
+            .await;
+        runtime
+            .set_client_runtime_diagnostic("disconnect", None)
+            .await;
+        let snapshot = runtime.runtime_snapshot().await;
+        assert_eq!(snapshot.problems.len(), 1);
+        assert_eq!(snapshot.problems[0].operation, "connect");
+        assert_eq!(snapshot.problems[0].occurred_at, "first-occurrence");
+        assert_eq!(
+            snapshot.problems[0].technical_detail.as_deref(),
+            Some("SMCP connection still unavailable; see logs for details")
+        );
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                        operation,
+                        has_error: false,
+                    } if operation == "disconnect"
+                ))
+                .count(),
+            0
         );
 
         runtime.set_client_runtime_diagnostic("connect", None).await;
@@ -2498,11 +2972,127 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(runtime.runtime_snapshot().await.last_error, None);
+        assert!(runtime.runtime_snapshot().await.problems.is_empty());
     }
 
     #[tokio::test]
-    async fn connection_authority_changes_publish_versioned_runtime_events() {
+    async fn repeated_mcp_failures_preserve_each_problem_occurrence() {
+        let runtime = ComputerInstanceRuntime::new(
+            instance("one", "One"),
+            std::env::temp_dir().join("tfrobot-client-test-skill-home"),
+        );
+        runtime.start().await.unwrap();
+        let bundle_id = BundleId::try_from("server-a").unwrap();
+        runtime
+            .sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), "Server A".to_string());
+
+        runtime
+            .record_mcp_start_diagnostic(bundle_id.clone(), "first start failure".to_string())
+            .await;
+        runtime
+            .mcp_start_diagnostics
+            .write()
+            .await
+            .get_mut(&bundle_id)
+            .unwrap()
+            .occurred_at = "first-start-occurrence".to_string();
+        runtime
+            .record_mcp_start_diagnostic(bundle_id.clone(), "updated start failure".to_string())
+            .await;
+
+        runtime
+            .record_mcp_config_apply_diagnostic(
+                bundle_id.clone(),
+                "first configuration failure".to_string(),
+            )
+            .await;
+        runtime
+            .mcp_config_apply_diagnostics
+            .write()
+            .await
+            .get_mut(&bundle_id)
+            .unwrap()
+            .occurred_at = "first-configuration-occurrence".to_string();
+        runtime
+            .record_mcp_config_apply_diagnostic(
+                bundle_id.clone(),
+                "updated configuration failure".to_string(),
+            )
+            .await;
+
+        let problems = runtime.runtime_snapshot().await.problems;
+        let start = problems
+            .iter()
+            .find(|problem| problem.operation == "start")
+            .unwrap();
+        assert_eq!(start.occurred_at, "first-start-occurrence");
+        assert_eq!(
+            start.technical_detail.as_deref(),
+            Some("updated start failure")
+        );
+        let configuration = problems
+            .iter()
+            .find(|problem| problem.operation == "apply_configuration")
+            .unwrap();
+        assert_eq!(configuration.occurred_at, "first-configuration-occurrence");
+        assert_eq!(
+            configuration.technical_detail.as_deref(),
+            Some("updated configuration failure")
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_first_mcp_mount_is_structured_before_runtime_inventory_admission() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let sink = Arc::new(RecordingRuntimeEventSink::default());
+        registry.set_runtime_event_sink(sink.clone()).await;
+        registry.start_runtime("one").await.unwrap();
+        let runtime = registry.runtime("one").await.unwrap();
+        let bundle_id = BundleId::try_from("server-a").unwrap();
+
+        runtime
+            .record_mcp_config_apply_diagnostic_for_server(
+                bundle_id.clone(),
+                "Server A".to_string(),
+                "active process rejected the saved configuration".to_string(),
+            )
+            .await;
+
+        assert!(!runtime.sdk_servers.read().await.contains_key(&bundle_id));
+        let problem = runtime.runtime_snapshot().await.problems.pop().unwrap();
+        assert_eq!(problem.operation, "apply_configuration");
+        assert!(matches!(
+            problem.affected_capabilities.as_slice(),
+            [crate::services::computer_runtime_events::ComputerRuntimeAffectedCapability::McpServer {
+                bundle_id: affected_bundle_id,
+                name: Some(name),
+            }] if affected_bundle_id == "server-a" && name == "Server A"
+        ));
+        assert!(problem
+            .technical_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("rejected")));
+        runtime.clear_mcp_config_apply_diagnostic(&bundle_id).await;
+        assert!(runtime.runtime_snapshot().await.problems.is_empty());
+        assert!(sink.events.lock().unwrap().iter().any(|event| matches!(
+            &event.cause,
+            ComputerRuntimeEventCause::McpDiagnosticChanged {
+                has_error: false,
+                ..
+            }
+        )));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connection_state_changes_publish_versioned_runtime_events() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance("one", "One")],
@@ -2532,9 +3122,9 @@ mod tests {
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 1,
-                        present: true,
+                        status: ClientConnectionStatus::Connected,
                     }
                 )
             })
@@ -2555,9 +3145,9 @@ mod tests {
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 2,
-                        present: true,
+                        status: ClientConnectionStatus::Connected,
                     }
                 )
             })
@@ -2578,16 +3168,16 @@ mod tests {
                 .await
         );
         assert_eq!(sink.event_count(), event_count);
-        assert_eq!(runtime.connection_authority_snapshot().await.revision, 2);
+        assert_eq!(runtime.connection_snapshot().await.revision, 2);
 
         runtime.take_connection_state().await;
         let removed = sink
             .wait_for(|event| {
                 matches!(
                     &event.cause,
-                    ComputerRuntimeEventCause::ClientConnectionAuthorityChanged {
+                    ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 3,
-                        present: false,
+                        status: ClientConnectionStatus::Disconnected,
                     }
                 )
             })
@@ -2599,7 +3189,614 @@ mod tests {
         let event_count = sink.event_count();
         assert!(!runtime.refresh_connection_timestamp_for_generation(7).await);
         assert_eq!(sink.event_count(), event_count);
-        assert_eq!(runtime.connection_authority_snapshot().await.revision, 3);
+        assert_eq!(runtime.connection_snapshot().await.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn connection_operation_state_is_versioned_and_isolated_per_computer() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One"), instance("two", "Two")],
+        });
+        let first = registry.runtime("one").await.unwrap();
+        let second = registry.runtime("two").await.unwrap();
+
+        first
+            .begin_connection_operation(
+                ClientConnectionOperation::Connect,
+                Some(ClientConnectionOperationTarget {
+                    source_type: "manager_robot".to_string(),
+                    target_id: Some("employee:11".to_string()),
+                    employee_id: Some(11),
+                }),
+            )
+            .await
+            .unwrap();
+        let connecting = first.connection_snapshot().await;
+        assert_eq!(connecting.status, ClientConnectionStatus::Connecting);
+        assert_eq!(
+            connecting.operation,
+            Some(ClientConnectionOperation::Connect)
+        );
+        assert_eq!(
+            connecting
+                .operation_target
+                .as_ref()
+                .and_then(|target| target.employee_id),
+            Some(11)
+        );
+        assert_eq!(connecting.revision, 1);
+        assert!(!connecting.actions.connect.enabled);
+        assert!(!connecting.actions.disconnect.enabled);
+
+        let unaffected = second.connection_snapshot().await;
+        assert_eq!(unaffected.status, ClientConnectionStatus::Disconnected);
+        assert_eq!(unaffected.revision, 0);
+
+        first
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("target-a".to_string()),
+                target_name: Some("Target A".to_string()),
+                employee_id: None,
+                generation: 7,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first.connection_snapshot().await.status,
+            ClientConnectionStatus::Connecting
+        );
+
+        first.complete_connection_operation().await;
+        let connected = first.connection_snapshot().await;
+        assert_eq!(connected.status, ClientConnectionStatus::Connected);
+        assert_eq!(connected.revision, 3);
+        assert!(connected.operation_target.is_none());
+        assert!(connected.actions.disconnect.enabled);
+
+        first
+            .begin_connection_operation(
+                ClientConnectionOperation::Disconnect,
+                connected
+                    .context
+                    .as_ref()
+                    .map(|context| ClientConnectionOperationTarget {
+                        source_type: context.source_type.clone(),
+                        target_id: context.target_id.clone(),
+                        employee_id: context.employee_id,
+                    }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.connection_snapshot().await.status,
+            ClientConnectionStatus::Disconnecting
+        );
+        first
+            .reconcile_disconnect_failure("transport no longer valid".to_string())
+            .await;
+        let failed = first.connection_snapshot().await;
+        assert_eq!(failed.status, ClientConnectionStatus::Disconnected);
+        assert!(!failed.present);
+        assert!(failed.operation_target.is_none());
+        assert_eq!(
+            failed.last_error.as_ref().map(|error| error.operation),
+            Some(ClientConnectionOperation::Disconnect)
+        );
+        assert!(failed
+            .last_error
+            .as_ref()
+            .is_some_and(|error| error.retryable));
+
+        let orphan_transport_projection = ClientConnectionStateSnapshot::from_parts(
+            failed.revision + 1,
+            None,
+            &ClientConnectionOperationState::default(),
+            ComputerRuntimeState::Connected,
+        );
+        assert_eq!(
+            orphan_transport_projection.status,
+            ClientConnectionStatus::Disconnected
+        );
+        assert!(!orphan_transport_projection.actions.connect.enabled);
+        assert!(orphan_transport_projection.actions.disconnect.enabled);
+    }
+
+    #[tokio::test]
+    async fn aborted_reconnect_settles_only_its_generation() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 7,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(7).await);
+        assert!(!runtime.abort_reconnect_for_generation(6).await);
+        assert_eq!(
+            runtime.connection_snapshot().await.status,
+            ClientConnectionStatus::Connecting
+        );
+
+        runtime.take_connection_state().await;
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://other.example.com".to_string(),
+                office_id: "office-b".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("target-b".to_string()),
+                target_name: Some("Target B".to_string()),
+                employee_id: None,
+                generation: 8,
+            })
+            .await
+            .unwrap();
+
+        assert!(runtime.abort_reconnect_for_generation(7).await);
+        let settled = runtime.connection_snapshot().await;
+        assert_eq!(settled.status, ClientConnectionStatus::Connected);
+        assert_eq!(
+            settled.context.and_then(|context| context.target_id),
+            Some("target-b".to_string())
+        );
+
+        assert!(runtime.begin_reconnect_for_generation(8).await);
+        assert!(
+            runtime
+                .fail_reconnect_for_generation(8, "Manager session expired".to_string(), false,)
+                .await
+        );
+        let unauthorized = runtime.connection_snapshot().await;
+        assert_eq!(unauthorized.status, ClientConnectionStatus::Disconnected);
+        assert!(!unauthorized.present);
+        assert_eq!(
+            unauthorized
+                .last_error
+                .as_ref()
+                .map(|error| error.retryable),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_retries_preserve_the_first_problem_occurrence() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 9,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(9).await);
+        assert!(
+            runtime
+                .record_reconnect_retry(9, "first reconnect failure".to_string())
+                .await
+        );
+        let first_occurrence = runtime
+            .connection_snapshot()
+            .await
+            .last_error
+            .unwrap()
+            .occurred_at;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        assert!(
+            runtime
+                .record_reconnect_retry(9, "updated reconnect failure".to_string())
+                .await
+        );
+        let retry = runtime.connection_snapshot().await.last_error.unwrap();
+        assert_eq!(retry.occurred_at, first_occurrence);
+        assert_eq!(retry.message, "updated reconnect failure");
+
+        assert!(runtime.complete_reconnect_for_generation(9).await);
+        assert!(runtime.begin_reconnect_for_generation(9).await);
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        assert!(
+            runtime
+                .record_reconnect_retry(9, "new reconnect failure".to_string())
+                .await
+        );
+        let second_occurrence = runtime
+            .connection_snapshot()
+            .await
+            .last_error
+            .unwrap()
+            .occurred_at;
+        assert_ne!(second_occurrence, first_occurrence);
+        assert!(
+            runtime
+                .fail_reconnect_for_generation(9, "terminal reconnect failure".to_string(), false,)
+                .await
+        );
+        let terminal = runtime.connection_snapshot().await.last_error.unwrap();
+        assert_eq!(terminal.occurred_at, second_occurrence);
+        assert_eq!(terminal.message, "terminal reconnect failure");
+        assert!(!terminal.retryable);
+    }
+
+    #[tokio::test]
+    async fn reconnect_problem_preserves_occurrence_across_diagnostic_sources() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let sink = Arc::new(RecordingRuntimeEventSink::default());
+        registry.set_runtime_event_sink(sink.clone()).await;
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 10,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(10).await);
+        runtime
+            .set_client_runtime_diagnostic(
+                "reconnect",
+                Some("SMCP reconnect failed; retrying".to_string()),
+            )
+            .await;
+        runtime
+            .client_runtime_diagnostic
+            .write()
+            .await
+            .as_mut()
+            .unwrap()
+            .occurred_at = "2026-01-01T00:00:00+00:00".to_string();
+        let first = runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .into_iter()
+            .find(|problem| problem.operation == "reconnect")
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        assert!(
+            runtime
+                .record_reconnect_retry(10, "retry 1/3".to_string())
+                .await
+        );
+        let projected = runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .into_iter()
+            .find(|problem| problem.operation == "reconnect")
+            .unwrap();
+        assert_eq!(projected.id, first.id);
+        assert_eq!(projected.occurred_at, first.occurred_at);
+        assert_eq!(projected.technical_detail.as_deref(), Some("retry 1/3"));
+
+        let event_count_before_recovery = sink.events.lock().unwrap().len();
+        assert!(runtime.complete_reconnect_for_generation(10).await);
+        assert!(runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .iter()
+            .all(|problem| problem.operation != "reconnect"));
+        let recovery_events = sink.events.lock().unwrap().clone();
+        assert!(recovery_events[event_count_before_recovery..]
+            .iter()
+            .all(|event| event
+                .snapshot
+                .problems
+                .iter()
+                .all(|problem| problem.operation != "reconnect")));
+        assert!(recovery_events[event_count_before_recovery..]
+            .iter()
+            .any(|event| matches!(
+                &event.cause,
+                ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                    operation,
+                    has_error: false,
+                } if operation == "reconnect"
+            )));
+    }
+
+    #[tokio::test]
+    async fn manual_connect_recovery_clears_a_terminal_reconnect_problem() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let sink = Arc::new(RecordingRuntimeEventSink::default());
+        registry.set_runtime_event_sink(sink.clone()).await;
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 11,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(11).await);
+        runtime
+            .set_client_runtime_diagnostic(
+                "reconnect",
+                Some("SMCP reconnect failed; retrying".to_string()),
+            )
+            .await;
+        assert!(
+            runtime
+                .record_reconnect_retry(11, "retry limit exhausted".to_string())
+                .await
+        );
+        assert!(
+            runtime
+                .fail_reconnect_for_generation(
+                    11,
+                    "SMCP reconnect retry limit exhausted".to_string(),
+                    true,
+                )
+                .await
+        );
+        assert!(runtime.runtime_snapshot().await.problems.iter().any(|problem| {
+            problem.operation == "reconnect"
+                && problem.source
+                    == crate::services::computer_runtime_events::ComputerRuntimeProblemSource::ClientConnection
+        }));
+
+        let token = runtime
+            .begin_connection_operation(ClientConnectionOperation::Connect, None)
+            .await
+            .unwrap();
+        let event_count_before_recovery = sink.events.lock().unwrap().len();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("manual-target".to_string()),
+                target_name: Some("Manual target".to_string()),
+                employee_id: None,
+                generation: 12,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.complete_connection_operation_for_token(token).await);
+
+        assert!(runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .iter()
+            .all(|problem| problem.operation != "reconnect"));
+        let recovery_events = sink.events.lock().unwrap().clone();
+        assert!(recovery_events[event_count_before_recovery..]
+            .iter()
+            .all(|event| event
+                .snapshot
+                .problems
+                .iter()
+                .all(|problem| problem.operation != "reconnect")));
+        assert!(recovery_events[event_count_before_recovery..]
+            .iter()
+            .any(|event| matches!(
+                &event.cause,
+                ComputerRuntimeEventCause::ClientDiagnosticChanged {
+                    operation,
+                    has_error: false,
+                } if operation == "reconnect"
+            )));
+    }
+
+    #[tokio::test]
+    async fn manual_connect_keeps_an_owner_only_terminal_problem_until_recovery() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let sink = Arc::new(RecordingRuntimeEventSink::default());
+        registry.set_runtime_event_sink(sink.clone()).await;
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manager:1".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manager_robot".to_string(),
+                target_id: Some("manager:1".to_string()),
+                target_name: Some("Robot One".to_string()),
+                employee_id: Some(1),
+                generation: 13,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.begin_reconnect_for_generation(13).await);
+        assert!(
+            runtime
+                .fail_reconnect_for_generation(
+                    13,
+                    "Manager session expired during SMCP token refresh".to_string(),
+                    false,
+                )
+                .await
+        );
+        assert!(runtime.client_runtime_diagnostic.read().await.is_none());
+        let terminal = runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .into_iter()
+            .find(|problem| problem.operation == "reconnect")
+            .unwrap();
+
+        let event_count_before_retry = sink.events.lock().unwrap().len();
+        let token = runtime
+            .begin_connection_operation(ClientConnectionOperation::Connect, None)
+            .await
+            .unwrap();
+        let retrying = runtime
+            .runtime_snapshot()
+            .await
+            .problems
+            .into_iter()
+            .find(|problem| problem.operation == "reconnect")
+            .unwrap();
+        assert_eq!(retrying.id, terminal.id);
+        assert_eq!(retrying.occurred_at, terminal.occurred_at);
+        let retry_events = sink.events.lock().unwrap().clone();
+        assert!(retry_events[event_count_before_retry..]
+            .iter()
+            .all(|event| {
+                event.snapshot.problems.iter().any(|problem| {
+                    problem.id == terminal.id && problem.occurred_at == terminal.occurred_at
+                })
+            }));
+
+        let event_count_before_recovery = retry_events.len();
+        runtime
+            .install_connection_state(ConnectionState {
+                profile_name: "manual".to_string(),
+                url: "https://smcp.example.com".to_string(),
+                office_id: "office-a".to_string(),
+                computer_name: "One".to_string(),
+                connected_at: chrono::Utc::now(),
+                source_type: "manual_smcp".to_string(),
+                target_id: Some("manual-target".to_string()),
+                target_name: Some("Manual target".to_string()),
+                employee_id: None,
+                generation: 14,
+            })
+            .await
+            .unwrap();
+        assert!(runtime.complete_connection_operation_for_token(token).await);
+
+        assert!(runtime.runtime_snapshot().await.problems.is_empty());
+        let recovery_events = sink.events.lock().unwrap().clone();
+        assert!(recovery_events[event_count_before_recovery..]
+            .iter()
+            .all(|event| event.snapshot.problems.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn handle_replacement_invalidates_connect_operation_without_transport() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime.start().await.unwrap();
+        let token = runtime
+            .begin_connection_operation(ClientConnectionOperation::Connect, None)
+            .await
+            .unwrap();
+
+        runtime.restart().await.unwrap();
+
+        assert!(runtime.ensure_connection_operation(token).await.is_err());
+        let snapshot = runtime.connection_snapshot().await;
+        assert_eq!(snapshot.status, ClientConnectionStatus::Disconnected);
+        assert!(snapshot.operation.is_none());
+        assert!(!snapshot.present);
+    }
+
+    #[tokio::test]
+    async fn every_refresh_terminal_outcome_leaves_a_non_transitional_snapshot() {
+        let cases = [
+            (RefreshTerminalOutcome::Gone, None),
+            (RefreshTerminalOutcome::Unauthorized, Some(false)),
+            (RefreshTerminalOutcome::Stop, Some(false)),
+            (RefreshTerminalOutcome::Exhausted, Some(true)),
+        ];
+        for (index, (outcome, expected_retryable)) in cases.into_iter().enumerate() {
+            let id = format!("terminal-{index}");
+            let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+                schema_version: 1,
+                instances: vec![instance(&id, "Terminal")],
+            });
+            let runtime = registry.runtime(&id).await.unwrap();
+            let generation = 100 + index as u64;
+            runtime
+                .install_connection_state(ConnectionState {
+                    profile_name: "manager:1".to_string(),
+                    url: "https://smcp.example.com".to_string(),
+                    office_id: "office-a".to_string(),
+                    computer_name: "Terminal".to_string(),
+                    connected_at: chrono::Utc::now(),
+                    source_type: "manager_robot".to_string(),
+                    target_id: Some("manager:1".to_string()),
+                    target_name: Some("Robot One".to_string()),
+                    employee_id: Some(1),
+                    generation,
+                })
+                .await
+                .unwrap();
+            assert!(runtime.begin_reconnect_for_generation(generation).await);
+            assert!(
+                settle_refresh_terminal(&runtime, generation, outcome).await,
+                "terminal outcome {outcome:?} did not settle"
+            );
+
+            let snapshot = runtime.connection_snapshot().await;
+            assert_ne!(snapshot.status, ClientConnectionStatus::Connecting);
+            assert_ne!(snapshot.status, ClientConnectionStatus::Disconnecting);
+            assert_eq!(
+                snapshot.last_error.as_ref().map(|error| error.retryable),
+                expected_retryable
+            );
+        }
     }
 
     #[tokio::test]
@@ -2611,14 +3808,36 @@ mod tests {
         let sink = Arc::new(RecordingRuntimeEventSink::default());
         registry.set_runtime_event_sink(sink.clone()).await;
         let runtime = registry.runtime("one").await.unwrap();
-        let first_generation = runtime.runtime_generation();
 
         registry.start_runtime("one").await.unwrap();
+        let first_generation = runtime.runtime_generation();
         sink.wait_for(|event| {
             event.snapshot.generation == first_generation
                 && event.snapshot.lifecycle == LifecycleState::Started
         })
         .await;
+        runtime
+            .record_mcp_config_apply_diagnostic(
+                {
+                    let bundle_id = BundleId::try_from("server-a").unwrap();
+                    runtime
+                        .sdk_servers
+                        .write()
+                        .await
+                        .insert(bundle_id.clone(), "Server A".to_string());
+                    bundle_id
+                },
+                "configuration apply failed".to_string(),
+            )
+            .await;
+        runtime
+            .fail_connection_operation(
+                ClientConnectionOperation::Connect,
+                "connection failed".to_string(),
+                true,
+            )
+            .await;
+        assert_eq!(runtime.runtime_snapshot().await.problems.len(), 2);
         registry.stop_runtime("one").await.unwrap();
         sink.wait_for(|event| {
             event.snapshot.generation == first_generation
@@ -2646,8 +3865,53 @@ mod tests {
 
         assert_eq!(second_generation, first_generation + 1);
         assert_eq!(replaced.snapshot.lifecycle, LifecycleState::Created);
+        assert!(
+            replaced.snapshot.problems.is_empty(),
+            "handle replacement must not carry diagnostics from the retired generation"
+        );
         assert!(restarted.snapshot.capability_revision > 0);
         assert!(runtime.is_running().await);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_handle_replacement_preserves_current_generation_problems() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "One")],
+        });
+        let runtime = registry.runtime("one").await.unwrap();
+        runtime.start().await.unwrap();
+        let bundle_id = BundleId::try_from("server-a").unwrap();
+        runtime
+            .sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), "Server A".to_string());
+        runtime
+            .record_mcp_config_apply_diagnostic(bundle_id, "configuration apply failed".to_string())
+            .await;
+        runtime
+            .fail_connection_operation(
+                ClientConnectionOperation::Reconnect,
+                "connection failed".to_string(),
+                true,
+            )
+            .await;
+        let generation = runtime.runtime_generation();
+        let before = runtime.runtime_snapshot().await.problems;
+        assert_eq!(before.len(), 2);
+
+        runtime.fail_sdk_shutdown_once.store(true, Ordering::SeqCst);
+        let error = runtime.restart().await.unwrap_err().to_string();
+
+        assert!(error.contains("Injected SDK shutdown failure"));
+        assert_eq!(runtime.runtime_generation(), generation);
+        assert_eq!(
+            runtime.runtime_snapshot().await.problems,
+            before,
+            "a failed replacement must preserve the authoritative generation's problems"
+        );
         runtime.shutdown().await;
     }
 
@@ -2662,8 +3926,8 @@ mod tests {
         let first_generation = runtime.runtime_generation();
 
         let snapshot_guard = runtime.runtime_snapshot_lock.lock().await;
-        let reload_runtime = runtime.clone();
-        let reload_task = tokio::spawn(async move { reload_runtime.reload().await });
+        let restart_runtime = runtime.clone();
+        let restart_task = tokio::spawn(async move { restart_runtime.restart().await });
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while runtime.runtime_state().await != LifecycleState::Shutdown {
@@ -2679,14 +3943,14 @@ mod tests {
         );
 
         drop(snapshot_guard);
-        reload_task.await.unwrap().unwrap();
+        restart_task.await.unwrap().unwrap();
         assert_eq!(runtime.runtime_generation(), first_generation + 1);
         assert!(runtime.is_running().await);
         runtime.shutdown().await;
     }
 
     #[tokio::test]
-    async fn concurrent_event_sink_install_and_reload_rebinds_current_generation() {
+    async fn concurrent_event_sink_install_and_restart_rebinds_current_generation() {
         let registry = Arc::new(ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance("one", "One")],
@@ -2695,11 +3959,11 @@ mod tests {
         runtime.start().await.unwrap();
         let sink = Arc::new(RecordingRuntimeEventSink::default());
 
-        let (_, reload_result) = tokio::join!(
+        let (_, restart_result) = tokio::join!(
             registry.set_runtime_event_sink(sink.clone()),
-            runtime.reload()
+            runtime.restart()
         );
-        reload_result.unwrap();
+        restart_result.unwrap();
         let generation = runtime.runtime_generation();
 
         runtime.try_shutdown().await.unwrap();
@@ -2711,7 +3975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_runtime_instance_preserves_runtime_handles() {
+    async fn update_runtime_instance_saves_profile_without_restarting_active_handle() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
             instances: vec![instance_with_input("one", "Initial Label")],
@@ -2719,6 +3983,7 @@ mod tests {
 
         let before = registry.runtime("one").await.unwrap();
         registry.start_runtime("one").await.unwrap();
+        let generation_before_update = before.runtime_generation();
         let mut updated = instance_with_input("one", "Updated Label");
         updated.name = "Renamed".to_string();
         let after = registry.update_runtime_instance(updated).await.unwrap();
@@ -2734,6 +3999,8 @@ mod tests {
         ));
         assert_eq!(before.runtime_incarnation, after.runtime_incarnation);
         assert!(Arc::ptr_eq(&before.lifecycle_lock, &after.lifecycle_lock));
+        assert_eq!(after.runtime_generation(), generation_before_update);
+        assert_eq!(after.computer.read().await.name(), "Computer");
         let inputs = after.inputs.read().await;
         let input = inputs.get("api-key").expect("input should be synced");
         assert!(matches!(
@@ -2748,10 +4015,37 @@ mod tests {
             after.sdk_skill_home().await,
             after.skill_home_base.join("one").join("skill_home")
         );
+        drop(inputs);
+
+        after.restart().await.unwrap();
+        assert_eq!(after.runtime_generation(), generation_before_update + 1);
+        assert_eq!(after.computer.read().await.name(), "Renamed");
     }
 
     #[tokio::test]
-    async fn runtime_rebuild_restores_default_skill_home_when_override_is_cleared() {
+    async fn update_runtime_instance_does_not_recreate_a_removed_runtime() {
+        let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "Original")],
+        });
+        registry
+            .remove_runtime("one")
+            .await
+            .unwrap()
+            .expect("runtime should be removed");
+
+        let error = registry
+            .update_runtime_instance(instance("one", "Stale Update"))
+            .await
+            .err()
+            .expect("update must not recreate a removed runtime");
+
+        assert!(error.contains("does not exist"));
+        assert!(registry.runtime("one").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_reads_saved_skill_home_without_rebuilding_during_save() {
         let registry = ComputerRegistry::from_config_with_skill_home_base(
             ComputerInstancesConfig {
                 schema_version: 1,
@@ -2768,6 +4062,11 @@ mod tests {
         updated.local_skills_root = None;
         let runtime = registry.update_runtime_instance(updated).await.unwrap();
 
+        assert_eq!(
+            runtime.sdk_skill_home().await,
+            PathBuf::from("/tmp/custom-skill-home")
+        );
+        runtime.start().await.unwrap();
         assert_eq!(
             runtime.sdk_skill_home().await,
             runtime.skill_home_base.join("one").join("skill_home")
@@ -2832,7 +4131,7 @@ mod tests {
         assert!(Arc::ptr_eq(&before.computer, &after.computer));
         assert!(after.is_running().await);
         assert!(after.sdk_is_mcp_manager_initialized().await);
-        assert_eq!(after.computer.read().await.name(), "Updated");
+        assert_eq!(after.computer.read().await.name(), "Initial");
         assert!(after.sdk_mcp_server_ids().await.is_empty());
     }
 

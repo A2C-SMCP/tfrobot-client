@@ -217,8 +217,8 @@ The architecture alignment is guarded by:
 - Marketplace governance integration tests: `cargo test --test marketplace_integration_test`
 - SMCP lifecycle integration tests: `cargo test --test smcp_connection_lifecycle_test`
 - frontend store/component tests:
-  `pnpm test src/test/components/Dashboard.test.tsx src/test/components/ComputerOverview.test.tsx src/test/components/DesktopResources.test.tsx src/test/components/ResourceBrowser.test.tsx src/test/stores/dashboardStore.test.ts src/test/stores/computerOverviewStore.test.ts src/test/stores/desktopStore.test.ts src/test/stores/debugStore.test.ts`
-  - Result: 8 files and 57 tests passed.
+  `pnpm test src/test/components/Dashboard.test.tsx src/test/components/Computer.test.tsx src/test/components/DesktopResources.test.tsx src/test/components/ResourceBrowser.test.tsx src/test/stores/dashboardStore.test.ts src/test/stores/runtimeStore.test.ts src/test/stores/desktopStore.test.ts src/test/stores/debugStore.test.ts`
+  - The command exit status and CI output are authoritative; file and test counts are not pinned here.
 - source scan: `rg -n "runtime\\.manager|MCPServerManager" src-tauri/src`
   - Result: no production-source matches.
 

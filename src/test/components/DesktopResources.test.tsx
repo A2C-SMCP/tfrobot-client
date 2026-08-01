@@ -1,280 +1,365 @@
-import { render, screen, fireEvent, waitFor } from '../helpers/render';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { DesktopResources } from '@/components/DesktopResources';
+import {
+  desktopRuntimeKey,
+  desktopWindowKey,
+  selectDesktopInstance,
+  useDesktopStore,
+  type DesktopInstanceState,
+  type DesktopWindow,
+} from '@/stores/desktopStore';
+import { runtimeSnapshot } from '../helpers/store';
+import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 
-const mockFetchDesktop = vi.fn().mockResolvedValue(undefined);
-const mockFetchWindowDetail = vi.fn().mockResolvedValue(undefined);
-
-const mockStore = {
-  windows: [],
-  loading: false,
-  error: null as string | null,
-  windowDetails: {} as Record<string, import('@/stores/desktopStore').WindowDetail>,
-  loadingDetails: {} as Record<string, boolean>,
-  detailErrors: {} as Record<string, string>,
-  fetchDesktop: mockFetchDesktop,
-  fetchWindowDetail: mockFetchWindowDetail,
-  reset: vi.fn(),
-};
-
-vi.mock('@/stores/desktopStore', () => ({
-  useDesktopStore: vi.fn(() => mockStore),
-}));
-
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-}));
-
-const mockUseDesktopStore = vi.mocked(
-  await import('@/stores/desktopStore').then((m) => m.useDesktopStore)
-);
-const { invoke } = await import('@tauri-apps/api/core');
-const mockInvoke = vi.mocked(invoke);
-
-const mockWindows = [
-  { bundleId: 'desktop-bundle', uri: 'window://main', title: 'Main Window', server: 'desktop-server' },
-  { bundleId: 'desktop-bundle', uri: 'window://secondary', title: 'Secondary', server: 'desktop-server' },
+const mockedInvoke = vi.mocked(invoke);
+const activeRuntime = runtimeSnapshot({
+  lifecycle: 'started',
+  mcp_servers: 1,
+  active_mcp_servers: 1,
+});
+const activeRuntimeKey = desktopRuntimeKey(activeRuntime);
+const windows: DesktopWindow[] = [
+  {
+    bundleId: 'desktop-bundle',
+    uri: 'window://main',
+    title: 'Main Window',
+    server: 'Desktop MCP',
+    mime_type: 'text/plain',
+  },
+  {
+    bundleId: 'desktop-bundle',
+    uri: 'window://secondary',
+    title: 'Secondary',
+    server: 'Desktop MCP',
+    mime_type: 'image/png',
+  },
 ];
+
+function setDesktopState(instanceId: string, update: Partial<DesktopInstanceState>) {
+  act(() => {
+    useDesktopStore.setState((state) => ({
+      instances: {
+        ...state.instances,
+        [instanceId]: {
+          ...selectDesktopInstance(state, instanceId),
+          runtimeKey: activeRuntimeKey,
+          ...update,
+        },
+      },
+    }));
+  });
+}
+
+function renderDesktop(
+  props: Partial<React.ComponentProps<typeof DesktopResources>> = {},
+) {
+  return render(
+    <DesktopResources
+      instanceId="computer-a"
+      runtime={activeRuntime}
+      {...props}
+    />,
+  );
+}
+
+function expandSection() {
+  fireEvent.click(screen.getByText('Desktop Resources'));
+}
+
+function firstRowExpandButton(): Element {
+  const button = document.querySelector('.ant-table-row-expand-icon');
+  expect(button).toBeInTheDocument();
+  return button!;
+}
 
 describe('DesktopResources', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    mockFetchDesktop.mockResolvedValue(undefined);
-    mockFetchWindowDetail.mockResolvedValue(undefined);
-    mockInvoke.mockReset();
-    mockUseDesktopStore.mockReturnValue({ ...mockStore } as any);
+    useDesktopStore.getState().reset();
+    mockedInvoke.mockReset();
   });
 
-  it('calls fetchDesktop on mount', () => {
-    render(<DesktopResources instanceId="computer-a" />);
-    expect(mockFetchDesktop).toHaveBeenCalledWith('computer-a');
-  });
+  it('is collapsed by default and performs zero resource requests on render', () => {
+    renderDesktop();
 
-  it('renders title and refresh button', () => {
-    render(<DesktopResources instanceId="computer-a" />);
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
-    expect(screen.getByText('Refresh')).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Load resources' })).not.toBeInTheDocument();
   });
 
-  it('renders empty state when no windows', () => {
-    render(<DesktopResources instanceId="computer-a" />);
+  it('still performs zero requests when the section is expanded', () => {
+    renderDesktop();
+
+    expandSection();
+
+    expect(screen.getByRole('button', { name: 'Load resources' })).toBeInTheDocument();
+    expect(screen.getByText('Resources are loaded only when you request them.')).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('expands a legacy resources destination without eagerly loading resources', () => {
+    renderDesktop({ initiallyExpanded: true });
+
+    expect(screen.getByRole('button', { name: 'Load resources' })).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('enumerates resources only after an explicit load action', async () => {
+    mockedInvoke.mockResolvedValueOnce({ status: 'unverified', windows });
+    renderDesktop();
+    expandSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load resources' }));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
+        instanceId: 'computer-a',
+        uri: null,
+      });
+    });
+    expect(await screen.findByText('Main Window')).toBeInTheDocument();
+    expect(screen.getAllByText('Desktop MCP')).toHaveLength(2);
+    expect(screen.getByText('text/plain')).toBeInTheDocument();
+    expect(screen.getByText('Some Desktop Resources may be missing')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
+  });
+
+  it('shows an actionable Runtime state without invoking the backend', () => {
+    const onStartRuntime = vi.fn();
+    renderDesktop({
+      runtime: runtimeSnapshot({ lifecycle: 'stopped', active_mcp_servers: 0 }),
+      onStartRuntime,
+    });
+    expandSection();
+
+    expect(screen.getByText('Runtime is not ready')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    expect(onStartRuntime).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('shows an actionable no-active-MCP state', () => {
+    const onOpenMcp = vi.fn();
+    renderDesktop({
+      runtime: runtimeSnapshot({
+        lifecycle: 'started',
+        mcp_servers: 1,
+        active_mcp_servers: 0,
+      }),
+      onOpenMcp,
+    });
+    expandSection();
+
+    expect(screen.getByText('No MCP server is active')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage MCP Servers' }));
+    expect(onOpenMcp).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('reads one resource only when its row is expanded', async () => {
+    setDesktopState('computer-a', { windows, loaded: true });
+    mockedInvoke.mockResolvedValueOnce({
+      bundleId: 'desktop-bundle',
+      uri: 'window://main',
+      title: 'Main Window',
+      server: 'Desktop MCP',
+      contents: [
+        { type: 'text', uri: 'window://main', mime_type: 'text/plain', text: 'Hello World' },
+      ],
+    });
+    renderDesktop();
+    expandSection();
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    fireEvent.click(firstRowExpandButton());
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledTimes(1);
+      expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
+        instanceId: 'computer-a',
+        bundleId: 'desktop-bundle',
+        uri: 'window://main',
+      });
+    });
+    expect(await screen.findByText('Hello World')).toBeInTheDocument();
+  });
+
+  it('does not claim an unverified empty enumeration is a real empty resource set', async () => {
+    mockedInvoke.mockResolvedValueOnce({ status: 'unverified', windows: [] });
+    renderDesktop();
+    expandSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load resources' }));
+
     expect(
-      screen.getByText('No desktop windows detected'),
+      await screen.findByText('Desktop Resources could not be determined'),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText('No desktop resources are currently exposed'),
+    ).not.toBeInTheDocument();
   });
 
-  it('renders windows table', () => {
-    mockUseDesktopStore.mockReturnValue({ ...mockStore, windows: mockWindows } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-    expect(screen.getByText('Main Window')).toBeInTheDocument();
-    expect(screen.getByText('Secondary')).toBeInTheDocument();
-  });
-
-  it('renders error alert', () => {
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      error: 'Failed to fetch',
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-    expect(screen.getByText('Failed to fetch')).toBeInTheDocument();
-  });
-
-  it('refreshes on button click', () => {
-    render(<DesktopResources instanceId="computer-a" />);
-    const refreshButton = screen.getByText('Refresh');
-    fireEvent.click(refreshButton);
-    expect(mockFetchDesktop).toHaveBeenCalledTimes(2); // Once on mount, once on click
-  });
-
-  it('shows loading spinner when loading', () => {
-    mockUseDesktopStore.mockReturnValue({ ...mockStore, loading: true } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-    // Ant Design Table loading state
-    expect(document.querySelector('.ant-spin')).toBeInTheDocument();
-  });
-
-  it('fetches window detail when row is expanded', async () => {
-    const mockDetail = {
+  it('does not read a cached detail again after collapse and re-expand', async () => {
+    const detail = {
       bundleId: 'desktop-bundle',
       uri: 'window://main',
       title: 'Main Window',
-      server: 'desktop-server',
-      contents: [
-        { type: 'text' as const, uri: 'window://main', text: 'Hello World' },
-      ],
-    };
-    mockInvoke.mockResolvedValueOnce(mockDetail);
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-
-    // Find and click expand button (first row)
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    fireEvent.click(expandButtons[0]);
-
-    await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith(
-        'computer-a',
-        'desktop-bundle',
-        'window://main',
-      );
-    });
-  });
-
-  it('renders text content in expanded row', async () => {
-    const mockDetail = {
-      bundleId: 'desktop-bundle',
-      uri: 'window://main',
-      title: 'Main Window',
-      server: 'desktop-server',
-      contents: [
-        { type: 'text' as const, uri: 'window://main', text: 'Sample text content' },
-      ],
-    };
-    mockFetchWindowDetail.mockResolvedValueOnce(mockDetail);
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-      windowDetails: { 'desktop-bundle:window://main': mockDetail },
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-
-    // Expand first row
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    fireEvent.click(expandButtons[0]);
-
-    await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith(
-        'computer-a',
-        'desktop-bundle',
-        'window://main',
-      );
-    });
-    expect(screen.getByText('Sample text content')).toBeInTheDocument();
-  });
-
-  it('renders image content in expanded row', async () => {
-    const mockDetail = {
-      bundleId: 'desktop-bundle',
-      uri: 'window://main',
-      title: 'Main Window',
-      server: 'desktop-server',
-      contents: [
-        {
-          type: 'blob' as const,
-          uri: 'window://main',
-          mime_type: 'image/png',
-          blob: 'iVBORw0KGgo',
-        },
-      ],
-    };
-    mockFetchWindowDetail.mockResolvedValueOnce(mockDetail);
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-      windowDetails: { 'desktop-bundle:window://main': mockDetail },
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-
-    // Expand first row
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    fireEvent.click(expandButtons[0]);
-
-    await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith(
-        'computer-a',
-        'desktop-bundle',
-        'window://main',
-      );
-    });
-    // Check for image element with base64 src
-    const img = document.querySelector('img[src*="base64"]');
-    expect(img).toBeInTheDocument();
-  });
-
-  it('shows no content message when contents are empty', async () => {
-    const mockDetail = {
-      bundleId: 'desktop-bundle',
-      uri: 'window://main',
-      title: 'Main Window',
-      server: 'desktop-server',
+      server: 'Desktop MCP',
       contents: [],
     };
-    mockFetchWindowDetail.mockResolvedValueOnce(mockDetail);
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-      windowDetails: { 'desktop-bundle:window://main': mockDetail },
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-
-    // Expand first row
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    fireEvent.click(expandButtons[0]);
-
-    await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledWith(
-        'computer-a',
-        'desktop-bundle',
-        'window://main',
-      );
+    const key = desktopWindowKey(detail);
+    setDesktopState('computer-a', {
+      windows,
+      loaded: true,
+      windowDetails: { [key]: detail },
     });
+    renderDesktop();
+    expandSection();
+
+    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstRowExpandButton());
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
     expect(screen.getByText('No content available')).toBeInTheDocument();
   });
 
-  it('collapses expanded row when clicked again', async () => {
-    mockFetchWindowDetail.mockResolvedValue({
+  it('renders detail failures inline with an explicit retry', async () => {
+    const key = desktopWindowKey(windows[0]);
+    setDesktopState('computer-a', {
+      windows,
+      loaded: true,
+      detailErrors: { [key]: 'Read failed' },
+    });
+    mockedInvoke.mockResolvedValueOnce({
       bundleId: 'desktop-bundle',
       uri: 'window://main',
-      title: 'Main Window',
-      server: 'desktop-server',
+      server: 'Desktop MCP',
       contents: [],
     });
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
+    renderDesktop();
+    expandSection();
+    fireEvent.click(firstRowExpandButton());
 
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    // First click - expand
-    fireEvent.click(expandButtons[0]);
+    expect(screen.getByText('Read failed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
     await waitFor(() => {
-      expect(mockFetchWindowDetail).toHaveBeenCalledTimes(1);
+      expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
+        instanceId: 'computer-a',
+        bundleId: 'desktop-bundle',
+        uri: 'window://main',
+      });
     });
-
-    // Second click - collapse (should not trigger another fetch)
-    fireEvent.click(expandButtons[0]);
-
-    // invoke should still be called only once
-    expect(mockFetchWindowDetail).toHaveBeenCalledTimes(1);
   });
 
-  it('shows loading spinner while fetching detail', async () => {
-    // Mock store with loading state for the window
-    mockUseDesktopStore.mockReturnValue({
-      ...mockStore,
-      windows: mockWindows,
-      loadingDetails: { 'desktop-bundle:window://main': true },
-    } as any);
-    render(<DesktopResources instanceId="computer-a" />);
-
-    // Expand first row
-    const expandButtons = document.querySelectorAll('.ant-table-row-expand-icon');
-    expect(expandButtons.length).toBeGreaterThan(0);
-    fireEvent.click(expandButtons[0]);
-
-    // Should show loading spinner when loadingDetails contains the URI
-    await waitFor(() => {
-      expect(document.querySelector('.ant-spin')).toBeInTheDocument();
+  it('renders safe raster previews but does not embed unsupported binary MIME types', () => {
+    const pngKey = desktopWindowKey(windows[1]);
+    setDesktopState('computer-a', {
+      windows: [windows[1]],
+      loaded: true,
+      windowDetails: {
+        [pngKey]: {
+          bundleId: 'desktop-bundle',
+          uri: 'window://secondary',
+          server: 'Desktop MCP',
+          contents: [{
+            type: 'blob',
+            uri: 'window://secondary',
+            mime_type: 'image/png',
+            blob: 'iVBORw0KGgo=',
+          }],
+        },
+      },
     });
+    const { unmount } = renderDesktop();
+    expandSection();
+    fireEvent.click(firstRowExpandButton());
+
+    expect(screen.getByAltText('Desktop resource preview')).toHaveAttribute(
+      'src',
+      expect.stringContaining('data:image/png;base64,'),
+    );
+
+    unmount();
+    useDesktopStore.getState().reset();
+    const svgWindow = { ...windows[0], mime_type: 'image/svg+xml' };
+    const svgKey = desktopWindowKey(svgWindow);
+    setDesktopState('computer-a', {
+      windows: [svgWindow],
+      loaded: true,
+      windowDetails: {
+        [svgKey]: {
+          bundleId: svgWindow.bundleId,
+          uri: svgWindow.uri,
+          server: svgWindow.server,
+          contents: [{
+            type: 'blob',
+            uri: svgWindow.uri,
+            mime_type: 'image/svg+xml',
+            blob: 'PHN2Zz48L3N2Zz4=',
+          }],
+        },
+      },
+    });
+    renderDesktop();
+    expandSection();
+    fireEvent.click(firstRowExpandButton());
+
+    expect(screen.queryByAltText('Desktop resource preview')).not.toBeInTheDocument();
+    expect(screen.getByText('Binary data is not rendered (11 bytes)')).toBeInTheDocument();
+  });
+
+  it('shows only the selected Computer cache', () => {
+    setDesktopState('computer-a', {
+      windows: [windows[0]],
+      loaded: true,
+    });
+    setDesktopState('computer-b', {
+      runtimeKey: activeRuntimeKey,
+      windows: [{
+        bundleId: 'other',
+        uri: 'window://other',
+        title: 'Other Computer Window',
+        server: 'Other MCP',
+      }],
+      loaded: true,
+    });
+    const { rerender } = renderDesktop();
+    expandSection();
+    expect(screen.getByText('Main Window')).toBeInTheDocument();
+
+    rerender(
+      <DesktopResources
+        instanceId="computer-b"
+        runtime={activeRuntime}
+      />,
+    );
+
+    expect(screen.getByText('Other Computer Window')).toBeInTheDocument();
+    expect(screen.queryByText('Main Window')).not.toBeInTheDocument();
+  });
+
+  it('hides cached resources immediately when the Runtime generation changes', () => {
+    setDesktopState('computer-a', {
+      windows: [windows[0]],
+      loaded: true,
+    });
+    const { rerender } = renderDesktop();
+    expandSection();
+    expect(screen.getByText('Main Window')).toBeInTheDocument();
+
+    rerender(
+      <DesktopResources
+        instanceId="computer-a"
+        runtime={runtimeSnapshot({
+          generation: 2,
+          mcp_servers: 1,
+          active_mcp_servers: 1,
+        })}
+      />,
+    );
+
+    expect(screen.queryByText('Main Window')).not.toBeInTheDocument();
+    expect(screen.getByText('Resources are loaded only when you request them.')).toBeInTheDocument();
   });
 });

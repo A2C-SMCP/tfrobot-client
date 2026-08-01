@@ -89,6 +89,61 @@ impl SdkConfigPortabilityError {
     }
 }
 
+/// Accepts the UI-friendly `{{ID}}` spelling only in fields consumed while creating an MCP
+/// transport. Identity, governance, and tool metadata are deliberately left unchanged.
+pub(crate) fn normalize_mcp_input_references(
+    config: MCPServerConfig,
+) -> Result<MCPServerConfig, String> {
+    let mut value = serde_json::to_value(config).map_err(|error| error.to_string())?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("MCP server config must be an object".to_string());
+    };
+    if let Some(parameters) = object.get_mut("server_parameters") {
+        normalize_input_references_in_value(parameters);
+    }
+    if let Some(env_file) = object.get_mut("envFile") {
+        normalize_input_references_in_value(env_file);
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+fn normalize_input_references_in_value(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = normalize_input_references_in_string(text),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(normalize_input_references_in_value),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(normalize_input_references_in_value),
+        _ => {}
+    }
+}
+
+fn normalize_input_references_in_string(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find("{{") {
+        normalized.push_str(&remaining[..start]);
+        let candidate = &remaining[start + 2..];
+        let Some(end) = candidate.find("}}") else {
+            normalized.push_str(&remaining[start..]);
+            return normalized;
+        };
+        let id = candidate[..end].trim();
+        if !id.is_empty() && !id.contains(['{', '}']) {
+            normalized.push_str("${input:");
+            normalized.push_str(id);
+            normalized.push('}');
+        } else {
+            normalized.push_str(&remaining[start..start + 2 + end + 2]);
+        }
+        remaining = &candidate[end + 2..];
+    }
+    normalized.push_str(remaining);
+    normalized
+}
+
 /// Resolve only configuration owned by the Computer instance for a portable backup.
 ///
 /// Policy is an ambient, read-only constraint of the machine performing the export. Pointing the
@@ -260,7 +315,7 @@ impl SdkConfigService {
     /// Upserts MCP declarations into SDK-owned config without touching runtime state.
     ///
     /// Configuration CRUD must not resolve commands, paths, inputs, or secrets. Those checks are
-    /// deferred to runtime reload/preflight/start. New declarations use the client's local scope;
+    /// deferred to runtime restart/preflight/start. New declarations use the client's local scope;
     /// existing declarations update at their writable origin through the SDK write-target resolver.
     pub fn upsert_mcp_configs(
         &self,
@@ -658,7 +713,16 @@ impl SdkConfigService {
         &self,
         servers: &[MCPServerConfig],
     ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
-        let document = project_document_from_servers(servers)?;
+        let servers = servers
+            .iter()
+            .cloned()
+            .map(normalize_mcp_input_references)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|reason| ConfigCrudError::Io {
+                path: PathBuf::from("<in-memory-mcp-config>"),
+                reason,
+            })?;
+        let document = project_document_from_servers(&servers)?;
         let (sanitized, report) = self.prepare_import(&document)?;
         if !report.is_valid() {
             return Err(SdkConfigPortabilityError::invalid_source(report.errors));

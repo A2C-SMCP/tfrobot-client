@@ -3,6 +3,7 @@ import { App, Alert, Button, Empty, Input, List, Skeleton, Space, Tag, Typograph
 import { FolderOpenOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { formatInvokeError, useSkillStore, type SkillRef } from '@/stores/skillStore';
+import styles from './SkillsTab.module.css';
 
 const { Text, Title, Paragraph } = Typography;
 const EMPTY_SKILLS: SkillRef[] = [];
@@ -146,17 +147,8 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
 
       {error && <Alert type="error" showIcon message={t('common.error')} description={error} />}
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(300px, 36%) minmax(0, 1fr)',
-          gap: 16,
-          alignItems: 'stretch',
-          height: 'clamp(420px, calc(100vh - 360px), 760px)',
-          minHeight: 420,
-        }}
-      >
-        <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className={styles.layout}>
+        <div className={styles.listPane}>
           <Input
             allowClear
             prefix={<SearchOutlined />}
@@ -171,7 +163,7 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
           ) : filteredSkills.length === 0 ? (
             <Empty description={t('skills.emptySearch')} />
           ) : (
-            <Space direction="vertical" size={12} style={{ width: '100%', minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
+            <Space direction="vertical" size={12} className={styles.list}>
               {Object.entries(grouped).map(([source, sourceSkills]) => (
                 <List
                   key={source}
@@ -181,21 +173,31 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
                   dataSource={sourceSkills}
                   renderItem={(skill) => (
                     <List.Item
-                      style={{ cursor: 'pointer', background: selectedSkillName === skill.name ? '#f6ffed' : undefined }}
-                      onClick={() => selectSkill(instanceId, skill.name)}
+                      style={{ background: selectedSkillName === skill.name ? '#f6ffed' : undefined }}
+                      actions={skill.source.startsWith('mcp:')
+                        ? [
+                            <Button
+                              key="open-mcp-source"
+                              type="link"
+                              size="small"
+                              onClick={() => onOpenMcpTab?.()}
+                            >
+                              {t('skills.openMcpSource', { server: skill.source.replace(/^mcp:/, '') })}
+                            </Button>,
+                          ]
+                        : undefined}
                     >
-                      <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
-                        <Text strong ellipsis>{skill.name}</Text>
-                        <Text type="secondary" ellipsis>{skill.description}</Text>
-                        {skill.source.startsWith('mcp:') && (
-                          <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={(event) => {
-                            event.stopPropagation();
-                            onOpenMcpTab?.();
-                          }}>
-                            {t('skills.openMcpSource', { server: skill.source.replace(/^mcp:/, '') })}
-                          </Button>
-                        )}
-                      </Space>
+                      <button
+                        type="button"
+                        className={styles.skillButton}
+                        aria-pressed={selectedSkillName === skill.name}
+                        onClick={() => selectSkill(instanceId, skill.name)}
+                      >
+                        <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
+                          <Text strong ellipsis>{skill.name}</Text>
+                          <Text type="secondary" ellipsis>{skill.description}</Text>
+                        </Space>
+                      </button>
                     </List.Item>
                   )}
                 />
@@ -204,16 +206,7 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
           )}
         </div>
 
-        <div
-          style={{
-            border: '1px solid #f0f0f0',
-            borderRadius: 6,
-            padding: 16,
-            minHeight: 0,
-            minWidth: 0,
-            overflowY: 'auto',
-          }}
-        >
+        <div className={styles.detail} role="region" aria-label={t('skills.preview')}>
           {renderSkillDetail()}
         </div>
       </div>

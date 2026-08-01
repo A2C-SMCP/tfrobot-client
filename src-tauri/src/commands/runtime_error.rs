@@ -21,17 +21,25 @@ pub enum RuntimeActionError {
     },
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
-    #[error("runtime action '{action}' is unavailable while lifecycle is '{lifecycle}'")]
-    ActionUnavailable { action: String, lifecycle: String },
+    #[error("{message}")]
+    ActionUnavailable {
+        action: String,
+        lifecycle: String,
+        disabled_reason: String,
+        message: String,
+    },
     #[error("{message}")]
     RuntimeError { message: String },
 }
 
 impl From<ComputerRuntimeActionUnavailable> for RuntimeActionError {
     fn from(error: ComputerRuntimeActionUnavailable) -> Self {
+        let message = error.to_string();
         Self::ActionUnavailable {
             action: error.action.to_string(),
             lifecycle: error.lifecycle.to_string(),
+            disabled_reason: error.disabled_reason.to_string(),
+            message,
         }
     }
 }
@@ -41,6 +49,22 @@ impl RuntimeActionError {
         Self::RuntimeError {
             message: message.into(),
         }
+    }
+
+    pub fn append_context(mut self, context: impl std::fmt::Display) -> Self {
+        let suffix = context.to_string();
+        match &mut self {
+            Self::MissingInput { message, .. }
+            | Self::MissingSecret { message, .. }
+            | Self::ResolverFailed { message, .. }
+            | Self::RuntimeError { message } => {
+                *message = format!("{message}; {suffix}");
+            }
+            Self::ActionUnavailable { .. } => {
+                return Self::runtime(format!("{self}; {suffix}"));
+            }
+        }
+        self
     }
 }
 
@@ -78,6 +102,9 @@ impl From<ComputerRuntimeStartError> for RuntimeActionError {
     fn from(error: ComputerRuntimeStartError) -> Self {
         match error {
             ComputerRuntimeStartError::Sdk(error) => error.into(),
+            ComputerRuntimeStartError::SdkWithContext { source, context } => {
+                Self::from(source).append_context(context)
+            }
             ComputerRuntimeStartError::Client(message) => Self::runtime(message),
         }
     }
@@ -128,10 +155,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_missing_input_fields_when_runtime_restore_adds_context() {
+        let error = RuntimeActionError::from(ComputerRuntimeStartError::SdkWithContext {
+            source: ComputerError::InputResolution(InputResolutionError::Missing {
+                id: "audit@acme/api-key".to_string(),
+                kind: InputKind::Secret,
+                env_hint: "A2C_SMCP_audit_acme_api_key".to_string(),
+            }),
+            context: "previous runtime restore also failed".to_string(),
+        });
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "missing_secret",
+                "input_id": "audit@acme/api-key",
+                "env_hint": "A2C_SMCP_audit_acme_api_key",
+                "message": "Required secret input 'audit@acme/api-key' is unresolved; previous runtime restore also failed"
+            })
+        );
+    }
+
+    #[test]
     fn serializes_unavailable_actions_with_the_current_lifecycle() {
         let error = RuntimeActionError::from(ComputerRuntimeActionUnavailable {
             action: "connect",
             lifecycle: a2c_smcp::smcp_computer::LifecycleState::Connecting,
+            disabled_reason: "transition_in_progress",
         });
 
         assert_eq!(
@@ -139,7 +189,9 @@ mod tests {
             serde_json::json!({
                 "code": "action_unavailable",
                 "action": "connect",
-                "lifecycle": "connecting"
+                "lifecycle": "connecting",
+                "disabled_reason": "transition_in_progress",
+                "message": "runtime action 'connect' is unavailable while lifecycle is 'connecting' (transition_in_progress)"
             })
         );
     }

@@ -7,11 +7,15 @@ test.describe('MCP Server configuration', () => {
     await page.goto('/');
     await page.locator('.ant-layout-sider').getByText('Computer').click();
     await page.getByRole('button', { name: 'Computer A', exact: true }).click();
-    await page.getByRole('tab', { name: /MCP Servers/ }).click();
+    await page.getByRole('button', { name: 'Open Computer settings' }).click();
+    await page
+      .getByRole('menu', { name: 'Computer settings sections' })
+      .getByText('MCP Servers', { exact: true })
+      .click();
   });
 
   test('displays first Computer server list with test server', async ({ page }) => {
-    await expect(page.getByText('computer-a-stdio-server')).toBeVisible();
+    await expect(page.getByRole('row', { name: /computer-a-stdio-server/ })).toBeVisible();
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({
@@ -25,8 +29,8 @@ test.describe('MCP Server configuration', () => {
   });
 
   test('shows Start All and Stop All buttons', async ({ page }) => {
-    await page.locator('.ant-tabs-nav-more').click();
-    await page.getByText('Runtime', { exact: true }).last().click();
+    await page.getByRole('button', { name: 'Back to Computer' }).click();
+    await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByText('Start All')).toBeVisible();
     await expect(page.getByText('Stop All')).toBeVisible();
   });
@@ -42,13 +46,16 @@ test.describe('MCP Server configuration', () => {
   });
 
   test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
-    await page.getByText('Back to Computers').click();
+    await page.locator('.ant-layout-sider').getByText('Computer').click();
     await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
-    await page.getByRole('tab', { name: /MCP Servers/ }).click();
+    await page.getByRole('button', { name: 'Open Computer settings' }).click();
+    await page
+      .getByRole('menu', { name: 'Computer settings sections' })
+      .getByText('MCP Servers', { exact: true })
+      .click();
 
-    await expect(page.getByText('Robot B')).toBeVisible();
-    await expect(page.getByText('second-stdio-server')).toBeVisible();
-    await expect(page.getByText('computer-a-stdio-server')).not.toBeVisible();
+    await expect(page.getByRole('row', { name: /second-stdio-server/ })).toBeVisible();
+    await expect(page.getByRole('row', { name: /computer-a-stdio-server/ })).not.toBeVisible();
     await expect
       .poll(async () => page.evaluate(() => (window as any).__TAURI_INVOKES__))
       .toContainEqual(expect.objectContaining({

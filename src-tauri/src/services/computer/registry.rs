@@ -134,7 +134,7 @@ impl ComputerRegistry {
     ) -> Vec<(
         ComputerInstanceId,
         ComputerRuntimeSnapshot,
-        ClientConnectionAuthoritySnapshot,
+        ClientConnectionStateSnapshot,
     )> {
         let runtimes = self.list_runtimes().await;
         let mut snapshots = Vec::with_capacity(runtimes.len());
@@ -142,7 +142,7 @@ impl ComputerRegistry {
             snapshots.push((
                 runtime.instance.id.clone(),
                 runtime.runtime_snapshot().await,
-                runtime.connection_authority_snapshot().await,
+                runtime.connection_snapshot().await,
             ));
         }
         snapshots
@@ -173,6 +173,21 @@ impl ComputerRegistry {
                     && Arc::ptr_eq(&current.computer, &expected.computer)
             }
             _ => false,
+        }
+    }
+
+    pub(crate) async fn ensure_current_runtime(
+        &self,
+        expected: &ComputerInstanceRuntime,
+    ) -> Result<(), String> {
+        let runtimes = self.runtimes.read().await;
+        if Self::runtime_entry_matches(runtimes.get(&expected.instance.id), Some(expected)) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Computer runtime changed while committing instance {}",
+                expected.instance.id
+            ))
         }
     }
 
@@ -213,6 +228,15 @@ impl ComputerRegistry {
         &self,
         instance: ComputerInstance,
     ) -> Result<ComputerInstanceRuntime, String> {
+        self.update_runtime_instance_typed(instance)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn update_runtime_instance_typed(
+        &self,
+        instance: ComputerInstance,
+    ) -> Result<ComputerInstanceRuntime, ComputerRuntimeStartError> {
         let instance_id = instance.id.clone();
         let coordinator = self.runtime_mutation_coordinator(&instance_id);
         let _mutation_guard = coordinator.lock().await;
@@ -220,38 +244,29 @@ impl ComputerRegistry {
             let runtimes = self.runtimes.read().await;
             runtimes.get(&instance_id).cloned()
         };
-        let runtime = match previous.as_ref() {
-            Some(existing) => existing.with_instance(instance),
-            None => ComputerInstanceRuntime::new_with_secret_store_and_event_sink(
-                instance,
-                self.skill_home_base.clone(),
-                self.secret_store.clone(),
-                self.runtime_event_sink.clone(),
-            ),
-        };
+        let existing = previous.as_ref().ok_or_else(|| {
+            ComputerRuntimeStartError::Client(format!(
+                "Computer runtime does not exist for instance {instance_id}"
+            ))
+        })?;
+        let runtime = existing.with_instance(instance);
         if let Err(error) = runtime.sync_runtime().await {
-            if let Some(previous_runtime) = previous.as_ref() {
-                let restore_runtime =
-                    previous_runtime.with_instance(previous_runtime.instance.clone());
-                if let Err(restore_error) = restore_runtime.sync_runtime().await {
-                    return Err(format!(
-                        "{error}; additionally failed to restore previous runtime: {restore_error}"
-                    ));
-                }
+            let restore_runtime = existing.with_instance(existing.instance.clone());
+            if let Err(restore_error) = restore_runtime.sync_runtime().await {
+                return Err(error.append_context(format!(
+                    "additionally failed to restore previous runtime: {restore_error}"
+                )));
             }
             return Err(error);
         }
         {
             let mut runtimes = self.runtimes.write().await;
             if !Self::runtime_entry_matches(runtimes.get(&instance_id), previous.as_ref()) {
-                return Err(format!(
+                return Err(ComputerRuntimeStartError::Client(format!(
                     "Computer runtime changed while updating instance {instance_id}"
-                ));
+                )));
             }
             runtimes.insert(instance_id, runtime.clone());
-        }
-        if previous.is_none() {
-            runtime.start_runtime_event_relay().await;
         }
         Ok(runtime)
     }

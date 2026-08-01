@@ -14,6 +14,7 @@
     "edit": "Edit",
     "update": "Update",
     "refresh": "Refresh",
+    "retry": "Retry",
     "yes": "Yes",
     "no": "No",
     "error": "Error",
@@ -53,17 +54,80 @@
     "tools": "{{count}} tools",
     "status": {
       "running": "Running",
-      "stopped": "Stopped",
+      "not_running": "Not Running",
+      "starting": "Starting",
+      "stopping": "Stopping",
+      "degraded": "Limited",
       "error": "Error"
     },
     "connection": {
       "connected": "Connected",
-      "disconnected": "Disconnected"
+      "disconnected": "Disconnected",
+      "connecting": "Connecting",
+      "disconnecting": "Disconnecting"
+    },
+    "settings": {
+      "open": "Open Computer settings",
+      "title": "{{name}} Settings",
+      "pageLabel": "Computer settings",
+      "navigationLabel": "Computer settings sections",
+      "backToComputer": "Back to Computer",
+      "noComputer": "No Computer is available to configure",
+      "sections": {
+        "general": {
+          "title": "General",
+          "description": "Manage this Computer's saved name and description."
+        },
+        "skills": {
+          "title": "Skills",
+          "description": "Choose this Computer's Skill Home and open related capability management.",
+          "savedSkillHome": "Saved Skill Home",
+          "openDirectory": "Open local directory",
+          "openActiveSkills": "View active Skills in Computer",
+          "openPlugins": "Manage Plugins and Marketplace"
+        },
+        "plugins": {
+          "title": "Plugins & Marketplace",
+          "description": "Manage Marketplace sources and the Plugin installation lifecycle."
+        },
+        "mcp": {
+          "title": "MCP Servers",
+          "description": "Manage saved MCP declarations, sources, enablement, import, export, and validation."
+        },
+        "inputs": {
+          "title": "Inputs",
+          "description": "Manage user-created definitions, values, and Secrets for this Computer."
+        },
+        "connection": {
+          "title": "Connection Policy",
+          "description": "Choose the saved connection target and automatic connection policy."
+        }
+      }
+    },
+    "workbench": {
+      "pageLabel": "Computer runtime workbench",
+      "capabilitySummary": "Active capability summary",
+      "actions": {
+        "more": "More Computer actions",
+        "copyId": "Copy ID"
+      },
+      "sections": {
+        "runtime": "Runtime workbench",
+        "skills": "Active Skills and Tools",
+        "resources": "Desktop Resources",
+        "diagnostics": "Runtime diagnostics"
+      },
+      "messages": {
+        "idCopied": "Computer ID copied"
+      },
+      "deleteDescription": "This permanently deletes {{name}} and its saved configuration."
     },
     "runtime": {
       "title": "Runtime",
       "statusTitle": "Runtime Status",
+      "userState": "Status",
       "lifecycle": "Lifecycle",
+      "incarnation": "Runtime Incarnation",
       "generation": "Runtime Generation",
       "snapshotRevision": "Snapshot Revision",
       "connection": "Connection",
@@ -72,7 +136,26 @@
       "activeMcpServers": "Active MCP Servers",
       "mcpLifecycle": "MCP Runtime",
       "restart": "Restart",
-      "reload": "Reload",
+      "advancedDiagnostics": "Advanced Runtime Diagnostics",
+      "actionProgress": {
+        "starting": "Starting…",
+        "stopping": "Stopping…"
+      },
+      "actionDisabledReasons": {
+        "already_running": "The Runtime is already running.",
+        "not_running": "Start the Runtime before using this action.",
+        "transition_in_progress": "Wait for the current Runtime operation to finish.",
+        "degraded": "This action is unavailable while the Runtime is limited.",
+        "connection_unavailable": "This action is unavailable in the current connection state."
+      },
+      "userStates": {
+        "not_running": "Not Running",
+        "starting": "Starting",
+        "running": "Running",
+        "stopping": "Stopping",
+        "degraded": "Running with Limitations",
+        "error": "Runtime Error"
+      },
       "lastError": "Runtime Error",
       "degraded": "Runtime Degraded",
       "recentEvents": "Recent Runtime Events",
@@ -82,15 +165,52 @@
         "lifecycleChanged": "Lifecycle changed to {{state}}",
         "configRevisionBumped": "Config revision changed to {{revision}}",
         "capabilityRevisionBumped": "Capability revision changed to {{revision}}",
-        "clientConnectionAuthorityChanged": "Connection authority revision {{revision}} is {{status}}",
+        "clientConnectionStateChanged": "Connection state revision {{revision}} changed to {{status}}",
         "connectionPresent": "present",
         "connectionAbsent": "absent",
         "clientDiagnosticChanged": "{{operation}} diagnostic {{status}}",
+        "mcpDiagnosticChanged": "MCP {{bundleId}} {{operation}} diagnostic {{status}}",
         "diagnosticFailed": "failed",
         "diagnosticCleared": "cleared",
         "handleReplaced": "Runtime handle replaced: {{reason}}",
         "observationAdvanced": "Runtime observation advanced beyond its triggering event",
         "resync": "Runtime events resynchronized after {{count}} skipped events"
+      },
+      "problems": {
+        "severity": {
+          "error": "Error",
+          "degraded": "Running with limitations"
+        },
+        "sources": {
+          "sdk": "Runtime SDK",
+          "client_connection": "Connection",
+          "mcp": "MCP"
+        },
+        "messages": {
+          "sdk_runtime_error": "Core Runtime capabilities are unavailable.",
+          "sdk_runtime_degraded": "The Runtime is available, but some capabilities are limited.",
+          "connection_failed": "The Runtime is available, but the connection could not be established.",
+          "disconnection_failed": "The Runtime is available, but connection cleanup did not complete.",
+          "reconnection_failed": "The Runtime is available, but automatic reconnection failed.",
+          "mcp_start_failed": "The Runtime is available, but an MCP server could not start.",
+          "mcp_configuration_apply_failed": "The configuration was saved, but it could not be applied to the active MCP process."
+        },
+        "capabilities": {
+          "runtime": "core Runtime",
+          "connection": "Robot connection",
+          "mcpServer": "MCP server {{name}}"
+        },
+        "affected": "Affected: {{capabilities}}",
+        "occurredAt": "Occurred at {{time}}",
+        "actions": {
+          "retryConnection": "Retry connection",
+          "retryDisconnection": "Retry disconnection",
+          "viewLogs": "View logs",
+          "unavailable": "This action is unavailable in the current state."
+        },
+        "actionUnavailable": "{{action}} unavailable: {{reason}}",
+        "technicalDiagnostics": "Current Technical Diagnostics",
+        "noTechnicalDiagnostics": "No current technical diagnostics"
       },
       "lifecycleStates": {
         "created": "Created",
@@ -123,16 +243,24 @@
       "chooseSkillHome": "Choose Skill Home",
       "resetSkillHome": "Use Default",
       "skillHomeDescription": "This directory is the instance capability governance root. Clearing it restores the default instance skill_home/.",
-      "nextSkillHome": "Next Skill Home",
-      "skillHomeConfirmTitle": "Rebuild this Computer?",
-      "skillHomeConfirmDescription": "Changing Skill Home saves a new capability governance root and rebuilds the current Computer runtime. Marketplace, plugin, MCP server, and skill views will be resolved from the new Skill Home; current connection and runtime state may refresh.",
-      "skillHomeConfirmOk": "Rebuild"
+      "nextSkillHome": "Saved Skill Home",
+      "skillHomeConfirmTitle": "Save Skill Home?",
+      "skillHomeConfirmDescription": "This saves the capability governance root without automatically restarting the Computer.",
+      "skillHomeConfirmOk": "Save"
     },
     "actionGroups": {
       "profile": "Profile & Configuration",
       "runtime": "Runtime"
     },
     "connectionActions": {
+      "lastError": "Connection Error",
+      "disabledReasons": {
+        "already_connected": "This Computer is already connected.",
+        "not_connected": "This Computer is not connected.",
+        "transition_in_progress": "Wait for the current connection operation to finish.",
+        "not_running": "Start this Computer before connecting.",
+        "connection_unavailable": "Connection is unavailable in the current runtime state."
+      },
       "targetTitle": "Connection Target",
       "selectTarget": "Select a Robot or Manual SMCP target",
       "requiresRunning": "Start this Computer before connecting.",
@@ -168,7 +296,8 @@
       "started": "Computer started",
       "stopped": "Computer stopped",
       "restarted": "Computer restarted",
-      "reloaded": "Computer runtime reloaded"
+      "runtimeOperationFailed": "The Runtime operation failed. View Runtime diagnostics or logs for details.",
+      "connectionOperationFailed": "The connection operation failed. View Runtime diagnostics or logs for details."
     }
   },
   "skills": {
@@ -176,6 +305,7 @@
     "empty": "No active skills",
     "emptySearch": "No skills match the search",
     "emptySelection": "Select a skill to preview SKILL.md",
+    "preview": "Skill preview",
     "searchPlaceholder": "Search skills",
     "openLocalRoot": "Open Local Root",
     "openMcpSource": "Open MCP server {{server}}",
@@ -232,6 +362,8 @@
     },
     "actions": {
       "addMarketplace": "Add Marketplace",
+      "selectMarketplace": "Select marketplace {{marketplace}}",
+      "selectPlugin": "Select plugin {{plugin}} ({{pluginId}})",
       "refreshMarketplace": "Refresh Marketplace",
       "removeMarketplace": "Remove Marketplace",
       "updateMarketplace": "Update Marketplace",
@@ -288,6 +420,10 @@
     "validateConfig": "Validate Schema",
     "bundledConfigHint": "This declaration shares a name with an installed plugin bundle; its config declaration remains editable.",
     "readOnlyConfigHint": "This declaration comes from the read-only {{origin}} scope and cannot be edited here.",
+    "ownershipLoadingTitle": "Checking MCP declaration ownership",
+    "ownershipUnavailableTitle": "MCP declaration ownership is unavailable",
+    "ownershipUnavailableDescription": "Configuration changes remain disabled until authoritative ownership is loaded. Refresh to try again.",
+    "ownershipUnavailableHint": "Configuration changes are disabled until authoritative MCP ownership is available.",
     "validation": {
       "schemaOnlyTitle": "Schema validation only",
       "schemaOnlyDescription": "Validation checks the SDK-owned configuration structure. It does not check commands, paths, secrets, inputs, marketplaces, plugins, or MCP server runtime availability.",
@@ -297,7 +433,8 @@
     "status": {
       "running": "Running",
       "stopped": "Stopped",
-      "error": "Error"
+      "error": "Error",
+      "pending": "Pending"
     },
     "table": {
       "name": "Name",
@@ -310,13 +447,27 @@
     },
     "source": {
       "user": "User",
+      "plugin": "Plugin: {{plugin}}",
+      "marketplace": "Marketplace: {{marketplace}}",
       "bundled": "Bundled",
       "trusted": "Trusted"
     },
     "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
+    "batch": {
+      "startSummary": "Start complete: {{candidates}} candidates, {{actual}} started, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
+      "stopSummary": "Stop complete: {{candidates}} candidates, {{actual}} stopped, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
+      "failure": "{{name}} ({{bundleId}}): operation failed. View Runtime diagnostics or logs for details."
+    },
+    "disabledGuidance": {
+      "title": "MCP lifecycle actions are unavailable",
+      "startRuntime": "Start Runtime",
+      "restartRuntime": "Restart Runtime",
+      "refreshAfterTransition": "Wait for the current Runtime action to finish, then refresh."
+    },
     "actions": {
       "start": "Start",
       "stop": "Stop",
+      "managePlugin": "Manage {{plugin}}",
       "edit": "Edit",
       "remove": "Remove",
       "toggleEnabled": "Toggle server {{name}} enabled state"
@@ -336,6 +487,7 @@
       "cwd": "Working Directory",
       "envVars": "Environment Variables",
       "addEnv": "Add Variable",
+      "inputReference": "Use Input",
       "url": "URL",
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
@@ -361,6 +513,8 @@
       "removed": "Server removed successfully",
       "started": "Server {{name}} started",
       "stopped": "Server {{name}} stopped",
+      "operationFailed": "The MCP operation failed. View Runtime diagnostics or logs for details.",
+      "statusLoadFailed": "MCP status could not be loaded. Retry or view logs for details.",
       "allStarted": "All servers started",
       "allStopped": "All servers stopped",
       "editNotImplemented": "Edit functionality coming soon",
@@ -372,6 +526,8 @@
     "title": "Input Variables",
     "addInput": "Add Variable",
     "editInput": "Edit Variable",
+    "editInputFor": "Edit variable {{id}}",
+    "removeInputFor": "Remove variable {{id}}",
     "setValue": "Set Value",
     "selectValue": "Select a value",
     "enterValue": "Enter value",
@@ -384,7 +540,10 @@
       "missingInput": "Input required to start",
       "missingSecret": "Secret required to start",
       "envHint": "You can save it here or provide it through {{env}}.",
-      "definitionMissing": "Input definition {{id}} could not be loaded."
+      "definitionMissing": "Input {{id}} is not configured yet. Saving will create it for this Computer.",
+      "createAsSecret": "Store this Input as a Secret",
+      "loadFailed": "The Input could not be loaded. Retry or view logs for details.",
+      "submitFailed": "The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs."
     },
     "table": {
       "id": "ID",
@@ -466,15 +625,37 @@
   },
   "desktop": {
     "title": "Desktop Resources",
+    "loadResources": "Load resources",
     "windowUri": "URI",
     "windowTitle": "Title",
     "sourceServer": "Source Server",
-    "noWindows": "No desktop windows detected",
+    "contentType": "Content Type",
+    "unknownContentType": "Unknown",
+    "noWindows": "No desktop resources are currently exposed",
+    "notLoaded": "Resources are loaded only when you request them.",
     "windowContent": "Window Content",
     "noContent": "No content available",
     "clickToLoadDetail": "Click to load details",
-    "binaryData": "Binary data",
-    "failedToLoadDetail": "Failed to load window detail"
+    "textContent": "Text",
+    "binaryContent": "Binary",
+    "binarySummary": "Binary data is not rendered ({{size}} bytes)",
+    "previewTooLarge": "Preview omitted because the content is too large ({{size}} bytes)",
+    "windowPreviewAlt": "Desktop resource preview",
+    "refreshDetail": "Refresh resource content",
+    "failedToLoadDetail": "Failed to load resource content",
+    "enumerationFailed": "Failed to load Desktop Resources",
+    "enumerationIndeterminate": "Desktop Resources could not be determined",
+    "enumerationIndeterminateDescription": "The current SDK cannot distinguish an empty result from an unsupported capability or a per-server enumeration failure. You can retry or inspect MCP diagnostics.",
+    "enumerationUnverified": "Some Desktop Resources may be missing",
+    "enumerationUnverifiedDescription": "The current SDK returned resources but cannot report whether another MCP failed during enumeration.",
+    "runtimeUnavailable": "Runtime is not ready",
+    "runtimeUnavailableDescription": "Start the Runtime before loading Desktop Resources.",
+    "runtimeTransitionDescription": "Wait for the current Runtime operation to finish, then try again.",
+    "noActiveMcp": "No MCP server is active",
+    "noActiveMcpDescription": "Start or configure an MCP server before loading Desktop Resources.",
+    "manageMcp": "Manage MCP Servers",
+    "runtimeDegraded": "Runtime is limited",
+    "runtimeDegradedDescription": "Available resources may be incomplete. You can retry or inspect Runtime diagnostics."
   },
   "debug": {
     "description": "Tool browser and call testing.",
@@ -611,6 +792,8 @@
       "connect": "Connect",
       "connected": "Connected",
       "disconnect": "Disconnect",
+      "connectionCleanupRequired": "A stale connection must be cleaned up before reconnecting.",
+      "connectionCleanupGuidance": "Retry the disconnect action. If cleanup still fails, view Runtime diagnostics or logs.",
       "disconnectSuccess": "Disconnected from SMCP server",
       "connectSuccess": "Connecting to {{name}}…",
       "noRobotAccount": "This robot can't be connected securely yet (no robot account ID).",

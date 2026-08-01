@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
-import { formatRuntimeActionError } from '@/utils/runtimeActionError';
+import { formatRuntimeActionError, type RuntimeActionError } from '@/utils/runtimeActionError';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -24,6 +24,20 @@ export interface McpServerStatus {
 export type McpServerManagedBy =
   | { type: 'user' }
   | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
+
+export interface McpBatchFailure {
+  bundleId: string;
+  name: string;
+  error: RuntimeActionError;
+}
+
+export interface McpBatchOperationResult {
+  candidate_count: number;
+  actual_operation_count: number;
+  unchanged_count: number;
+  excluded_plugin_owned_count: number;
+  failures: McpBatchFailure[];
+}
 
 // server_parameters sub-types
 export interface StdioServerParameters {
@@ -94,6 +108,7 @@ export function getConfigType(config: McpServerConfig): 'stdio' | 'http' | 'sse'
 
 interface McpServerState {
   servers: McpServerStatus[];
+  serversReady: boolean;
   loading: boolean;
   error: string | null;
   activeInstanceId: string | null;
@@ -102,21 +117,33 @@ interface McpServerState {
   fetchServers: (instanceId: string) => Promise<void>;
   startServer: (instanceId: string, bundleId: string) => Promise<void>;
   stopServer: (instanceId: string, bundleId: string) => Promise<void>;
-  startAll: (instanceId: string) => Promise<void>;
-  stopAll: (instanceId: string) => Promise<void>;
+  startAll: (instanceId: string) => Promise<McpBatchOperationResult>;
+  stopAll: (instanceId: string) => Promise<McpBatchOperationResult>;
   reset: () => void;
 }
 
 const initialState = {
   servers: [] as McpServerStatus[],
+  serversReady: false,
   loading: false,
   error: null as string | null,
   activeInstanceId: null as string | null,
   serversRequestId: 0,
 };
 
-export const useMcpStore = create<McpServerState>((set, get) => ({
-  ...initialState,
+export const useMcpStore = create<McpServerState>((set, get) => {
+  const isActiveInstance = (instanceId: string) => get().activeInstanceId === instanceId;
+  const beginInstanceAction = (instanceId: string) => {
+    if (get().activeInstanceId === null) {
+      set({ activeInstanceId: instanceId });
+    }
+    if (isActiveInstance(instanceId)) {
+      set({ loading: true, error: null });
+    }
+  };
+
+  return {
+    ...initialState,
 
   fetchServers: async (instanceId: string) => {
     const requestId = get().serversRequestId + 1;
@@ -124,6 +151,7 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       activeInstanceId: instanceId,
       serversRequestId: requestId,
       servers: [],
+      serversReady: false,
       loading: true,
       error: null,
     });
@@ -132,66 +160,93 @@ export const useMcpStore = create<McpServerState>((set, get) => ({
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ servers, loading: false });
+      set({ servers, serversReady: true, loading: false });
     } catch (e) {
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ error: formatRuntimeActionError(e), loading: false });
+      set({
+        serversReady: false,
+        error: formatRuntimeActionError(e),
+        loading: false,
+      });
     }
   },
 
   startServer: async (instanceId: string, bundleId: string) => {
-    set({ loading: true, error: null });
+    beginInstanceAction(instanceId);
     try {
       await invoke('start_mcp_server', { instanceId, bundleId });
       info(`MCP server started: ${bundleId}`);
-      await get().fetchServers(instanceId);
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
     } catch (e) {
       const actionError = formatRuntimeActionError(e);
-      await get().fetchServers(instanceId);
-      set({ error: actionError, loading: false });
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
+      if (isActiveInstance(instanceId)) {
+        set({ error: actionError, loading: false });
+      }
       throw e;
     }
   },
 
   stopServer: async (instanceId: string, bundleId: string) => {
-    set({ loading: true, error: null });
+    beginInstanceAction(instanceId);
     try {
       await invoke('stop_mcp_server', { instanceId, bundleId });
       info(`MCP server stopped: ${bundleId}`);
-      await get().fetchServers(instanceId);
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      if (isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e), loading: false });
+      }
       throw e;
     }
   },
 
   startAll: async (instanceId: string) => {
-    set({ loading: true, error: null });
+    beginInstanceAction(instanceId);
     try {
-      await invoke('start_all_servers', { instanceId });
+      const result = await invoke<McpBatchOperationResult>('start_all_servers', { instanceId });
       info('All MCP servers started');
-      await get().fetchServers(instanceId);
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
+      return result;
     } catch (e) {
       const actionError = formatRuntimeActionError(e);
-      await get().fetchServers(instanceId);
-      set({ error: actionError, loading: false });
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
+      if (isActiveInstance(instanceId)) {
+        set({ error: actionError, loading: false });
+      }
       throw e;
     }
   },
 
   stopAll: async (instanceId: string) => {
-    set({ loading: true, error: null });
+    beginInstanceAction(instanceId);
     try {
-      await invoke('stop_all_servers', { instanceId });
+      const result = await invoke<McpBatchOperationResult>('stop_all_servers', { instanceId });
       info('All MCP servers stopped');
-      await get().fetchServers(instanceId);
+      if (isActiveInstance(instanceId)) {
+        await get().fetchServers(instanceId);
+      }
+      return result;
     } catch (e) {
-      set({ error: formatRuntimeActionError(e), loading: false });
+      if (isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e), loading: false });
+      }
       throw e;
     }
   },
 
   reset: () => set(initialState),
-}));
+  };
+});

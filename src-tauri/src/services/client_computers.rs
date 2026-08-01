@@ -2,19 +2,18 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalConfigFile {
-    Inputs,
     ManualTargets,
     ManagerSession,
 }
 
 pub const COMPUTER_PROFILE_FILE_NAME: &str = "profile.json";
+pub const COMPUTER_INPUTS_FILE_NAME: &str = "inputs.json";
 pub const SDK_CONTEXT_FILE_NAME: &str = "sdk_context.json";
 pub const MIGRATION_STATE_FILE_NAME: &str = "migration_state.json";
 
 impl GlobalConfigFile {
     fn file_name(self) -> &'static str {
         match self {
-            Self::Inputs => "inputs.json",
             Self::ManualTargets => "manual_targets.json",
             Self::ManagerSession => "manager_session.json",
         }
@@ -72,6 +71,15 @@ impl ClientComputersPaths {
         Ok(self.instance_root(instance_id)?.join(SDK_CONTEXT_FILE_NAME))
     }
 
+    pub(crate) fn computer_inputs(
+        &self,
+        instance_id: &str,
+    ) -> Result<PathBuf, ClientComputersPathError> {
+        Ok(self
+            .instance_root(instance_id)?
+            .join(COMPUTER_INPUTS_FILE_NAME))
+    }
+
     pub(crate) fn global_config(&self, artifact: GlobalConfigFile) -> PathBuf {
         self.root.join("global").join(artifact.file_name())
     }
@@ -109,8 +117,8 @@ mod tests {
             Path::new("/app-data/client_computers/instances/computer-a/profile.json")
         );
         assert_eq!(
-            paths.global_config(GlobalConfigFile::Inputs),
-            Path::new("/app-data/client_computers/global/inputs.json")
+            paths.computer_inputs("computer-a").unwrap(),
+            Path::new("/app-data/client_computers/instances/computer-a/inputs.json")
         );
     }
 

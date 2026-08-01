@@ -32,7 +32,22 @@ import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connecti
 
 const { Title, Text } = Typography;
 
-const DISCONNECTED_STATUS: ConnectionStatusInfo = { connected: false };
+const DEFAULT_CONNECT_CAPABILITY = {
+  enabled: false,
+  disabled_reason: 'connection_unavailable',
+} as const;
+const DEFAULT_DISCONNECT_CAPABILITY = {
+  enabled: false,
+  disabled_reason: 'not_connected',
+} as const;
+const DISCONNECTED_STATUS: ConnectionStatusInfo = {
+  status: 'disconnected',
+  connected: false,
+  actions: {
+    connect: DEFAULT_CONNECT_CAPABILITY,
+    disconnect: DEFAULT_DISCONNECT_CAPABILITY,
+  },
+};
 
 interface EmployeeListProps {
   instanceId?: string;
@@ -74,7 +89,6 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
   const {
     session,
     employees,
-    selectedEmployeeId,
     loading,
     error,
     paymentRequired,
@@ -93,6 +107,14 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
   );
   const connectionEnabled = Boolean(instanceId);
   const connectionStatus = selectedConnectionStatus ?? DISCONNECTED_STATUS;
+  const backendConnectionStatus = connectionStatus.status
+    ?? (connectionStatus.connected ? 'connected' : 'disconnected');
+  const connectCapability = connectionStatus.actions?.connect
+    ?? DEFAULT_CONNECT_CAPABILITY;
+  const disconnectCapability = connectionStatus.actions?.disconnect
+    ?? DEFAULT_DISCONNECT_CAPABILITY;
+  const orphanCleanupAvailable = backendConnectionStatus === 'disconnected'
+    && disconnectCapability.enabled;
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
@@ -139,13 +161,13 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
       if (!instanceId) return;
       await disconnectSmcp(instanceId);
       message.success(t('managerAccount.employees.disconnectSuccess'));
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      message.error(t('computer.messages.connectionOperationFailed'));
     }
   };
 
   const isConnectedEmployee = (emp: DigitalEmployeeBrief): boolean => {
-    if (!connectionStatus?.connected) return false;
+    if (backendConnectionStatus === 'disconnected') return false;
     if (connectionStatus.profile_name === `manager:${emp.id}`) return true;
     return !!(emp.robotId && connectionStatus.office_id === emp.robotId);
   };
@@ -226,15 +248,26 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
             type="error"
             showIcon
             message={t(errorI18nKey(error))}
-            description={
-              error.kind === 'network_error'
-                ? error.detail
-                : error.kind === 'other'
-                ? `HTTP ${error.detail.status}: ${error.detail.body}`
-                : undefined
-            }
             closable
             onClose={clearError}
+          />
+        )}
+
+        {orphanCleanupAvailable && (
+          <Alert
+            type="warning"
+            showIcon
+            message={t('managerAccount.employees.connectionCleanupRequired')}
+            description={t('managerAccount.employees.connectionCleanupGuidance')}
+            action={(
+              <Button
+                danger
+                icon={<DisconnectOutlined />}
+                onClick={handleDisconnectEmployee}
+              >
+                {t('managerAccount.employees.disconnect')}
+              </Button>
+            )}
           />
         )}
 
@@ -248,8 +281,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
             rowKey={(emp) => emp.id}
             renderItem={(emp) => {
               const connectable = isConnectable(emp);
-              const isSelecting = selectedEmployeeId === emp.id && loading;
-              const isConnected = isConnectedEmployee(emp);
+              const isConnectionTarget = isConnectedEmployee(emp);
+              const isConnecting = backendConnectionStatus === 'connecting'
+                && connectionStatus.operation_target?.employee_id === emp.id;
+              const isDisconnecting = backendConnectionStatus === 'disconnecting'
+                && isConnectionTarget;
+              const isConnected = backendConnectionStatus === 'connected' && isConnectionTarget;
               // 无 robotAccountId（历史/未回填实例）无法做 token-exchange → 禁用连接（TFRC-11 / TFRM-183）。
               const noRobotAccount = emp.robotAccountId == null;
               const connectButton = (
@@ -257,8 +294,8 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
                   key="connect"
                   type="primary"
                   icon={<LinkOutlined />}
-                  disabled={!connectable || noRobotAccount}
-                  loading={isSelecting}
+                  disabled={!connectable || noRobotAccount || !connectCapability.enabled}
+                  loading={isConnecting}
                   onClick={() => handleConnect(emp)}
                 >
                   {t('managerAccount.employees.connect')}
@@ -269,12 +306,13 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
                   actions={
                     connectionEnabled
                       ? [
-                          isConnected ? (
+                          isConnected || isDisconnecting ? (
                             <Button
                               key="disconnect"
                               danger
                               icon={<DisconnectOutlined />}
-                              loading={loading}
+                              disabled={!disconnectCapability.enabled}
+                              loading={isDisconnecting}
                               onClick={handleDisconnectEmployee}
                             >
                               {t('managerAccount.employees.disconnect')}

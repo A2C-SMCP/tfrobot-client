@@ -3,6 +3,9 @@ import { create } from 'zustand';
 import { formatRuntimeActionError } from '@/utils/runtimeActionError';
 import {
   getClientConnectionAuthority,
+  legacyClientConnectionState,
+  type ClientConnectionAuthority,
+  type ClientConnectionStatus,
   type ConnectionStateSummary,
 } from './connectionAuthority';
 import {
@@ -11,18 +14,20 @@ import {
   resolveRuntimeSnapshot,
   type ComputerRuntimeSnapshot,
 } from './runtimeSnapshot';
+import type { ComputerRuntimeUserState } from './runtimeSnapshot';
 
 export {
   isRuntimeRunning,
   isRuntimeTransportConnected,
   type ComputerRuntimeActionCapabilities,
   type ComputerRuntimeLifecycle,
+  type ComputerRuntimeUserState,
   type ComputerRuntimeSnapshot,
 } from './runtimeSnapshot';
 export type { ConnectionStateSummary } from './connectionAuthority';
 
-export type ComputerStatus = 'running' | 'stopped' | 'error';
-export type ComputerConnectionStatus = 'connected' | 'disconnected';
+export type ComputerStatus = ComputerRuntimeUserState;
+export type ComputerConnectionStatus = ClientConnectionStatus;
 
 export interface RobotBindingMetadata {
   employee_id: number;
@@ -50,9 +55,12 @@ export interface ComputerInstanceStatus {
   name: string;
   description?: string;
   local_skills_root?: string | null;
-  effective_skill_home?: string;
+  default_skill_home: string;
+  configured_skill_home: string;
+  effective_skill_home: string;
   running: boolean;
   runtime: ComputerRuntimeSnapshot;
+  connection_state?: ClientConnectionAuthority;
   connected: boolean;
   client_connection_present?: boolean;
   connection_revision?: number;
@@ -69,6 +77,8 @@ export interface ComputerInstance {
   description?: string;
   status: ComputerStatus;
   connectionStatus: ComputerConnectionStatus;
+  /** Canonical backend-owned connection operation state and capabilities. */
+  connectionState?: ClientConnectionAuthority;
   /** Client-owned logical connection authority, independent of SDK transport lifecycle. */
   clientConnectionPresent?: boolean;
   clientConnectionContext?: ConnectionStateSummary | null;
@@ -77,6 +87,8 @@ export interface ComputerInstance {
   robotName?: string;
   robotBinding?: RobotBindingMetadata | null;
   localSkillsRoot?: string | null;
+  defaultSkillHome?: string;
+  configuredSkillHome?: string;
   effectiveSkillHome?: string;
   connectionPolicy: ComputerConnectionPolicy;
   mcpServerCount: number;
@@ -118,7 +130,6 @@ interface ComputerState {
   startInstance: (id: string) => Promise<ComputerInstance>;
   stopInstance: (id: string) => Promise<ComputerInstance>;
   restartInstance: (id: string) => Promise<ComputerInstance>;
-  reloadRuntime: (id: string) => Promise<ComputerInstance>;
   applyRuntimeSnapshot: (id: string, runtime: ComputerRuntimeSnapshot) => void;
   updateConnectionPolicy: (
     id: string,
@@ -145,6 +156,18 @@ const initialState = {
   connectionMetadataRequestIds: {} as Record<string, number>,
 };
 
+function connectionStateFromStatus(status: ComputerInstanceStatus): ClientConnectionAuthority {
+  if (status.connection_state) return status.connection_state;
+  const context = status.connection_context ?? status.connection ?? null;
+  const connectionState = legacyClientConnectionState(
+    status.client_connection_present ?? (context ? true : status.connected),
+    context,
+    status.connection_revision ?? 0,
+    status.runtime,
+  );
+  return connectionState;
+}
+
 function mergeConnectionMetadata(
   instance: ComputerInstance,
   status: ComputerInstanceStatus,
@@ -163,25 +186,26 @@ function mergeConnectionMetadata(
 function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
   const runtime = status.runtime;
   const authority = getClientConnectionAuthority(status.id, runtime.incarnation);
-  const fallbackContext = status.connection_context ?? status.connection ?? null;
-  const clientConnectionPresent = authority?.present
-    ?? status.client_connection_present
-    ?? (fallbackContext ? true : status.connected);
-  const connectionContext = authority?.context ?? (clientConnectionPresent ? fallbackContext : null);
-  const projection = projectRuntimeSnapshot(runtime, clientConnectionPresent);
+  const connectionState = authority
+    ?? connectionStateFromStatus(status);
+  const connectionContext = connectionState.context;
+  const projection = projectRuntimeSnapshot(runtime, connectionState.status === 'connected');
   return {
     id: status.id,
     name: status.name,
     description: status.description ?? undefined,
     status: projection.status,
-    connectionStatus: projection.businessConnected ? 'connected' : 'disconnected',
-    clientConnectionPresent,
+    connectionStatus: connectionState.status,
+    connectionState,
+    clientConnectionPresent: connectionState.present,
     clientConnectionContext: connectionContext,
     connectionProfile: connectionContext?.profile_name,
     connectionUrl: connectionContext?.url,
     robotName: status.robot_binding?.robot_name,
     robotBinding: status.robot_binding,
     localSkillsRoot: status.local_skills_root ?? null,
+    defaultSkillHome: status.default_skill_home,
+    configuredSkillHome: status.configured_skill_home,
     effectiveSkillHome: status.effective_skill_home,
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     mcpServerCount: projection.mcpServerCount,
@@ -203,15 +227,10 @@ async function ingestStatus(
   options?: { allowDeletedRediscovery?: boolean },
 ): Promise<ComputerInstance> {
   const { useRuntimeStore } = await import('./runtimeStore');
-  const connectionContext = status.connection_context ?? status.connection ?? null;
   useRuntimeStore.getState().receiveSnapshot(
     status.id,
     status.runtime,
-    {
-      present: status.client_connection_present ?? (connectionContext ? true : status.connected),
-      context: connectionContext,
-      revision: status.connection_revision ?? 0,
-    },
+    connectionStateFromStatus(status),
     options,
   );
   return toComputerInstance(status);
@@ -226,15 +245,10 @@ async function ingestStatuses(
   // allowDeletedRediscovery side effect so a deletion committed in that window wins.
   if (!canIngest()) return false;
   for (const status of statuses) {
-    const connectionContext = status.connection_context ?? status.connection ?? null;
     useRuntimeStore.getState().receiveSnapshot(
       status.id,
       status.runtime,
-      {
-        present: status.client_connection_present ?? (connectionContext ? true : status.connected),
-        context: connectionContext,
-        revision: status.connection_revision ?? 0,
-      },
+      connectionStateFromStatus(status),
       { allowDeletedRediscovery: true },
     );
   }
@@ -262,26 +276,30 @@ function mergeInstanceRuntime(
   const incarnationChangedWithoutAuthority = eventSnapshot
     && current?.runtime.incarnation !== runtime.incarnation
     && !authority;
-  const clientConnectionPresent = authority?.present
-    ?? (incarnationChangedWithoutAuthority
-      ? false
-      : incoming.clientConnectionPresent
-        ?? current?.clientConnectionPresent
-        ?? incoming.connectionStatus === 'connected');
-  const clientConnectionContext = authority?.context
-    ?? (clientConnectionPresent && !incarnationChangedWithoutAuthority
-      ? incoming.clientConnectionContext ?? current?.clientConnectionContext ?? null
-      : null);
-  const projection = projectRuntimeSnapshot(runtime, clientConnectionPresent);
+  const fallbackPresent = incarnationChangedWithoutAuthority
+    ? false
+    : incoming.clientConnectionPresent
+      ?? current?.clientConnectionPresent
+      ?? incoming.connectionStatus === 'connected';
+  const fallbackContext = fallbackPresent && !incarnationChangedWithoutAuthority
+    ? incoming.clientConnectionContext ?? current?.clientConnectionContext ?? null
+    : null;
+  const connectionState = authority
+    ?? (!incarnationChangedWithoutAuthority
+      ? incoming.connectionState ?? current?.connectionState
+      : undefined)
+    ?? legacyClientConnectionState(fallbackPresent, fallbackContext, 0, runtime);
+  const projection = projectRuntimeSnapshot(runtime, connectionState.status === 'connected');
   return {
     ...incoming,
     runtime,
     status: projection.status,
-    connectionStatus: projection.businessConnected ? 'connected' : 'disconnected',
-    clientConnectionPresent,
-    clientConnectionContext,
-    connectionProfile: clientConnectionContext?.profile_name ?? incoming.connectionProfile,
-    connectionUrl: clientConnectionContext?.url ?? incoming.connectionUrl,
+    connectionStatus: connectionState.status,
+    connectionState,
+    clientConnectionPresent: connectionState.present,
+    clientConnectionContext: connectionState.context,
+    connectionProfile: connectionState.context?.profile_name ?? incoming.connectionProfile,
+    connectionUrl: connectionState.context?.url ?? incoming.connectionUrl,
     mcpServerCount: projection.mcpServerCount,
   };
 }
@@ -683,34 +701,6 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         selectedInstanceId: state.selectedInstanceId,
       }));
       return requireInstance(get().instances, restarted.id);
-    } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
-      throw e;
-    } finally {
-      set((state) => {
-        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
-        return {
-          pendingMutationCount,
-          loading: pendingMutationCount > 0,
-          mutationCompletionRevision: state.mutationCompletionRevision + 1,
-        };
-      });
-    }
-  },
-
-  reloadRuntime: async (id) => {
-    set((state) => ({
-      loading: true,
-      error: null,
-      pendingMutationCount: state.pendingMutationCount + 1,
-    }));
-    try {
-      const reloaded = await ingestStatus(await invoke<ComputerInstanceStatus>('reload_computer_runtime', { id }));
-      set((state) => ({
-        instances: upsertRuntimeAction(state.instances, reloaded),
-        selectedInstanceId: state.selectedInstanceId,
-      }));
-      return requireInstance(get().instances, reloaded.id);
     } catch (e) {
       set({ error: formatRuntimeActionError(e) });
       throw e;

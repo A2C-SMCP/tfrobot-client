@@ -266,6 +266,7 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
             style={{ minWidth: 360 }}
             value={selectedTargetValue}
             placeholder={t('computer.connectionActions.selectTarget')}
+            aria-label={t('computer.connectionActions.selectTarget')}
             onChange={handleTargetChange}
             options={targetOptions}
           />
@@ -276,7 +277,12 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
             {t('common.refresh')}
           </Button>
           <Space>
-            <Switch checked={autoConnect} loading={savingPolicy} onChange={handleAutoConnectChange} />
+            <Switch
+              checked={autoConnect}
+              loading={savingPolicy}
+              aria-label={t('connection.form.autoConnect')}
+              onChange={handleAutoConnectChange}
+            />
             <Text>{t('connection.form.autoConnect')}</Text>
           </Space>
         </Space>

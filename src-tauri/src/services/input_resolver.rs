@@ -13,12 +13,16 @@ use std::sync::Arc;
 /// receives a persisted value map and never owns the storage key namespace.
 #[derive(Clone)]
 pub struct RuntimeInputResolver {
+    instance_id: Arc<str>,
     store: Arc<dyn SecretStore>,
 }
 
 impl RuntimeInputResolver {
-    pub fn new(store: Arc<dyn SecretStore>) -> Self {
-        Self { store }
+    pub fn new(instance_id: impl Into<Arc<str>>, store: Arc<dyn SecretStore>) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            store,
+        }
     }
 }
 
@@ -32,8 +36,12 @@ impl InputValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<Value>, InputResolutionError> {
-        keychain::get_input_value(self.store.as_ref(), definition.id())
-            .map_err(|error| resolver_failed(definition.id(), error))
+        keychain::get_input_value(
+            self.store.as_ref(),
+            self.instance_id.as_ref(),
+            definition.id(),
+        )
+        .map_err(|error| resolver_failed(definition.id(), error))
     }
 }
 
@@ -43,25 +51,12 @@ impl SecretValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<String>, InputResolutionError> {
-        if let Some(secret) = keychain::get_input_secret(self.store.as_ref(), definition.id())
-            .map_err(|error| resolver_failed(definition.id(), error))?
-        {
-            return Ok(Some(secret));
-        }
-
-        // TFRC-60 stored every input as JSON under input-value. Keep a read-only fallback so
-        // existing password values survive the namespace split; the next edit migrates them.
-        keychain::get_input_value(self.store.as_ref(), definition.id())
-            .map_err(|error| resolver_failed(definition.id(), error))?
-            .map(|value| {
-                value.as_str().map(str::to_owned).ok_or_else(|| {
-                    InputResolutionError::resolver_failed(
-                        definition.id(),
-                        "legacy secret value is not a string",
-                    )
-                })
-            })
-            .transpose()
+        keychain::get_input_secret(
+            self.store.as_ref(),
+            self.instance_id.as_ref(),
+            definition.id(),
+        )
+        .map_err(|error| resolver_failed(definition.id(), error))
     }
 }
 
@@ -99,9 +94,15 @@ mod tests {
     #[tokio::test]
     async fn value_and_secret_resolvers_use_isolated_namespaces() {
         let store = Arc::new(InMemorySecretStore::default());
-        keychain::set_input_value(store.as_ref(), "token", &serde_json::json!("value")).unwrap();
-        keychain::set_input_secret(store.as_ref(), "token", "secret").unwrap();
-        let resolver = RuntimeInputResolver::new(store);
+        keychain::set_input_value(
+            store.as_ref(),
+            "computer-a",
+            "token",
+            &serde_json::json!("value"),
+        )
+        .unwrap();
+        keychain::set_input_secret(store.as_ref(), "computer-a", "token", "secret").unwrap();
+        let resolver = RuntimeInputResolver::new("computer-a", store);
 
         assert_eq!(
             InputValueResolver::resolve_input(&resolver, &definition("token", false))
@@ -120,7 +121,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_values_remain_unresolved_for_sdk_fallbacks() {
-        let resolver = RuntimeInputResolver::new(Arc::new(InMemorySecretStore::default()));
+        let resolver =
+            RuntimeInputResolver::new("computer-a", Arc::new(InMemorySecretStore::default()));
 
         assert_eq!(
             InputValueResolver::resolve_input(&resolver, &definition("value", false))
@@ -137,34 +139,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_resolver_reads_legacy_string_value_without_exposing_non_strings() {
+    async fn resolvers_are_isolated_by_computer_instance() {
         let store = Arc::new(InMemorySecretStore::default());
-        keychain::set_input_value(store.as_ref(), "legacy", &serde_json::json!("old-secret"))
-            .unwrap();
         keychain::set_input_value(
             store.as_ref(),
-            "invalid",
-            &serde_json::json!({"token": true}),
+            "computer-a",
+            "shared",
+            &serde_json::json!("value-a"),
         )
         .unwrap();
-        let resolver = RuntimeInputResolver::new(store);
+        keychain::set_input_value(
+            store.as_ref(),
+            "computer-b",
+            "shared",
+            &serde_json::json!("value-b"),
+        )
+        .unwrap();
+        let resolver_a = RuntimeInputResolver::new("computer-a", store.clone());
+        let resolver_b = RuntimeInputResolver::new("computer-b", store);
 
         assert_eq!(
-            SecretValueResolver::resolve_secret(&resolver, &definition("legacy", true))
+            InputValueResolver::resolve_input(&resolver_a, &definition("shared", false))
                 .await
                 .unwrap()
-                .as_deref(),
-            Some("old-secret")
+                .as_ref(),
+            Some(&serde_json::json!("value-a"))
         );
-        assert!(matches!(
-            SecretValueResolver::resolve_secret(&resolver, &definition("invalid", true)).await,
-            Err(InputResolutionError::ResolverFailed { id, .. }) if id == "invalid"
-        ));
+        assert_eq!(
+            InputValueResolver::resolve_input(&resolver_b, &definition("shared", false))
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&serde_json::json!("value-b"))
+        );
     }
 
     #[tokio::test]
     async fn secret_store_failures_remain_structured_resolver_errors() {
-        let resolver = RuntimeInputResolver::new(Arc::new(FailingSecretStore));
+        let resolver = RuntimeInputResolver::new("computer-a", Arc::new(FailingSecretStore));
 
         assert!(matches!(
             InputValueResolver::resolve_input(&resolver, &definition("value", false)).await,

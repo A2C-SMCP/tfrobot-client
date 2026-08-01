@@ -27,13 +27,14 @@ pub struct AppState {
     pub computer_registry: Arc<ComputerRegistry>,
     /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
     pub secret_store: Arc<dyn SecretStore>,
-    /// Serializes SMCP connection establishment so duplicate Robot checks and connection install
-    /// happen as one transaction across Computer instances.
-    pub connection_establish_lock: Arc<Mutex<()>>,
+    /// Short-lived cross-Computer reservations for Robot/Office identities. Network connection
+    /// work runs under each Computer's own lifecycle coordinator, never under this map lock.
+    pub connection_target_reservations:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
     /// These operations are infrequent and must not observe one another half-committed.
     pub computer_lifecycle_lock: Arc<Mutex<()>>,
-    /// Serializes global input definition/value mutations through runtime compensation.
+    /// Serializes per-Computer input definition/value mutations through runtime compensation.
     pub input_mutation_lock: Arc<Mutex<()>>,
     /// Log service for SQLite-backed logging
     pub log_service: Arc<LogService>,
@@ -115,7 +116,7 @@ impl AppState {
                 .map(|instance| instance.id.clone()),
         )
         .map_err(AppStateInitError::ConfigImportRecovery)?;
-        // Recovery may update global input definitions. Reload the profiles so every runtime is
+        // Recovery may update per-Computer input definitions. Reload the profiles so every runtime is
         // hydrated from the recovered storage state rather than the pre-recovery discovery copy.
         let stored_instances = config.load_computer_instances()?;
         let instances = hydrate_computer_instances(stored_instances, secret_store.as_ref())?;
@@ -130,7 +131,9 @@ impl AppState {
             sdk_config,
             computer_registry: Arc::new(computer_registry),
             secret_store: secret_store.clone(),
-            connection_establish_lock: Arc::new(Mutex::new(())),
+            connection_target_reservations: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             computer_lifecycle_lock: Arc::new(Mutex::new(())),
             input_mutation_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
@@ -327,6 +330,7 @@ pub fn run() {
             commands::skills::get_skill,
             commands::skills::refresh_skills,
             commands::skills::open_local_skills_root,
+            commands::skills::open_configured_local_skills_root,
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,
@@ -335,6 +339,7 @@ pub fn run() {
             commands::inputs::list_input_values,
             commands::inputs::get_input_value,
             commands::inputs::set_input_value,
+            commands::inputs::set_runtime_input_value,
             commands::inputs::remove_input_value,
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,
@@ -356,7 +361,6 @@ pub fn run() {
             commands::computer::start_computer_instance,
             commands::computer::stop_computer_instance,
             commands::computer::restart_computer_instance,
-            commands::computer::reload_computer_runtime,
             commands::computer::update_computer_connection_policy,
             commands::computer::update_computer_skill_home,
             commands::computer::connect_computer_connection_target,
@@ -381,7 +385,6 @@ pub fn run() {
             commands::logs::clear_logs,
             // Dashboard
             commands::dashboard::get_dashboard_data,
-            commands::dashboard::get_computer_overview_data,
             // Settings
             commands::settings::get_settings,
             commands::settings::update_settings,

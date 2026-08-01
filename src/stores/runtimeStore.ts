@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { create } from 'zustand';
 import { useComputerStore } from './computerStore';
-import { useComputerOverviewStore } from './computerOverviewStore';
 import { useDashboardStore } from './dashboardStore';
 import { useDebugStore } from './debugStore';
 import { useMcpStore } from './mcpStore';
@@ -13,6 +12,7 @@ import {
   resetClientConnectionAuthorities,
   setClientConnectionAuthority,
   type ClientConnectionAuthority,
+  type ClientConnectionAuthorityInput,
 } from './connectionAuthority';
 import { useConnectionStore } from './connectionStore';
 import {
@@ -30,8 +30,20 @@ export type ComputerRuntimeEventCause =
   | { kind: 'lifecycle_changed'; state: ComputerRuntimeSnapshot['lifecycle'] }
   | { kind: 'config_revision_bumped'; revision: number }
   | { kind: 'capability_revision_bumped'; revision: number }
+  | {
+      kind: 'client_connection_state_changed';
+      revision: number;
+      status: ClientConnectionAuthority['status'];
+    }
+  /** @deprecated Compatibility with runtime events emitted before TFRC-73. */
   | { kind: 'client_connection_authority_changed'; revision: number; present: boolean }
   | { kind: 'client_diagnostic_changed'; operation: string; has_error: boolean }
+  | {
+      kind: 'mcp_diagnostic_changed';
+      bundle_id: string;
+      operation: string;
+      has_error: boolean;
+    }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
   | { kind: 'resync'; skipped_events: number };
@@ -40,7 +52,7 @@ export interface ComputerRuntimeStatusEvent {
   instance_id: string;
   cause: ComputerRuntimeEventCause;
   snapshot: ComputerRuntimeSnapshot;
-  connection: ClientConnectionAuthority;
+  connection: ClientConnectionAuthorityInput;
 }
 
 export interface ComputerRuntimeEventRecord extends ComputerRuntimeStatusEvent {
@@ -52,7 +64,7 @@ export const RUNTIME_EVENT_HISTORY_LIMIT = 50;
 interface ComputerRuntimeSnapshotRecord {
   instance_id: string;
   snapshot: ComputerRuntimeSnapshot;
-  connection: ClientConnectionAuthority;
+  connection: ClientConnectionAuthorityInput;
 }
 
 interface RuntimeState {
@@ -68,7 +80,7 @@ interface RuntimeState {
   receiveSnapshot: (
     instanceId: string,
     snapshot: ComputerRuntimeSnapshot,
-    connection?: ClientConnectionAuthority,
+    connection?: ClientConnectionAuthorityInput,
     options?: { allowDeletedRediscovery?: boolean },
   ) => void;
   evictSnapshot: (instanceId: string, incarnation: number) => void;
@@ -117,23 +129,16 @@ function refreshRevisionConsumers(
 function applySnapshotToConsumers(instanceId: string, snapshot: ComputerRuntimeSnapshot) {
   useComputerStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useDashboardStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
-  useComputerOverviewStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
   useConnectionStore.getState().applyRuntimeSnapshot(instanceId, snapshot);
 }
 
 function applyConnectionAuthority(
   instanceId: string,
   snapshot: ComputerRuntimeSnapshot,
-  connection: ClientConnectionAuthority,
+  connection: ClientConnectionAuthorityInput,
 ) {
   if (!canProjectRuntimeIncarnation(instanceId, snapshot.incarnation)) return;
-  setClientConnectionAuthority(
-    instanceId,
-    connection.present,
-    connection.context,
-    connection.revision,
-    snapshot,
-  );
+  setClientConnectionAuthority(instanceId, connection, snapshot);
 }
 
 const initialState = {
@@ -185,11 +190,14 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   },
 
   receiveEvent: (event) => {
-    applyConnectionAuthority(event.instance_id, event.snapshot, event.connection);
     const { accepted, previous } = acceptAuthoritativeRuntimeSnapshot(
       event.instance_id,
       event.snapshot,
     );
+    // Runtime admission establishes the observation fence first. Connection authority then uses
+    // its own revision plus the paired runtime generation/revision to reject equal-revision
+    // observations that arrive out of order.
+    applyConnectionAuthority(event.instance_id, event.snapshot, event.connection);
     if (!accepted) {
       // Connection authority is versioned independently and has already been projected above.
       // Event history deliberately remains a history of accepted runtime observations so a

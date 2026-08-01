@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { isMissingRuntimeInputError } from '@/utils/runtimeActionError';
 
 export interface SkillRef {
   name: string;
@@ -102,6 +103,7 @@ interface SkillState extends InstanceSkillRecord {
   refreshSkills: (instanceId: string) => Promise<void>;
   selectSkill: (instanceId: string, name: string) => Promise<void>;
   openLocalSkillsRoot: (instanceId: string) => Promise<void>;
+  openConfiguredLocalSkillsRoot: (instanceId: string) => Promise<void>;
   fetchMarketplaceCapabilities: (instanceId: string) => Promise<void>;
   fetchMarketplaceGovernance: (instanceId: string) => Promise<void>;
   addMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
@@ -334,6 +336,10 @@ export const useSkillStore = create<SkillState>((set, get) => ({
     await invoke('open_local_skills_root', { instanceId });
   },
 
+  openConfiguredLocalSkillsRoot: async (instanceId) => {
+    await invoke('open_configured_local_skills_root', { instanceId });
+  },
+
   fetchMarketplaceCapabilities: async (instanceId) => {
     await get().fetchMarketplaceGovernance(instanceId);
   },
@@ -421,10 +427,10 @@ async function runMarketplaceLifecycle(
       await get().fetchSkills(instanceId);
     }
   } catch (e) {
-    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
+    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) throw e;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
-      marketplaceError: formatInvokeError(e),
+      marketplaceError: isMissingRuntimeInputError(e) ? null : formatInvokeError(e),
       loadingMarketplace: false,
     }));
     throw e;

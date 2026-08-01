@@ -1,14 +1,47 @@
 use a2c_smcp::smcp_computer::LifecycleState;
 use serde::{Deserialize, Serialize};
 
-/// Runtime actions exposed to clients. The backend remains authoritative: the same
-/// lifecycle policy is serialized in snapshots and checked again at command boundaries.
+/// Stable user-facing projection of the SDK lifecycle.
+///
+/// The raw SDK lifecycle remains available for advanced diagnostics, while normal clients should
+/// render this projection so connection transitions are not confused with Runtime availability.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeUserState {
+    NotRunning,
+    Starting,
+    Running,
+    Stopping,
+    Degraded,
+    Error,
+}
+
+impl From<LifecycleState> for ComputerRuntimeUserState {
+    fn from(lifecycle: LifecycleState) -> Self {
+        match lifecycle {
+            LifecycleState::Created | LifecycleState::Stopped | LifecycleState::Shutdown => {
+                Self::NotRunning
+            }
+            LifecycleState::Starting | LifecycleState::Syncing => Self::Starting,
+            LifecycleState::Started
+            | LifecycleState::Connecting
+            | LifecycleState::Connected
+            | LifecycleState::JoinedOffice
+            | LifecycleState::Disconnecting => Self::Running,
+            LifecycleState::Stopping => Self::Stopping,
+            LifecycleState::Degraded => Self::Degraded,
+            LifecycleState::Error => Self::Error,
+        }
+    }
+}
+
+/// Runtime actions exposed to clients. The backend remains authoritative: the same lifecycle
+/// policy is serialized in snapshots and checked again at command boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputerRuntimeAction {
     Start,
     Stop,
     Restart,
-    Reload,
     Connect,
     Disconnect,
     ManageMcp,
@@ -20,7 +53,6 @@ impl ComputerRuntimeAction {
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Restart => "restart",
-            Self::Reload => "reload",
             Self::Connect => "connect",
             Self::Disconnect => "disconnect",
             Self::ManageMcp => "manage_mcp",
@@ -29,24 +61,77 @@ impl ComputerRuntimeAction {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerRuntimeActionDisabledReason {
+    AlreadyRunning,
+    NotRunning,
+    TransitionInProgress,
+    Degraded,
+    ConnectionUnavailable,
+}
+
+impl ComputerRuntimeActionDisabledReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyRunning => "already_running",
+            Self::NotRunning => "not_running",
+            Self::TransitionInProgress => "transition_in_progress",
+            Self::Degraded => "degraded",
+            Self::ConnectionUnavailable => "connection_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerRuntimeActionCapability {
+    pub enabled: bool,
+    pub disabled_reason: Option<ComputerRuntimeActionDisabledReason>,
+}
+
+impl ComputerRuntimeActionCapability {
+    fn enabled() -> Self {
+        Self {
+            enabled: true,
+            disabled_reason: None,
+        }
+    }
+
+    fn disabled(reason: ComputerRuntimeActionDisabledReason) -> Self {
+        Self {
+            enabled: false,
+            disabled_reason: Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerRuntimeActionCapabilities {
-    pub can_start: bool,
-    pub can_stop: bool,
-    pub can_restart: bool,
-    pub can_reload: bool,
-    pub can_connect: bool,
-    pub can_disconnect: bool,
-    pub can_manage_mcp: bool,
+    pub start: ComputerRuntimeActionCapability,
+    pub stop: ComputerRuntimeActionCapability,
+    pub restart: ComputerRuntimeActionCapability,
+    pub connect: ComputerRuntimeActionCapability,
+    pub disconnect: ComputerRuntimeActionCapability,
+    pub manage_mcp: ComputerRuntimeActionCapability,
 }
 
 impl ComputerRuntimeActionCapabilities {
     pub fn for_lifecycle(lifecycle: LifecycleState) -> Self {
+        use ComputerRuntimeActionDisabledReason as Disabled;
+
         let inactive = matches!(
             lifecycle,
             LifecycleState::Created
                 | LifecycleState::Stopped
                 | LifecycleState::Shutdown
                 | LifecycleState::Error
+        );
+        let transitioning = matches!(
+            lifecycle,
+            LifecycleState::Starting
+                | LifecycleState::Connecting
+                | LifecycleState::Syncing
+                | LifecycleState::Disconnecting
+                | LifecycleState::Stopping
         );
         let locally_operational = matches!(
             lifecycle,
@@ -55,55 +140,114 @@ impl ComputerRuntimeActionCapabilities {
                 | LifecycleState::JoinedOffice
                 | LifecycleState::Degraded
         );
-        let mcp_operational = matches!(
-            lifecycle,
-            LifecycleState::Started | LifecycleState::Connected | LifecycleState::JoinedOffice
-        );
+
+        let inactive_or_transition_reason = || {
+            if transitioning {
+                Disabled::TransitionInProgress
+            } else {
+                Disabled::NotRunning
+            }
+        };
 
         Self {
-            can_start: inactive,
-            can_stop: locally_operational,
-            can_restart: locally_operational,
-            can_reload: inactive || locally_operational,
-            can_connect: lifecycle == LifecycleState::Started,
-            can_disconnect: matches!(
+            start: if inactive {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(if transitioning {
+                    Disabled::TransitionInProgress
+                } else {
+                    Disabled::AlreadyRunning
+                })
+            },
+            stop: if locally_operational {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(inactive_or_transition_reason())
+            },
+            restart: if locally_operational {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(inactive_or_transition_reason())
+            },
+            connect: if lifecycle == LifecycleState::Started {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(if transitioning {
+                    Disabled::TransitionInProgress
+                } else if inactive {
+                    Disabled::NotRunning
+                } else {
+                    Disabled::ConnectionUnavailable
+                })
+            },
+            disconnect: if matches!(
                 lifecycle,
                 LifecycleState::Connected | LifecycleState::JoinedOffice | LifecycleState::Degraded
-            ),
-            can_manage_mcp: mcp_operational,
+            ) {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(if transitioning {
+                    Disabled::TransitionInProgress
+                } else if inactive {
+                    Disabled::NotRunning
+                } else {
+                    Disabled::ConnectionUnavailable
+                })
+            },
+            manage_mcp: if matches!(
+                lifecycle,
+                LifecycleState::Started | LifecycleState::Connected | LifecycleState::JoinedOffice
+            ) {
+                ComputerRuntimeActionCapability::enabled()
+            } else {
+                ComputerRuntimeActionCapability::disabled(
+                    if lifecycle == LifecycleState::Degraded {
+                        Disabled::Degraded
+                    } else {
+                        inactive_or_transition_reason()
+                    },
+                )
+            },
         }
     }
 
-    pub fn allows(self, action: ComputerRuntimeAction) -> bool {
+    pub fn capability(self, action: ComputerRuntimeAction) -> ComputerRuntimeActionCapability {
         match action {
-            ComputerRuntimeAction::Start => self.can_start,
-            ComputerRuntimeAction::Stop => self.can_stop,
-            ComputerRuntimeAction::Restart => self.can_restart,
-            ComputerRuntimeAction::Reload => self.can_reload,
-            ComputerRuntimeAction::Connect => self.can_connect,
-            ComputerRuntimeAction::Disconnect => self.can_disconnect,
-            ComputerRuntimeAction::ManageMcp => self.can_manage_mcp,
+            ComputerRuntimeAction::Start => self.start,
+            ComputerRuntimeAction::Stop => self.stop,
+            ComputerRuntimeAction::Restart => self.restart,
+            ComputerRuntimeAction::Connect => self.connect,
+            ComputerRuntimeAction::Disconnect => self.disconnect,
+            ComputerRuntimeAction::ManageMcp => self.manage_mcp,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("runtime action '{action}' is unavailable while lifecycle is '{lifecycle}'")]
+#[error(
+    "runtime action '{action}' is unavailable while lifecycle is '{lifecycle}' ({disabled_reason})"
+)]
 pub struct ComputerRuntimeActionUnavailable {
     pub action: &'static str,
     pub lifecycle: LifecycleState,
+    pub disabled_reason: &'static str,
 }
 
 pub fn ensure_runtime_action(
     lifecycle: LifecycleState,
     action: ComputerRuntimeAction,
 ) -> Result<(), ComputerRuntimeActionUnavailable> {
-    if ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle).allows(action) {
+    let capability = ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle).capability(action);
+    if capability.enabled {
         Ok(())
     } else {
         Err(ComputerRuntimeActionUnavailable {
             action: action.as_str(),
             lifecycle,
+            disabled_reason: capability
+                .disabled_reason
+                .expect("disabled runtime action must provide a reason")
+                .as_str(),
         })
     }
 }
@@ -113,77 +257,224 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_matrix_is_explicit_for_every_sdk_lifecycle() {
+    fn user_state_mapping_covers_every_sdk_lifecycle() {
         let cases = [
             (
                 LifecycleState::Created,
-                (true, false, false, true, false, false, false),
+                ComputerRuntimeUserState::NotRunning,
             ),
-            (
-                LifecycleState::Starting,
-                (false, false, false, false, false, false, false),
-            ),
-            (
-                LifecycleState::Started,
-                (false, true, true, true, true, false, true),
-            ),
+            (LifecycleState::Starting, ComputerRuntimeUserState::Starting),
+            (LifecycleState::Started, ComputerRuntimeUserState::Running),
             (
                 LifecycleState::Connecting,
-                (false, false, false, false, false, false, false),
+                ComputerRuntimeUserState::Running,
             ),
-            (
-                LifecycleState::Connected,
-                (false, true, true, true, false, true, true),
-            ),
+            (LifecycleState::Connected, ComputerRuntimeUserState::Running),
             (
                 LifecycleState::JoinedOffice,
-                (false, true, true, true, false, true, true),
+                ComputerRuntimeUserState::Running,
             ),
-            (
-                LifecycleState::Syncing,
-                (false, false, false, false, false, false, false),
-            ),
-            (
-                LifecycleState::Degraded,
-                (false, true, true, true, false, true, false),
-            ),
+            (LifecycleState::Syncing, ComputerRuntimeUserState::Starting),
+            (LifecycleState::Degraded, ComputerRuntimeUserState::Degraded),
             (
                 LifecycleState::Disconnecting,
-                (false, false, false, false, false, false, false),
+                ComputerRuntimeUserState::Running,
             ),
-            (
-                LifecycleState::Stopping,
-                (false, false, false, false, false, false, false),
-            ),
+            (LifecycleState::Stopping, ComputerRuntimeUserState::Stopping),
             (
                 LifecycleState::Stopped,
-                (true, false, false, true, false, false, false),
+                ComputerRuntimeUserState::NotRunning,
             ),
             (
                 LifecycleState::Shutdown,
-                (true, false, false, true, false, false, false),
+                ComputerRuntimeUserState::NotRunning,
+            ),
+            (LifecycleState::Error, ComputerRuntimeUserState::Error),
+        ];
+
+        for (lifecycle, expected) in cases {
+            assert_eq!(
+                ComputerRuntimeUserState::from(lifecycle),
+                expected,
+                "unexpected user state for {lifecycle}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_matrix_is_explicit_for_every_sdk_lifecycle() {
+        use ComputerRuntimeActionDisabledReason as Disabled;
+
+        let enabled = ComputerRuntimeActionCapability::enabled;
+        let disabled = ComputerRuntimeActionCapability::disabled;
+        let cases = [
+            (
+                LifecycleState::Created,
+                ComputerRuntimeActionCapabilities {
+                    start: enabled(),
+                    stop: disabled(Disabled::NotRunning),
+                    restart: disabled(Disabled::NotRunning),
+                    connect: disabled(Disabled::NotRunning),
+                    disconnect: disabled(Disabled::NotRunning),
+                    manage_mcp: disabled(Disabled::NotRunning),
+                },
+            ),
+            (
+                LifecycleState::Starting,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::TransitionInProgress),
+                    stop: disabled(Disabled::TransitionInProgress),
+                    restart: disabled(Disabled::TransitionInProgress),
+                    connect: disabled(Disabled::TransitionInProgress),
+                    disconnect: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                },
+            ),
+            (
+                LifecycleState::Started,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::AlreadyRunning),
+                    stop: enabled(),
+                    restart: enabled(),
+                    connect: enabled(),
+                    disconnect: disabled(Disabled::ConnectionUnavailable),
+                    manage_mcp: enabled(),
+                },
+            ),
+            (
+                LifecycleState::Connecting,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::TransitionInProgress),
+                    stop: disabled(Disabled::TransitionInProgress),
+                    restart: disabled(Disabled::TransitionInProgress),
+                    connect: disabled(Disabled::TransitionInProgress),
+                    disconnect: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                },
+            ),
+            (
+                LifecycleState::Connected,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::AlreadyRunning),
+                    stop: enabled(),
+                    restart: enabled(),
+                    connect: disabled(Disabled::ConnectionUnavailable),
+                    disconnect: enabled(),
+                    manage_mcp: enabled(),
+                },
+            ),
+            (
+                LifecycleState::JoinedOffice,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::AlreadyRunning),
+                    stop: enabled(),
+                    restart: enabled(),
+                    connect: disabled(Disabled::ConnectionUnavailable),
+                    disconnect: enabled(),
+                    manage_mcp: enabled(),
+                },
+            ),
+            (
+                LifecycleState::Syncing,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::TransitionInProgress),
+                    stop: disabled(Disabled::TransitionInProgress),
+                    restart: disabled(Disabled::TransitionInProgress),
+                    connect: disabled(Disabled::TransitionInProgress),
+                    disconnect: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                },
+            ),
+            (
+                LifecycleState::Degraded,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::AlreadyRunning),
+                    stop: enabled(),
+                    restart: enabled(),
+                    connect: disabled(Disabled::ConnectionUnavailable),
+                    disconnect: enabled(),
+                    manage_mcp: disabled(Disabled::Degraded),
+                },
+            ),
+            (
+                LifecycleState::Disconnecting,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::TransitionInProgress),
+                    stop: disabled(Disabled::TransitionInProgress),
+                    restart: disabled(Disabled::TransitionInProgress),
+                    connect: disabled(Disabled::TransitionInProgress),
+                    disconnect: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                },
+            ),
+            (
+                LifecycleState::Stopping,
+                ComputerRuntimeActionCapabilities {
+                    start: disabled(Disabled::TransitionInProgress),
+                    stop: disabled(Disabled::TransitionInProgress),
+                    restart: disabled(Disabled::TransitionInProgress),
+                    connect: disabled(Disabled::TransitionInProgress),
+                    disconnect: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                },
+            ),
+            (
+                LifecycleState::Stopped,
+                ComputerRuntimeActionCapabilities {
+                    start: enabled(),
+                    stop: disabled(Disabled::NotRunning),
+                    restart: disabled(Disabled::NotRunning),
+                    connect: disabled(Disabled::NotRunning),
+                    disconnect: disabled(Disabled::NotRunning),
+                    manage_mcp: disabled(Disabled::NotRunning),
+                },
+            ),
+            (
+                LifecycleState::Shutdown,
+                ComputerRuntimeActionCapabilities {
+                    start: enabled(),
+                    stop: disabled(Disabled::NotRunning),
+                    restart: disabled(Disabled::NotRunning),
+                    connect: disabled(Disabled::NotRunning),
+                    disconnect: disabled(Disabled::NotRunning),
+                    manage_mcp: disabled(Disabled::NotRunning),
+                },
             ),
             (
                 LifecycleState::Error,
-                (true, false, false, true, false, false, false),
+                ComputerRuntimeActionCapabilities {
+                    start: enabled(),
+                    stop: disabled(Disabled::NotRunning),
+                    restart: disabled(Disabled::NotRunning),
+                    connect: disabled(Disabled::NotRunning),
+                    disconnect: disabled(Disabled::NotRunning),
+                    manage_mcp: disabled(Disabled::NotRunning),
+                },
             ),
         ];
 
         for (lifecycle, expected) in cases {
             let actions = ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle);
             assert_eq!(
-                (
-                    actions.can_start,
-                    actions.can_stop,
-                    actions.can_restart,
-                    actions.can_reload,
-                    actions.can_connect,
-                    actions.can_disconnect,
-                    actions.can_manage_mcp,
-                ),
-                expected,
+                actions, expected,
                 "unexpected action capabilities for {lifecycle}"
             );
+            for action in [
+                ComputerRuntimeAction::Start,
+                ComputerRuntimeAction::Stop,
+                ComputerRuntimeAction::Restart,
+                ComputerRuntimeAction::Connect,
+                ComputerRuntimeAction::Disconnect,
+                ComputerRuntimeAction::ManageMcp,
+            ] {
+                let capability = actions.capability(action);
+                assert_eq!(
+                    capability.enabled,
+                    capability.disabled_reason.is_none(),
+                    "capability and reason diverged for {} at {lifecycle}",
+                    action.as_str()
+                );
+            }
         }
     }
 }

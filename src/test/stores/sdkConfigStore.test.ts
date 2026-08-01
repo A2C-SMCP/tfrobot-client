@@ -200,7 +200,7 @@ describe('sdkConfigStore', () => {
     });
     expect(useSdkConfigStore.getState()).toMatchObject({
       snapshot: { revision: 'sha256:committed' },
-      error: 'runtime cleanup failed',
+      error: 'operation_failed',
     });
   });
 

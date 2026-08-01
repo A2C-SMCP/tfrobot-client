@@ -1,4 +1,8 @@
 use super::*;
+use std::time::Duration;
+use tokio::time::timeout;
+
+const SDK_COMPUTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
@@ -6,24 +10,32 @@ impl ComputerInstanceRuntime {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         let lifecycle = self.runtime_state().await;
-        if self.sdk_config_reload_required.load(Ordering::Acquire)
-            || matches!(
-                lifecycle,
-                LifecycleState::Stopped | LifecycleState::Shutdown | LifecycleState::Error
-            )
-        {
-            self.replace_sdk_computer(false, "start_after_terminal")
+        if matches!(
+            lifecycle,
+            LifecycleState::Created
+                | LifecycleState::Stopped
+                | LifecycleState::Shutdown
+                | LifecycleState::Error
+        ) {
+            self.replace_sdk_computer(false, "start_with_persisted_configuration")
+                .await?;
+        } else if matches!(
+            lifecycle,
+            LifecycleState::Started | LifecycleState::Degraded
+        ) {
+            self.reconcile_sdk_governance_inner()
                 .await
-                .map_err(ComputerRuntimeStartError::Client)?;
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+            let failures = self.start_desired_mcp_servers_inner().await;
+            self.log_mcp_start_failures(&failures, "idempotent Computer startup");
+            return Ok(());
         } else if matches!(
             lifecycle,
             LifecycleState::Starting
-                | LifecycleState::Started
                 | LifecycleState::Connecting
                 | LifecycleState::Connected
                 | LifecycleState::JoinedOffice
                 | LifecycleState::Syncing
-                | LifecycleState::Degraded
                 | LifecycleState::Disconnecting
                 | LifecycleState::Stopping
         ) {
@@ -34,9 +46,19 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.computer.read().await.boot_up().await {
             return Err(ComputerRuntimeStartError::Sdk(error));
         }
-        self.reconcile_sdk_governance_inner()
-            .await
-            .map_err(ComputerRuntimeStartError::Client)?;
+        if let Err(error) = self.reconcile_sdk_governance_inner().await {
+            // boot_up has already moved the SDK lifecycle to Started. A governance failure is
+            // still a failed Computer start transaction, so roll the partially started handle
+            // back to Shutdown; otherwise the public Start action becomes unavailable and the
+            // user cannot save the missing runtime input and retry.
+            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                start_error = start_error.append_context(format!(
+                    "failed to roll back the partially started Computer: {cleanup_error}"
+                ));
+            }
+            return Err(start_error);
+        }
         let failures = self.start_desired_mcp_servers_inner().await;
         self.log_mcp_start_failures(&failures, "Computer startup");
 
@@ -78,19 +100,28 @@ impl ComputerInstanceRuntime {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
             let generation = self.runtime_generation();
             let snapshot = self.computer.read().await.status().await;
-            let client_last_error = self.client_runtime_diagnostic.read().await.clone();
             if generation == self.runtime_generation() {
                 let snapshot_revision = self
                     .runtime_snapshot_revision
                     .fetch_add(1, Ordering::AcqRel)
                     + 1;
-                return ComputerRuntimeSnapshot::from_sdk(
+                let mut runtime_snapshot = ComputerRuntimeSnapshot::from_sdk(
                     self.runtime_incarnation,
                     generation,
                     snapshot_revision,
                     snapshot,
-                    client_last_error,
                 );
+                runtime_snapshot.problems = collect_runtime_problems(
+                    &runtime_snapshot,
+                    &self.sdk_problem_observations,
+                    &self.client_runtime_diagnostic,
+                    &self.connection_operation,
+                    &self.mcp_start_diagnostics,
+                    &self.mcp_config_apply_diagnostics,
+                    &self.sdk_servers,
+                )
+                .await;
+                return runtime_snapshot;
             }
         }
     }
@@ -103,7 +134,7 @@ impl ComputerInstanceRuntime {
             self.instance.id.clone(),
             cause,
             self.runtime_snapshot().await,
-            self.connection_authority_snapshot().await,
+            self.connection_snapshot().await,
         );
         if let Err(error) = sink.emit(&event) {
             log::warn!(
@@ -133,8 +164,13 @@ impl ComputerInstanceRuntime {
         let sink = self.runtime_event_sink.clone();
         let instance_id = self.instance.id.clone();
         let incarnation = self.runtime_incarnation;
+        let sdk_problem_observations = self.sdk_problem_observations.clone();
         let client_runtime_diagnostic = self.client_runtime_diagnostic.clone();
+        let mcp_start_diagnostics = self.mcp_start_diagnostics.clone();
+        let mcp_config_apply_diagnostics = self.mcp_config_apply_diagnostics.clone();
+        let sdk_servers = self.sdk_servers.clone();
         let connection = self.connection.clone();
+        let connection_operation = self.connection_operation.clone();
         let connection_authority_revision = self.connection_authority_revision.clone();
         let mut relay = self.runtime_event_task.lock().await;
         if self.is_retired()
@@ -181,17 +217,26 @@ impl ComputerInstanceRuntime {
                         break;
                     }
                     let snapshot = computer.read().await.status().await;
-                    let client_last_error = client_runtime_diagnostic.read().await.clone();
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
-                    ComputerRuntimeSnapshot::from_sdk(
+                    let mut runtime_snapshot = ComputerRuntimeSnapshot::from_sdk(
                         incarnation,
                         generation,
                         snapshot_revision.fetch_add(1, Ordering::AcqRel) + 1,
                         snapshot,
-                        client_last_error,
+                    );
+                    runtime_snapshot.problems = collect_runtime_problems(
+                        &runtime_snapshot,
+                        &sdk_problem_observations,
+                        &client_runtime_diagnostic,
+                        &connection_operation,
+                        &mcp_start_diagnostics,
+                        &mcp_config_apply_diagnostics,
+                        &sdk_servers,
                     )
+                    .await;
+                    runtime_snapshot
                 };
                 let Some(sink) = sink.read().await.clone() else {
                     break;
@@ -199,12 +244,15 @@ impl ComputerInstanceRuntime {
                 let event = ComputerRuntimeStatusEvent::from_observation(
                     instance_id.clone(),
                     cause,
-                    runtime_snapshot,
+                    runtime_snapshot.clone(),
                     {
                         let connection = connection.read().await;
-                        ClientConnectionAuthoritySnapshot::from_connection(
+                        let operation = connection_operation.read().await;
+                        ClientConnectionStateSnapshot::from_parts(
                             connection_authority_revision.load(Ordering::Acquire),
                             connection.as_ref(),
+                            &operation,
+                            runtime_snapshot.lifecycle,
                         )
                     },
                 );
@@ -238,19 +286,7 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(true, "restart")
-            .await
-            .map_err(ComputerRuntimeStartError::Client)
-    }
-
-    pub async fn reload(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()
-            .map_err(ComputerRuntimeStartError::Client)?;
-        let was_running = self.is_running().await;
-        self.replace_sdk_computer(was_running, "reload")
-            .await
-            .map_err(ComputerRuntimeStartError::Client)
+        self.replace_sdk_computer(true, "restart").await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {
@@ -290,7 +326,7 @@ impl ComputerInstanceRuntime {
         }
 
         if self.has_smcp_transport().await {
-            if let Err(error) = self.disconnect_smcp_socketio_inner().await {
+            if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
                 cleanup_errors.push(format!(
                     "Failed to disconnect SMCP socket during shutdown for instance {}: {}",
                     self.instance.id, error
@@ -301,6 +337,7 @@ impl ComputerInstanceRuntime {
         // leave refresh work or logical connection state alive for an instance being removed.
         self.abort_refresh_task().await;
         self.take_connection_state().await;
+        self.complete_connection_operation().await;
         self.clear_client_runtime_diagnostic_silent().await;
         if let Err(error) = self.shutdown_sdk_computer_inner().await {
             cleanup_errors.push(error);
@@ -354,9 +391,29 @@ impl ComputerInstanceRuntime {
         if self.shutdown_completed.load(Ordering::Acquire) {
             return Ok(());
         }
+        #[cfg(debug_assertions)]
+        if self.fail_sdk_shutdown_once.swap(false, Ordering::SeqCst) {
+            return Err(format!(
+                "Injected SDK shutdown failure for instance {}",
+                self.instance.id
+            ));
+        }
 
-        let computer = self.computer.read().await;
-        if let Err(error) = computer.shutdown().await {
+        let shutdown_result = timeout(SDK_COMPUTER_SHUTDOWN_TIMEOUT, async {
+            self.computer.read().await.shutdown().await
+        })
+        .await;
+        let shutdown_result = match shutdown_result {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(format!(
+                    "Timed out shutting down SDK Computer for instance {} after {:?}",
+                    self.instance.id, SDK_COMPUTER_SHUTDOWN_TIMEOUT
+                ))
+            }
+        };
+        if let Err(error) = shutdown_result {
+            let computer = self.computer.read().await;
             if computer.lifecycle_state() != LifecycleState::Shutdown {
                 return Err(format!(
                     "Failed to shutdown SDK Computer for instance {}: {}",
@@ -431,5 +488,125 @@ impl ComputerInstanceRuntime {
         } else {
             Ok(guard)
         }
+    }
+}
+
+async fn collect_runtime_problems(
+    snapshot: &ComputerRuntimeSnapshot,
+    sdk_problem_observations: &Mutex<SdkProblemObservations>,
+    client_runtime_diagnostic: &RwLock<Option<RuntimeDiagnosticRecord>>,
+    connection_operation: &RwLock<ClientConnectionOperationState>,
+    mcp_start_diagnostics: &RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>,
+    mcp_config_apply_diagnostics: &RwLock<HashMap<BundleId, RuntimeDiagnosticRecord>>,
+    sdk_servers: &RwLock<HashMap<BundleId, ServerName>>,
+) -> Vec<ComputerRuntimeProblem> {
+    let (sdk_error, sdk_degraded) = sdk_problem_observations.lock().await.observe(
+        snapshot.generation,
+        snapshot.lifecycle,
+        snapshot.last_error.as_deref(),
+        snapshot.degraded_reason.as_deref(),
+    );
+    let mut problems = Vec::new();
+    if let Some(diagnostic) = sdk_error {
+        problems.push(ComputerRuntimeProblem::sdk_error(
+            snapshot.generation,
+            diagnostic,
+        ));
+    }
+    if let Some(diagnostic) = sdk_degraded {
+        problems.push(ComputerRuntimeProblem::sdk_degraded(
+            snapshot.generation,
+            diagnostic,
+        ));
+    }
+
+    // Read both client-owned records coherently. Reconnect completion acquires the corresponding
+    // write locks in this order so a product snapshot cannot observe a half-cleared problem.
+    let client_diagnostic_guard = client_runtime_diagnostic.read().await;
+    let connection_operation_guard = connection_operation.read().await;
+    let client_diagnostic = client_diagnostic_guard.clone();
+    let mut connection_error = connection_operation_guard.last_error();
+    drop(connection_operation_guard);
+    drop(client_diagnostic_guard);
+    if let (Some(error), Some(diagnostic)) = (connection_error.as_mut(), client_diagnostic.as_ref())
+    {
+        let operation = match error.operation {
+            ClientConnectionOperation::Connect => "connect",
+            ClientConnectionOperation::Disconnect => "disconnect",
+            ClientConnectionOperation::Reconnect => "reconnect",
+        };
+        if diagnostic.operation == operation {
+            // Both records describe one product problem. Preserve the earliest owner observation
+            // when the richer connection-state projection supersedes the low-level diagnostic.
+            error.occurred_at = earliest_runtime_occurrence(
+                error.occurred_at.as_str(),
+                diagnostic.occurred_at.as_str(),
+            );
+        }
+    }
+    if let Some(error) = connection_error.as_ref() {
+        problems.push(ComputerRuntimeProblem::connection(
+            snapshot.generation,
+            error,
+        ));
+    }
+    if let Some(diagnostic) = client_diagnostic {
+        let already_projected = connection_error.as_ref().is_some_and(|error| {
+            diagnostic.operation
+                == match error.operation {
+                    ClientConnectionOperation::Connect => "connect",
+                    ClientConnectionOperation::Disconnect => "disconnect",
+                    ClientConnectionOperation::Reconnect => "reconnect",
+                }
+        });
+        if !already_projected {
+            problems.push(ComputerRuntimeProblem::client_diagnostic(
+                snapshot.generation,
+                diagnostic,
+            ));
+        }
+    }
+
+    if snapshot.is_running() {
+        let server_names = sdk_servers.read().await.clone();
+        let start_diagnostics = mcp_start_diagnostics.read().await.clone();
+        let apply_diagnostics = mcp_config_apply_diagnostics.read().await.clone();
+        let mut mcp_diagnostics: Vec<_> = start_diagnostics
+            .into_iter()
+            .chain(apply_diagnostics)
+            .filter(|(bundle_id, diagnostic)| {
+                server_names.contains_key(bundle_id) || diagnostic.mcp_server_name.is_some()
+            })
+            .collect();
+        mcp_diagnostics.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.operation.cmp(&right.1.operation))
+        });
+        for (bundle_id, diagnostic) in mcp_diagnostics {
+            let server_name = server_names
+                .get(&bundle_id)
+                .map(ToString::to_string)
+                .or_else(|| diagnostic.mcp_server_name.clone());
+            problems.push(ComputerRuntimeProblem::mcp(
+                snapshot.generation,
+                bundle_id.as_str(),
+                server_name,
+                diagnostic,
+            ));
+        }
+    }
+    problems
+}
+
+fn earliest_runtime_occurrence(left: &str, right: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left_time), Ok(right_time)) if right_time < left_time => right.to_string(),
+        (Ok(_), Ok(_)) => left.to_string(),
+        _ if right < left => right.to_string(),
+        _ => left.to_string(),
     }
 }

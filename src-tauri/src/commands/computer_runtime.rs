@@ -1,4 +1,4 @@
-use crate::services::computer::ClientConnectionAuthoritySnapshot;
+use crate::services::computer::ClientConnectionStateSnapshot;
 use crate::services::computer_runtime_events::{
     ComputerRuntimeEventSink, ComputerRuntimeSnapshot, ComputerRuntimeStatusEvent,
     COMPUTER_RUNTIME_STATUS_EVENT,
@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 pub struct ComputerRuntimeSnapshotRecord {
     pub instance_id: String,
     pub snapshot: ComputerRuntimeSnapshot,
-    pub connection: ClientConnectionAuthoritySnapshot,
+    pub connection: ClientConnectionStateSnapshot,
 }
 
 #[derive(Clone)]

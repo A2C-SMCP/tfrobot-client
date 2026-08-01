@@ -18,15 +18,21 @@ use socketioxide::SocketIo;
 use tf_rust_socketio::asynchronous::{Client, ClientBuilder};
 use tf_rust_socketio::{Payload, TransportType};
 use tfrobot_client_lib::commands::computer::{
-    delete_computer_instance_core, rename_computer_instance_core, RenameComputerInstanceRequest,
+    delete_computer_instance_core, rename_computer_instance_core, stop_computer_instance_core,
+    RenameComputerInstanceRequest,
 };
 use tfrobot_client_lib::commands::connection::{
-    close_smcp_connection, connect_connection_target_core, reconnect_with_token,
-    try_install_refreshed_client, ConnectionState, ManagerConnectionParams, RefreshOutcome,
-    SwapResult,
+    close_smcp_connection, connect_connection_target_core, delete_manual_smcp_target_core,
+    reconnect_with_token, try_install_refreshed_client, ConnectionState, ManagerConnectionParams,
+    RefreshOutcome, SwapResult,
 };
 use tfrobot_client_lib::services::computer::{
-    ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState, RobotBindingMetadata,
+    ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState,
+    RobotBindingMetadata,
+};
+use tfrobot_client_lib::services::computer_runtime_events::{
+    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
+    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
 };
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::manager_client::ExchangedToken;
@@ -1165,7 +1171,7 @@ async fn close_succeeds_while_socket_reference_is_shared() {
 }
 
 #[tokio::test]
-async fn runtime_rebuild_clears_smcp_connection_snapshot() {
+async fn runtime_metadata_update_preserves_smcp_connection_snapshot() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
@@ -1212,14 +1218,24 @@ async fn runtime_rebuild_clears_smcp_connection_snapshot() {
         },
     )
     .await
-    .expect("rename should rebuild runtime");
+    .expect("rename should update runtime metadata");
 
-    assert!(!status.connected);
+    assert!(status.connected);
     assert!(runtime
         .connection_handle_for_test()
         .read_owned()
         .await
-        .is_none());
+        .is_some());
+    assert!(runtime.is_connected().await);
+    assert_eq!(
+        runtime.runtime_state().await,
+        ComputerRuntimeState::JoinedOffice
+    );
+
+    runtime
+        .clear_smcp_connection()
+        .await
+        .expect("cleanup preserved connection");
     assert!(!runtime.is_connected().await);
     assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
 
@@ -1324,7 +1340,7 @@ async fn profile_connect_requires_running_computer() {
 
     assert_eq!(
         err,
-        "runtime action 'connect' is unavailable while lifecycle is 'created'"
+        "runtime action 'connect' is unavailable while lifecycle is 'created' (not_running)"
     );
     assert!(runtime
         .connection_handle_for_test()
@@ -1373,6 +1389,583 @@ async fn profile_connect_uses_computer_instance_name_as_connection_identity() {
     close_smcp_connection(&runtime, connection)
         .await
         .expect("close smcp socket");
+}
+
+#[tokio::test]
+async fn profile_connect_exposes_backend_connecting_state_until_join_office_succeeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "state-machine-target".to_string(),
+            name: "state-machine-target".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "state-machine-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let connect = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id);
+    let observe_connecting = async {
+        wait_for("server never entered delayed join_office", || {
+            stats.join_events() == 1
+        })
+        .await;
+        runtime.connection_snapshot().await
+    };
+    let (result, connecting) = tokio::join!(connect, observe_connecting);
+    result.expect("connect target");
+
+    assert_eq!(connecting.status, ClientConnectionStatus::Connecting);
+    assert!(!connecting.present);
+    assert!(!connecting.actions.connect.enabled);
+    assert!(!connecting.actions.disconnect.enabled);
+    let connected = runtime.connection_snapshot().await;
+    assert_eq!(connected.status, ClientConnectionStatus::Connected);
+    assert!(connected.present);
+    assert!(connected.context.is_some());
+    assert!(connected.actions.disconnect.enabled);
+
+    let connection = runtime
+        .connection_state_snapshot()
+        .await
+        .expect("connection snapshot");
+    close_smcp_connection(&runtime, connection)
+        .await
+        .expect("close smcp socket");
+}
+
+#[tokio::test]
+async fn restart_during_delayed_join_cannot_leave_authority_without_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "restart-race-target".to_string(),
+            name: "restart-race-target".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "restart-race-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let connect = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id);
+    let restart = async {
+        wait_for("server never entered delayed join_office", || {
+            stats.join_events() == 1
+        })
+        .await;
+        runtime.restart().await
+    };
+    let (connect_result, restart_result) = tokio::join!(connect, restart);
+
+    restart_result.expect("restart should settle after atomic connect commit");
+    assert!(
+        connect_result.is_err(),
+        "the superseded connect command must not report success"
+    );
+    wait_for("restart left the superseded socket active", || {
+        stats.active() == 0
+    })
+    .await;
+    let snapshot = runtime.connection_snapshot().await;
+    assert_eq!(snapshot.status, ClientConnectionStatus::Disconnected);
+    assert!(!snapshot.present);
+    assert!(snapshot.operation.is_none());
+    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_none());
+}
+
+#[tokio::test]
+async fn deleting_manual_target_during_connect_prevents_stale_policy_commit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "deleted-during-connect".to_string(),
+            name: "deleted-during-connect".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "deleted-during-connect-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let connect = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id);
+    let delete = async {
+        wait_for("server never entered delayed join_office", || {
+            stats.join_events() == 1
+        })
+        .await;
+        delete_manual_smcp_target_core(&state, &target.id).await
+    };
+    let (connect_result, delete_result) = tokio::join!(connect, delete);
+
+    delete_result.expect("target deletion should win before connection commit");
+    assert!(
+        connect_result.is_err(),
+        "connection must not commit a policy for a deleted target"
+    );
+    assert!(state.config.get_manual_smcp_target(&target.id).is_err());
+    let persisted = state
+        .config
+        .get_computer_instance(TEST_INSTANCE_ID)
+        .expect("Computer profile remains");
+    assert!(persisted.connection_policy.target.is_none());
+    wait_for("failed commit left the stale socket active", || {
+        stats.active() == 0
+    })
+    .await;
+    assert_eq!(
+        runtime.connection_snapshot().await.status,
+        ClientConnectionStatus::Disconnected
+    );
+}
+
+#[tokio::test]
+async fn deleting_computer_during_connect_cannot_resurrect_profile_or_runtime() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "delete-computer-race".to_string(),
+            name: "delete-computer-race".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "delete-computer-race-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let connect = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id);
+    let delete = async {
+        wait_for("server never entered delayed join_office", || {
+            stats.join_events() == 1
+        })
+        .await;
+        delete_computer_instance_core(&state, TEST_INSTANCE_ID.to_string()).await
+    };
+    let (connect_result, delete_result) = tokio::join!(connect, delete);
+
+    delete_result.expect("Computer deletion should complete");
+    assert!(
+        connect_result.is_err(),
+        "superseded connection must not report success"
+    );
+    assert!(state
+        .config
+        .get_computer_instance(TEST_INSTANCE_ID)
+        .is_err());
+    assert!(state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .is_none());
+    wait_for("Computer deletion left the stale socket active", || {
+        stats.active() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rename_during_connect_supersedes_stale_connection_commit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) =
+        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "rename-during-connect".to_string(),
+            name: "rename-during-connect".to_string(),
+            url: server_url,
+            namespace: "/smcp".to_string(),
+            office_id: "rename-during-connect-office".to_string(),
+            headers: HashMap::new(),
+        })
+        .expect("save target");
+
+    let connect = connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id);
+    let rename = async {
+        wait_for("server never entered delayed join_office", || {
+            stats.join_events() == 1
+        })
+        .await;
+        rename_computer_instance_core(
+            &state,
+            RenameComputerInstanceRequest {
+                id: TEST_INSTANCE_ID.to_string(),
+                name: "Renamed During Connect".to_string(),
+                description: None,
+            },
+        )
+        .await
+    };
+    let (connect_result, rename_result) = tokio::join!(connect, rename);
+
+    rename_result.expect("rename should complete");
+    assert!(
+        connect_result.is_err(),
+        "connection established with the previous Computer name must be superseded"
+    );
+    let persisted = state
+        .config
+        .get_computer_instance(TEST_INSTANCE_ID)
+        .expect("Computer profile");
+    assert_eq!(persisted.name, "Renamed During Connect");
+    assert!(persisted.connection_policy.target.is_none());
+    let current_runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("runtime remains registered");
+    assert_eq!(current_runtime.instance.name, "Renamed During Connect");
+
+    wait_for("superseded rename connection left a socket active", || {
+        stats.active() == 0
+    })
+    .await;
+    assert_eq!(
+        current_runtime.connection_snapshot().await.status,
+        ClientConnectionStatus::Disconnected
+    );
+}
+
+#[tokio::test]
+async fn reconnect_terminal_failure_closes_transport_or_exposes_orphan_cleanup() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "terminal-office",
+            "terminal-computer",
+        )
+        .await
+        .expect("connect terminal socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manager:1".to_string(),
+            url: server_url.clone(),
+            office_id: "terminal-office".to_string(),
+            computer_name: "terminal-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:1".to_string()),
+            target_name: Some("Terminal Robot".to_string()),
+            employee_id: Some(1),
+            generation: 80,
+        })
+        .await
+        .expect("install terminal authority");
+    assert!(runtime.begin_reconnect_for_generation(80).await);
+    assert!(
+        runtime
+            .terminate_reconnect_for_generation(80, "Manager session expired".to_string(), false,)
+            .await
+    );
+    wait_for("terminal reconnect failure left the socket active", || {
+        stats.active() == 0
+    })
+    .await;
+    let settled = runtime.connection_snapshot().await;
+    assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
+    assert!(!settled.present);
+    assert!(!settled.actions.disconnect.enabled);
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "orphan-office",
+            "orphan-computer",
+        )
+        .await
+        .expect("connect orphan socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manager:2".to_string(),
+            url: server_url,
+            office_id: "orphan-office".to_string(),
+            computer_name: "orphan-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:2".to_string()),
+            target_name: Some("Orphan Robot".to_string()),
+            employee_id: Some(2),
+            generation: 81,
+        })
+        .await
+        .expect("install orphan authority");
+    assert!(runtime.begin_reconnect_for_generation(81).await);
+    runtime.fail_next_smcp_disconnect_for_test();
+    assert!(
+        runtime
+            .terminate_reconnect_for_generation(
+                81,
+                "SMCP reconnect retry limit exhausted".to_string(),
+                true,
+            )
+            .await
+    );
+    let orphan = runtime.connection_snapshot().await;
+    assert_eq!(orphan.status, ClientConnectionStatus::Disconnected);
+    assert!(!orphan.present);
+    assert!(orphan.actions.disconnect.enabled);
+    assert!(orphan.last_error.as_ref().is_some_and(|error| error
+        .message
+        .contains("failed to close stale SMCP transport")));
+    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_some());
+
+    runtime
+        .clear_smcp_connection()
+        .await
+        .expect("manual orphan cleanup");
+    wait_for("manual orphan cleanup left the socket active", || {
+        stats.active() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn disconnect_failure_fails_closed_when_transport_liveness_is_unproven() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "fail-closed-office",
+            "fail-closed-computer",
+        )
+        .await
+        .expect("connect fail-closed socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manual".to_string(),
+            url: server_url,
+            office_id: "fail-closed-office".to_string(),
+            computer_name: "fail-closed-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manual_smcp".to_string(),
+            target_id: Some("fail-closed-target".to_string()),
+            target_name: Some("Fail Closed Target".to_string()),
+            employee_id: None,
+            generation: 82,
+        })
+        .await
+        .expect("install fail-closed authority");
+
+    let operation = runtime
+        .begin_connection_operation(
+            tfrobot_client_lib::services::computer::ClientConnectionOperation::Disconnect,
+            None,
+        )
+        .await
+        .expect("begin disconnect");
+    runtime.fail_next_smcp_disconnect_for_test();
+    let error = runtime
+        .disconnect_smcp_socketio()
+        .await
+        .expect_err("injected disconnect should fail");
+    assert!(
+        runtime
+            .reconcile_disconnect_failure_for_token(operation, error)
+            .await
+    );
+
+    let settled = runtime.connection_snapshot().await;
+    assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
+    assert!(!settled.present);
+    assert!(settled.actions.disconnect.enabled);
+    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_some());
+
+    runtime
+        .clear_smcp_connection()
+        .await
+        .expect("cleanup fail-closed orphan");
+    wait_for("fail-closed orphan remained connected", || {
+        stats.active() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reconnect_teardown_timeout_bounds_attempt_and_terminal_settlement() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "timeout-office",
+            "timeout-computer",
+        )
+        .await
+        .expect("connect timeout socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manager:3".to_string(),
+            url: server_url.clone(),
+            office_id: "timeout-office".to_string(),
+            computer_name: "timeout-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:3".to_string()),
+            target_name: Some("Timeout Robot".to_string()),
+            employee_id: Some(3),
+            generation: 83,
+        })
+        .await
+        .expect("install timeout authority");
+    assert!(runtime.begin_reconnect_for_generation(83).await);
+
+    runtime.hang_next_smcp_disconnect_for_test();
+    let attempt = tokio::time::timeout(
+        Duration::from_secs(7),
+        runtime.reconnect_smcp_socketio_for_generation(
+            83,
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "timeout-office",
+            "timeout-computer",
+            60,
+        ),
+    )
+    .await
+    .expect("reconnect attempt teardown must be bounded")
+    .expect_err("timed-out teardown must fail the attempt");
+    assert!(attempt.contains("Timed out disconnecting SMCP socket"));
+
+    runtime.hang_next_smcp_disconnect_for_test();
+    let terminated = tokio::time::timeout(
+        Duration::from_secs(7),
+        runtime.terminate_reconnect_for_generation(
+            83,
+            "SMCP reconnect retry limit exhausted".to_string(),
+            true,
+        ),
+    )
+    .await
+    .expect("terminal reconnect teardown must be bounded");
+    assert!(terminated);
+
+    let settled = runtime.connection_snapshot().await;
+    assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
+    assert!(!settled.present);
+    assert!(settled.actions.disconnect.enabled);
+    assert!(settled.last_error.as_ref().is_some_and(|error| error
+        .message
+        .contains("Timed out disconnecting SMCP socket")));
+
+    runtime
+        .clear_smcp_connection()
+        .await
+        .expect("cleanup timeout orphan");
+    wait_for("timeout orphan remained connected", || stats.active() == 0).await;
+}
+
+#[tokio::test]
+async fn runtime_stop_bounds_pending_transport_teardown_and_clears_authority() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "stop-timeout-office",
+            "stop-timeout-computer",
+        )
+        .await
+        .expect("connect stop-timeout socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manual".to_string(),
+            url: server_url,
+            office_id: "stop-timeout-office".to_string(),
+            computer_name: "stop-timeout-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manual_smcp".to_string(),
+            target_id: Some("stop-timeout-target".to_string()),
+            target_name: Some("Stop Timeout Target".to_string()),
+            employee_id: None,
+            generation: 84,
+        })
+        .await
+        .expect("install stop-timeout authority");
+
+    runtime.hang_next_smcp_disconnect_for_test();
+    let status = tokio::time::timeout(
+        Duration::from_secs(8),
+        stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string()),
+    )
+    .await
+    .expect("runtime stop must not hang on transport teardown")
+    .expect("runtime stop should complete after bounded cleanup");
+
+    assert_eq!(
+        status.connection_state.status,
+        ClientConnectionStatus::Disconnected
+    );
+    assert!(!status.connection_state.present);
+    assert!(status.connection_state.operation.is_none());
+    assert!(!runtime.is_connected().await);
+    wait_for("runtime stop left the socket active", || {
+        stats.active() == 0
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1874,7 +2467,9 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
     );
     let error = target_result.err().or_else(|| other_result.err()).unwrap();
     assert!(
-        error.contains("already connected") || error.contains("disconnect before switching Robot"),
+        error.contains("already connected")
+            || error.contains("already being established")
+            || error.contains("disconnect before switching Robot"),
         "losing connection should fail by duplicate-connection guard, got: {error}"
     );
 
@@ -2022,8 +2617,30 @@ async fn reconnect_with_token_records_diagnostic_on_sdk_build_failure() {
         "expected Retry on build failure"
     );
     assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
+    let snapshot = runtime.runtime_snapshot().await;
     assert_eq!(
-        runtime.runtime_snapshot().await.last_error.as_deref(),
+        snapshot.last_error, None,
+        "client-owned diagnostics must not be projected as SDK last_error"
+    );
+    let problem = snapshot
+        .problems
+        .iter()
+        .find(|problem| problem.source == ComputerRuntimeProblemSource::ClientConnection)
+        .expect("failed reconnect should surface a current structured problem");
+    assert_eq!(problem.severity, ComputerRuntimeProblemSeverity::Degraded);
+    assert_eq!(
+        problem.message,
+        ComputerRuntimeProblemMessage::ReconnectionFailed
+    );
+    assert_eq!(problem.operation, "reconnect");
+    assert!(problem.current);
+    assert!(problem.occurred_at.contains('T'));
+    assert_eq!(
+        problem.affected_capabilities,
+        vec![ComputerRuntimeAffectedCapability::Connection]
+    );
+    assert_eq!(
+        problem.technical_detail.as_deref(),
         Some("SMCP reconnect failed; retrying")
     );
     assert!(!runtime.is_connected().await);

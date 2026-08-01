@@ -44,6 +44,9 @@ pids/
 # Test coverage
 coverage/
 
+# Local experiments
+experiments/
+
 # Playwright
 test-results/
 e2e/playwright-report/

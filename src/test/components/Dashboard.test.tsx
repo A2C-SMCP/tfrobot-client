@@ -118,8 +118,6 @@ describe('Dashboard', () => {
     expect(screen.getAllByText('Connection failed').length).toBeGreaterThan(0);
     expect(screen.getByText('Node.js')).toBeInTheDocument();
     expect(screen.getByText('Python')).toBeInTheDocument();
-    expect(screen.getByText('Config Revision: 2')).toBeInTheDocument();
-    expect(screen.getByText('Capability Revision: 3')).toBeInTheDocument();
     expect(screen.getByText('Tools: 9')).toBeInTheDocument();
     expect(screen.getByText('Skills: 4')).toBeInTheDocument();
   });

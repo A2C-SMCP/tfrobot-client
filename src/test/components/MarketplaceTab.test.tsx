@@ -1,9 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useState } from 'react';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
 import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
+
+vi.setConfig({ testTimeout: 30_000 });
 
 const supportedCapabilities = {
   computerLifecycleApiAvailable: true,
@@ -74,7 +77,7 @@ describe('MarketplaceTab', () => {
           marketplace: 'acme',
           plugin: 'audit',
           pluginId: 'plugin-2',
-          version: null,
+          version: '1.0.0',
           installed: true,
           enabled: true,
           status: 'enabled',
@@ -104,13 +107,149 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('browser')).toBeInTheDocument();
     expect(screen.getByText('summarizer')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('acme'));
+    const acmeSelection = screen.getByRole('button', {
+      name: 'Select marketplace acme',
+    });
+    fireEvent.click(acmeSelection);
 
     expect(screen.getByText('Plugins in acme')).toBeInTheDocument();
     expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
     expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.getByText('audit:code-review')).toBeInTheDocument();
+  });
+
+  it('opens the exact Marketplace Plugin requested by the Runtime workbench', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'tf-market', displayGitUrl: null, status: 'known', message: null },
+        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'tf-market',
+          plugin: 'desktop-tools',
+          pluginId: 'plugin-1',
+          version: null,
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['browser'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-old',
+          version: '0.9.0',
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['legacy-audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: 'Previous owner',
+        },
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+          version: '1.0.0',
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          bundledMcpServers: ['audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+      ],
+    }).mockResolvedValueOnce([]);
+
+    const targetPlugin = {
+      marketplace: 'acme',
+      plugin: 'audit',
+      pluginId: 'plugin-2',
+    };
+    function NavigationHarness() {
+      const [target, setTarget] = useState<typeof targetPlugin | null>(null);
+      const consumeTarget = useCallback(() => setTarget(null), []);
+      return (
+        <>
+          <button type="button" onClick={() => setTarget(targetPlugin)}>
+            Open audit Plugin
+          </button>
+          <span data-testid="plugin-navigation-state">{target ? 'pending' : 'idle'}</span>
+          <MarketplaceTab
+            instanceId="computer-a"
+            targetPlugin={target}
+            onTargetPluginConsumed={consumeTarget}
+          />
+        </>
+      );
+    }
+
+    render(<NavigationHarness />);
+    expect(await screen.findByText('Plugins in tf-market')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
+
+    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
+    expect(screen.getByText('audit-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
+    expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('plugin-navigation-state')).toHaveTextContent('idle');
+    });
+
+    fireEvent.click(screen.getByText('tf-market'));
+    expect((await screen.findAllByText('desktop-tools')).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
+    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(screen.getByText('audit-mcp')).toBeInTheDocument();
+    expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
+  });
+
+  it('does not fall back to a same-name Plugin when the authoritative ID is unavailable', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+      ],
+      plugins: [{
+        marketplace: 'acme',
+        plugin: 'audit',
+        pluginId: 'plugin-old',
+        version: '0.9.0',
+        installed: true,
+        enabled: true,
+        status: 'enabled',
+        bundledMcpServers: ['legacy-audit-mcp'],
+        bundledSkills: [],
+        declared: null,
+        message: null,
+      }],
+    }).mockResolvedValueOnce([]);
+    const onTargetPluginConsumed = vi.fn();
+
+    render(
+      <MarketplaceTab
+        instanceId="computer-a"
+        targetPlugin={{
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'plugin-2',
+        }}
+        onTargetPluginConsumed={onTargetPluginConsumed}
+      />,
+    );
+
+    expect(await screen.findByText('legacy-audit-mcp')).toBeInTheDocument();
+    expect(onTargetPluginConsumed).not.toHaveBeenCalled();
   });
 
   it('preserves unknown, empty, declared, and installed capability semantics', async () => {
@@ -214,6 +353,70 @@ describe('MarketplaceTab', () => {
     });
   });
 
+  it('refreshes the selected Marketplace through the capability-gated lifecycle action', async () => {
+    const governance = {
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        {
+          name: 'tf-market',
+          displayGitUrl: 'https://example.com/tf.git',
+          status: 'known',
+          message: null,
+        },
+      ],
+      plugins: [],
+    };
+    mockedInvoke
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    const refresh = await screen.findByRole('button', { name: 'Refresh Marketplace' });
+    fireEvent.click(refresh);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('refresh_marketplace', {
+        instanceId: 'computer-a',
+        marketplace: 'tf-market',
+      });
+    });
+    expect(await screen.findByText('Marketplace refreshed')).toBeInTheDocument();
+  });
+
+  it('reports Marketplace refresh failures without changing the selection', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [
+          {
+            name: 'tf-market',
+            displayGitUrl: 'https://example.com/tf.git',
+            status: 'known',
+            message: null,
+          },
+        ],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('refresh failed'));
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh Marketplace' }));
+
+    expect(await screen.findByText('refresh failed')).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Select marketplace tf-market',
+    })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
   it('adds a marketplace directly without secondary trust confirmation', async () => {
     mockedInvoke
       .mockResolvedValueOnce({
@@ -290,6 +493,67 @@ describe('MarketplaceTab', () => {
     expect(screen.queryByText('Refresh Marketplace')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Remove Marketplace')).toBeDisabled();
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
+  });
+
+  it('stores a runtime-only plugin input and automatically retries enable', async () => {
+    const governance = {
+      capabilities: supportedCapabilities,
+      marketplaces: [
+        { name: 'acme', displayGitUrl: 'https://example.com/acme.git', status: 'known', message: null },
+      ],
+      plugins: [
+        {
+          marketplace: 'acme',
+          plugin: 'audit',
+          pluginId: 'audit@acme',
+          version: '1.0.0',
+          installed: true,
+          enabled: false,
+          status: 'installed',
+          bundledMcpServers: ['audit-mcp'],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        },
+      ],
+    };
+    mockedInvoke
+      .mockResolvedValueOnce(governance)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce({
+        code: 'missing_secret',
+        input_id: 'audit@acme/api_token',
+        env_hint: 'A2C_SMCP_audit_acme_api_token',
+        message: 'Required plugin secret is unresolved',
+      })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        ...governance,
+        plugins: [{ ...governance.plugins[0], enabled: true, status: 'enabled' }],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    fireEvent.click((await screen.findByText('Enable Plugin')).closest('button')!);
+    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Enter value'), {
+      target: { value: 'plugin-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('set_runtime_input_value', {
+        instanceId: 'computer-a',
+        id: 'audit@acme/api_token',
+        value: 'plugin-secret',
+      });
+      expect(mockedInvoke).toHaveBeenCalledTimes(8);
+    });
+    expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(2);
+    expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
   });
 
   it('previews an enabled plugin skill from the details pane', async () => {

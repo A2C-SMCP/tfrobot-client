@@ -1,7 +1,10 @@
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
-    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstanceRuntime,
-    ComputerRuntimeAction, ComputerRuntimeState, RobotBindingMetadata, SmcpReconnectOutcome,
+    ClientConnectionOperation, ClientConnectionOperationTarget, ClientConnectionOperationToken,
+    ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance,
+    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeState, RobotBindingMetadata,
+    SmcpReconnectOutcome,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
@@ -14,7 +17,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,6 +25,10 @@ const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const TOKEN_PREREFRESH_LEAD_SECS: i64 = 60;
 /// 预刷新失败（503 签名未就位 / 网络抖动）时的重试间隔；小于 lead，保证过期前多次重试。
 const TOKEN_REFRESH_RETRY_SECS: u64 = 10;
+/// A reconnect that has torn down the old socket must not leave the UI in an unbounded
+/// transitional state. Three retries give transient outages 10s/20s/40s windows to recover.
+const TOKEN_REFRESH_MAX_RETRIES: u32 = 3;
+const TOKEN_REFRESH_MAX_RETRY_SECS: u64 = 40;
 
 /// 单调代际号：后台预刷新任务在原地替换连接前，确认「这仍是我建立的那条连接」，
 /// 避免与「用户期间手动断开 / 改连别的机器人」竞态时误覆盖新连接。
@@ -68,6 +74,36 @@ enum ManagerConnectionDecision {
     AlreadyConnected,
 }
 
+#[derive(Debug, Clone)]
+struct ConnectionProfileSnapshot {
+    name: String,
+    connection_policy: ComputerConnectionPolicy,
+    robot_binding: Option<RobotBindingMetadata>,
+}
+
+impl ConnectionProfileSnapshot {
+    fn capture(instance: &ComputerInstance) -> Self {
+        Self {
+            name: instance.name.clone(),
+            connection_policy: instance.connection_policy.clone(),
+            robot_binding: instance.robot_binding.clone(),
+        }
+    }
+
+    fn ensure_unchanged(&self, current: &ComputerInstance) -> Result<(), String> {
+        if current.name == self.name
+            && current.connection_policy == self.connection_policy
+            && current.robot_binding == self.robot_binding
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Computer profile {} changed while the connection was being established",
+            current.id
+        ))
+    }
+}
+
 const SOURCE_MANUAL_SMCP: &str = "manual_smcp";
 const SOURCE_MANAGER_ROBOT: &str = "manager_robot";
 
@@ -82,7 +118,10 @@ pub enum ManualSmcpApiKeyAction {
     Clear,
 }
 
-/// Connection status returned to frontend
+/// Backward-compatible connection status response.
+///
+/// Existing consumers keep their historical top-level fields while TFRC-73 consumers use the
+/// canonical, versioned `connection_state`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionStatusInfo {
     pub connected: bool,
@@ -95,6 +134,7 @@ pub struct ConnectionStatusInfo {
     pub target_id: Option<String>,
     pub target_name: Option<String>,
     pub employee_id: Option<u64>,
+    pub connection_state: ClientConnectionStateSnapshot,
 }
 
 /// List globally managed manual SMCP targets.
@@ -148,13 +188,20 @@ pub async fn delete_manual_smcp_target(
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<(), String> {
+    delete_manual_smcp_target_core(&state, &target_id).await
+}
+
+pub async fn delete_manual_smcp_target_core(
+    state: &AppState,
+    target_id: &str,
+) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     for runtime in state.computer_registry.list_runtimes().await {
         let connection = runtime.connection_state_snapshot().await;
         if connection
             .as_ref()
             .and_then(|connection| connection.target_id.as_deref())
-            == Some(target_id.as_str())
+            == Some(target_id)
         {
             return Err("Cannot delete a manual SMCP target while it is connected".to_string());
         }
@@ -162,9 +209,9 @@ pub async fn delete_manual_smcp_target(
 
     state
         .config
-        .delete_manual_smcp_target(&target_id)
+        .delete_manual_smcp_target(target_id)
         .map_err(|e| e.to_string())?;
-    delete_manual_smcp_target_api_key(state.secret_store.as_ref(), &target_id);
+    delete_manual_smcp_target_api_key(state.secret_store.as_ref(), target_id);
     Ok(())
 }
 
@@ -189,16 +236,35 @@ pub async fn connect_connection_target_core(
     instance_id: &str,
     target_id: &str,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    connect_connection_target_locked(state, instance_id, target_id).await
+    connect_connection_target_with_policy(state, instance_id, target_id, None).await
 }
 
-pub(crate) async fn connect_connection_target_locked(
+pub async fn connect_connection_target_for_policy_core(
+    state: &AppState,
+    instance_id: &str,
+    target: &ComputerConnectionTarget,
+) -> Result<(), String> {
+    connect_connection_target_with_policy(state, instance_id, &target.id, Some(target)).await
+}
+
+async fn connect_connection_target_with_policy(
     state: &AppState,
     instance_id: &str,
     target_id: &str,
+    required_policy_target: Option<&ComputerConnectionTarget>,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
+    // The connection mutation is a two-phase transaction. Validate its authoritative inputs and
+    // publish the operation token under the Computer lifecycle lock, then release the lock before
+    // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
+    // runtimes, or operation tokens.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?.to_string();
+    let instance = state
+        .config
+        .get_computer_instance(&instance_id)
+        .map_err(|error| error.to_string())?;
+    ensure_required_policy_target(&instance, required_policy_target)?;
+    let profile_snapshot = ConnectionProfileSnapshot::capture(&instance);
     let target = state
         .config
         .get_manual_smcp_target(target_id)
@@ -209,89 +275,162 @@ pub(crate) async fn connect_connection_target_locked(
         .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
-        .runtime(instance_id)
+        .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    {
-        let _guard = state.connection_establish_lock.lock().await;
-        if matches!(
-            check_connection_target_allowed(state, instance_id, &target.id, &target.office_id)
-                .await
-                .map_err(|e| e.to_string())?,
-            ManagerConnectionDecision::AlreadyConnected
-        ) {
-            return Ok(());
-        }
-
-        runtime
-            .ensure_runtime_action(ComputerRuntimeAction::Connect)
+    if matches!(
+        check_connection_target_allowed(state, &instance_id, &target.id, &target.office_id)
             .await
-            .map_err(|error| error.to_string())?;
-
-        clear_unhealthy_connection_snapshot(&runtime).await?;
-
-        let auth_payload = api_key
-            .filter(|k| !k.is_empty())
-            .map(|tok| serde_json::json!({ "token": tok }));
-        let computer_name = runtime.instance.name.clone();
-        runtime
-            .connect_smcp_socketio(
-                &target.url,
-                auth_payload,
-                target.headers.clone(),
-                Some(target.namespace.clone()),
-                &target.office_id,
-                &computer_name,
-            )
-            .await?;
-
-        let new_connection = ConnectionState {
-            profile_name: target.name.clone(),
-            url: target.url.clone(),
-            office_id: target.office_id.clone(),
-            computer_name,
-            connected_at: chrono::Utc::now(),
+            .map_err(|error| error.to_string())?,
+        ManagerConnectionDecision::AlreadyConnected
+    ) {
+        return Ok(());
+    }
+    let operation_token = begin_connect_operation_locked(
+        &runtime,
+        ClientConnectionOperationTarget {
             source_type: SOURCE_MANUAL_SMCP.to_string(),
             target_id: Some(target.id.clone()),
-            target_name: Some(target.name.clone()),
             employee_id: None,
-            generation: next_generation(),
-        };
+        },
+    )
+    .await?;
+    drop(lifecycle_guard);
+    finish_connect_preparation(&runtime, operation_token).await?;
 
-        runtime.install_connection_state(new_connection).await?;
-    }
-    if let Err(error) = persist_manual_connection_target(state, instance_id, &target.id).await {
-        let existing_connection = runtime.take_connection_state().await;
-        if let Some(connection) = existing_connection {
-            let _ = close_smcp_connection(&runtime, connection).await;
+    let connect_result = async {
+        let _reservation =
+            reserve_connection_target(state, &instance_id, &target.id, &target.office_id)?;
+        let result = async {
+            if matches!(
+                check_connection_target_allowed(state, &instance_id, &target.id, &target.office_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                ManagerConnectionDecision::AlreadyConnected
+            ) {
+                return Ok(());
+            }
+            runtime.ensure_connection_operation(operation_token).await?;
+
+            let auth_payload = api_key
+                .as_deref()
+                .filter(|key| !key.is_empty())
+                .map(|token| serde_json::json!({ "token": token }));
+            let computer_name = runtime.instance.name.clone();
+            runtime
+                .connect_and_install_smcp_socketio(
+                    operation_token,
+                    &target.url,
+                    auth_payload,
+                    target.headers.clone(),
+                    Some(target.namespace.clone()),
+                    &target.office_id,
+                    &computer_name,
+                    ConnectionState {
+                        profile_name: target.name.clone(),
+                        url: target.url.clone(),
+                        office_id: target.office_id.clone(),
+                        computer_name: computer_name.clone(),
+                        connected_at: chrono::Utc::now(),
+                        source_type: SOURCE_MANUAL_SMCP.to_string(),
+                        target_id: Some(target.id.clone()),
+                        target_name: Some(target.name.clone()),
+                        employee_id: None,
+                        generation: next_generation(),
+                    },
+                )
+                .await?;
+            commit_manual_connection_target(
+                state,
+                &runtime,
+                operation_token,
+                &instance_id,
+                &target,
+                api_key.as_deref(),
+                &profile_snapshot,
+            )
+            .await
         }
+        .await;
+        if result.is_err() {
+            let _ = runtime
+                .clear_smcp_connection_for_operation(operation_token)
+                .await;
+        }
+        result
+    }
+    .await;
+    if let Err(error) = connect_result {
+        runtime
+            .fail_connection_operation_for_token(operation_token, error.clone(), true)
+            .await;
         return Err(error);
+    }
+    if !runtime
+        .complete_connection_operation_for_token(operation_token)
+        .await
+    {
+        return Err(
+            "Connection operation was superseded by a runtime lifecycle change".to_string(),
+        );
     }
     let _ = state.log_service.write_for_instance(
         "info",
         "connection",
         &format!("Connected to manual SMCP target {}", target.name),
         None,
-        Some(instance_id),
+        Some(&instance_id),
     );
     Ok(())
 }
 
-async fn persist_manual_connection_target(
+async fn commit_manual_connection_target(
     state: &AppState,
+    runtime: &ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
     instance_id: &str,
-    target_id: &str,
+    expected_target: &ManualSmcpTarget,
+    expected_api_key: Option<&str>,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), String> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    runtime.ensure_connection_operation(operation_token).await?;
+    state
+        .computer_registry
+        .ensure_current_runtime(runtime)
+        .await?;
+    let current_target = state
+        .config
+        .get_manual_smcp_target(&expected_target.id)
+        .map_err(|error| error.to_string())?;
+    if current_target != *expected_target {
+        return Err(format!(
+            "Manual SMCP target {} changed while the connection was being established",
+            expected_target.id
+        ));
+    }
+    let current_api_key = state
+        .secret_store
+        .get_secret(&manual_target_keychain_id(&expected_target.id))
+        .map_err(|error| error.to_string())?;
+    if current_api_key.as_deref() != expected_api_key {
+        return Err(format!(
+            "Manual SMCP target {} credentials changed while the connection was being established",
+            expected_target.id
+        ));
+    }
+
     let previous = state
         .config
         .get_computer_instance(instance_id)
         .map_err(|error| error.to_string())?;
+    expected_profile.ensure_unchanged(&previous)?;
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
             instance.connection_policy.target = Some(ComputerConnectionTarget {
                 target_type: ComputerConnectionTargetType::ManualSmcp,
-                id: target_id.to_string(),
+                id: expected_target.id.clone(),
                 robot_account_id: None,
             });
         })
@@ -350,12 +489,83 @@ fn connection_snapshot_blocks_target(state: ComputerRuntimeState, same_instance:
 
 async fn clear_unhealthy_connection_snapshot(
     runtime: &ComputerInstanceRuntime,
+    token: ClientConnectionOperationToken,
 ) -> Result<(), String> {
-    let has_snapshot = runtime.has_connection_state().await;
-    if has_snapshot && !runtime.is_connected().await {
-        runtime.clear_smcp_connection().await?;
+    if runtime.has_smcp_transport().await
+        && !runtime.is_connected().await
+        && !runtime.clear_smcp_connection_for_operation(token).await?
+    {
+        return Err(
+            "Connection operation was superseded before stale transport cleanup".to_string(),
+        );
     }
     Ok(())
+}
+
+async fn begin_connect_operation_locked(
+    runtime: &ComputerInstanceRuntime,
+    operation_target: ClientConnectionOperationTarget,
+) -> Result<ClientConnectionOperationToken, String> {
+    // A logical connection must still reject a second connect. Without authority, however, a
+    // failed disconnect may have left an orphan SDK transport; enter the backend transition first
+    // and clean that transport before validating the fresh connect action.
+    if runtime.has_connection_state().await {
+        runtime
+            .ensure_runtime_action(ComputerRuntimeAction::Connect)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let token = runtime
+        .begin_connection_operation(ClientConnectionOperation::Connect, Some(operation_target))
+        .await?;
+    Ok(token)
+}
+
+async fn finish_connect_preparation(
+    runtime: &ComputerInstanceRuntime,
+    token: ClientConnectionOperationToken,
+) -> Result<(), String> {
+    // Transport teardown can wait for the SDK/socket close timeout. Keep it outside the global
+    // Computer lifecycle transaction and use the token to reject a superseded cleanup.
+    if let Err(error) = clear_unhealthy_connection_snapshot(runtime, token).await {
+        runtime
+            .fail_connection_operation_for_token(token, error.clone(), true)
+            .await;
+        return Err(error);
+    }
+    if let Err(error) = runtime
+        .ensure_runtime_action(ComputerRuntimeAction::Connect)
+        .await
+    {
+        let message = error.to_string();
+        runtime
+            .fail_connection_operation_for_token(token, message.clone(), false)
+            .await;
+        return Err(message);
+    }
+    if let Err(error) = runtime.ensure_connection_operation(token).await {
+        runtime
+            .fail_connection_operation_for_token(token, error.clone(), false)
+            .await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn ensure_required_policy_target(
+    instance: &ComputerInstance,
+    required_policy_target: Option<&ComputerConnectionTarget>,
+) -> Result<(), String> {
+    let Some(required) = required_policy_target else {
+        return Ok(());
+    };
+    if instance.connection_policy.target.as_ref() == Some(required) {
+        return Ok(());
+    }
+    Err(format!(
+        "Computer connection policy for {} changed before the connection could start",
+        instance.id
+    ))
 }
 
 /// Disconnect from SMCP server
@@ -367,34 +577,87 @@ pub async fn disconnect_smcp(
     disconnect_smcp_core(&state, &instance_id).await
 }
 
-pub(crate) async fn disconnect_smcp_core(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    disconnect_smcp_locked(state, instance_id).await
-}
-
-pub(crate) async fn disconnect_smcp_locked(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
+pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    // Publish the operation while the authoritative runtime is protected, release the global
+    // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance_id = require_instance_id(instance_id)?.to_string();
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
         .computer_registry
-        .runtime(instance_id)
+        .runtime(&instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await?;
 
-    runtime
+    let current = runtime.connection_snapshot().await;
+    if !current.actions.disconnect.enabled {
+        return Err(format!(
+            "Connection disconnect action is unavailable: {:?}",
+            current.actions.disconnect.disabled_reason
+        ));
+    }
+    let operation_token = runtime
+        .begin_connection_operation(
+            ClientConnectionOperation::Disconnect,
+            current
+                .context
+                .as_ref()
+                .map(|context| ClientConnectionOperationTarget {
+                    source_type: context.source_type.clone(),
+                    target_id: context.target_id.clone(),
+                    employee_id: context.employee_id,
+                }),
+        )
+        .await?;
+    if let Err(error) = runtime
         .ensure_runtime_action(ComputerRuntimeAction::Disconnect)
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        let message = error.to_string();
+        runtime
+            .reconcile_disconnect_failure_for_token(operation_token, message.clone())
+            .await;
+        return Err(message);
+    }
+    drop(lifecycle_guard);
 
-    let existing_connection = runtime.connection_state_snapshot().await;
-    if let Some(connection) = existing_connection {
-        close_smcp_connection(&runtime, connection).await?;
+    if runtime.has_smcp_transport().await {
+        if let Err(error) = close_smcp_transport(&runtime).await {
+            let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+            if state
+                .computer_registry
+                .ensure_current_runtime(&runtime)
+                .await
+                .is_ok()
+                && runtime
+                    .ensure_connection_operation(operation_token)
+                    .await
+                    .is_ok()
+            {
+                runtime
+                    .reconcile_disconnect_failure_for_token(operation_token, error.clone())
+                    .await;
+            }
+            return Err(error);
+        }
+    }
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await?;
+    runtime.ensure_connection_operation(operation_token).await?;
+    if !runtime
+        .complete_connection_operation_for_token(operation_token)
+        .await
+    {
+        return Err(
+            "Disconnect operation was superseded by a runtime lifecycle change".to_string(),
+        );
     }
 
     let _ = state.log_service.write_for_instance(
@@ -402,7 +665,7 @@ pub(crate) async fn disconnect_smcp_locked(
         "connection",
         "Disconnected from SMCP server",
         None,
-        Some(instance_id),
+        Some(&instance_id),
     );
     Ok(())
 }
@@ -411,6 +674,10 @@ pub async fn close_smcp_connection(
     runtime: &ComputerInstanceRuntime,
     _connection: ConnectionState,
 ) -> Result<(), String> {
+    close_smcp_transport(runtime).await
+}
+
+async fn close_smcp_transport(runtime: &ComputerInstanceRuntime) -> Result<(), String> {
     let close_result = timeout(
         SMCP_CONNECTION_CLOSE_TIMEOUT,
         runtime.clear_smcp_connection(),
@@ -445,33 +712,21 @@ pub async fn get_connection_status(
         .runtime(instance_id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let connection = runtime.connection_status().await;
-    match connection {
-        Some(c) => Ok(ConnectionStatusInfo {
-            connected: runtime.is_connected().await,
-            url: Some(c.url),
-            office_id: Some(c.office_id),
-            computer_name: Some(c.computer_name),
-            connected_at: Some(c.connected_at),
-            profile_name: Some(c.profile_name),
-            source_type: Some(c.source_type),
-            target_id: c.target_id,
-            target_name: c.target_name,
-            employee_id: c.employee_id,
-        }),
-        None => Ok(ConnectionStatusInfo {
-            connected: false,
-            url: None,
-            office_id: None,
-            computer_name: None,
-            connected_at: None,
-            profile_name: None,
-            source_type: None,
-            target_id: None,
-            target_name: None,
-            employee_id: None,
-        }),
-    }
+    let connection_state = runtime.connection_snapshot().await;
+    let context = connection_state.context.as_ref();
+    Ok(ConnectionStatusInfo {
+        connected: connection_state.status == ClientConnectionStatus::Connected,
+        url: context.map(|value| value.url.clone()),
+        office_id: context.map(|value| value.office_id.clone()),
+        computer_name: context.map(|value| value.computer_name.clone()),
+        connected_at: context.map(|value| value.connected_at.clone()),
+        profile_name: context.map(|value| value.profile_name.clone()),
+        source_type: context.map(|value| value.source_type.clone()),
+        target_id: context.and_then(|value| value.target_id.clone()),
+        target_name: context.and_then(|value| value.target_name.clone()),
+        employee_id: context.and_then(|value| value.employee_id),
+        connection_state,
+    })
 }
 
 // ───────────────────────── Manager 驱动连接（TFRC-11 / C1） ─────────────────────────
@@ -500,111 +755,255 @@ pub async fn manager_connect_smcp(
     let instance_id = require_instance_id(&instance_id)
         .map_err(ManagerError::InvalidResponse)?
         .to_string();
+    let (runtime, operation_token, profile_snapshot) =
+        begin_manager_connect(state.inner(), &instance_id, employee_id, None).await?;
     log::info!(
         "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
     );
-    let employee =
-        validate_manager_robot_account(state.inner(), employee_id, robot_account_id).await?;
+    let result = async {
+        let employee =
+            validate_manager_robot_account(state.inner(), employee_id, robot_account_id).await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
 
-    // 1) 握手参数
-    let info = state
-        .manager_client
-        .get_connection_info(employee_id)
-        .await?;
-    let url = info.socket_base_url.clone();
-    if url.trim().is_empty() {
-        return Err(ManagerError::InvalidResponse(
-            "connection-info missing socketBaseURL".into(),
-        ));
-    }
-    let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-        ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
-    })?;
-    let params = ManagerConnectionParams {
-        url,
-        office_id: office_id.clone(),
-        // routingHeaders 为纯路由头（X-TF-*），verbatim 注入 HTTP header。连接面鉴权唯一走
-        // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
-        routing_headers: info.routing_headers.clone(),
-        employee_id,
-        robot_account_id,
-        scope,
-        robot_binding: RobotBindingMetadata {
+        // 1) 握手参数
+        let info = state
+            .manager_client
+            .get_connection_info(employee_id)
+            .await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
+        let url = info.socket_base_url.clone();
+        if url.trim().is_empty() {
+            return Err(ManagerError::InvalidResponse(
+                "connection-info missing socketBaseURL".into(),
+            ));
+        }
+        let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
+            ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
+        })?;
+        let params = ManagerConnectionParams {
+            url,
+            office_id: office_id.clone(),
+            // routingHeaders 为纯路由头（X-TF-*），verbatim 注入 HTTP header。连接面鉴权唯一走
+            // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
+            routing_headers: info.routing_headers.clone(),
             employee_id,
-            robot_id: robot_id
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| employee.robot_id.clone())
-                .or_else(|| Some(office_id.clone())),
-            robot_account_id: Some(robot_account_id),
-            namespace: namespace
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| employee.namespace.clone())
-                .or_else(|| info.namespace.clone()),
-            robot_name: robot_name
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| Some(employee.name.clone())),
-        },
-    };
+            robot_account_id,
+            scope,
+            robot_binding: RobotBindingMetadata {
+                employee_id,
+                robot_id: robot_id
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| employee.robot_id.clone())
+                    .or_else(|| Some(office_id.clone())),
+                robot_account_id: Some(robot_account_id),
+                namespace: namespace
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| employee.namespace.clone())
+                    .or_else(|| info.namespace.clone()),
+                robot_name: robot_name
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| Some(employee.name.clone())),
+            },
+        };
 
-    // 2) 换短 JWT
-    let token = state
-        .manager_client
-        .exchange_token(&robot_account_id.to_string(), params.scope.clone())
-        .await?;
+        // 2) 换短 JWT
+        let token = state
+            .manager_client
+            .exchange_token(&robot_account_id.to_string(), params.scope.clone())
+            .await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
 
-    // 3) 连接 + 入库 + 起预刷新任务
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    establish_manager_connection(&app, state.inner(), &instance_id, params, token).await
+        // 3) 连接 + 入库 + 起预刷新任务
+        establish_manager_connection(
+            &app,
+            state.inner(),
+            &runtime,
+            operation_token,
+            params,
+            token,
+            &profile_snapshot,
+        )
+        .await
+    }
+    .await;
+    finish_manager_connect(runtime, operation_token, result).await
 }
 
-pub(crate) async fn connect_manager_robot_target_locked(
+pub(crate) async fn connect_manager_robot_target_for_policy(
     app: &AppHandle,
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
     robot_account_id: u64,
+    required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
-    let employee = validate_manager_robot_account(state, employee_id, robot_account_id).await?;
-    let token = state
-        .manager_client
-        .exchange_token(&robot_account_id.to_string(), None)
-        .await?;
-    let info = state
-        .manager_client
-        .get_connection_info(employee_id)
-        .await?;
-    let url = info.socket_base_url.clone();
-    if url.trim().is_empty() {
-        return Err(ManagerError::InvalidResponse(
-            "connection-info missing socketBaseURL".into(),
-        ));
-    }
-    let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-        ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
-    })?;
-    let params = ManagerConnectionParams {
-        url,
-        office_id: office_id.clone(),
-        routing_headers: info.routing_headers.clone(),
+    let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
+        state,
+        instance_id,
         employee_id,
-        robot_account_id,
-        scope: None,
-        robot_binding: RobotBindingMetadata {
+        Some(required_policy_target),
+    )
+    .await?;
+    let result = async {
+        let employee = validate_manager_robot_account(state, employee_id, robot_account_id).await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
+        let token = state
+            .manager_client
+            .exchange_token(&robot_account_id.to_string(), None)
+            .await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
+        let info = state
+            .manager_client
+            .get_connection_info(employee_id)
+            .await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
+        let url = info.socket_base_url.clone();
+        if url.trim().is_empty() {
+            return Err(ManagerError::InvalidResponse(
+                "connection-info missing socketBaseURL".into(),
+            ));
+        }
+        let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
+            ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
+        })?;
+        let params = ManagerConnectionParams {
+            url,
+            office_id: office_id.clone(),
+            routing_headers: info.routing_headers.clone(),
             employee_id,
-            robot_id: employee
-                .robot_id
-                .clone()
-                .or_else(|| Some(office_id.clone())),
-            robot_account_id: Some(robot_account_id),
-            namespace: employee
-                .namespace
-                .clone()
-                .or_else(|| info.namespace.clone()),
-            robot_name: Some(employee.name.clone()),
-        },
-    };
+            robot_account_id,
+            scope: None,
+            robot_binding: RobotBindingMetadata {
+                employee_id,
+                robot_id: employee
+                    .robot_id
+                    .clone()
+                    .or_else(|| Some(office_id.clone())),
+                robot_account_id: Some(robot_account_id),
+                namespace: employee
+                    .namespace
+                    .clone()
+                    .or_else(|| info.namespace.clone()),
+                robot_name: Some(employee.name.clone()),
+            },
+        };
 
-    establish_manager_connection(app, state, instance_id, params, token).await
+        establish_manager_connection(
+            app,
+            state,
+            &runtime,
+            operation_token,
+            params,
+            token,
+            &profile_snapshot,
+        )
+        .await
+    }
+    .await;
+    finish_manager_connect(runtime, operation_token, result).await
+}
+
+async fn begin_manager_connect(
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+    required_policy_target: Option<&ComputerConnectionTarget>,
+) -> Result<
+    (
+        ComputerInstanceRuntime,
+        ClientConnectionOperationToken,
+        ConnectionProfileSnapshot,
+    ),
+    ManagerError,
+> {
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let instance = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    ensure_required_policy_target(&instance, required_policy_target)
+        .map_err(ManagerError::InvalidResponse)?;
+    let profile_snapshot = ConnectionProfileSnapshot::capture(&instance);
+    let runtime = state
+        .computer_registry
+        .runtime(instance_id)
+        .await
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}"))
+        })?;
+    state
+        .computer_registry
+        .ensure_current_runtime(&runtime)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    let operation_token = begin_connect_operation_locked(
+        &runtime,
+        ClientConnectionOperationTarget {
+            source_type: SOURCE_MANAGER_ROBOT.to_string(),
+            target_id: Some(manager_target_id(employee_id)),
+            employee_id: Some(employee_id),
+        },
+    )
+    .await
+    .map_err(ManagerError::InvalidResponse)?;
+    drop(lifecycle_guard);
+    finish_connect_preparation(&runtime, operation_token)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    Ok((runtime, operation_token, profile_snapshot))
+}
+
+async fn finish_manager_connect(
+    runtime: ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
+    result: Result<(), ManagerError>,
+) -> Result<(), ManagerError> {
+    match result {
+        Ok(()) => {
+            if runtime
+                .complete_connection_operation_for_token(operation_token)
+                .await
+            {
+                Ok(())
+            } else {
+                Err(ManagerError::InvalidResponse(
+                    "Connection operation was superseded by a runtime lifecycle change".into(),
+                ))
+            }
+        }
+        Err(error) => {
+            let retryable = matches!(
+                &error,
+                ManagerError::SigningUnavailable { .. } | ManagerError::NetworkError(_)
+            );
+            let message = error.to_string();
+            let _ = runtime
+                .clear_smcp_connection_for_operation(operation_token)
+                .await;
+            runtime
+                .fail_connection_operation_for_token(operation_token, message, retryable)
+                .await;
+            Err(error)
+        }
+    }
 }
 
 async fn validate_manager_robot_account(
@@ -646,19 +1045,34 @@ fn validate_manager_robot_account_from_list(
 /// 用给定参数 + 短 JWT 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
 async fn build_and_join(
     runtime: &ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
     params: &ManagerConnectionParams,
     jwt: &str,
+    generation: u64,
 ) -> Result<(), String> {
     // 连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`，smcp-computer #86）。
     let auth_payload = serde_json::json!({ "token": jwt });
     runtime
-        .connect_smcp_socketio(
+        .connect_and_install_smcp_socketio(
+            operation_token,
             &params.url,
             Some(auth_payload),
             params.routing_headers.clone(),
             None,
             &params.office_id,
             &runtime.instance.name,
+            ConnectionState {
+                profile_name: format!("manager:{}", params.employee_id),
+                url: params.url.clone(),
+                office_id: params.office_id.clone(),
+                computer_name: runtime.instance.name.clone(),
+                connected_at: chrono::Utc::now(),
+                source_type: SOURCE_MANAGER_ROBOT.to_string(),
+                target_id: Some(manager_target_id(params.employee_id)),
+                target_name: params.robot_binding.robot_name.clone(),
+                employee_id: Some(params.employee_id),
+                generation,
+            },
         )
         .await
 }
@@ -667,20 +1081,21 @@ async fn build_and_join(
 async fn establish_manager_connection(
     app: &AppHandle,
     state: &AppState,
-    instance_id: &str,
+    runtime: &ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
     params: ManagerConnectionParams,
     token: ExchangedToken,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| {
-            ManagerError::InvalidResponse(format!("Computer instance not found: {instance_id}"))
-        })?;
-    {
-        let _guard = state.connection_establish_lock.lock().await;
-
+    let instance_id = runtime.instance.id.as_str();
+    let _reservation = reserve_connection_target(
+        state,
+        instance_id,
+        &manager_target_id(params.employee_id),
+        &params.office_id,
+    )
+    .map_err(ManagerError::InvalidResponse)?;
+    let result = async {
         if matches!(
             check_connection_target_allowed(
                 state,
@@ -691,24 +1106,47 @@ async fn establish_manager_connection(
             .await?,
             ManagerConnectionDecision::AlreadyConnected
         ) {
-            persist_robot_binding(state, instance_id, &params.robot_binding).await?;
+            commit_robot_binding(
+                state,
+                runtime,
+                operation_token,
+                instance_id,
+                &params.robot_binding,
+                expected_profile,
+            )
+            .await?;
             return Ok(());
         }
         runtime
-            .ensure_runtime_action(ComputerRuntimeAction::Connect)
-            .await
-            .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
-        clear_unhealthy_connection_snapshot(&runtime)
+            .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
-        // 先把新连接建成功，再替换快照；不同 Robot 的切换由 guard 要求用户先断开。
-        // 用户发起的连接通常切到「不同机器人」（office 不同），不会撞 room；同机器人重连由 UI 阻止
-        // （已连接时显示「断开」），其 token 预刷新走 spawn_refresh_task 的 SDK 重连路径。
-        build_and_join(&runtime, &params, &token.access_token)
-            .await
-            .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
-
+        // First connection work runs under the instance lifecycle coordinator. The reservation
+        // above prevents only the same Robot/Office identity from being claimed concurrently.
         let generation = next_generation();
+        build_and_join(
+            runtime,
+            operation_token,
+            &params,
+            &token.access_token,
+            generation,
+        )
+        .await
+        .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
+
+        commit_robot_binding(
+            state,
+            runtime,
+            operation_token,
+            instance_id,
+            &params.robot_binding,
+            expected_profile,
+        )
+        .await?;
+        runtime
+            .ensure_connection_operation(operation_token)
+            .await
+            .map_err(ManagerError::InvalidResponse)?;
         let refresh_task = spawn_refresh_task(
             app,
             state,
@@ -718,34 +1156,22 @@ async fn establish_manager_connection(
             generation,
             token.expires_in,
         );
-        runtime.set_refresh_task(refresh_task).await;
-
-        let new_connection = ConnectionState {
-            profile_name: format!("manager:{}", params.employee_id),
-            url: params.url.clone(),
-            office_id: params.office_id.clone(),
-            computer_name: runtime.instance.name.clone(),
-            connected_at: chrono::Utc::now(),
-            source_type: SOURCE_MANAGER_ROBOT.to_string(),
-            target_id: Some(manager_target_id(params.employee_id)),
-            target_name: params.robot_binding.robot_name.clone(),
-            employee_id: Some(params.employee_id),
-            generation,
-        };
-
         runtime
-            .install_connection_state(new_connection)
+            .set_refresh_task_for_generation(generation, refresh_task)
             .await
-            .map_err(ManagerError::InvalidResponse)?;
+            .map_err(ManagerError::InvalidResponse)
     }
-
-    if let Err(error) = persist_robot_binding(state, instance_id, &params.robot_binding).await {
-        let existing_connection = runtime.take_connection_state().await;
-        if let Some(connection) = existing_connection {
-            let _ = close_smcp_connection(&runtime, connection).await;
-        }
-        return Err(error);
+    .await;
+    if result.is_err() {
+        let _ = runtime
+            .clear_smcp_connection_for_operation(operation_token)
+            .await;
     }
+    result?;
+    runtime
+        .ensure_connection_operation(operation_token)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
 
     let _ = state.log_service.write_for_instance(
         "info",
@@ -760,15 +1186,31 @@ async fn establish_manager_connection(
     Ok(())
 }
 
-async fn persist_robot_binding(
+async fn commit_robot_binding(
     state: &AppState,
+    runtime: &ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
     instance_id: &str,
     robot_binding: &RobotBindingMetadata,
+    expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    runtime
+        .ensure_connection_operation(operation_token)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    state
+        .computer_registry
+        .ensure_current_runtime(runtime)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
     let previous = state
         .config
         .get_computer_instance(instance_id)
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    expected_profile
+        .ensure_unchanged(&previous)
+        .map_err(ManagerError::InvalidResponse)?;
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
@@ -814,6 +1256,72 @@ fn manager_connection_decision(
     Ok(ManagerConnectionDecision::Proceed)
 }
 
+#[derive(Debug)]
+struct ConnectionTargetReservation {
+    reservations: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    instance_id: String,
+    keys: Vec<String>,
+}
+
+impl Drop for ConnectionTargetReservation {
+    fn drop(&mut self) {
+        let Ok(mut reservations) = self.reservations.lock() else {
+            log::error!("Connection target reservation map was poisoned during release");
+            return;
+        };
+        for key in &self.keys {
+            if reservations.get(key) == Some(&self.instance_id) {
+                reservations.remove(key);
+            }
+        }
+    }
+}
+
+/// Reserves only the target identities while connection work is in flight. The mutex itself is
+/// held for this short map mutation; unrelated Computers then perform HTTP and Socket.IO work
+/// concurrently under their instance lifecycle coordinators.
+fn reserve_connection_target(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
+    office_id: &str,
+) -> Result<ConnectionTargetReservation, String> {
+    reserve_connection_target_in(
+        &state.connection_target_reservations,
+        instance_id,
+        target_id,
+        office_id,
+    )
+}
+
+fn reserve_connection_target_in(
+    reservation_map: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    instance_id: &str,
+    target_id: &str,
+    office_id: &str,
+) -> Result<ConnectionTargetReservation, String> {
+    let mut keys = vec![format!("target:{target_id}"), format!("office:{office_id}")];
+    keys.sort();
+    keys.dedup();
+    let mut reservations = reservation_map
+        .lock()
+        .map_err(|_| "Connection target reservation map is unavailable".to_string())?;
+    if let Some(owner) = keys.iter().find_map(|key| reservations.get(key)) {
+        return Err(format!(
+            "Robot connection is already being established by Computer instance {owner}"
+        ));
+    }
+    for key in &keys {
+        reservations.insert(key.clone(), instance_id.to_string());
+    }
+    drop(reservations);
+    Ok(ConnectionTargetReservation {
+        reservations: reservation_map.clone(),
+        instance_id: instance_id.to_string(),
+        keys,
+    })
+}
+
 /// 后台预刷新重连任务：`expires_in - 60s` 重新 exchange → SDK 重连 → 刷新业务快照。
 ///
 /// SMCP 长连接 token 不能热刷新（握手时绑定一次），只能 teardown+reconnect。任务整段生命周期由
@@ -831,11 +1339,12 @@ fn spawn_refresh_task(
 ) -> tokio::task::JoinHandle<()> {
     let manager_client = state.manager_client.clone();
     let log_service = state.log_service.clone();
-    let connection_establish_lock = state.connection_establish_lock.clone();
     let app = app.clone();
 
     tokio::spawn(async move {
         let mut expires_in = initial_expires_in;
+        let mut next_wait = refresh_wait_secs(expires_in);
+        let mut retry_attempt = 0;
         loop {
             // #1: 把过短/退化 TTL（含 server 漏发=0）夹到安全下限，避免 wait≈1s 的重连风暴。
             if expires_in <= TOKEN_PREREFRESH_LEAD_SECS {
@@ -844,20 +1353,17 @@ fn spawn_refresh_task(
                      clamping refresh cadence to avoid a reconnect storm"
                 );
             }
-            let wait = refresh_wait_secs(expires_in);
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            tokio::time::sleep(Duration::from_secs(next_wait)).await;
+            if !runtime.begin_reconnect_for_generation(generation).await {
+                return;
+            }
 
-            match refresh_cycle(
-                &manager_client,
-                &connection_establish_lock,
-                &runtime,
-                &params,
-                generation,
-            )
-            .await
-            {
+            match refresh_cycle(&manager_client, &runtime, &params, generation).await {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
+                    if !runtime.complete_reconnect_for_generation(generation).await {
+                        return;
+                    }
                     let _ = log_service.write_for_instance(
                         "info",
                         "connection",
@@ -866,23 +1372,107 @@ fn spawn_refresh_task(
                         Some(&instance_id),
                     );
                     expires_in = new_ttl;
+                    next_wait = refresh_wait_secs(expires_in);
+                    retry_attempt = 0;
                 }
                 // session 失效：通知前端重新登录，停止刷新。
                 RefreshOutcome::Unauthorized => {
                     log::warn!("Token pre-refresh: session unauthorized; stopping refresh");
+                    settle_refresh_terminal(
+                        &runtime,
+                        generation,
+                        RefreshTerminalOutcome::Unauthorized,
+                    )
+                    .await;
                     let _ = app.emit("manager:auth-expired", ());
                     return;
                 }
                 // 连接已被替换/断开，或永久错误 → 本任务退场。
-                RefreshOutcome::Gone | RefreshOutcome::Stop => return,
+                RefreshOutcome::Gone => {
+                    settle_refresh_terminal(&runtime, generation, RefreshTerminalOutcome::Gone)
+                        .await;
+                    return;
+                }
+                RefreshOutcome::Stop => {
+                    settle_refresh_terminal(&runtime, generation, RefreshTerminalOutcome::Stop)
+                        .await;
+                    return;
+                }
                 // 暂时性失败（503 / 网络 / build 失败）→ 约 RETRY_SECS 后再试，
                 // 不再重睡整个 lead 窗口（修复僵尸窗口 + 错误的重睡间隔）。
                 RefreshOutcome::Retry => {
-                    expires_in = TOKEN_PREREFRESH_LEAD_SECS + TOKEN_REFRESH_RETRY_SECS as i64
+                    if retry_attempt >= TOKEN_REFRESH_MAX_RETRIES {
+                        settle_refresh_terminal(
+                            &runtime,
+                            generation,
+                            RefreshTerminalOutcome::Exhausted,
+                        )
+                        .await;
+                        return;
+                    }
+                    retry_attempt += 1;
+                    runtime
+                        .record_reconnect_retry(
+                            generation,
+                            format!(
+                                "SMCP reconnect failed; retry {retry_attempt}/{TOKEN_REFRESH_MAX_RETRIES}"
+                            ),
+                        )
+                        .await;
+                    next_wait = refresh_retry_delay_secs(retry_attempt, generation);
+                    expires_in = TOKEN_PREREFRESH_LEAD_SECS + next_wait as i64;
                 }
             }
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshTerminalOutcome {
+    Unauthorized,
+    Gone,
+    Stop,
+    Exhausted,
+}
+
+/// One terminal settlement table shared by orchestration and tests. Every exit either clears the
+/// reconnect operation for its generation or clears the failed connection authority with an
+/// actionable terminal error.
+pub(crate) async fn settle_refresh_terminal(
+    runtime: &ComputerInstanceRuntime,
+    generation: u64,
+    outcome: RefreshTerminalOutcome,
+) -> bool {
+    match outcome {
+        RefreshTerminalOutcome::Gone => runtime.abort_reconnect_for_generation(generation).await,
+        RefreshTerminalOutcome::Unauthorized => {
+            runtime
+                .terminate_reconnect_for_generation(
+                    generation,
+                    "Manager session expired during SMCP token refresh".to_string(),
+                    false,
+                )
+                .await
+        }
+        RefreshTerminalOutcome::Stop => {
+            runtime
+                .terminate_reconnect_for_generation(
+                    generation,
+                    "SMCP token refresh failed permanently".to_string(),
+                    false,
+                )
+                .await
+        }
+        RefreshTerminalOutcome::Exhausted => {
+            runtime
+                .terminate_reconnect_for_generation(
+                    generation,
+                    "SMCP reconnect retry limit exhausted".to_string(),
+                    true,
+                )
+                .await
+        }
+    }
 }
 
 /// #1: 距下次预刷新的等待秒数。把过短/退化 TTL 夹到安全下限 `lead+retry`——degenerate（含 0）→ 约
@@ -890,6 +1480,16 @@ fn spawn_refresh_task(
 fn refresh_wait_secs(expires_in: i64) -> u64 {
     let floor = TOKEN_PREREFRESH_LEAD_SECS + TOKEN_REFRESH_RETRY_SECS as i64;
     (expires_in.max(floor) - TOKEN_PREREFRESH_LEAD_SECS).max(1) as u64
+}
+
+fn refresh_retry_delay_secs(attempt: u32, generation: u64) -> u64 {
+    let exponential = TOKEN_REFRESH_RETRY_SECS
+        .saturating_mul(1_u64 << attempt.saturating_sub(1))
+        .min(TOKEN_REFRESH_MAX_RETRY_SECS);
+    // Stable ±20% jitter prevents clients with identical token TTLs from retrying in lockstep
+    // without adding a runtime RNG dependency.
+    let jitter_bucket = (generation.wrapping_add(attempt as u64 * 17) % 41) as i64 - 20;
+    ((exponential as i64 * (100 + jitter_bucket)) / 100).max(1) as u64
 }
 
 /// 一次预刷新的结果。`pub` 供集成测试匹配 [`reconnect_with_token`] 的返回。
@@ -910,7 +1510,6 @@ pub enum RefreshOutcome {
 /// 只做决策、不做 emit/log 副作用（交调用方按 [`RefreshOutcome`] 处理），便于无 AppHandle 环境测试。
 async fn refresh_cycle(
     manager_client: &Arc<ManagerClient>,
-    connection_establish_lock: &Arc<Mutex<()>>,
     runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
@@ -931,7 +1530,6 @@ async fn refresh_cycle(
             return RefreshOutcome::Stop;
         }
     };
-    let _establish_guard = connection_establish_lock.lock().await;
     reconnect_with_token(runtime, params, generation, &token).await
 }
 
@@ -1030,6 +1628,89 @@ pub struct ConnectionState {
 mod tests {
     use super::*;
     use crate::services::keychain::{InMemorySecretStore, SecretStore};
+
+    #[test]
+    fn connection_status_serialization_preserves_legacy_fields_and_canonical_state() {
+        let response: ConnectionStatusInfo = serde_json::from_value(serde_json::json!({
+            "connected": false,
+            "url": null,
+            "office_id": null,
+            "computer_name": null,
+            "connected_at": null,
+            "profile_name": null,
+            "source_type": null,
+            "target_id": null,
+            "target_name": null,
+            "employee_id": null,
+            "connection_state": {
+                "status": "connecting",
+                "present": false,
+                "revision": 4,
+                "context": null,
+                "operation": "connect",
+                "last_error": null,
+                "actions": {
+                    "connect": {
+                        "enabled": false,
+                        "disabled_reason": "transition_in_progress"
+                    },
+                    "disconnect": {
+                        "enabled": false,
+                        "disabled_reason": "transition_in_progress"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["connected"], false);
+        assert!(value.get("url").is_some());
+        assert_eq!(value["connection_state"]["status"], "connecting");
+        assert_eq!(value["connection_state"]["revision"], 4);
+    }
+
+    #[test]
+    fn target_reservations_allow_unrelated_computers_and_reject_identity_conflicts() {
+        let reservations = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let first =
+            reserve_connection_target_in(&reservations, "computer-a", "target-a", "office-a")
+                .unwrap();
+        let second =
+            reserve_connection_target_in(&reservations, "computer-b", "target-b", "office-b")
+                .unwrap();
+
+        let target_conflict =
+            reserve_connection_target_in(&reservations, "computer-c", "target-a", "office-c")
+                .unwrap_err();
+        assert!(target_conflict.contains("computer-a"));
+        let office_conflict =
+            reserve_connection_target_in(&reservations, "computer-c", "target-c", "office-b")
+                .unwrap_err();
+        assert!(office_conflict.contains("computer-b"));
+
+        drop(first);
+        reserve_connection_target_in(&reservations, "computer-c", "target-a", "office-c").unwrap();
+        drop(second);
+    }
+
+    #[test]
+    fn reconnect_retry_backoff_is_bounded_with_deterministic_jitter() {
+        let generation = 42;
+        let delays = (1..=TOKEN_REFRESH_MAX_RETRIES)
+            .map(|attempt| refresh_retry_delay_secs(attempt, generation))
+            .collect::<Vec<_>>();
+
+        assert!((8..=12).contains(&delays[0]));
+        assert!((16..=24).contains(&delays[1]));
+        assert!((32..=48).contains(&delays[2]));
+        assert_eq!(
+            delays,
+            (1..=TOKEN_REFRESH_MAX_RETRIES)
+                .map(|attempt| refresh_retry_delay_secs(attempt, generation))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn deleting_manual_target_api_key_cleans_up_target_scoped_secret() {

@@ -48,6 +48,10 @@ describe('RobotConnectionPanel', () => {
     expect(
       await screen.findByText(/No Manager account is signed in/i),
     ).toBeInTheDocument();
+    expect(screen.getByRole('combobox', {
+      name: 'Select a Robot or Manual SMCP target',
+    })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeInTheDocument();
     expect(mockedInvoke).toHaveBeenCalledWith('list_manual_smcp_targets');
     expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
     expect(mockedInvoke).not.toHaveBeenCalledWith('connect_computer_connection_target', expect.anything());

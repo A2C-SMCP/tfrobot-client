@@ -13,14 +13,67 @@ export type ComputerRuntimeLifecycle =
   | 'shutdown'
   | 'error';
 
+export type ComputerRuntimeUserState =
+  | 'not_running'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'degraded'
+  | 'error';
+
+export type ComputerRuntimeActionDisabledReason =
+  | 'already_running'
+  | 'not_running'
+  | 'transition_in_progress'
+  | 'degraded'
+  | 'connection_unavailable';
+
+export interface ComputerRuntimeActionCapability {
+  enabled: boolean;
+  disabled_reason?: ComputerRuntimeActionDisabledReason | null;
+}
+
 export interface ComputerRuntimeActionCapabilities {
-  can_start: boolean;
-  can_stop: boolean;
-  can_restart: boolean;
-  can_reload: boolean;
-  can_connect: boolean;
-  can_disconnect: boolean;
-  can_manage_mcp: boolean;
+  start: ComputerRuntimeActionCapability;
+  stop: ComputerRuntimeActionCapability;
+  restart: ComputerRuntimeActionCapability;
+  connect: ComputerRuntimeActionCapability;
+  disconnect: ComputerRuntimeActionCapability;
+  manage_mcp: ComputerRuntimeActionCapability;
+}
+
+export type ComputerRuntimeProblemSource = 'sdk' | 'client_connection' | 'mcp';
+export type ComputerRuntimeProblemSeverity = 'error' | 'degraded';
+export type ComputerRuntimeProblemMessage =
+  | 'sdk_runtime_error'
+  | 'sdk_runtime_degraded'
+  | 'connection_failed'
+  | 'disconnection_failed'
+  | 'reconnection_failed'
+  | 'mcp_start_failed'
+  | 'mcp_configuration_apply_failed';
+export type ComputerRuntimeProblemAction =
+  | 'start_runtime'
+  | 'restart_runtime'
+  | 'retry_connection'
+  | 'retry_disconnection'
+  | 'view_logs';
+export type ComputerRuntimeAffectedCapability =
+  | { kind: 'runtime' }
+  | { kind: 'connection' }
+  | { kind: 'mcp_server'; bundle_id: string; name?: string | null };
+
+export interface ComputerRuntimeProblem {
+  id: string;
+  source: ComputerRuntimeProblemSource;
+  operation: string;
+  severity: ComputerRuntimeProblemSeverity;
+  affected_capabilities: ComputerRuntimeAffectedCapability[];
+  occurred_at: string;
+  current: boolean;
+  message: ComputerRuntimeProblemMessage;
+  recommended_actions: ComputerRuntimeProblemAction[];
+  technical_detail?: string | null;
 }
 
 export interface ComputerRuntimeSnapshot {
@@ -28,6 +81,7 @@ export interface ComputerRuntimeSnapshot {
   generation: number;
   snapshot_revision: number;
   lifecycle: ComputerRuntimeLifecycle;
+  user_state: ComputerRuntimeUserState;
   actions: ComputerRuntimeActionCapabilities;
   config_revision: number;
   capability_revision: number;
@@ -35,6 +89,7 @@ export interface ComputerRuntimeSnapshot {
   active_mcp_servers: number;
   tools: number;
   skills: number;
+  problems: ComputerRuntimeProblem[];
   last_error?: string | null;
   degraded_reason?: string | null;
 }
@@ -61,7 +116,7 @@ export function isRuntimeTransportConnected(runtime: ComputerRuntimeSnapshot): b
   return runtime.lifecycle === 'connected' || runtime.lifecycle === 'joined_office';
 }
 
-export type RuntimeExecutionStatus = 'running' | 'stopped' | 'error';
+export type RuntimeExecutionStatus = ComputerRuntimeUserState;
 
 export interface RuntimeProjection {
   status: RuntimeExecutionStatus;
@@ -84,7 +139,7 @@ export function projectRuntimeSnapshot(
 ): RuntimeProjection {
   const running = isRuntimeRunning(runtime);
   return {
-    status: runtime.lifecycle === 'error' ? 'error' : running ? 'running' : 'stopped',
+    status: runtime.user_state,
     running,
     businessConnected: clientConnected && runtime.lifecycle === 'joined_office',
     mcpServerCount: runtime.mcp_servers,

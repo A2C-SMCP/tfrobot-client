@@ -14,6 +14,7 @@
     "edit": "编辑",
     "update": "更新",
     "refresh": "刷新",
+    "retry": "重试",
     "yes": "是",
     "no": "否",
     "error": "错误",
@@ -53,17 +54,80 @@
     "tools": "{{count}} 个工具",
     "status": {
       "running": "运行中",
-      "stopped": "已停止",
+      "not_running": "未运行",
+      "starting": "启动中",
+      "stopping": "停止中",
+      "degraded": "运行受限",
       "error": "错误"
     },
     "connection": {
       "connected": "已连接",
-      "disconnected": "未连接"
+      "disconnected": "未连接",
+      "connecting": "连接中",
+      "disconnecting": "断开中"
+    },
+    "settings": {
+      "open": "打开 Computer 设置",
+      "title": "{{name}} 设置",
+      "pageLabel": "Computer 设置",
+      "navigationLabel": "Computer 设置模块",
+      "backToComputer": "返回 Computer",
+      "noComputer": "没有可配置的 Computer",
+      "sections": {
+        "general": {
+          "title": "常规",
+          "description": "管理当前 Computer 保存的名称和描述。"
+        },
+        "skills": {
+          "title": "Skills",
+          "description": "选择当前 Computer 的 Skill Home，并进入相关能力治理入口。",
+          "savedSkillHome": "已保存的 Skill Home",
+          "openDirectory": "打开本地目录",
+          "openActiveSkills": "查看 Computer 中的 active Skills",
+          "openPlugins": "管理插件与 Marketplace"
+        },
+        "plugins": {
+          "title": "插件与 Marketplace",
+          "description": "管理 Marketplace 来源和 Plugin 安装生命周期。"
+        },
+        "mcp": {
+          "title": "MCP 服务器",
+          "description": "管理保存的 MCP 声明、来源、启用配置、导入、导出和校验。"
+        },
+        "inputs": {
+          "title": "输入项",
+          "description": "管理当前 Computer 中用户创建的定义、值和 Secret。"
+        },
+        "connection": {
+          "title": "连接策略",
+          "description": "选择保存的连接目标与自动连接策略。"
+        }
+      }
+    },
+    "workbench": {
+      "pageLabel": "Computer 运行工作台",
+      "capabilitySummary": "当前能力摘要",
+      "actions": {
+        "more": "更多 Computer 操作",
+        "copyId": "复制 ID"
+      },
+      "sections": {
+        "runtime": "Runtime 工作台",
+        "skills": "当前 Skills 与 Tools",
+        "resources": "桌面资源",
+        "diagnostics": "运行诊断"
+      },
+      "messages": {
+        "idCopied": "已复制 Computer ID"
+      },
+      "deleteDescription": "此操作将永久删除 {{name}} 及其保存的配置。"
     },
     "runtime": {
       "title": "运行时",
       "statusTitle": "运行时状态",
+      "userState": "状态",
       "lifecycle": "生命周期",
+      "incarnation": "运行时实例代际",
       "generation": "运行时世代",
       "snapshotRevision": "快照 Revision",
       "connection": "连接",
@@ -72,7 +136,26 @@
       "activeMcpServers": "活跃 MCP 服务器",
       "mcpLifecycle": "MCP 运行时",
       "restart": "重启",
-      "reload": "重载",
+      "advancedDiagnostics": "高级运行诊断",
+      "actionProgress": {
+        "starting": "启动中…",
+        "stopping": "停止中…"
+      },
+      "actionDisabledReasons": {
+        "already_running": "Runtime 已在运行。",
+        "not_running": "请先启动 Runtime，再执行此操作。",
+        "transition_in_progress": "请等待当前 Runtime 操作完成。",
+        "degraded": "Runtime 运行受限，暂时无法执行此操作。",
+        "connection_unavailable": "当前连接状态下无法执行此操作。"
+      },
+      "userStates": {
+        "not_running": "未运行",
+        "starting": "启动中",
+        "running": "运行中",
+        "stopping": "停止中",
+        "degraded": "运行受限",
+        "error": "运行异常"
+      },
       "lastError": "运行时错误",
       "degraded": "运行时降级",
       "recentEvents": "最近运行时事件",
@@ -82,15 +165,52 @@
         "lifecycleChanged": "生命周期变更为 {{state}}",
         "configRevisionBumped": "配置 Revision 变更为 {{revision}}",
         "capabilityRevisionBumped": "能力 Revision 变更为 {{revision}}",
-        "clientConnectionAuthorityChanged": "连接权威 Revision {{revision}}：{{status}}",
+        "clientConnectionStateChanged": "连接状态 Revision {{revision}}：{{status}}",
         "connectionPresent": "存在",
         "connectionAbsent": "不存在",
         "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
+        "mcpDiagnosticChanged": "MCP {{bundleId}} 的 {{operation}} 诊断状态：{{status}}",
         "diagnosticFailed": "失败",
         "diagnosticCleared": "已清除",
         "handleReplaced": "运行时句柄已替换：{{reason}}",
         "observationAdvanced": "运行时观测已推进到触发事件之后",
         "resync": "跳过 {{count}} 个事件后已重新同步运行时状态"
+      },
+      "problems": {
+        "severity": {
+          "error": "运行异常",
+          "degraded": "运行受限"
+        },
+        "sources": {
+          "sdk": "Runtime SDK",
+          "client_connection": "连接",
+          "mcp": "MCP"
+        },
+        "messages": {
+          "sdk_runtime_error": "Runtime 核心能力当前不可用。",
+          "sdk_runtime_degraded": "Runtime 仍可使用，但部分能力受限。",
+          "connection_failed": "Runtime 仍可使用，但未能建立连接。",
+          "disconnection_failed": "Runtime 仍可使用，但连接清理尚未完成。",
+          "reconnection_failed": "Runtime 仍可使用，但自动重连失败。",
+          "mcp_start_failed": "Runtime 仍可使用，但一个 MCP 服务器启动失败。",
+          "mcp_configuration_apply_failed": "配置已保存，但未能应用到当前 MCP 进程。"
+        },
+        "capabilities": {
+          "runtime": "Runtime 核心能力",
+          "connection": "Robot 连接",
+          "mcpServer": "MCP 服务器 {{name}}"
+        },
+        "affected": "受影响能力：{{capabilities}}",
+        "occurredAt": "发生时间：{{time}}",
+        "actions": {
+          "retryConnection": "重试连接",
+          "retryDisconnection": "重试断开",
+          "viewLogs": "查看日志",
+          "unavailable": "当前状态下无法执行此操作。"
+        },
+        "actionUnavailable": "{{action}}不可用：{{reason}}",
+        "technicalDiagnostics": "当前技术诊断",
+        "noTechnicalDiagnostics": "当前没有技术诊断"
       },
       "lifecycleStates": {
         "created": "已创建",
@@ -123,16 +243,24 @@
       "chooseSkillHome": "选择 Skill Home",
       "resetSkillHome": "使用默认值",
       "skillHomeDescription": "此目录是当前实例的能力治理根目录。清空后恢复默认实例 skill_home/。",
-      "nextSkillHome": "目标 Skill Home",
-      "skillHomeConfirmTitle": "确认重建 Computer？",
-      "skillHomeConfirmDescription": "修改 Skill Home 会保存新的能力治理根目录，并重建当前 Computer runtime。Marketplace、Plugin、MCP Server 和 Skill 会按新的 Skill Home 重新解析；当前连接和运行态可能被刷新。",
-      "skillHomeConfirmOk": "确认重建"
+      "nextSkillHome": "保存后的 Skill Home",
+      "skillHomeConfirmTitle": "保存 Skill Home？",
+      "skillHomeConfirmDescription": "此操作会保存能力治理根目录，但不会自动重启 Computer。",
+      "skillHomeConfirmOk": "保存"
     },
     "actionGroups": {
       "profile": "Profile 与配置",
       "runtime": "运行态"
     },
     "connectionActions": {
+      "lastError": "连接错误",
+      "disabledReasons": {
+        "already_connected": "这个 Computer 已连接。",
+        "not_connected": "这个 Computer 尚未连接。",
+        "transition_in_progress": "请等待当前连接操作完成。",
+        "not_running": "请先启动这个 Computer，再执行连接。",
+        "connection_unavailable": "当前运行时状态下无法执行连接操作。"
+      },
       "targetTitle": "连接目标",
       "selectTarget": "选择 Robot 或手动 SMCP 目标",
       "requiresRunning": "需要先启动这个 Computer 才能连接。",
@@ -168,7 +296,8 @@
       "started": "Computer 已启动",
       "stopped": "Computer 已停止",
       "restarted": "Computer 已重启",
-      "reloaded": "Computer 运行时已重载"
+      "runtimeOperationFailed": "Runtime 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "connectionOperationFailed": "连接操作失败，请查看 Runtime 诊断或日志了解详情。"
     }
   },
   "skills": {
@@ -176,6 +305,7 @@
     "empty": "暂无 active skills",
     "emptySearch": "没有匹配的 skills",
     "emptySelection": "选择一个 skill 预览 SKILL.md",
+    "preview": "Skill 预览",
     "searchPlaceholder": "搜索 skills",
     "openLocalRoot": "打开本地目录",
     "openMcpSource": "打开 MCP 服务器 {{server}}",
@@ -232,6 +362,8 @@
     },
     "actions": {
       "addMarketplace": "添加 Marketplace",
+      "selectMarketplace": "选择 Marketplace {{marketplace}}",
+      "selectPlugin": "选择 Plugin {{plugin}}（{{pluginId}}）",
       "refreshMarketplace": "刷新 Marketplace",
       "removeMarketplace": "删除 Marketplace",
       "updateMarketplace": "更新 Marketplace",
@@ -288,6 +420,10 @@
     "validateConfig": "校验 Schema",
     "bundledConfigHint": "该声明与已安装插件的 bundled server 同名，但配置声明仍可编辑。",
     "readOnlyConfigHint": "该声明来自只读的 {{origin}} scope，无法在此处编辑。",
+    "ownershipLoadingTitle": "正在检查 MCP 声明归属",
+    "ownershipUnavailableTitle": "无法获取 MCP 声明归属",
+    "ownershipUnavailableDescription": "在权威归属加载成功前，配置变更保持禁用。请刷新后重试。",
+    "ownershipUnavailableHint": "在权威 MCP 归属可用前，配置变更保持禁用。",
     "validation": {
       "schemaOnlyTitle": "仅校验配置 Schema",
       "schemaOnlyDescription": "校验只检查 SDK-owned 配置结构，不检查命令、路径、secret、input、marketplace、plugin 或 MCP server 的运行可用性。",
@@ -297,7 +433,8 @@
     "status": {
       "running": "运行中",
       "stopped": "已停止",
-      "error": "错误"
+      "error": "错误",
+      "pending": "等待中"
     },
     "table": {
       "name": "名称",
@@ -310,13 +447,27 @@
     },
     "source": {
       "user": "用户",
+      "plugin": "插件：{{plugin}}",
+      "marketplace": "Marketplace：{{marketplace}}",
       "bundled": "插件托管",
       "trusted": "可信来源"
     },
     "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在 Marketplace 中管理其生命周期。",
+    "batch": {
+      "startSummary": "批量启动完成：候选 {{candidates}} 个，实际启动 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
+      "stopSummary": "批量停止完成：候选 {{candidates}} 个，实际停止 {{actual}} 个，未变化 {{unchanged}} 个，排除 Plugin-owned {{excluded}} 个，失败 {{failed}} 个。",
+      "failure": "{{name}}（{{bundleId}}）：操作失败，请查看 Runtime 诊断或日志了解详情。"
+    },
+    "disabledGuidance": {
+      "title": "当前无法操作 MCP 生命周期",
+      "startRuntime": "启动 Runtime",
+      "restartRuntime": "重启 Runtime",
+      "refreshAfterTransition": "等待当前 Runtime 操作完成后刷新状态。"
+    },
     "actions": {
       "start": "启动",
       "stop": "停止",
+      "managePlugin": "管理 {{plugin}}",
       "edit": "编辑",
       "remove": "删除",
       "toggleEnabled": "切换服务器 {{name}} 的启用状态"
@@ -336,6 +487,7 @@
       "cwd": "工作目录",
       "envVars": "环境变量",
       "addEnv": "添加变量",
+      "inputReference": "引用 Input",
       "url": "URL",
       "urlRequired": "请输入 URL",
       "headers": "HTTP 请求头",
@@ -361,6 +513,8 @@
       "removed": "服务器删除成功",
       "started": "服务器 {{name}} 已启动",
       "stopped": "服务器 {{name}} 已停止",
+      "operationFailed": "MCP 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
       "editNotImplemented": "编辑功能即将推出",
@@ -372,6 +526,8 @@
     "title": "输入变量",
     "addInput": "添加变量",
     "editInput": "编辑变量",
+    "editInputFor": "编辑变量 {{id}}",
+    "removeInputFor": "删除变量 {{id}}",
     "setValue": "设置值",
     "selectValue": "请选择一个值",
     "enterValue": "请输入值",
@@ -384,7 +540,10 @@
       "missingInput": "启动需要补充变量",
       "missingSecret": "启动需要补充密钥",
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
-      "definitionMissing": "无法加载变量 {{id}} 的定义。"
+      "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
+      "createAsSecret": "将此 Input 作为 Secret 保存",
+      "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
+      "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
     },
     "table": {
       "id": "ID",
@@ -466,15 +625,37 @@
   },
   "desktop": {
     "title": "桌面资源",
+    "loadResources": "加载资源",
     "windowUri": "URI",
     "windowTitle": "标题",
     "sourceServer": "来源服务器",
-    "noWindows": "未检测到桌面窗口",
+    "contentType": "内容类型",
+    "unknownContentType": "未知",
+    "noWindows": "当前没有 MCP 暴露桌面资源",
+    "notLoaded": "仅在你主动请求时加载资源。",
     "windowContent": "窗口内容",
     "noContent": "无可用内容",
     "clickToLoadDetail": "点击加载详情",
-    "binaryData": "二进制数据",
-    "failedToLoadDetail": "加载窗口详情失败"
+    "textContent": "文本",
+    "binaryContent": "二进制",
+    "binarySummary": "为安全起见不渲染二进制内容（{{size}} 字节）",
+    "previewTooLarge": "内容过大，已省略预览（{{size}} 字节）",
+    "windowPreviewAlt": "桌面资源预览",
+    "refreshDetail": "刷新资源内容",
+    "failedToLoadDetail": "加载资源内容失败",
+    "enumerationFailed": "加载桌面资源失败",
+    "enumerationIndeterminate": "无法确定桌面资源状态",
+    "enumerationIndeterminateDescription": "当前 SDK 无法区分真实空结果、能力未声明和单个服务器枚举失败。你可以重试或查看 MCP 诊断。",
+    "enumerationUnverified": "部分桌面资源可能缺失",
+    "enumerationUnverifiedDescription": "当前 SDK 已返回资源，但无法报告是否有其他 MCP 在枚举时失败。",
+    "runtimeUnavailable": "Runtime 尚未就绪",
+    "runtimeUnavailableDescription": "请先启动 Runtime，再加载桌面资源。",
+    "runtimeTransitionDescription": "请等待当前 Runtime 操作完成后重试。",
+    "noActiveMcp": "没有正在运行的 MCP 服务器",
+    "noActiveMcpDescription": "请先启动或配置 MCP 服务器，再加载桌面资源。",
+    "manageMcp": "管理 MCP 服务器",
+    "runtimeDegraded": "Runtime 运行受限",
+    "runtimeDegradedDescription": "可用资源可能不完整，你可以重试或查看 Runtime 诊断。"
   },
   "debug": {
     "description": "工具浏览与调用测试。",
@@ -611,6 +792,8 @@
       "connect": "连接",
       "connected": "已连接",
       "disconnect": "断开连接",
+      "connectionCleanupRequired": "重新连接前需要先清理残留连接。",
+      "connectionCleanupGuidance": "请重试断开操作；若清理仍失败，请查看 Runtime 诊断或日志。",
       "disconnectSuccess": "已断开 SMCP 连接",
       "connectSuccess": "正在连接 {{name}}…",
       "noRobotAccount": "该机器人暂不支持安全连接（缺少机器人账号 ID）。",

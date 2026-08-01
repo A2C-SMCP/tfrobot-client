@@ -17,7 +17,13 @@ import { LogViewer } from './components/LogViewer';
 import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
-import { toComputerDetailTab } from './components/Computer/tabs';
+import { ComputerSettings } from './components/ComputerSettings';
+import {
+  legacyComputerSettingsSection,
+  parsePluginSettingsTarget,
+  toComputerWorkbenchSection,
+  toComputerSettingsSection,
+} from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
 import { useManagerStore } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
@@ -29,7 +35,10 @@ const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
 function App() {
   const { t, i18n } = useTranslation();
   const [selectedKey, setSelectedKey] = useState('dashboard');
-  const menuSelectedKey = selectedKey.startsWith('computer-detail') ? 'computer' : selectedKey;
+  const menuSelectedKey = selectedKey.startsWith('computer-detail')
+    || selectedKey.startsWith('computer-settings')
+    ? 'computer'
+    : selectedKey;
   const { resolved, setMode, initFromSettings } = useThemeStore();
   const {
     session,
@@ -148,8 +157,24 @@ function App() {
   ];
 
   const renderContent = () => {
-    const [pageKey, rawDetailTab] = selectedKey.split(':');
-    const detailTab = toComputerDetailTab(rawDetailTab);
+    const [pageKey, rawSubpage, ...routeParts] = selectedKey.split(':');
+    const legacySettingsSection = pageKey === 'computer-detail'
+      ? legacyComputerSettingsSection(rawSubpage)
+      : null;
+    if (legacySettingsSection) {
+      return (
+        <ComputerSettings
+          initialSection={legacySettingsSection}
+          onNavigate={setSelectedKey}
+        />
+      );
+    }
+
+    const workbenchSection = toComputerWorkbenchSection(rawSubpage);
+    const settingsSection = toComputerSettingsSection(rawSubpage);
+    const targetPlugin = settingsSection === 'plugins'
+      ? parsePluginSettingsTarget(routeParts)
+      : null;
 
     switch (pageKey) {
       case 'dashboard':
@@ -159,9 +184,17 @@ function App() {
       case 'computer-detail':
         return (
           <Computer
-            key={`computer-detail-${detailTab}`}
+            key={`computer-detail-${workbenchSection}`}
             initialView="detail"
-            initialTab={detailTab}
+            initialSection={workbenchSection}
+            onNavigate={setSelectedKey}
+          />
+        );
+      case 'computer-settings':
+        return (
+          <ComputerSettings
+            initialSection={settingsSection}
+            targetPlugin={targetPlugin}
             onNavigate={setSelectedKey}
           />
         );

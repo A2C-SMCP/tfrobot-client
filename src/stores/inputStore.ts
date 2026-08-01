@@ -35,6 +35,7 @@ interface InputState {
   addOrUpdateInput: (instanceId: string, input: InputDefinition) => Promise<void>;
   removeInput: (instanceId: string, id: string) => Promise<void>;
   setValue: (instanceId: string, id: string, value: unknown) => Promise<void>;
+  setRuntimeValue: (instanceId: string, id: string, value: unknown) => Promise<boolean>;
   removeValue: (instanceId: string, id: string) => Promise<void>;
   clearValues: (instanceId: string) => Promise<void>;
   importInputs: (instanceId: string, path: string) => Promise<number>;
@@ -132,6 +133,15 @@ export const useInputStore = create<InputState>((set, get) => ({
     try {
       await invoke('set_input_value', { instanceId, id, value });
       await get().fetchValues(instanceId);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  setRuntimeValue: async (instanceId: string, id: string, value: unknown) => {
+    try {
+      return await invoke<boolean>('set_runtime_input_value', { instanceId, id, value });
     } catch (e) {
       set({ error: String(e) });
       throw e;

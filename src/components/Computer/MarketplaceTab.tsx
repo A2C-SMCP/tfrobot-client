@@ -11,6 +11,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   formatInvokeError,
   useSkillStore,
@@ -19,6 +20,10 @@ import {
   type SkillRef,
   type SkillResource,
 } from '@/stores/skillStore';
+import {
+  isMissingRuntimeInputError,
+  type MissingRuntimeInputError,
+} from '@/utils/runtimeActionError';
 import styles from './MarketplaceTab.module.css';
 
 const { Text, Title, Paragraph } = Typography;
@@ -28,6 +33,8 @@ const EMPTY_SKILLS: SkillRef[] = [];
 
 interface MarketplaceTabProps {
   instanceId: string;
+  targetPlugin?: Pick<PluginSummary, 'marketplace' | 'plugin' | 'pluginId'> | null;
+  onTargetPluginConsumed?: () => void;
 }
 
 interface MarketplaceFormValues {
@@ -35,8 +42,8 @@ interface MarketplaceFormValues {
   gitUrl: string;
 }
 
-function pluginKey(plugin: Pick<PluginSummary, 'marketplace' | 'plugin'>) {
-  return `${plugin.marketplace}/${plugin.plugin}`;
+function pluginKey(plugin: Pick<PluginSummary, 'marketplace' | 'plugin' | 'pluginId'>) {
+  return `${plugin.marketplace}/${plugin.plugin}/${plugin.pluginId ?? ''}`;
 }
 
 function extractLastUpdated(message?: string | null) {
@@ -76,7 +83,11 @@ function renderMarkdown(markdown: string) {
   });
 }
 
-export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
+export function MarketplaceTab({
+  instanceId,
+  targetPlugin,
+  onTargetPluginConsumed,
+}: MarketplaceTabProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [marketplaceForm] = Form.useForm<MarketplaceFormValues>();
@@ -88,12 +99,18 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
   const [skillPreview, setSkillPreview] = useState<SkillResource | null>(null);
   const [loadingSkillPreview, setLoadingSkillPreview] = useState(false);
   const [skillPreviewError, setSkillPreviewError] = useState<string | null>(null);
+  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
+    error: MissingRuntimeInputError;
+    action: 'install' | 'enable' | 'disable' | 'uninstall';
+    plugin: PluginSummary;
+  } | null>(null);
   const {
     recordsByInstanceId,
     fetchMarketplaceGovernance,
     fetchSkills,
     addMarketplace,
     updateMarketplace,
+    refreshMarketplace,
     removeMarketplace,
     installPlugin,
     enablePlugin,
@@ -145,6 +162,24 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       setSkillPreviewError(null);
     }
   }, [marketplacePlugins, selectedPluginKey]);
+
+  useEffect(() => {
+    if (!targetPlugin) return;
+    const target = plugins.find((plugin) => (
+      plugin.marketplace === targetPlugin.marketplace
+      && plugin.plugin === targetPlugin.plugin
+      && (targetPlugin.pluginId
+        ? plugin.pluginId === targetPlugin.pluginId
+        : true)
+    ));
+    if (!target) return;
+    setSelectedMarketplaceName(target.marketplace);
+    setSelectedPluginKey(pluginKey(target));
+    setSelectedSkillName(null);
+    setSkillPreview(null);
+    setSkillPreviewError(null);
+    onTargetPluginConsumed?.();
+  }, [onTargetPluginConsumed, plugins, targetPlugin]);
 
   const selectedMarketplace = marketplaces.find((marketplace) => marketplace.name === selectedMarketplaceName) ?? null;
   const selectedPlugin = marketplacePlugins.find((plugin) => pluginKey(plugin) === selectedPluginKey) ?? null;
@@ -229,6 +264,15 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
     await fetchSkills(instanceId);
   };
 
+  const handleRefreshMarketplace = async (marketplace: string) => {
+    try {
+      await refreshMarketplace(instanceId, marketplace);
+      message.success(t('marketplace.messages.refreshed'));
+    } catch (error) {
+      message.error(formatInvokeError(error));
+    }
+  };
+
   const handlePluginAction = async (
     action: 'install' | 'enable' | 'disable' | 'uninstall',
     plugin: PluginSummary,
@@ -239,8 +283,13 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
       if (action === 'enable') await enablePlugin(instanceId, request);
       if (action === 'disable') await disablePlugin(instanceId, request);
       if (action === 'uninstall') await uninstallPlugin(instanceId, request);
+      setRuntimeInputPrompt(null);
       message.success(t(`marketplace.messages.${action}`));
     } catch (e) {
+      if (isMissingRuntimeInputError(e)) {
+        setRuntimeInputPrompt({ error: e, action, plugin });
+        return;
+      }
       message.error(formatInvokeError(e));
     }
   };
@@ -416,58 +465,81 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
             {marketplaces.length === 0 ? (
               <Empty description={t('marketplace.emptyMarketplaces')} image={Empty.PRESENTED_IMAGE_SIMPLE} />
             ) : (
-              <List
-                size="small"
-                dataSource={marketplaces}
-                className={styles.scrollList}
-                renderItem={(marketplace) => (
-                  <List.Item
-                    className={selectedMarketplaceName === marketplace.name ? styles.selectedItem : styles.selectableItem}
-                    onClick={() => selectMarketplace(marketplace.name)}
-                  >
-                    <div className={styles.marketplaceRow}>
-                      <div className={styles.marketplaceInfo}>
-                        <Space className={styles.marketplaceTitle}>
-                          <Text strong ellipsis className={styles.marketplaceName}>{marketplace.name}</Text>
-                          <Tag>{marketplace.status}</Tag>
+              <div>
+                <List
+                  size="small"
+                  dataSource={marketplaces}
+                  className={styles.scrollList}
+                  renderItem={(marketplace) => (
+                    <List.Item
+                      className={selectedMarketplaceName === marketplace.name ? styles.selectedItem : styles.selectableItem}
+                    >
+                      <div className={styles.marketplaceRow}>
+                        <button
+                          type="button"
+                          className={`${styles.marketplaceInfo} ${styles.selectionButton}`}
+                          aria-label={t('marketplace.actions.selectMarketplace', {
+                            marketplace: marketplace.name,
+                          })}
+                          aria-pressed={selectedMarketplaceName === marketplace.name}
+                          onClick={() => selectMarketplace(marketplace.name)}
+                        >
+                          <Space className={styles.marketplaceTitle}>
+                            <Text strong ellipsis className={styles.marketplaceName}>{marketplace.name}</Text>
+                            <Tag>{marketplace.status}</Tag>
+                          </Space>
+                          <Text type="secondary" ellipsis className={styles.marketplaceUrl}>
+                            {marketplace.displayGitUrl ?? t('marketplace.sdkOwnedState')}
+                          </Text>
+                        </button>
+                        <Space size={4} className={styles.marketplaceActions}>
+                          {canRunOperation('refresh_marketplace') && (
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<ReloadOutlined />}
+                              aria-label={t('marketplace.actions.refreshMarketplace')}
+                              title={t('marketplace.actions.refreshMarketplace')}
+                              loading={loadingMarketplace}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleRefreshMarketplace(marketplace.name);
+                              }}
+                            />
+                          )}
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<EditOutlined />}
+                            aria-label={t('common.edit')}
+                            title={t('common.edit')}
+                            disabled={!canRunOperation('update_marketplace')}
+                            loading={loadingMarketplace}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleEditMarketplace(marketplace.name);
+                            }}
+                          />
+                          <Button
+                            size="small"
+                            type="text"
+                            danger
+                            icon={<DeleteOutlined />}
+                            aria-label={t('marketplace.actions.removeMarketplace')}
+                            title={t('marketplace.actions.removeMarketplace')}
+                            disabled={!canRunOperation('remove_marketplace')}
+                            loading={loadingMarketplace}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              removeMarketplace(instanceId, marketplace.name);
+                            }}
+                          />
                         </Space>
-                        <Text type="secondary" ellipsis className={styles.marketplaceUrl}>
-                          {marketplace.displayGitUrl ?? t('marketplace.sdkOwnedState')}
-                        </Text>
                       </div>
-                      <Space size={4} className={styles.marketplaceActions}>
-                        <Button
-                          size="small"
-                          type="text"
-                          icon={<EditOutlined />}
-                          aria-label={t('common.edit')}
-                          title={t('common.edit')}
-                          disabled={!canRunOperation('update_marketplace')}
-                          loading={loadingMarketplace}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleEditMarketplace(marketplace.name);
-                          }}
-                        />
-                        <Button
-                          size="small"
-                          type="text"
-                          danger
-                          icon={<DeleteOutlined />}
-                          aria-label={t('marketplace.actions.removeMarketplace')}
-                          title={t('marketplace.actions.removeMarketplace')}
-                          disabled={!canRunOperation('remove_marketplace')}
-                          loading={loadingMarketplace}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            removeMarketplace(instanceId, marketplace.name);
-                          }}
-                        />
-                      </Space>
-                    </div>
-                  </List.Item>
-                )}
-              />
+                    </List.Item>
+                  )}
+                />
+              </div>
             )}
           </Space>
         </Card>
@@ -482,27 +554,39 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
           ) : marketplacePlugins.length === 0 ? (
             <Empty description={t('marketplace.emptyPlugins')} image={Empty.PRESENTED_IMAGE_SIMPLE} />
           ) : (
-            <List
-              size="small"
-              dataSource={marketplacePlugins}
-              className={styles.scrollList}
-              renderItem={(plugin) => (
-                <List.Item
-                  className={selectedPluginKey === pluginKey(plugin) ? styles.selectedItem : styles.selectableItem}
-                  onClick={() => selectPlugin(plugin)}
-                >
-                  <Space direction="vertical" size={8} className={styles.pluginCardBody}>
-                    <Space wrap>
-                      <Text strong>{plugin.plugin}</Text>
-                      {plugin.version && <Tag>{plugin.version}</Tag>}
-                      <Tag color={plugin.enabled ? 'green' : undefined}>{plugin.status}</Tag>
+            <div>
+              <List
+                size="small"
+                dataSource={marketplacePlugins}
+                className={styles.scrollList}
+                renderItem={(plugin) => (
+                  <List.Item
+                    className={selectedPluginKey === pluginKey(plugin) ? styles.selectedItem : styles.selectableItem}
+                  >
+                    <Space direction="vertical" size={8} className={styles.pluginCardBody}>
+                      <button
+                        type="button"
+                        className={styles.pluginSelectionButton}
+                        aria-label={t('marketplace.actions.selectPlugin', {
+                          plugin: plugin.plugin,
+                          pluginId: plugin.pluginId ?? plugin.plugin,
+                        })}
+                        aria-pressed={selectedPluginKey === pluginKey(plugin)}
+                        onClick={() => selectPlugin(plugin)}
+                      >
+                        <Space wrap>
+                          <Text strong>{plugin.plugin}</Text>
+                          {plugin.version && <Tag>{plugin.version}</Tag>}
+                          <Tag color={plugin.enabled ? 'green' : undefined}>{plugin.status}</Tag>
+                        </Space>
+                        {plugin.message && <Text type="secondary">{plugin.message}</Text>}
+                      </button>
+                      {renderPluginActions(plugin)}
                     </Space>
-                    {plugin.message && <Text type="secondary">{plugin.message}</Text>}
-                    {renderPluginActions(plugin)}
-                  </Space>
-                </List.Item>
-              )}
-            />
+                  </List.Item>
+                )}
+              />
+            </div>
           )}
         </Card>
 
@@ -596,6 +680,18 @@ export function MarketplaceTab({ instanceId }: MarketplaceTabProps) {
           </Form.Item>
         </Form>
       </Modal>
+      {runtimeInputPrompt && (
+        <RuntimeInputPrompt
+          instanceId={instanceId}
+          error={runtimeInputPrompt.error}
+          allowPersistentDefinitionCreation={false}
+          onCancel={() => setRuntimeInputPrompt(null)}
+          onSubmitted={() => handlePluginAction(
+            runtimeInputPrompt.action,
+            runtimeInputPrompt.plugin,
+          )}
+        />
+      )}
     </Space>
   );
 }

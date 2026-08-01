@@ -1,12 +1,16 @@
 import { fireEvent, render, screen } from '../helpers/render';
 import { ComputerRuntime } from '@/components/Computer/ComputerRuntime';
+import { resolveComputerConnection } from '@/components/Computer/computerActions';
 import type { ComputerInstance } from '@/stores/computerStore';
-import { useRuntimeStore } from '@/stores/runtimeStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 vi.mock('@/components/McpConfig/McpRuntimeControls', () => ({
-  McpRuntimeControls: ({ disabled }: { disabled: boolean }) => (
-    <div data-testid="runtime-mcp" data-disabled={String(disabled)} />
+  McpRuntimeControls: ({
+    capability,
+  }: {
+    capability: { enabled: boolean };
+  }) => (
+    <div data-testid="runtime-mcp" data-disabled={String(!capability.enabled)} />
   ),
 }));
 
@@ -16,6 +20,9 @@ function instance(overrides: Partial<ComputerInstance> = {}): ComputerInstance {
     name: 'Computer A',
     status: 'running',
     connectionStatus: 'disconnected',
+    defaultSkillHome: '/app/computer_instances/computer-a/skill_home',
+    configuredSkillHome: '/app/computer_instances/computer-a/skill_home',
+    effectiveSkillHome: '/app/computer_instances/computer-a/skill_home',
     connectionPolicy: { target: { type: 'manual_smcp', id: 'target-a' }, auto_connect: false },
     mcpServerCount: 3,
     runtime: runtimeSnapshot({
@@ -32,131 +39,121 @@ function instance(overrides: Partial<ComputerInstance> = {}): ComputerInstance {
   };
 }
 
+function renderRuntime(
+  computer = instance(),
+  overrides: Partial<React.ComponentProps<typeof ComputerRuntime>> = {},
+) {
+  const props: React.ComponentProps<typeof ComputerRuntime> = {
+    instance: computer,
+    connection: resolveComputerConnection(computer),
+    loading: false,
+    onStartStop: vi.fn(),
+    onRestart: vi.fn(),
+    onConnect: vi.fn(),
+    onDisconnect: vi.fn(),
+    onViewLogs: vi.fn(),
+    ...overrides,
+  };
+  render(<ComputerRuntime {...props} />);
+  return props;
+}
+
 describe('ComputerRuntime', () => {
-  beforeEach(() => {
-    useRuntimeStore.getState().reset();
+  it('composes MCP runtime and active capability summary without duplicating header actions', () => {
+    renderRuntime();
+
+    expect(screen.queryByText('Connection')).not.toBeInTheDocument();
+    const capabilitySummary = screen.getByText('Active capability summary');
+    const runtimeMcp = screen.getByTestId('runtime-mcp');
+    expect(
+      capabilitySummary.compareDocumentPosition(runtimeMcp)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(runtimeMcp).toHaveAttribute('data-disabled', 'false');
+    expect(screen.getByText('12')).toBeInTheDocument();
+    expect(screen.getByText('5')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Stop$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Restart$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Connect$/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Advanced Runtime Diagnostics')).not.toBeInTheDocument();
   });
 
-  it('renders SDK runtime state and exposes lifecycle operations separately', () => {
-    const onStartStop = vi.fn();
-    const onRestart = vi.fn();
-    const onReload = vi.fn();
-    const onConnect = vi.fn();
-
-    render(
-      <ComputerRuntime
-        instance={instance()}
-        loading={false}
-        canConnect
-        onStartStop={onStartStop}
-        onRestart={onRestart}
-        onReload={onReload}
-        onConnect={onConnect}
-        onDisconnect={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText('Started')).toBeInTheDocument();
-    expect(screen.getByRole('cell', { name: 'Runtime Generation 2' })).toBeInTheDocument();
-    expect(screen.getByRole('cell', { name: 'Config Revision 4' })).toBeInTheDocument();
-    expect(screen.getByRole('cell', { name: 'Capability Revision 7' })).toBeInTheDocument();
-    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
-
-    fireEvent.click(screen.getByRole('button', { name: /Stop$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Restart$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Reload$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Connect$/ }));
-
-    expect(onStartStop).toHaveBeenCalledOnce();
-    expect(onRestart).toHaveBeenCalledOnce();
-    expect(onReload).toHaveBeenCalledOnce();
-    expect(onConnect).toHaveBeenCalledOnce();
-  }, 30_000);
-
-  it('shows snapshot revision and recent accepted runtime events', () => {
-    const runtime = runtimeSnapshot({
-      lifecycle: 'started',
-      snapshot_revision: 9,
-      config_revision: 4,
-    });
-    useRuntimeStore.setState({
-      eventsByInstance: {
-        'computer-a': [{
-          instance_id: 'computer-a',
-          cause: { kind: 'config_revision_bumped', revision: 4 },
-          snapshot: runtime,
-          connection: { present: false, revision: 0, context: null },
-          received_at: '2026-07-17T10:00:00.000Z',
-        }],
+  it('shows a safe structured Runtime error and delegates log navigation', () => {
+    const onViewLogs = vi.fn();
+    renderRuntime(
+      instance({
+        status: 'error',
+        runtime: runtimeSnapshot({
+          lifecycle: 'error',
+          last_error: 'runtime boot failed',
+          problems: [{
+            id: 'sdk:2:runtime_error',
+            source: 'sdk',
+            operation: 'runtime',
+            severity: 'error',
+            affected_capabilities: [{ kind: 'runtime' }],
+            occurred_at: '2026-07-29T02:00:00Z',
+            current: true,
+            message: 'sdk_runtime_error',
+            recommended_actions: ['start_runtime', 'view_logs'],
+            technical_detail: 'runtime boot failed',
+          }],
+        }),
+      }),
+      {
+        onViewLogs,
       },
-    });
-
-    render(
-      <ComputerRuntime
-        instance={instance({ runtime })}
-        loading={false}
-        canConnect
-        onStartStop={vi.fn()}
-        onRestart={vi.fn()}
-        onReload={vi.fn()}
-        onConnect={vi.fn()}
-        onDisconnect={vi.fn()}
-      />,
     );
 
-    expect(screen.getByRole('cell', { name: 'Snapshot Revision 9' })).toBeInTheDocument();
-    expect(screen.getByText('Recent Runtime Events')).toBeInTheDocument();
-    expect(screen.getByText('Config revision changed to 4')).toBeInTheDocument();
-  });
-
-  it('surfaces structured runtime failures and disables runtime-only MCP actions', () => {
-    render(
-      <ComputerRuntime
-        instance={instance({
-          status: 'error',
-          runtime: runtimeSnapshot({
-            lifecycle: 'error',
-            last_error: 'runtime boot failed',
-          }),
-        })}
-        loading={false}
-        canConnect={false}
-        connectDisabledReason="Start the Computer first"
-        onStartStop={vi.fn()}
-        onRestart={vi.fn()}
-        onReload={vi.fn()}
-        onConnect={vi.fn()}
-        onDisconnect={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText('runtime boot failed')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Restart$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Connect$/ })).toBeDisabled();
+    expect(screen.getByText('Core Runtime capabilities are unavailable.')).toBeInTheDocument();
+    expect(screen.getByText('Affected: core Runtime')).toBeInTheDocument();
+    expect(screen.queryByText('runtime boot failed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'View logs' }));
+    expect(onViewLogs).toHaveBeenCalledOnce();
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
   });
 
-  it('disables every conflicting action while the SDK lifecycle is transitional', () => {
-    render(
-      <ComputerRuntime
-        instance={instance({
-          status: 'running',
-          runtime: runtimeSnapshot({ lifecycle: 'connecting' }),
-        })}
-        loading={false}
-        canConnect={false}
-        onStartStop={vi.fn()}
-        onRestart={vi.fn()}
-        onReload={vi.fn()}
-        onConnect={vi.fn()}
-        onDisconnect={vi.fn()}
-      />,
-    );
+  it('renders degraded MCP impact and explains an unavailable recovery action', () => {
+    renderRuntime(instance({
+      status: 'degraded',
+      runtime: runtimeSnapshot({
+        lifecycle: 'degraded',
+        problems: [{
+          id: 'mcp:2:server-a:start',
+          source: 'mcp',
+          operation: 'start',
+          severity: 'degraded',
+          affected_capabilities: [{
+            kind: 'mcp_server',
+            bundle_id: 'server-a',
+            name: 'Browser MCP',
+          }],
+          occurred_at: '2026-07-29T02:00:00Z',
+          current: true,
+          message: 'mcp_start_failed',
+          recommended_actions: ['restart_runtime', 'view_logs'],
+          technical_detail: 'process exited',
+        }],
+        actions: {
+          ...runtimeSnapshot({ lifecycle: 'degraded' }).actions,
+          restart: { enabled: false, disabled_reason: 'transition_in_progress' },
+        },
+      }),
+    }));
 
-    expect(screen.getByRole('button', { name: /Stop$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Restart$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Reload$/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Connect$/ })).toBeDisabled();
+    expect(screen.getByText('The Runtime is available, but an MCP server could not start.'))
+      .toBeInTheDocument();
+    expect(screen.getByText('Affected: MCP server Browser MCP')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Restart unavailable: Wait for the current Runtime operation to finish.',
+    )).toBeInTheDocument();
+  });
+
+  it('disables MCP lifecycle controls while the Runtime lifecycle is transitional', () => {
+    renderRuntime(instance({
+      runtime: runtimeSnapshot({ lifecycle: 'connecting' }),
+    }));
+
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
   });
 });

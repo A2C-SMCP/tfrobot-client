@@ -1,11 +1,24 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
-import { getClientConnectionAuthority } from './connectionAuthority';
-import { projectRuntimeSnapshot, type ComputerRuntimeSnapshot } from './runtimeSnapshot';
+import {
+  getClientConnectionAuthority,
+  type ClientConnectionActionCapabilities,
+  type ClientConnectionAuthority,
+  type ClientConnectionOperation,
+  type ClientConnectionOperationError,
+  type ClientConnectionOperationTarget,
+  type ClientConnectionStatus,
+} from './connectionAuthority';
+import type { ComputerRuntimeSnapshot } from './runtimeSnapshot';
 
 export interface ConnectionStatusInfo {
+  status?: ClientConnectionStatus;
   connected: boolean;
+  operation?: ClientConnectionOperation;
+  operation_target?: ClientConnectionOperationTarget;
+  last_error?: ClientConnectionOperationError;
+  actions?: ClientConnectionActionCapabilities;
   url?: string;
   office_id?: string;
   computer_name?: string;
@@ -15,6 +28,7 @@ export interface ConnectionStatusInfo {
   target_id?: string;
   target_name?: string;
   employee_id?: number;
+  connection_state?: ClientConnectionAuthority;
 }
 
 interface ConnectionState {
@@ -38,14 +52,21 @@ const initialState = {
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   ...initialState,
 
-  getStatus: (instanceId: string) => get().statuses[instanceId] ?? { connected: false },
+  getStatus: (instanceId: string) => get().statuses[instanceId] ?? {
+    status: 'disconnected',
+    connected: false,
+  },
 
   applyRuntimeSnapshot: (instanceId, runtime) => {
     const authority = getClientConnectionAuthority(instanceId, runtime.incarnation);
-    const projection = projectRuntimeSnapshot(runtime, authority?.present ?? false);
-    const context = projection.businessConnected ? authority?.context : null;
+    const context = authority?.context;
     const status: ConnectionStatusInfo = context ? {
-      connected: true,
+      status: authority?.status ?? 'disconnected',
+      connected: authority?.status === 'connected',
+      operation: authority?.operation ?? undefined,
+      operation_target: authority?.operation_target ?? undefined,
+      last_error: authority?.last_error ?? undefined,
+      actions: authority?.actions,
       url: context.url,
       office_id: context.office_id,
       computer_name: context.computer_name,
@@ -57,7 +78,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       target_id: context.target_id ?? undefined,
       target_name: context.target_name ?? undefined,
       employee_id: context.employee_id ?? undefined,
-    } : { connected: false };
+    } : {
+      status: authority?.status ?? 'disconnected',
+      connected: authority?.status === 'connected',
+      operation: authority?.operation ?? undefined,
+      operation_target: authority?.operation_target ?? undefined,
+      last_error: authority?.last_error ?? undefined,
+      actions: authority?.actions,
+    };
     set((state) => ({
       statuses: {
         ...state.statuses,

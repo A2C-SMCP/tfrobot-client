@@ -96,7 +96,6 @@ interface ManagerState {
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
   employees: DigitalEmployeeBrief[];
-  selectedEmployeeId: number | null;
   loading: boolean;
   restoreAttempted: boolean;
   error: ManagerError | null;
@@ -145,7 +144,6 @@ const initialState = {
   session: null as UserInfo | null,
   pendingAccountSelection: null as AccountOption[] | null,
   employees: [] as DigitalEmployeeBrief[],
-  selectedEmployeeId: null as number | null,
   loading: false,
   restoreAttempted: false,
   error: null as ManagerError | null,
@@ -299,7 +297,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   },
 
   selectEmployeeAndConnect: async (instanceId, employeeId) => {
-    set({ loading: true, error: null, selectedEmployeeId: employeeId, paymentRequired: null });
+    set({ loading: true, error: null, paymentRequired: null });
     if (!instanceId) {
       const err: ManagerError = {
         kind: 'invalid_response',
@@ -377,7 +375,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         session: null,
         pendingAccountSelection: null,
         employees: [],
-        selectedEmployeeId: null,
         loading: false,
         restoreAttempted: true,
         lastFetchAt: null,
@@ -395,7 +392,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       session: null,
       pendingAccountSelection: null,
       employees: [],
-      selectedEmployeeId: null,
       lastFetchAt: null,
       error: { kind: 'unauthorized' },
     });

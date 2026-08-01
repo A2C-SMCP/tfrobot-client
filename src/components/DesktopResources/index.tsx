@@ -1,246 +1,130 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Space, Typography, Table, Empty, Alert, Spin, Image } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import {
+  Alert,
+  Button,
+  Collapse,
+  Space,
+} from 'antd';
+import { DesktopOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useDesktopStore, WindowContent, type DesktopWindow } from '@/stores/desktopStore';
-
-const { Title, Text } = Typography;
-
-// Constants
-const MAX_TEXT_PREVIEW_LENGTH = 500;
+import {
+  desktopRuntimeKey,
+  selectDesktopInstance,
+  useDesktopStore,
+} from '@/stores/desktopStore';
+import type { ComputerRuntimeSnapshot } from '@/stores/runtimeSnapshot';
+import { canEnumerateDesktopResources } from './availability';
+import { DesktopAvailability } from './DesktopAvailability';
+import { DesktopResourcesTable } from './DesktopResourcesTable';
 
 interface DesktopResourcesProps {
   instanceId: string;
+  runtime: ComputerRuntimeSnapshot;
+  initiallyExpanded?: boolean;
+  onStartRuntime?: () => void;
+  onOpenMcp?: () => void;
 }
 
-export function DesktopResources({ instanceId }: DesktopResourcesProps) {
+export function DesktopResources({
+  instanceId,
+  runtime,
+  initiallyExpanded = false,
+  onStartRuntime,
+  onOpenMcp,
+}: DesktopResourcesProps) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
-  const {
-    windows,
-    loading,
-    error,
-    fetchDesktop,
-    windowDetails,
-    loadingDetails,
-    detailErrors,
-    fetchWindowDetail,
-  } = useDesktopStore();
-  const [expandedUris, setExpandedUris] = useState<Set<string>>(new Set());
+  const runtimeKey = desktopRuntimeKey(runtime);
+  const desktop = useDesktopStore(
+    (state) => selectDesktopInstance(state, instanceId, runtimeKey),
+  );
+  const bindRuntime = useDesktopStore((state) => state.bindRuntime);
+  const fetchDesktop = useDesktopStore((state) => state.fetchDesktop);
+  const fetchWindowDetail = useDesktopStore((state) => state.fetchWindowDetail);
+  const [activePanels, setActivePanels] = useState<string[]>(
+    initiallyExpanded ? ['desktop-resources'] : [],
+  );
+  const canLoad = canEnumerateDesktopResources(runtime);
 
   useEffect(() => {
-    fetchDesktop(instanceId);
-  }, [fetchDesktop, instanceId]);
+    bindRuntime(instanceId, runtimeKey);
+  }, [bindRuntime, instanceId, runtimeKey]);
 
-  // Show error message when detail fetch fails
   useEffect(() => {
-    Object.entries(detailErrors).forEach(([_uri, err]) => {
-      if (err) {
-        message.error(`${t('desktop.failedToLoadDetail')}: ${err}`);
-      }
-    });
-  }, [detailErrors, t, message]);
-
-  const windowKey = (record: Pick<DesktopWindow, 'bundleId' | 'uri'>) => `${record.bundleId}:${record.uri}`;
-
-  const handleRowExpand = async (expanded: boolean, record: DesktopWindow) => {
-    const key = windowKey(record);
-    const newExpanded = new Set(expandedUris);
-    if (!expanded) {
-      newExpanded.delete(key);
-      setExpandedUris(newExpanded);
-    } else {
-      newExpanded.add(key);
-      setExpandedUris(newExpanded);
-      await fetchWindowDetail(instanceId, record.bundleId, record.uri);
+    if (initiallyExpanded) {
+      setActivePanels(['desktop-resources']);
     }
-  };
+  }, [initiallyExpanded]);
 
-  const renderContent = (contents: WindowContent[]) => {
-    if (contents.length === 0) {
-      return <Text type="secondary">{t('desktop.noContent')}</Text>;
-    }
+  const content = (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {runtime.lifecycle === 'degraded' && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('desktop.runtimeDegraded')}
+          description={t('desktop.runtimeDegradedDescription')}
+        />
+      )}
 
-    return contents.map((content, idx) => (
-      <div key={idx} style={{ marginBottom: 8 }}>
-        {content.type === 'text' && content.text && (
-          <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {content.mime_type || 'text'}
-            </Text>
-            <div
-              style={{
-                backgroundColor: '#f5f5f5',
-                padding: '8px 12px',
-                borderRadius: 4,
-                marginTop: 4,
-                maxWidth: '100%',
-                overflow: 'auto',
-              }}
+      {!canLoad ? (
+        <DesktopAvailability
+          runtime={runtime}
+          onStartRuntime={onStartRuntime}
+          onOpenMcp={onOpenMcp}
+        />
+      ) : (
+        <>
+          <Space>
+            <Button
+              type={desktop.loaded ? 'default' : 'primary'}
+              icon={desktop.loaded ? <ReloadOutlined /> : <DesktopOutlined />}
+              aria-label={desktop.loaded ? t('common.refresh') : t('desktop.loadResources')}
+              onClick={() => { void fetchDesktop(instanceId, runtimeKey); }}
+              loading={desktop.loading}
             >
-              <Text
-                code
-                style={{
-                  wordBreak: 'break-all',
-                  whiteSpace: 'pre-wrap',
-                  fontSize: 12,
-                }}
-              >
-                {content.text.length > MAX_TEXT_PREVIEW_LENGTH
-                  ? content.text.slice(0, MAX_TEXT_PREVIEW_LENGTH) + '...'
-                  : content.text}
-              </Text>
-            </div>
-          </div>
-        )}
-        {content.type === 'blob' && content.mime_type?.startsWith('image/') && content.blob && (
-          <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {content.mime_type}
-            </Text>
-            <div style={{ marginTop: 8 }}>
-              <Image
-                src={`data:${content.mime_type};base64,${content.blob}`}
-                alt="Window screenshot"
-                style={{ maxWidth: 400, maxHeight: 300, borderRadius: 4 }}
-                placeholder={<Spin />}
-              />
-            </div>
-          </div>
-        )}
-        {content.type === 'blob' && !content.mime_type?.startsWith('image/') && (
-          <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {content.mime_type || 'binary'}
-            </Text>
-            <div style={{ marginTop: 4 }}>
-              <Text type="secondary">
-                [{t('desktop.binaryData')}: {Math.floor((content.blob?.length || 0) * 3 / 4)} bytes]
-              </Text>
-            </div>
-          </div>
-        )}
-      </div>
-    ));
-  };
+              {desktop.loaded ? t('common.refresh') : t('desktop.loadResources')}
+            </Button>
+          </Space>
 
-  const columns = [
-    {
-      title: t('desktop.windowUri'),
-      dataIndex: 'uri',
-      key: 'uri',
-      ellipsis: true,
-      width: '40%',
-    },
-    {
-      title: t('desktop.windowTitle'),
-      dataIndex: 'title',
-      key: 'title',
-      width: '30%',
-    },
-    {
-      title: t('desktop.sourceServer'),
-      dataIndex: 'server',
-      key: 'server',
-      width: '30%',
-    },
-  ];
+          {desktop.error && (
+            <Alert
+              message={t('desktop.enumerationFailed')}
+              description={desktop.error}
+              type="error"
+              showIcon
+              action={(
+                <Button
+                  size="small"
+                  onClick={() => { void fetchDesktop(instanceId, runtimeKey); }}
+                >
+                  {t('common.retry')}
+                </Button>
+              )}
+            />
+          )}
+
+          <DesktopResourcesTable
+            desktop={desktop}
+            instanceId={instanceId}
+            runtimeKey={runtimeKey}
+            fetchWindowDetail={fetchWindowDetail}
+          />
+        </>
+      )}
+    </Space>
+  );
 
   return (
-    <div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 16,
-        }}
-      >
-        <Title level={4} style={{ margin: 0 }}>
-          {t('desktop.title')}
-        </Title>
-        <Space>
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => fetchDesktop(instanceId)}
-            loading={loading}
-          >
-            {t('common.refresh')}
-          </Button>
-        </Space>
-      </div>
-
-      {error && (
-        <Alert
-          message={t('common.error')}
-          description={error}
-          type="error"
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
-
-      {windows.length === 0 && !loading ? (
-        <Empty description={t('desktop.noWindows')} />
-      ) : (
-        <Table
-          columns={columns}
-          dataSource={windows}
-          rowKey={windowKey}
-          loading={loading}
-          size="middle"
-          pagination={false}
-          expandable={{
-            expandedRowKeys: Array.from(expandedUris),
-            onExpand: handleRowExpand,
-            expandedRowRender: (record) => {
-              const key = windowKey(record);
-              const detail = windowDetails[key];
-              const isLoading = loadingDetails[key];
-
-              if (isLoading) {
-                return (
-                  <div style={{ padding: '16px 0', textAlign: 'center' }}>
-                    <Spin />
-                  </div>
-                );
-              }
-
-              if (!detail) {
-                return (
-                  <Text type="secondary">{t('desktop.clickToLoadDetail')}</Text>
-                );
-              }
-
-              return (
-                <div style={{ padding: '12px 0' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: 12,
-                    }}
-                  >
-                    <Title level={5} style={{ margin: 0 }}>
-                      {t('desktop.windowContent')}
-                    </Title>
-                    <Button
-                      size="small"
-                      icon={<ReloadOutlined />}
-                      onClick={() => fetchWindowDetail(instanceId, record.bundleId, record.uri)}
-                      loading={isLoading}
-                    />
-                  </div>
-                  {renderContent(detail.contents)}
-                </div>
-              );
-            },
-            rowExpandable: () => true,
-          }}
-        />
-      )}
-    </div>
+    <Collapse
+      activeKey={activePanels}
+      onChange={(keys) => setActivePanels(Array.isArray(keys) ? keys : [keys])}
+      items={[
+        {
+          key: 'desktop-resources',
+          label: t('desktop.title'),
+          children: content,
+        },
+      ]}
+    />
   );
 }
