@@ -51,7 +51,7 @@ pub struct ManagerConnectionParams {
     /// digital-employee 主键（用于状态标识 / 日志）。
     pub employee_id: u64,
     /// 机器人账号 ID（audience = `robot:<id>`，TFRM-183 暴露）。
-    pub robot_account_id: u64,
+    pub robot_account_id: String,
     /// 可选 scope（None = server 缺省全部能力）。
     pub scope: Option<String>,
     /// Persisted Robot binding metadata for the target ComputerInstance.
@@ -746,7 +746,7 @@ pub async fn manager_connect_smcp(
     state: State<'_, AppState>,
     instance_id: String,
     employee_id: u64,
-    robot_account_id: u64,
+    robot_account_id: String,
     robot_id: Option<String>,
     robot_name: Option<String>,
     namespace: Option<String>,
@@ -762,7 +762,7 @@ pub async fn manager_connect_smcp(
     );
     let result = async {
         let employee =
-            validate_manager_robot_account(state.inner(), employee_id, robot_account_id).await?;
+            validate_manager_robot_account(state.inner(), employee_id, &robot_account_id).await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -793,7 +793,7 @@ pub async fn manager_connect_smcp(
             // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
             routing_headers: info.routing_headers.clone(),
             employee_id,
-            robot_account_id,
+            robot_account_id: robot_account_id.clone(),
             scope,
             robot_binding: RobotBindingMetadata {
                 employee_id,
@@ -801,7 +801,7 @@ pub async fn manager_connect_smcp(
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| employee.robot_id.clone())
                     .or_else(|| Some(office_id.clone())),
-                robot_account_id: Some(robot_account_id),
+                robot_account_id: Some(robot_account_id.clone()),
                 namespace: namespace
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| employee.namespace.clone())
@@ -815,7 +815,7 @@ pub async fn manager_connect_smcp(
         // 2) 换短 JWT
         let token = state
             .manager_client
-            .exchange_token(&robot_account_id.to_string(), params.scope.clone())
+            .exchange_token(&robot_account_id, params.scope.clone())
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
@@ -843,7 +843,7 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
-    robot_account_id: u64,
+    robot_account_id: String,
     required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
     let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
@@ -854,14 +854,15 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     )
     .await?;
     let result = async {
-        let employee = validate_manager_robot_account(state, employee_id, robot_account_id).await?;
+        let employee =
+            validate_manager_robot_account(state, employee_id, &robot_account_id).await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
         let token = state
             .manager_client
-            .exchange_token(&robot_account_id.to_string(), None)
+            .exchange_token(&robot_account_id, None)
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
@@ -889,7 +890,7 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             office_id: office_id.clone(),
             routing_headers: info.routing_headers.clone(),
             employee_id,
-            robot_account_id,
+            robot_account_id: robot_account_id.clone(),
             scope: None,
             robot_binding: RobotBindingMetadata {
                 employee_id,
@@ -897,7 +898,7 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
                     .robot_id
                     .clone()
                     .or_else(|| Some(office_id.clone())),
-                robot_account_id: Some(robot_account_id),
+                robot_account_id: Some(robot_account_id.clone()),
                 namespace: employee
                     .namespace
                     .clone()
@@ -1009,7 +1010,7 @@ async fn finish_manager_connect(
 async fn validate_manager_robot_account(
     state: &AppState,
     employee_id: u64,
-    robot_account_id: u64,
+    robot_account_id: &str,
 ) -> Result<DigitalEmployeeBrief, ManagerError> {
     let employees = state.manager_client.list_digital_employees().await?;
     validate_manager_robot_account_from_list(&employees, employee_id, robot_account_id)
@@ -1018,7 +1019,7 @@ async fn validate_manager_robot_account(
 fn validate_manager_robot_account_from_list(
     employees: &[DigitalEmployeeBrief],
     employee_id: u64,
-    robot_account_id: u64,
+    robot_account_id: &str,
 ) -> Result<DigitalEmployeeBrief, ManagerError> {
     let employee = employees
         .iter()
@@ -1029,7 +1030,7 @@ fn validate_manager_robot_account_from_list(
                 "Manager Robot target employee {employee_id} is not visible"
             ))
         })?;
-    let actual_robot_account_id = employee.robot_account_id.ok_or_else(|| {
+    let actual_robot_account_id = employee.robot_account_id.as_deref().ok_or_else(|| {
         ManagerError::InvalidResponse(format!(
             "robotAccountId missing for Manager Robot target employee {employee_id}"
         ))
@@ -1218,7 +1219,7 @@ async fn commit_robot_binding(
             instance.connection_policy.target = Some(ComputerConnectionTarget {
                 target_type: ComputerConnectionTargetType::ManagerRobot,
                 id: robot_binding.employee_id.to_string(),
-                robot_account_id: robot_binding.robot_account_id,
+                robot_account_id: robot_binding.robot_account_id.clone(),
             });
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
@@ -1515,7 +1516,7 @@ async fn refresh_cycle(
     generation: u64,
 ) -> RefreshOutcome {
     let token = match manager_client
-        .exchange_token(&params.robot_account_id.to_string(), params.scope.clone())
+        .exchange_token(&params.robot_account_id, params.scope.clone())
         .await
     {
         Ok(t) => t,
@@ -1726,32 +1727,37 @@ mod tests {
     #[test]
     fn validate_manager_robot_account_accepts_matching_employee() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
-            { "id": 41, "name": "old", "robotAccountId": 4100 },
+            { "id": 41, "name": "old", "robotAccountId": "org-1:account-41" },
             {
                 "id": 42,
                 "name": "target",
-                "robotAccountId": 4200,
+                "robotAccountId": "org-1:account-42",
                 "robotId": "robot-a",
                 "namespace": "tf"
             }
         ]))
         .unwrap();
 
-        let employee = validate_manager_robot_account_from_list(&employees, 42, 4200).unwrap();
+        let employee =
+            validate_manager_robot_account_from_list(&employees, 42, "org-1:account-42").unwrap();
 
         assert_eq!(employee.id, 42);
-        assert_eq!(employee.robot_account_id, Some(4200));
+        assert_eq!(
+            employee.robot_account_id.as_deref(),
+            Some("org-1:account-42")
+        );
         assert_eq!(employee.robot_id.as_deref(), Some("robot-a"));
     }
 
     #[test]
     fn validate_manager_robot_account_rejects_mismatched_account() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
-            { "id": 42, "name": "target", "robotAccountId": 4200 }
+            { "id": 42, "name": "target", "robotAccountId": "org-1:account-42" }
         ]))
         .unwrap();
 
-        let err = validate_manager_robot_account_from_list(&employees, 42, 4300).unwrap_err();
+        let err = validate_manager_robot_account_from_list(&employees, 42, "org-1:account-43")
+            .unwrap_err();
 
         assert!(
             matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId mismatch"))
@@ -1765,7 +1771,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let err = validate_manager_robot_account_from_list(&employees, 42, 4200).unwrap_err();
+        let err = validate_manager_robot_account_from_list(&employees, 42, "4200").unwrap_err();
 
         assert!(
             matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId missing"))

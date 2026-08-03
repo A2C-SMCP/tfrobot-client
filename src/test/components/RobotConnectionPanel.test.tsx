@@ -8,7 +8,7 @@ import { runtimeSnapshot } from '../helpers/store';
 const mockedInvoke = vi.mocked(invoke);
 
 function setComputer(
-  target: { type: 'manager_robot' | 'manual_smcp'; id: string; robotAccountId?: number } | null = null,
+  target: { type: 'manager_robot' | 'manual_smcp'; id: string; robotAccountId?: string } | null = null,
 ) {
   useComputerStore.setState({
     instances: [
@@ -36,13 +36,13 @@ function setManagerRobots() {
         id: 24,
         name: 'Deleted Robot',
         status: 'deleted',
-        robotAccountId: 2424,
+        robotAccountId: '2424',
       },
       {
         id: 25,
         name: 'Running Robot',
         status: 'running',
-        robotAccountId: 2525,
+        robotAccountId: '2525',
         robotId: 'robot-25',
         templateDisplayName: 'UAT',
         templateType: 'tfrserver',
@@ -63,7 +63,7 @@ function managerPolicyResponse() {
     runtime: runtimeSnapshot(),
     robot_binding: null,
     connection_policy: {
-      target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },
+      target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
       auto_connect: false,
     },
     connection: null,
@@ -123,7 +123,7 @@ describe('RobotConnectionPanel', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
         request: {
           id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },
+          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
           autoConnect: false,
         },
       });
@@ -163,7 +163,7 @@ describe('RobotConnectionPanel', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
         request: {
           id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: 2525 },
+          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
           autoConnect: false,
         },
       });

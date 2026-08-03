@@ -22,19 +22,19 @@ const employeeA: DigitalEmployeeBrief = {
   id: 11,
   name: 'bot-one',
   robotId: 'robot-a',
-  robotAccountId: 4242,
+  robotAccountId: '4242',
   namespace: 'ns-a',
   templateType: 'tfrserver',
   status: 'running',
   departments: [
     {
-      id: 7,
+      id: '7',
       name: '平台组',
       path: '/1/3/7/',
       ancestors: [
-        { id: 1, name: '总公司' },
-        { id: 3, name: '研发中心' },
-        { id: 7, name: '平台组' },
+        { id: '1', name: '总公司' },
+        { id: '3', name: '研发中心' },
+        { id: '7', name: '平台组' },
       ],
     },
   ],
@@ -249,12 +249,12 @@ describe('managerStore', () => {
         robot_binding: {
           employee_id: 11,
           robot_id: 'robot-a',
-          robot_account_id: 4242,
+          robot_account_id: '4242',
           namespace: 'ns-a',
           robot_name: 'bot-one',
         },
         connection_policy: {
-          target: { type: 'manager_robot', id: '11', robotAccountId: 4242 },
+          target: { type: 'manager_robot', id: '11', robotAccountId: '4242' },
           auto_connect: false,
         },
       }]); // metadata-only reconciliation
@@ -265,7 +265,7 @@ describe('managerStore', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('manager_connect_smcp', {
         instanceId: 'computer-a',
         employeeId: 11,
-        robotAccountId: 4242,
+        robotAccountId: '4242',
         robotId: 'robot-a',
         robotName: 'bot-one',
         namespace: 'ns-a',
@@ -280,9 +280,9 @@ describe('managerStore', () => {
       expect(useComputerStore.getState().instances[0]).toMatchObject({
         connectionStatus: 'disconnected',
         robotName: 'bot-one',
-        robotBinding: { employee_id: 11, robot_account_id: 4242 },
+        robotBinding: { employee_id: 11, robot_account_id: '4242' },
         connectionPolicy: {
-          target: { type: 'manager_robot', id: '11', robotAccountId: 4242 },
+          target: { type: 'manager_robot', id: '11', robotAccountId: '4242' },
           auto_connect: false,
         },
       });

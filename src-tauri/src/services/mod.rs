@@ -11,6 +11,7 @@ pub mod manager_client;
 pub mod manager_environment;
 pub mod runtime;
 pub mod sdk_config;
+pub(crate) mod serde_compat;
 pub mod settings;
 pub mod shell_env;
 pub mod storage;

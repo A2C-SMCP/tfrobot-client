@@ -203,23 +203,45 @@ async fn live_staging_login_contract_completes_the_manager_loop() {
         .expect("staging login contract");
 
     match login {
-        LoginResult::Authenticated { .. } => {}
-        LoginResult::AccountSelectionRequired { accounts } => {
-            let account = accounts.first().expect("at least one Manager account");
+        LoginResult::Authenticated { .. } => {
             client
-                .select_account(&account.account_id)
+                .list_digital_employees()
                 .await
-                .expect("staging account selection contract");
+                .expect("staging authenticated list contract");
+        }
+        LoginResult::AccountSelectionRequired { accounts } => {
+            assert!(!accounts.is_empty(), "at least one Manager account");
+            // A list contract mismatch can be account-specific because different accounts expose
+            // different generations of robot records. Exercise every selectable account instead
+            // of silently covering only the first one.
+            for account in accounts {
+                let account_client = test_manager_client();
+                let refreshed_login = account_client
+                    .login(
+                        Some(ManagerEnvironment::Staging.base_url().to_string()),
+                        &identifier,
+                        &password,
+                    )
+                    .await
+                    .expect("refresh staging login before account selection");
+                assert!(matches!(
+                    refreshed_login,
+                    LoginResult::AccountSelectionRequired { .. }
+                ));
+                account_client
+                    .select_account(&account.account_id)
+                    .await
+                    .expect("staging account selection contract");
+                account_client
+                    .list_digital_employees()
+                    .await
+                    .expect("staging authenticated list contract for selected account");
+            }
         }
         LoginResult::OnboardingRequired { .. } => {
             panic!("test account unexpectedly requires onboarding")
         }
     }
-
-    client
-        .list_digital_employees()
-        .await
-        .expect("staging authenticated list contract");
 }
 
 /// 标准单账户登录 data（与 UAT guide §5.1 实测字面量对齐）。
@@ -477,7 +499,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
                     {"id": 11, "name": "本地联调员工", "robotId": "r-1",
                      "status": "running", "templateType": "tfrserver", "templateDisplayName": "智能客服",
                      "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver",
-                     "robot_account_id": 4242},
+                     "robotAccountId": "org-legacy-18:account-24"},
                     {"id": 12, "name": "robot-2"}
                 ]
             })),
@@ -496,7 +518,10 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     assert_eq!(list[0].template_type.as_deref(), Some("tfrserver"));
     assert_eq!(list[0].status.as_deref(), Some("running"));
     assert_eq!(list[0].cluster_name.as_deref(), Some("local-tfrobotserver"));
-    assert_eq!(list[0].robot_account_id, Some(4242));
+    assert_eq!(
+        list[0].robot_account_id.as_deref(),
+        Some("org-legacy-18:account-24")
+    );
 
     // Bearer token 应当在第二个请求（list）里
     let reqs = captured.lock().await;

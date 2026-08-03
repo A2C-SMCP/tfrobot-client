@@ -74,8 +74,12 @@ pub struct RobotBindingMetadata {
     pub employee_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_account_id: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub robot_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,9 +102,10 @@ pub struct ComputerConnectionTarget {
         rename = "robotAccountId",
         alias = "robot_account_id",
         default,
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
         skip_serializing_if = "Option::is_none"
     )]
-    pub robot_account_id: Option<u64>,
+    pub robot_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -244,9 +249,10 @@ pub struct ComputerProfileConnectionTarget {
     #[serde(
         rename = "robotAccountId",
         default,
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
         skip_serializing_if = "Option::is_none"
     )]
-    pub robot_account_id: Option<u64>,
+    pub robot_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,8 +261,12 @@ pub struct ComputerProfileRobotBinding {
     pub employee_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_account_id: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub robot_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,7 +298,7 @@ impl From<&ComputerInstance> for ComputerProfile {
                     ComputerProfileConnectionTarget {
                         target_type: target.target_type.clone(),
                         id: target.id.clone(),
-                        robot_account_id: target.robot_account_id,
+                        robot_account_id: target.robot_account_id.clone(),
                     }
                 }),
                 auto_connect: instance.connection_policy.auto_connect,
@@ -297,7 +307,7 @@ impl From<&ComputerInstance> for ComputerProfile {
                 ComputerProfileRobotBinding {
                     employee_id: binding.employee_id,
                     robot_id: binding.robot_id.clone(),
-                    robot_account_id: binding.robot_account_id,
+                    robot_account_id: binding.robot_account_id.clone(),
                     namespace: binding.namespace.clone(),
                     robot_name: binding.robot_name.clone(),
                 }
@@ -2478,6 +2488,54 @@ mod tests {
 
     fn instance(id: &str, name: &str) -> ComputerInstance {
         ComputerInstance::new(id, name)
+    }
+
+    #[test]
+    fn computer_profile_migrates_legacy_numeric_robot_account_ids() {
+        let profile: ComputerProfile = serde_json::from_value(serde_json::json!({
+            "schema_version": COMPUTER_PROFILE_SCHEMA_VERSION,
+            "id": "computer-1",
+            "name": "Computer",
+            "connection_policy": {
+                "target": {
+                    "type": "manager_robot",
+                    "id": "11",
+                    "robotAccountId": 4200
+                },
+                "auto_connect": true
+            },
+            "robot_binding": {
+                "employee_id": 11,
+                "robot_account_id": 4200
+            }
+        }))
+        .expect("legacy numeric robotAccountId should remain readable");
+
+        assert_eq!(
+            profile
+                .connection_policy
+                .target
+                .as_ref()
+                .and_then(|target| target.robot_account_id.as_deref()),
+            Some("4200")
+        );
+        assert_eq!(
+            profile
+                .robot_binding
+                .as_ref()
+                .and_then(|binding| binding.robot_account_id.as_deref()),
+            Some("4200")
+        );
+
+        let serialized = serde_json::to_value(profile).unwrap();
+        assert_eq!(
+            serialized["connection_policy"]["target"]["robotAccountId"],
+            serde_json::json!("4200")
+        );
+        assert_eq!(
+            serialized["robot_binding"]["robot_account_id"],
+            serde_json::json!("4200")
+        );
     }
 
     fn instance_with_input(id: &str, label: &str) -> ComputerInstance {

@@ -32,7 +32,7 @@ export type ComputerConnectionStatus = ClientConnectionStatus;
 export interface RobotBindingMetadata {
   employee_id: number;
   robot_id?: string;
-  robot_account_id?: number;
+  robot_account_id?: string;
   namespace?: string;
   robot_name?: string;
 }
@@ -42,7 +42,7 @@ export type ComputerConnectionTargetType = 'manager_robot' | 'manual_smcp';
 export interface ComputerConnectionTarget {
   type: ComputerConnectionTargetType;
   id: string;
-  robotAccountId?: number;
+  robotAccountId?: string;
 }
 
 export interface ComputerConnectionPolicy {

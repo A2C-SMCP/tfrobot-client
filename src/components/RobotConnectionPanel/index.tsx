@@ -369,7 +369,7 @@ function formatManagerRobotOption(employee: {
 
 function valueToTarget(
   value: string | undefined,
-  employees: Array<{ id: number; robotAccountId?: number }>,
+  employees: Array<{ id: number; robotAccountId?: string }>,
   currentTarget?: ComputerConnectionTarget | null,
 ): ComputerConnectionTarget | null {
   if (!value) return null;

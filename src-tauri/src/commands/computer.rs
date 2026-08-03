@@ -787,6 +787,7 @@ async fn connect_computer_connection_target_by_policy(
                 .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
             let robot_account_id = target
                 .robot_account_id
+                .clone()
                 .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
             connect_manager_robot_target_for_policy(
                 app,
@@ -826,6 +827,7 @@ fn validate_connection_target_reference(
             id.parse::<u64>()
                 .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
             robot_account_id
+                .clone()
                 .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
             Ok(())
         }

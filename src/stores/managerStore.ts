@@ -25,7 +25,7 @@ export interface AccountOption {
 
 /** 部门祖先链元素（`departments[].ancestors[]`）。根→叶有序，末元素即本部门。 */
 export interface DepartmentAncestor {
-  id: number;
+  id: string;
   name: string;
 }
 
@@ -34,7 +34,7 @@ export interface DepartmentAncestor {
  * `ancestors` 含自身、根→叶有序；按序 join `name` 即面包屑。不受可见性 flag 控制。
  */
 export interface DepartmentRef {
-  id: number;
+  id: string;
   name: string;
   path?: string;
   ancestors?: DepartmentAncestor[];
@@ -47,11 +47,11 @@ export interface DigitalEmployeeBrief {
   description?: string;
   robotId?: string;
   /**
-   * 机器人自身账号 ID（TFRM-183，nullable）。token-exchange 的 audience = `robot:<robotAccountId>`。
+   * 机器人自身账号 ID（TFRM-183，不透明字符串、nullable）。token-exchange 的 audience = `robot:<robotAccountId>`。
    * 为空表示历史/未回填实例——无法走安全连接，UI 应禁用其连接按钮。
    * 注意与 `robotId`（SMCP 路由串）区分。
    */
-  robotAccountId?: number;
+  robotAccountId?: string;
   status?: string;
   templateDisplayName?: string;
   templateType?: string;

@@ -251,7 +251,8 @@ pub enum LoginResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DepartmentAncestor {
-    pub id: u64,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub id: String,
     pub name: String,
 }
 
@@ -262,7 +263,8 @@ pub struct DepartmentAncestor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DepartmentRef {
-    pub id: u64,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub path: String,
@@ -281,16 +283,17 @@ pub struct DigitalEmployeeBrief {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    /// 机器人自身账号 ID（`AccountType=robot` 的 Account.ID）；token-exchange 的
+    /// 机器人自身账号 ID（`AccountType=robot` 的 Account.ID，不透明字符串）；token-exchange 的
     /// audience = `robot:<robotAccountId>`（TFRM-183 暴露，**nullable**：历史/未回填实例为 null —
     /// 这类机器人不能做 token-exchange 连接，前端应禁用其连接按钮）。
     /// 注意与 `account_id`（创建人 ID）和 `robot_id`/rid（SMCP 路由串）区分。
     #[serde(
         default,
         alias = "robot_account_id",
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
         skip_serializing_if = "Option::is_none"
     )]
-    pub robot_account_id: Option<u64>,
+    pub robot_account_id: Option<String>,
     /// `running` / `stopped` / `init_failed` / … 完整状态集见 UAT guide。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -1151,7 +1154,7 @@ mod tests {
         let emp: DigitalEmployeeBrief = serde_json::from_str(json).unwrap();
         assert_eq!(emp.departments.len(), 1);
         let dept = &emp.departments[0];
-        assert_eq!(dept.id, 7);
+        assert_eq!(dept.id, "7");
         assert_eq!(dept.path, "/1/3/7/");
         assert_eq!(dept.ancestors.len(), 3);
         assert_eq!(dept.ancestors[0].name, "总公司");
@@ -1170,19 +1173,48 @@ mod tests {
     }
 
     #[test]
+    fn digital_employee_brief_preserves_string_department_ids_from_manager() {
+        let emp: DigitalEmployeeBrief = serde_json::from_str(
+            r#"{
+                "id": 11,
+                "name": "robot",
+                "departments": [{
+                    "id": "org-legacy-18:department-7",
+                    "name": "平台组",
+                    "ancestors": [{
+                        "id": "org-legacy-18:department-1",
+                        "name": "总公司"
+                    }]
+                }]
+            }"#,
+        )
+        .expect("Manager string department IDs should deserialize");
+
+        let serialized = serde_json::to_value(emp).unwrap();
+        assert_eq!(
+            serialized["departments"][0]["id"],
+            serde_json::json!("org-legacy-18:department-7")
+        );
+        assert_eq!(
+            serialized["departments"][0]["ancestors"][0]["id"],
+            serde_json::json!("org-legacy-18:department-1")
+        );
+    }
+
+    #[test]
     fn digital_employee_brief_deserializes_robot_account_id() {
         // TFRM-183：robotAccountId（camelCase, nullable）= 机器人账号 ID，token-exchange audience 用。
         let json = r#"{"id": 11, "name": "robot", "robotId": "rid-1", "robotAccountId": 4242}"#;
         let emp: DigitalEmployeeBrief = serde_json::from_str(json).unwrap();
-        assert_eq!(emp.robot_account_id, Some(4242));
-        // 与 rid/robot_id 区分：robotId 是路由串，robotAccountId 是数字账号 ID。
+        assert_eq!(emp.robot_account_id.as_deref(), Some("4242"));
+        // 与 rid/robot_id 区分：robotId 是路由串，robotAccountId 是不透明账号 ID。
         assert_eq!(emp.robot_id.as_deref(), Some("rid-1"));
 
         // Manager 若返回 snake_case，也必须保留；Tauri 再序列化给前端时会转回 robotAccountId。
         let snake_case: DigitalEmployeeBrief =
             serde_json::from_str(r#"{"id": 14, "name": "robot", "robot_account_id": 5252}"#)
                 .unwrap();
-        assert_eq!(snake_case.robot_account_id, Some(5252));
+        assert_eq!(snake_case.robot_account_id.as_deref(), Some("5252"));
 
         // 缺字段（历史实例）→ None
         let absent: DigitalEmployeeBrief =
@@ -1192,6 +1224,22 @@ mod tests {
         let null_val: DigitalEmployeeBrief =
             serde_json::from_str(r#"{"id": 13, "name": "n", "robotAccountId": null}"#).unwrap();
         assert!(null_val.robot_account_id.is_none());
+    }
+
+    #[test]
+    fn digital_employee_brief_preserves_string_robot_account_id_from_manager() {
+        // staging 实际契约：机器人账号 ID 与登录账号 ID 一样是 opaque string，
+        // 不能假设为数字主键，否则一个不兼容条目会导致整个列表解析失败。
+        let emp: DigitalEmployeeBrief = serde_json::from_str(
+            r#"{"id": 15, "name": "robot", "robotAccountId": "org-legacy-18:account-24"}"#,
+        )
+        .expect("Manager string robotAccountId should deserialize");
+
+        let serialized = serde_json::to_value(emp).unwrap();
+        assert_eq!(
+            serialized["robotAccountId"],
+            serde_json::json!("org-legacy-18:account-24")
+        );
     }
 
     #[test]
