@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tfrobot_client_lib::services::manager_client::{LoginResult, ManagerClient, ManagerError};
+use tfrobot_client_lib::services::manager_environment::ManagerEnvironment;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -185,12 +186,48 @@ fn envelope(data: serde_json::Value) -> serde_json::Value {
     serde_json::json!({"code": 200, "message": "success", "data": data})
 }
 
+#[tokio::test]
+#[ignore = "requires TFRS_LIVE_IDENTIFIER and TFRS_LIVE_PASSWORD"]
+async fn live_staging_login_contract_completes_the_manager_loop() {
+    let identifier = std::env::var("TFRS_LIVE_IDENTIFIER").expect("TFRS_LIVE_IDENTIFIER");
+    let password = std::env::var("TFRS_LIVE_PASSWORD").expect("TFRS_LIVE_PASSWORD");
+    let client = test_manager_client();
+
+    let login = client
+        .login(
+            Some(ManagerEnvironment::Staging.base_url().to_string()),
+            &identifier,
+            &password,
+        )
+        .await
+        .expect("staging login contract");
+
+    match login {
+        LoginResult::Authenticated { .. } => {}
+        LoginResult::AccountSelectionRequired { accounts } => {
+            let account = accounts.first().expect("at least one Manager account");
+            client
+                .select_account(&account.account_id)
+                .await
+                .expect("staging account selection contract");
+        }
+        LoginResult::OnboardingRequired { .. } => {
+            panic!("test account unexpectedly requires onboarding")
+        }
+    }
+
+    client
+        .list_digital_employees()
+        .await
+        .expect("staging authenticated list contract");
+}
+
 /// 标准单账户登录 data（与 UAT guide §5.1 实测字面量对齐）。
 fn single_account_login_data(token: &str) -> serde_json::Value {
     serde_json::json!({
         "token": token,
         "userId": 9,
-        "accountId": 16,
+        "accountId": "org-legacy-9:account-16",
         "accountName": "client_uat",
     })
 }
@@ -215,7 +252,7 @@ async fn login_success_writes_session_and_returns_authenticated() {
     match result {
         LoginResult::Authenticated { user } => {
             assert_eq!(user.user_id, 9);
-            assert_eq!(user.account_id, 16);
+            assert_eq!(user.account_id, "org-legacy-9:account-16");
             assert_eq!(user.account_name, "client_uat");
         }
         _ => panic!("expected Authenticated variant"),
@@ -250,6 +287,85 @@ async fn login_success_writes_session_and_returns_authenticated() {
 }
 
 #[tokio::test]
+async fn login_uses_email_field_for_email_identifier() {
+    let script = vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 200 OK",
+        envelope(single_account_login_data("jwt-email")),
+    )];
+    let (base, captured, _h) = spawn_mock_manager(script).await;
+
+    let client = test_manager_client();
+    client
+        .login(Some(base), "user@example.com", "Test@123456")
+        .await
+        .expect("email login should succeed");
+
+    let requests = captured.lock().await;
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body["email"], "user@example.com");
+    assert!(body.get("phone").is_none());
+}
+
+#[tokio::test]
+async fn invalid_login_credentials_do_not_expire_an_existing_session() {
+    let (success_base, _, _success_server) = spawn_mock_manager(vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 200 OK",
+        envelope(single_account_login_data("jwt-existing")),
+    )])
+    .await;
+    let (invalid_base, _, _invalid_server) = spawn_mock_manager(vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 401 Unauthorized",
+        serde_json::json!({"code": 401, "message": "invalid credentials", "data": null}),
+    )])
+    .await;
+
+    let client = test_manager_client();
+    client
+        .login(Some(success_base), "13800138008", "correct")
+        .await
+        .unwrap();
+    let error = client
+        .login(Some(invalid_base), "13800138008", "wrong")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ManagerError::InvalidCredentials { ref message } if message == "invalid credentials"
+    ));
+    assert!(client.has_session().await);
+}
+
+#[tokio::test]
+async fn login_without_an_account_returns_onboarding_required() {
+    let script = vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 200 OK",
+        envelope(serde_json::json!({
+            "token": "onboarding-token",
+            "userId": 99,
+            "needsOnboarding": true
+        })),
+    )];
+    let (base, _, _h) = spawn_mock_manager(script).await;
+
+    let client = test_manager_client();
+    let result = client
+        .login(Some(base), "13800138008", "Test@123456")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        result,
+        LoginResult::OnboardingRequired { user_id: 99 }
+    ));
+    assert!(!client.has_session().await);
+}
+
+#[tokio::test]
 async fn login_multi_account_returns_account_selection_required() {
     let script = vec![json_script(
         "/auth/login-by-password",
@@ -259,10 +375,10 @@ async fn login_multi_account_returns_account_selection_required() {
             "tempToken": "temp-xyz",
             "expiresIn": 300,
             "accounts": [
-                {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "测试用户2",
-                 "organizationId": 2, "organizationName": "测试企业", "organizationType": "enterprise"},
-                {"accountId": 3, "accountName": "testuser2_personal", "nickname": "测试用户2",
-                 "organizationId": 1, "organizationName": "one-person-org-1", "organizationType": "personal"}
+                {"accountId": "org-2:account-2", "accountName": "testuser2_enterprise", "nickname": "测试用户2",
+                 "organizationId": "org-2", "organizationName": "测试企业", "organizationType": "enterprise"},
+                {"accountId": "org-1:account-3", "accountName": "testuser2_personal", "nickname": "测试用户2",
+                 "organizationId": "org-1", "organizationName": "one-person-org-1", "organizationType": "personal"}
             ]
         })),
     )];
@@ -277,7 +393,7 @@ async fn login_multi_account_returns_account_selection_required() {
     match result {
         LoginResult::AccountSelectionRequired { accounts } => {
             assert_eq!(accounts.len(), 2);
-            assert_eq!(accounts[0].account_id, 2);
+            assert_eq!(accounts[0].account_id, "org-2:account-2");
             assert_eq!(accounts[0].account_name, "testuser2_enterprise");
             assert_eq!(accounts[0].organization_type, "enterprise");
             assert_eq!(accounts[1].organization_type, "personal");
@@ -297,8 +413,8 @@ async fn select_account_completes_session() {
                 "tempToken": "temp-xyz",
                 "expiresIn": 300,
                 "accounts": [
-                    {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "n",
-                     "organizationId": 2, "organizationName": "ent", "organizationType": "enterprise"}
+                    {"accountId": "org-2:account-2", "accountName": "testuser2_enterprise", "nickname": "n",
+                     "organizationId": "org-2", "organizationName": "ent", "organizationType": "enterprise"}
                 ]
             })),
         ),
@@ -308,7 +424,7 @@ async fn select_account_completes_session() {
             envelope(serde_json::json!({
                 "token": "final-jwt",
                 "userId": 2,
-                "accountId": 2,
+                "accountId": "org-2:account-2",
                 "accountName": "testuser2_enterprise"
             })),
         ),
@@ -320,16 +436,19 @@ async fn select_account_completes_session() {
         .login(Some(base), "13900139000", "Test@123456")
         .await
         .unwrap();
-    let user = client.select_account(2).await.expect("select-account");
-    assert_eq!(user.account_id, 2);
+    let user = client
+        .select_account("org-2:account-2")
+        .await
+        .expect("select-account");
+    assert_eq!(user.account_id, "org-2:account-2");
     assert_eq!(user.account_name, "testuser2_enterprise");
 
-    // 第二个请求 body 应当是 tempToken + accountId (number)
+    // 第二个请求 body 应当是 tempToken + opaque accountId string
     let reqs = captured.lock().await;
     assert_eq!(reqs.len(), 2);
     let select_body: serde_json::Value = serde_json::from_str(&reqs[1].body).unwrap();
     assert_eq!(select_body["tempToken"], "temp-xyz");
-    assert_eq!(select_body["accountId"], 2);
+    assert_eq!(select_body["accountId"], "org-2:account-2");
     // sessionToken 不应再出现
     assert!(select_body.get("sessionToken").is_none());
 }
@@ -337,7 +456,7 @@ async fn select_account_completes_session() {
 #[tokio::test]
 async fn select_account_without_pending_session_errors() {
     let client = test_manager_client();
-    let err = client.select_account(1).await.unwrap_err();
+    let err = client.select_account("org-1:account-1").await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 
@@ -678,8 +797,7 @@ async fn other_status_bucket_captures_body() {
 }
 
 #[tokio::test]
-async fn login_errors_when_base_url_missing_and_env_unset() {
-    std::env::remove_var("TFRS_MANAGER_BASE_URL");
+async fn login_errors_when_internal_caller_does_not_resolve_an_environment() {
     let client = test_manager_client();
     let err = client.login(None, "a", "b").await.unwrap_err();
     assert!(matches!(err, ManagerError::MissingBaseUrl));

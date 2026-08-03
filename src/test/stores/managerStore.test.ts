@@ -12,7 +12,11 @@ import { resetAllStores, runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 
-const user: UserInfo = { userId: 9, accountId: 16, accountName: 'client_uat' };
+const user: UserInfo = {
+  userId: 9,
+  accountId: 'org-legacy-9:account-16',
+  accountName: 'client_uat',
+};
 
 const employeeA: DigitalEmployeeBrief = {
   id: 11,
@@ -55,16 +59,16 @@ describe('managerStore', () => {
 
       const ret = await useManagerStore
         .getState()
-        .login('13800138008', 'Test@123456', 'http://localhost:8090');
+        .login('staging', '13800138008', 'Test@123456');
 
       expect(mockedInvoke).toHaveBeenCalledWith('manager_login', {
-        baseUrl: 'http://localhost:8090',
-        phone: '13800138008',
+        environment: 'staging',
+        identifier: '13800138008',
         password: 'Test@123456',
       });
       expect(ret).toEqual(result);
       expect(useManagerStore.getState().session).toEqual(user);
-      expect(useManagerStore.getState().baseUrl).toBe('http://localhost:8090');
+      expect(useManagerStore.getState().environment).toBe('staging');
       expect(useManagerStore.getState().pendingAccountSelection).toBeNull();
     });
 
@@ -73,10 +77,10 @@ describe('managerStore', () => {
         kind: 'account_selection_required',
         accounts: [
           {
-            accountId: 2,
+            accountId: 'org-2:account-2',
             accountName: 'testuser2_enterprise',
             nickname: '测试用户2',
-            organizationId: 2,
+            organizationId: 'org-2',
             organizationName: '测试企业',
             organizationType: 'enterprise',
           },
@@ -84,12 +88,12 @@ describe('managerStore', () => {
       };
       mockedInvoke.mockResolvedValueOnce(result);
 
-      await useManagerStore
-        .getState()
-        .login('13900139000', 'Test@123456', 'http://localhost:8090');
+      await useManagerStore.getState().login('beta', '13900139000', 'Test@123456');
 
       expect(useManagerStore.getState().session).toBeNull();
-      expect(useManagerStore.getState().pendingAccountSelection).toEqual(result.accounts);
+      expect(useManagerStore.getState().pendingAccountSelection).toEqual([
+        expect.objectContaining({ accountId: 'org-2:account-2' }),
+      ]);
     });
 
     it('stores unauthorized error and rethrows', async () => {
@@ -97,25 +101,63 @@ describe('managerStore', () => {
       mockedInvoke.mockRejectedValueOnce(err);
 
       await expect(
-        useManagerStore.getState().login('13800138008', 'wrong', 'http://localhost:8090'),
+        useManagerStore.getState().login('staging', '13800138008', 'wrong'),
       ).rejects.toEqual(err);
       expect(useManagerStore.getState().error).toEqual(err);
+    });
+
+    it('preserves an existing session when a new login has invalid credentials', async () => {
+      const err: ManagerError = {
+        kind: 'invalid_credentials',
+        detail: { message: 'invalid credentials' },
+      };
+      useManagerStore.setState({
+        environment: 'prod',
+        session: user,
+        employees: [employeeA],
+      });
+      mockedInvoke.mockRejectedValueOnce(err);
+
+      await expect(
+        useManagerStore.getState().login('staging', '13800138008', 'wrong'),
+      ).rejects.toEqual(err);
+
+      expect(useManagerStore.getState()).toMatchObject({
+        environment: 'prod',
+        session: user,
+        employees: [employeeA],
+        error: err,
+      });
+    });
+
+    it('routes an account without an organization to onboarding guidance', async () => {
+      const result: LoginResult = { kind: 'onboarding_required', userId: 99 };
+      mockedInvoke.mockResolvedValueOnce(result);
+
+      await useManagerStore.getState().login('prod', 'user@example.com', 'Test@123456');
+
+      expect(useManagerStore.getState()).toMatchObject({
+        environment: 'prod',
+        session: null,
+        pendingAccountSelection: null,
+        onboardingUserId: 99,
+      });
     });
   });
 
   describe('restoreSession', () => {
     it('restores session from persisted Manager credentials', async () => {
       mockedInvoke.mockResolvedValueOnce({
-        baseUrl: 'https://manager.example.com',
+        environment: 'prod',
         user,
       });
 
       const ret = await useManagerStore.getState().restoreSession();
 
       expect(mockedInvoke).toHaveBeenCalledWith('manager_restore_session');
-      expect(ret).toEqual({ baseUrl: 'https://manager.example.com', user });
+      expect(ret).toEqual({ environment: 'prod', user });
       expect(useManagerStore.getState().session).toEqual(user);
-      expect(useManagerStore.getState().baseUrl).toBe('https://manager.example.com');
+      expect(useManagerStore.getState().environment).toBe('prod');
       expect(useManagerStore.getState().restoreAttempted).toBe(true);
     });
 
@@ -132,7 +174,7 @@ describe('managerStore', () => {
 
   describe('fetchEmployees', () => {
     it('populates the employees list', async () => {
-      useManagerStore.setState({ session: user, baseUrl: 'https://mgr.example.com' });
+      useManagerStore.setState({ session: user, environment: 'staging' });
       mockedInvoke.mockResolvedValueOnce([employeeA]);
 
       await useManagerStore.getState().fetchEmployees();

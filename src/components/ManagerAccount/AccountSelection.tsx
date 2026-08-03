@@ -16,7 +16,7 @@ export function AccountSelection() {
 
   if (!pendingAccountSelection) return null;
 
-  const handleSelect = async (accountId: number) => {
+  const handleSelect = async (accountId: string) => {
     clearError();
     try {
       await selectAccount(accountId);

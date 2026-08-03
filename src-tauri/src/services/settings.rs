@@ -1,10 +1,11 @@
 use crate::services::client_computers::{ClientComputersPaths, GlobalConfigFile};
+use crate::services::manager_environment::ManagerEnvironment;
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 1;
+pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -55,21 +56,10 @@ pub struct ManagerSessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistedManagerSession {
-    pub base_url: String,
+    pub environment: ManagerEnvironment,
     pub user_id: u64,
-    pub account_id: u64,
+    pub account_id: String,
     pub account_name: String,
-}
-
-impl From<&ManagerSessionSettings> for PersistedManagerSession {
-    fn from(session: &ManagerSessionSettings) -> Self {
-        Self {
-            base_url: session.base_url.clone(),
-            user_id: session.user_id,
-            account_id: session.account_id,
-            account_name: session.account_name.clone(),
-        }
-    }
 }
 
 impl Default for ManagerSessionConfig {
@@ -156,7 +146,18 @@ impl SettingsService {
         if content.trim().is_empty() {
             return Err(ManagerSessionConfigError::EmptyFile(path));
         }
-        let config: ManagerSessionConfig = serde_json::from_str(&content)?;
+        let value: serde_json::Value = serde_json::from_str(&content)?;
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+        {
+            // Schema v1 stored an arbitrary base URL and numeric database account ID. Both are
+            // incompatible with the environment-scoped, opaque-ID auth contract, so fail closed
+            // and require one fresh login instead of reviving ambiguous credentials.
+            return Ok(ManagerSessionConfig::default());
+        }
+        let config: ManagerSessionConfig = serde_json::from_value(value)?;
         validate_manager_session_schema(&config)?;
         Ok(config)
     }
@@ -334,9 +335,9 @@ mod tests {
         let config = ManagerSessionConfig {
             schema_version: MANAGER_SESSION_SCHEMA_VERSION,
             session: Some(PersistedManagerSession {
-                base_url: "https://manager.example.com".to_string(),
+                environment: ManagerEnvironment::Staging,
                 user_id: 7,
-                account_id: 42,
+                account_id: "org-legacy-1:account-7".to_string(),
                 account_name: "client_uat".to_string(),
             }),
         };
@@ -368,7 +369,7 @@ mod tests {
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
             svc.global_manager_session_path(),
-            r#"{"schema_version": 2, "session": null}"#,
+            r#"{"schema_version": 3, "session": null}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -378,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn global_manager_session_rejects_nested_secret_fields() {
+    fn global_manager_session_v1_requires_a_fresh_environment_scoped_login() {
         let (svc, _tmp) = setup();
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
@@ -389,6 +390,30 @@ mod tests {
                 "baseUrl": "https://manager.example.com",
                 "userId": 7,
                 "accountId": 42,
+                "accountName": "client_uat"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            svc.load_global_manager_session().unwrap(),
+            ManagerSessionConfig::default()
+        );
+    }
+
+    #[test]
+    fn global_manager_session_rejects_nested_secret_fields() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 2,
+              "session": {
+                "environment": "staging",
+                "userId": 7,
+                "accountId": "org-legacy-1:",
                 "accountName": "client_uat",
                 "jwt": "plaintext"
               }

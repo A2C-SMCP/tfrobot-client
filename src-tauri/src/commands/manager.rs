@@ -10,6 +10,7 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::services::manager_client::{DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo};
+use crate::services::manager_environment::ManagerEnvironment;
 use crate::services::settings::{
     ManagerSessionConfig, PersistedManagerSession, MANAGER_SESSION_SCHEMA_VERSION,
 };
@@ -18,7 +19,7 @@ use crate::AppState;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoredManagerSession {
-    pub base_url: String,
+    pub environment: ManagerEnvironment,
     pub user: UserInfo,
 }
 
@@ -38,18 +39,18 @@ fn maybe_emit_auth_expired(app: &AppHandle, err: &ManagerError) {
 pub async fn manager_login(
     state: State<'_, AppState>,
     app: AppHandle,
-    base_url: Option<String>,
-    phone: String,
+    environment: ManagerEnvironment,
+    identifier: String,
     password: String,
 ) -> Result<LoginResult, ManagerError> {
-    log::info!(
-        "manager_login: base_url_provided={} phone={}",
-        base_url.is_some(),
-        phone
-    );
+    log::info!("manager_login: environment={environment:?}");
     let result = state
         .manager_client
-        .login(base_url, &phone, &password)
+        .login(
+            Some(environment.base_url().to_string()),
+            &identifier,
+            &password,
+        )
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
     if let LoginResult::Authenticated { user } = &result {
@@ -62,12 +63,12 @@ pub async fn manager_login(
 pub async fn manager_select_account(
     state: State<'_, AppState>,
     app: AppHandle,
-    account_id: u64,
+    account_id: String,
 ) -> Result<UserInfo, ManagerError> {
     log::info!("manager_select_account: account_id={}", account_id);
     let user = state
         .manager_client
-        .select_account(account_id)
+        .select_account(&account_id)
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
     persist_manager_session(state.inner(), &user).await;
@@ -96,11 +97,11 @@ pub async fn manager_restore_session(
     };
     let restored = state
         .manager_client
-        .restore_session(saved.base_url.clone(), user)
+        .restore_session(saved.environment, user)
         .await
         .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
     Ok(restored.map(|user| RestoredManagerSession {
-        base_url: saved.base_url,
+        environment: saved.environment,
         user,
     }))
 }
@@ -135,15 +136,15 @@ pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerErr
 }
 
 async fn persist_manager_session(state: &AppState, user: &UserInfo) {
-    let Some(base_url) = state.manager_client.current_base_url().await else {
+    let Some(environment) = state.manager_client.current_environment().await else {
         return;
     };
     let config = ManagerSessionConfig {
         schema_version: MANAGER_SESSION_SCHEMA_VERSION,
         session: Some(PersistedManagerSession {
-            base_url,
+            environment,
             user_id: user.user_id,
-            account_id: user.account_id,
+            account_id: user.account_id.clone(),
             account_name: user.account_name.clone(),
         }),
     };

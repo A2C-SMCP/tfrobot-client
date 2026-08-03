@@ -43,6 +43,7 @@ function App() {
   const {
     session,
     pendingAccountSelection,
+    onboardingUserId,
     restoreAttempted,
     restoreSession,
     handleAuthExpired,
@@ -69,12 +70,12 @@ function App() {
   // Manager authentication is app-wide state: restore it before any page-level
   // connection action can need the Manager JWT.
   useEffect(() => {
-    if (!session && !pendingAccountSelection && !restoreAttempted) {
+    if (!session && !pendingAccountSelection && onboardingUserId === null && !restoreAttempted) {
       restoreSession().catch(() => {
         /* restore errors are stored in manager store */
       });
     }
-  }, [pendingAccountSelection, restoreAttempted, restoreSession, session]);
+  }, [onboardingUserId, pendingAccountSelection, restoreAttempted, restoreSession, session]);
 
   useEffect(() => {
     const unlistenPromise = listen<unknown>(AUTH_EXPIRED_EVENT, () => {

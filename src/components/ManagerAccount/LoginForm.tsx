@@ -1,9 +1,12 @@
-import { useEffect } from 'react';
-import { Form, Button, Card, Alert, Typography, Space } from 'antd';
+import { Form, Button, Card, Alert, Typography, Space, Select } from 'antd';
 import { Input } from '@/components/common/Input';
 import { LoginOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useManagerStore, type ManagerError } from '@/stores/managerStore';
+import {
+  useManagerStore,
+  type ManagerEnvironment,
+  type ManagerError,
+} from '@/stores/managerStore';
 
 const { Title, Text } = Typography;
 
@@ -18,17 +21,16 @@ interface LoginFormProps {
 export function LoginForm({ onSubmitted }: LoginFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm();
-  const { baseUrl, login, loading, error, clearError, setBaseUrl } = useManagerStore();
+  const { environment, login, loading, error, clearError } = useManagerStore();
 
-  useEffect(() => {
-    form.setFieldValue('baseUrl', baseUrl);
-  }, [baseUrl, form]);
-
-  const handleFinish = async (values: { baseUrl?: string; phone: string; password: string }) => {
+  const handleFinish = async (values: {
+    environment: ManagerEnvironment;
+    identifier: string;
+    password: string;
+  }) => {
     clearError();
     try {
-      if (values.baseUrl) setBaseUrl(values.baseUrl);
-      await login(values.phone, values.password, values.baseUrl);
+      await login(values.environment, values.identifier, values.password);
       onSubmitted?.();
     } catch {
       /* error already stored */
@@ -53,6 +55,8 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
             description={
               error.kind === 'network_error'
                 ? error.detail
+                : error.kind === 'invalid_credentials'
+                ? error.detail.message
                 : error.kind === 'other'
                 ? `HTTP ${error.detail.status}: ${error.detail.body}`
                 : undefined
@@ -62,20 +66,31 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
           />
         )}
 
-        <Form form={form} layout="vertical" onFinish={handleFinish}>
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{ environment: environment ?? 'staging' }}
+          onFinish={handleFinish}
+        >
           <Form.Item
-            name="baseUrl"
-            label={t('managerAccount.login.baseUrl')}
-            extra={t('managerAccount.login.baseUrlHint')}
+            name="environment"
+            label={t('managerAccount.login.environment')}
+            extra={t('managerAccount.login.environmentHint')}
+            rules={[{ required: true, message: t('managerAccount.login.environmentRequired') }]}
           >
-            <Input placeholder="https://manager.example.com" />
+            <Select
+              options={(['staging', 'beta', 'prod'] as ManagerEnvironment[]).map((value) => ({
+                value,
+                label: t(`managerAccount.login.environments.${value}`),
+              }))}
+            />
           </Form.Item>
           <Form.Item
-            name="phone"
-            label={t('managerAccount.login.phone')}
-            rules={[{ required: true, message: t('managerAccount.login.phoneRequired') }]}
+            name="identifier"
+            label={t('managerAccount.login.identifier')}
+            rules={[{ required: true, message: t('managerAccount.login.identifierRequired') }]}
           >
-            <Input autoComplete="username" inputMode="tel" />
+            <Input autoComplete="username" />
           </Form.Item>
           <Form.Item
             name="password"

@@ -105,7 +105,6 @@ export type DuplicateSkillHomeMode = 'empty' | 'copy';
 export interface DuplicateComputerValues extends ComputerFormValues {
   sourceId: string;
   copyRobotBinding: boolean;
-  connectionTargetId?: string;
   skillHomeMode: DuplicateSkillHomeMode;
 }
 
@@ -554,7 +553,6 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         sourceId: values.sourceId,
         ...normalizeFormValues(values),
         copyRobotBinding: values.copyRobotBinding,
-        connectionTargetId: values.connectionTargetId || undefined,
         skillHomeMode: values.skillHomeMode,
       };
       const duplicated = await ingestStatus(

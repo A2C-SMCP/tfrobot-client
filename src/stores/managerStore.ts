@@ -9,16 +9,16 @@ import { useComputerStore } from './computerStore';
  */
 export interface UserInfo {
   userId: number;
-  accountId: number;
+  accountId: string;
   accountName: string;
 }
 
 /** 多账户候选项——server 实测字段结构。 */
 export interface AccountOption {
-  accountId: number;
+  accountId: string;
   accountName: string;
   nickname: string;
-  organizationId: number;
+  organizationId: string;
   organizationName: string;
   organizationType: string;
 }
@@ -63,16 +63,20 @@ export interface DigitalEmployeeBrief {
 
 export type LoginResult =
   | { kind: 'authenticated'; user: UserInfo }
-  | { kind: 'account_selection_required'; accounts: AccountOption[] };
+  | { kind: 'account_selection_required'; accounts: AccountOption[] }
+  | { kind: 'onboarding_required'; userId: number };
+
+export type ManagerEnvironment = 'staging' | 'beta' | 'prod';
 
 export interface RestoredManagerSession {
-  baseUrl: string;
+  environment: ManagerEnvironment;
   user: UserInfo;
 }
 
 export type ManagerError =
   | { kind: 'network_error'; detail: string }
   | { kind: 'unauthorized' }
+  | { kind: 'invalid_credentials'; detail: { message: string } }
   | { kind: 'forbidden' }
   | { kind: 'payment_required'; detail: { message: string; redirect_url?: string } }
   | { kind: 'not_found' }
@@ -92,9 +96,10 @@ export interface PaymentRequiredInfo {
 }
 
 interface ManagerState {
-  baseUrl: string;
+  environment: ManagerEnvironment | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
+  onboardingUserId: number | null;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
   restoreAttempted: boolean;
@@ -105,10 +110,13 @@ interface ManagerState {
   /** 在线状态。false 时 UI 展示离线横幅并保留最近一次成功列表（TFRM-56 离线模式）。 */
   online: boolean;
 
-  setBaseUrl: (url: string) => void;
   restoreSession: () => Promise<RestoredManagerSession | null>;
-  login: (phone: string, password: string, baseUrl?: string) => Promise<LoginResult>;
-  selectAccount: (accountId: number) => Promise<void>;
+  login: (
+    environment: ManagerEnvironment,
+    identifier: string,
+    password: string,
+  ) => Promise<LoginResult>;
+  selectAccount: (accountId: string) => Promise<void>;
   fetchEmployees: () => Promise<void>;
   /**
    * 进入列表页时的兜底拉取：仅当无数据、或距上次成功拉取已超过 `maxAgeMs`（默认 60s，
@@ -140,9 +148,10 @@ interface ManagerState {
 const EMPLOYEE_LIST_STALE_MS = 60_000;
 
 const initialState = {
-  baseUrl: '',
+  environment: null as ManagerEnvironment | null,
   session: null as UserInfo | null,
   pendingAccountSelection: null as AccountOption[] | null,
+  onboardingUserId: null as number | null,
   employees: [] as DigitalEmployeeBrief[],
   loading: false,
   restoreAttempted: false,
@@ -166,8 +175,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
 
   reset: () => set(initialState),
 
-  setBaseUrl: (url: string) => set({ baseUrl: url }),
-
   clearError: () => set({ error: null }),
   dismissPaymentRequired: () => set({ paymentRequired: null }),
 
@@ -181,7 +188,8 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         set({
           session: restored.user,
           pendingAccountSelection: null,
-          baseUrl: restored.baseUrl,
+          onboardingUserId: null,
+          environment: restored.environment,
           loading: false,
         });
       } else {
@@ -196,13 +204,12 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     }
   },
 
-  login: async (phone, password, baseUrl) => {
+  login: async (environment, identifier, password) => {
     set({ loading: true, error: null, paymentRequired: null });
     try {
-      const effectiveBaseUrl = baseUrl ?? get().baseUrl;
       const result = await invoke<LoginResult>('manager_login', {
-        baseUrl: effectiveBaseUrl || null,
-        phone,
+        environment,
+        identifier,
         password,
       });
       if (result.kind === 'authenticated') {
@@ -210,15 +217,26 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         set({
           session: result.user,
           pendingAccountSelection: null,
-          baseUrl: effectiveBaseUrl,
+          onboardingUserId: null,
+          environment,
           loading: false,
         });
-      } else {
+      } else if (result.kind === 'account_selection_required') {
         info(`manager: login requires account selection (${result.accounts.length} options)`);
         set({
           session: null,
           pendingAccountSelection: result.accounts,
-          baseUrl: effectiveBaseUrl,
+          onboardingUserId: null,
+          environment,
+          loading: false,
+        });
+      } else {
+        info('manager: login requires organization onboarding');
+        set({
+          session: null,
+          pendingAccountSelection: null,
+          onboardingUserId: result.userId,
+          environment,
           loading: false,
         });
       }
@@ -374,6 +392,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       set({
         session: null,
         pendingAccountSelection: null,
+        onboardingUserId: null,
         employees: [],
         loading: false,
         restoreAttempted: true,
@@ -391,6 +410,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     set({
       session: null,
       pendingAccountSelection: null,
+      onboardingUserId: null,
       employees: [],
       lastFetchAt: null,
       error: { kind: 'unauthorized' },

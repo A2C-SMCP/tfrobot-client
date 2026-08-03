@@ -21,7 +21,6 @@ import {
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
-import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
 import {
   computerSettingsNavigationKey,
   type ComputerWorkbenchSection,
@@ -214,7 +213,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     connectSelectedTarget,
     disconnectConnection,
   } = useComputerStore();
-  const { manualTargets, fetchManualTargets } = useConnectionTargetStore();
   const [view, setView] = useState<'list' | 'detail'>(initialView);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
@@ -227,7 +225,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     name: string;
     description?: string;
     copyRobotBinding?: boolean;
-    connectionTargetId?: string;
     skillHomeMode?: 'empty' | 'copy';
   }>();
 
@@ -257,12 +254,10 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
   const openDuplicateModal = (instance: ComputerInstance) => {
     setTargetInstance(instance);
     setModalMode('duplicate');
-    fetchManualTargets();
     form.setFieldsValue({
       name: `${instance.name} Copy`,
       description: instance.description,
       copyRobotBinding: true,
-      connectionTargetId: undefined,
       skillHomeMode: 'empty',
     });
   };
@@ -288,7 +283,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
           name: values.name,
           description: values.description,
           copyRobotBinding: values.copyRobotBinding ?? true,
-          connectionTargetId: values.connectionTargetId,
           skillHomeMode: values.skillHomeMode ?? 'empty',
         });
         message.success(t('computer.messages.duplicated'));
@@ -397,16 +391,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
           <>
             <Form.Item name="copyRobotBinding" label={t('computer.form.copyRobotBinding')} valuePropName="checked">
               <Switch />
-            </Form.Item>
-            <Form.Item name="connectionTargetId" label={t('computer.form.connectionTarget')}>
-              <Select
-                allowClear
-                placeholder={t('computer.form.useOriginalConnectionConfig')}
-                options={manualTargets.map((target) => ({
-                  value: target.id,
-                  label: `${target.name} (${target.office_id})`,
-                }))}
-              />
             </Form.Item>
             <Form.Item name="skillHomeMode" label={t('computer.form.skillHomeMode')}>
               <Select

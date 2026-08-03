@@ -7,30 +7,22 @@ import {
   Descriptions,
   Empty,
   List,
-  Modal,
   Select,
   Space,
   Switch,
-  Table,
-  Tabs,
   Tag,
   Typography,
 } from 'antd';
 import {
-  ApiOutlined,
   ExportOutlined,
-  InfoCircleOutlined,
   LoginOutlined,
   RobotOutlined,
-  UserOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
-  type ComputerConnectionTargetType,
 } from '@/stores/computerStore';
-import { useConnectionTargetStore, type ManualSmcpTarget } from '@/stores/connectionTargetStore';
 import { useManagerStore, type DepartmentRef } from '@/stores/managerStore';
 
 const { Text } = Typography;
@@ -64,7 +56,6 @@ function employeeStatusTagColor(status?: string): string {
 export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnectionPanelProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const [detailTarget, setDetailTarget] = useState<ManualSmcpTarget | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const hydrationAttemptedFor = useRef<string | null>(null);
   const { instances, updateConnectionPolicy } = useComputerStore();
@@ -75,27 +66,20 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     error: managerError,
     fetchEmployeesIfStale,
   } = useManagerStore();
-  const {
-    manualTargets,
-    loading: targetLoading,
-    error: targetError,
-    fetchManualTargets,
-  } = useConnectionTargetStore();
   const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
-    fetchManualTargets();
     if (session) {
       fetchEmployeesIfStale().catch(() => {
         /* error is rendered from manager store */
       });
     }
-  }, [fetchManualTargets, fetchEmployeesIfStale, session]);
+  }, [fetchEmployeesIfStale, session]);
 
   useEffect(() => {
-    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(selectedInstance?.connectionPolicy.target));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
@@ -121,52 +105,16 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
         })!,
         label: formatManagerRobotOption(employee),
       }));
-    const manualOptions = manualTargets.map((target) => ({
-      value: targetToValue({ type: 'manual_smcp', id: target.id })!,
-      label: `${target.name} (${target.office_id})`,
-    }));
     return [
       {
         label: t('managerAccount.employees.managerRobots'),
         options: managerOptions,
       },
-      {
-        label: t('connection.manualSmcp'),
-        options: manualOptions,
-      },
     ];
-  }, [employees, manualTargets, t]);
-
-  const manualColumns = useMemo(
-    () => [
-      {
-        title: t('connection.table.name'),
-        dataIndex: 'name',
-        key: 'name',
-        render: (name: string) => <Text strong>{name}</Text>,
-      },
-      { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
-      { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
-      {
-        title: t('connection.table.actions'),
-        key: 'actions',
-        width: 120,
-        render: (_: unknown, record: ManualSmcpTarget) => (
-          <Button
-            type="link"
-            icon={<InfoCircleOutlined />}
-            onClick={() => setDetailTarget(record)}
-          >
-            {t('computer.connectionActions.openTargetDetails')}
-          </Button>
-        ),
-      },
-    ],
-    [t],
-  );
+  }, [employees, t]);
 
   const rollbackPolicyControls = useCallback(() => {
-    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(selectedInstance?.connectionPolicy.target));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
@@ -270,15 +218,16 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
             onChange={handleTargetChange}
             options={targetOptions}
           />
-          <Button disabled={savingPolicy} onClick={() => {
-            fetchManualTargets();
-            if (session) fetchEmployeesIfStale(0);
-          }}>
+          <Button
+            disabled={savingPolicy || !session}
+            onClick={() => session && fetchEmployeesIfStale(0)}
+          >
             {t('common.refresh')}
           </Button>
           <Space>
             <Switch
               checked={autoConnect}
+              disabled={!selectedTarget}
               loading={savingPolicy}
               aria-label={t('connection.form.autoConnect')}
               onChange={handleAutoConnectChange}
@@ -288,193 +237,107 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
         </Space>
       </Card>
 
-      <Tabs
-        items={[
-          {
-            key: 'manager',
-            label: (
-              <>
-                <UserOutlined /> {t('managerAccount.employees.managerRobots')}
-              </>
-            ),
-            children: session ? (
-              <Card
-                title={t('managerAccount.employees.title')}
-                extra={
-                  <Button onClick={() => fetchEmployeesIfStale(0)} loading={managerLoading}>
-                    {t('common.refresh')}
-                  </Button>
-                }
-              >
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {managerError && (
-                    <Alert
-                      type="error"
-                      showIcon
-                      message={t(`manager.errors.${managerError.kind}`)}
-                    />
-                  )}
-                  {!managerLoading && employees.length === 0 && !managerError ? (
-                    <Empty description={t('managerAccount.employees.empty')} />
-                  ) : (
-                    <List
-                      bordered
-                      loading={managerLoading}
-                      dataSource={employees}
-                      rowKey={(employee) => employee.id}
-                      renderItem={(employee) => (
-                        <List.Item>
-                          <List.Item.Meta
-                            avatar={<RobotOutlined style={{ fontSize: 24 }} />}
-                            title={
-                              <Space size={4} wrap>
-                                <Text strong>{employee.name}</Text>
-                                {employee.status && (
-                                  <Tag color={employeeStatusTagColor(employee.status)}>
-                                    {employee.status}
-                                  </Tag>
-                                )}
-                                {employee.templateDisplayName && (
-                                  <Tag>{employee.templateDisplayName}</Tag>
-                                )}
-                                {employee.templateType && (
-                                  <Tag color="purple">{employee.templateType}</Tag>
-                                )}
-                              </Space>
-                            }
-                            description={
-                              <Descriptions size="small" column={1} colon={false}>
-                                <Descriptions.Item label={t('managerAccount.employees.department')}>
-                                  {employee.departments && employee.departments.length > 0 ? (
-                                    <Space direction="vertical" size={0}>
-                                      {employee.departments.map((dept) => (
-                                        <Text key={dept.id}>{formatDeptBreadcrumb(dept)}</Text>
-                                      ))}
-                                    </Space>
-                                  ) : (
-                                    <Text type="secondary">
-                                      {t('managerAccount.employees.noDepartment')}
-                                    </Text>
-                                  )}
-                                </Descriptions.Item>
-                                {employee.robotId && (
-                                  <Descriptions.Item
-                                    label={t('managerAccount.employees.robotId')}
-                                    contentStyle={{ fontFamily: 'monospace' }}
-                                  >
-                                    {employee.robotId}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.namespace && (
-                                  <Descriptions.Item label={t('managerAccount.employees.namespace')}>
-                                    {employee.namespace}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.clusterName && (
-                                  <Descriptions.Item label={t('managerAccount.employees.cluster')}>
-                                    {employee.clusterName}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.description && (
-                                  <Descriptions.Item label={t('managerAccount.employees.description')}>
-                                    {employee.description}
-                                  </Descriptions.Item>
-                                )}
-                              </Descriptions>
-                            }
-                          />
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                </Space>
-              </Card>
+      {session ? (
+        <Card
+          title={t('managerAccount.employees.title')}
+          extra={
+            <Button onClick={() => fetchEmployeesIfStale(0)} loading={managerLoading}>
+              {t('common.refresh')}
+            </Button>
+          }
+        >
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            {managerError && (
+              <Alert type="error" showIcon message={t(`manager.errors.${managerError.kind}`)} />
+            )}
+            {!managerLoading && employees.length === 0 && !managerError ? (
+              <Empty description={t('managerAccount.employees.empty')} />
             ) : (
-              <Card>
-                <Empty
-                  description={t('computer.connectionActions.managerLoginRequired')}
-                >
-                  <Button
-                    type="primary"
-                    icon={<LoginOutlined />}
-                    onClick={() => onNavigate?.('robot-connections')}
-                  >
-                    {t('computer.connectionActions.openRobotConnections')}
-                  </Button>
-                </Empty>
-              </Card>
-            ),
-          },
-          {
-            key: 'manual',
-            label: (
-              <>
-                <ApiOutlined /> {t('connection.manualSmcp')}
-              </>
-            ),
-            children: (
-              <Card
-                title={t('computer.connectionActions.manualTargetsTitle')}
-                extra={
-                  <Space>
-                    <Button onClick={() => fetchManualTargets()} loading={targetLoading}>
-                      {t('common.refresh')}
-                    </Button>
-                    <Button
-                      icon={<ExportOutlined />}
-                      onClick={() => onNavigate?.('robot-connections')}
-                    >
-                      {t('computer.connectionActions.configureTargets')}
-                    </Button>
-                  </Space>
-                }
-              >
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {targetError && <Alert type="error" showIcon message={targetError} />}
-                  <Table
-                    rowKey="id"
-                    columns={manualColumns}
-                    dataSource={manualTargets}
-                    loading={targetLoading}
-                    pagination={false}
-                    locale={{ emptyText: t('computer.connectionActions.noManualTargets') }}
-                  />
-                </Space>
-              </Card>
-            ),
-          },
-        ]}
-      />
-
-      <Modal
-        open={Boolean(detailTarget)}
-        title={detailTarget?.name}
-        footer={null}
-        onCancel={() => setDetailTarget(null)}
-        destroyOnHidden
-      >
-        {detailTarget && (
-          <Descriptions size="small" column={1} bordered>
-            <Descriptions.Item label={t('connection.table.name')}>
-              {detailTarget.name}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.url')}>
-              {detailTarget.url}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.office')}>
-              {detailTarget.office_id}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.form.namespace')}>
-              {detailTarget.namespace}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.form.headers')}>
-              {Object.keys(detailTarget.headers).length > 0
-                ? JSON.stringify(detailTarget.headers)
-                : '-'}
-            </Descriptions.Item>
-          </Descriptions>
-        )}
-      </Modal>
+              <List
+                bordered
+                loading={managerLoading}
+                dataSource={employees}
+                rowKey={(employee) => employee.id}
+                renderItem={(employee) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      avatar={<RobotOutlined style={{ fontSize: 24 }} />}
+                      title={
+                        <Space size={4} wrap>
+                          <Text strong>{employee.name}</Text>
+                          {employee.status && (
+                            <Tag color={employeeStatusTagColor(employee.status)}>
+                              {employee.status}
+                            </Tag>
+                          )}
+                          {employee.templateDisplayName && (
+                            <Tag>{employee.templateDisplayName}</Tag>
+                          )}
+                          {employee.templateType && (
+                            <Tag color="purple">{employee.templateType}</Tag>
+                          )}
+                        </Space>
+                      }
+                      description={
+                        <Descriptions size="small" column={1} colon={false}>
+                          <Descriptions.Item label={t('managerAccount.employees.department')}>
+                            {employee.departments && employee.departments.length > 0 ? (
+                              <Space direction="vertical" size={0}>
+                                {employee.departments.map((dept) => (
+                                  <Text key={dept.id}>{formatDeptBreadcrumb(dept)}</Text>
+                                ))}
+                              </Space>
+                            ) : (
+                              <Text type="secondary">
+                                {t('managerAccount.employees.noDepartment')}
+                              </Text>
+                            )}
+                          </Descriptions.Item>
+                          {employee.robotId && (
+                            <Descriptions.Item
+                              label={t('managerAccount.employees.robotId')}
+                              contentStyle={{ fontFamily: 'monospace' }}
+                            >
+                              {employee.robotId}
+                            </Descriptions.Item>
+                          )}
+                          {employee.namespace && (
+                            <Descriptions.Item label={t('managerAccount.employees.namespace')}>
+                              {employee.namespace}
+                            </Descriptions.Item>
+                          )}
+                          {employee.clusterName && (
+                            <Descriptions.Item label={t('managerAccount.employees.cluster')}>
+                              {employee.clusterName}
+                            </Descriptions.Item>
+                          )}
+                          {employee.description && (
+                            <Descriptions.Item label={t('managerAccount.employees.description')}>
+                              {employee.description}
+                            </Descriptions.Item>
+                          )}
+                        </Descriptions>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Space>
+        </Card>
+      ) : (
+        <Card>
+          <Empty description={t('computer.connectionActions.managerLoginRequired')}>
+            <Button
+              type="primary"
+              icon={<LoginOutlined />}
+              onClick={() => onNavigate?.('robot-connections')}
+            >
+              {t('computer.connectionActions.openRobotConnections')}
+            </Button>
+          </Empty>
+        </Card>
+      )}
     </Space>
   );
 }
@@ -482,6 +345,10 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
 function targetToValue(target?: ComputerConnectionTarget | null): string | undefined {
   if (!target) return undefined;
   return `${target.type}:${target.id}`;
+}
+
+function managerTargetToValue(target?: ComputerConnectionTarget | null): string | undefined {
+  return target?.type === 'manager_robot' ? targetToValue(target) : undefined;
 }
 
 function formatManagerRobotOption(employee: {
@@ -508,23 +375,17 @@ function valueToTarget(
   if (!value) return null;
   const [type, ...idParts] = value.split(':');
   const id = idParts.join(':');
-  if (!id || (type !== 'manager_robot' && type !== 'manual_smcp')) return null;
-  if (type === 'manager_robot') {
-    const employee = employees.find((item) => String(item.id) === id);
-    if (currentTarget && targetToValue(currentTarget) === value) {
-      return {
-        ...currentTarget,
-        robotAccountId: employee?.robotAccountId ?? currentTarget.robotAccountId,
-      };
-    }
+  if (!id || type !== 'manager_robot') return null;
+  const employee = employees.find((item) => String(item.id) === id);
+  if (currentTarget?.type === 'manager_robot' && targetToValue(currentTarget) === value) {
     return {
-      type,
-      id,
-      robotAccountId: employee?.robotAccountId,
+      ...currentTarget,
+      robotAccountId: employee?.robotAccountId ?? currentTarget.robotAccountId,
     };
   }
-  if (currentTarget && targetToValue(currentTarget) === value) {
-    return currentTarget;
-  }
-  return { type: type as ComputerConnectionTargetType, id };
+  return {
+    type,
+    id,
+    robotAccountId: employee?.robotAccountId,
+  };
 }

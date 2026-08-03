@@ -108,27 +108,9 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
 vi.mock('@/components/Computer/SkillsTab', () => ({
   SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
 }));
-const { mockFetchManualTargets } = vi.hoisted(() => ({
-  mockFetchManualTargets: vi.fn(),
-}));
-
-vi.mock('@/stores/connectionTargetStore', () => ({
-  useConnectionTargetStore: vi.fn(() => ({
-    manualTargets: [
-      {
-        id: 'target-a',
-        name: 'Target A',
-        office_id: 'office-a',
-      },
-    ],
-    fetchManualTargets: mockFetchManualTargets,
-  })),
-}));
-
 describe('Computer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFetchManualTargets.mockReset();
     useRuntimeStore.getState().reset();
     useComputerStore.getState().reset();
     useInputStore.getState().reset();
@@ -542,10 +524,8 @@ describe('Computer', () => {
     expect(await screen.findByText('Updated Computer')).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Duplicate' })[0]);
-    await waitFor(() => expect(mockFetchManualTargets).toHaveBeenCalled());
     expect(screen.getByLabelText('Copy Robot binding')).toBeChecked();
-    fireEvent.mouseDown(screen.getByLabelText('Connection target'));
-    fireEvent.click(await screen.findByText('Target A (office-a)'));
+    expect(screen.queryByLabelText('Connection target')).not.toBeInTheDocument();
     fireEvent.click(last(screen.getAllByText('OK')));
     expect(await screen.findByText('prod Copy')).toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith('duplicate_computer_instance', {
@@ -554,7 +534,6 @@ describe('Computer', () => {
         name: 'Updated Computer Copy',
         description: 'Updated description',
         copyRobotBinding: true,
-        connectionTargetId: 'target-a',
         skillHomeMode: 'empty',
       },
     });

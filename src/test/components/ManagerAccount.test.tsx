@@ -10,16 +10,16 @@ import type {
 import { useConnectionStore } from '@/stores/connectionStore';
 
 type ManagerStoreMock = {
-  baseUrl: string;
+  environment: 'staging' | 'beta' | 'prod' | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
+  onboardingUserId: number | null;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
   restoreAttempted: boolean;
   error: ManagerError | null;
   paymentRequired: { message: string; redirectUrl?: string } | null;
   online: boolean;
-  setBaseUrl: ReturnType<typeof vi.fn>;
   restoreSession: ReturnType<typeof vi.fn>;
   login: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
@@ -35,16 +35,16 @@ type ManagerStoreMock = {
 };
 
 const mockStore: ManagerStoreMock = {
-  baseUrl: '',
+  environment: null,
   session: null,
   pendingAccountSelection: null,
+  onboardingUserId: null,
   employees: [],
   loading: false,
   restoreAttempted: true,
   error: null,
   paymentRequired: null,
   online: true,
-  setBaseUrl: vi.fn(),
   restoreSession: vi.fn().mockResolvedValue(null),
   login: vi.fn().mockResolvedValue({ kind: 'authenticated' }),
   selectAccount: vi.fn().mockResolvedValue(undefined),
@@ -100,11 +100,11 @@ describe('ManagerAccount', () => {
   });
 
   describe('LoginForm', () => {
-    it('renders the sign-in heading and baseUrl hint', () => {
+    it('renders the sign-in heading and environment hint', () => {
       render(<LoginForm />);
       expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();
       expect(
-        screen.getByText('Leave empty to use the TFRS_MANAGER_BASE_URL environment variable.'),
+        screen.getByText('The client configures the Manager address for the selected environment.'),
       ).toBeInTheDocument();
     });
 
@@ -113,10 +113,7 @@ describe('ManagerAccount', () => {
       applyMock({ login });
 
       render(<LoginForm />);
-      fireEvent.change(screen.getByLabelText('Manager Base URL'), {
-        target: { value: 'http://localhost:8090' },
-      });
-      fireEvent.change(screen.getByLabelText('Phone'), {
+      fireEvent.change(screen.getByLabelText('Phone or email'), {
         target: { value: '13800138008' },
       });
       fireEvent.change(screen.getByLabelText('Password'), {
@@ -125,11 +122,7 @@ describe('ManagerAccount', () => {
       fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
 
       await waitFor(() => {
-        expect(login).toHaveBeenCalledWith(
-          '13800138008',
-          'Test@123456',
-          'http://localhost:8090',
-        );
+        expect(login).toHaveBeenCalledWith('staging', '13800138008', 'Test@123456');
       });
     });
 
@@ -146,7 +139,7 @@ describe('ManagerAccount', () => {
       render(<LoginForm />);
       expect(
         screen.getByText(
-          'The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.',
+          'The Manager environment could not be resolved. Select an environment again.',
         ),
       ).toBeInTheDocument();
     });
@@ -158,18 +151,18 @@ describe('ManagerAccount', () => {
       applyMock({
         pendingAccountSelection: [
           {
-            accountId: 2,
+            accountId: 'org-2:account-2',
             accountName: 'testuser2_enterprise',
             nickname: '测试企业主账号',
-            organizationId: 2,
+            organizationId: 'org-2',
             organizationName: '测试企业',
             organizationType: 'enterprise',
           },
           {
-            accountId: 3,
+            accountId: 'org-1:account-3',
             accountName: 'testuser2_personal',
             nickname: '个人账号',
-            organizationId: 1,
+            organizationId: 'org-1',
             organizationName: 'one-person-org-1',
             organizationType: 'personal',
           },
@@ -184,13 +177,17 @@ describe('ManagerAccount', () => {
 
       fireEvent.click(screen.getAllByRole('button', { name: 'Select' })[0]);
       await waitFor(() => {
-        expect(selectAccount).toHaveBeenCalledWith(2);
+        expect(selectAccount).toHaveBeenCalledWith('org-2:account-2');
       });
     }, 10000);
   });
 
   describe('EmployeeList', () => {
-    const user: UserInfo = { userId: 9, accountId: 16, accountName: 'client_uat' };
+    const user: UserInfo = {
+      userId: 9,
+      accountId: 'org-legacy-9:account-16',
+      accountName: 'client_uat',
+    };
     const employee: DigitalEmployeeBrief = {
       id: 11,
       name: 'bot-one',
@@ -426,7 +423,7 @@ describe('ManagerAccount', () => {
       render(<EmployeeList instanceId="computer-a" />);
 
       expect(screen.getByText(
-        'Cannot reach the Manager server. Check your connection or the Manager URL.',
+        'Cannot reach the Manager server. Check your connection or selected environment.',
       )).toBeInTheDocument();
       expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
     });
@@ -469,10 +466,10 @@ describe('ManagerAccount', () => {
       applyMock({
         pendingAccountSelection: [
           {
-            accountId: 2,
+            accountId: 'org-2:account-2',
             accountName: 'Acct One',
             nickname: 'Acct One',
-            organizationId: 2,
+            organizationId: 'org-2',
             organizationName: 'Org',
             organizationType: 'enterprise',
           },
@@ -484,11 +481,26 @@ describe('ManagerAccount', () => {
 
     it('renders EmployeeList when session is present', async () => {
       applyMock({
-        session: { userId: 9, accountId: 16, accountName: 'client_uat' },
+        session: {
+          userId: 9,
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+        },
         employees: [],
       });
       render(<ManagerAccount />);
       expect(screen.getByText('Digital Employees')).toBeInTheDocument();
+    });
+
+    it('renders onboarding guidance without creating an organization in the client', () => {
+      applyMock({ onboardingUserId: 99 });
+
+      render(<ManagerAccount />);
+
+      expect(screen.getByText('No organization account yet')).toBeInTheDocument();
+      expect(
+        screen.getByText(/Complete organization setup or join an organization in TFRS FrontPortal/),
+      ).toBeInTheDocument();
     });
   });
 });

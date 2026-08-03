@@ -262,7 +262,7 @@
         "connection_unavailable": "Connection is unavailable in the current runtime state."
       },
       "targetTitle": "Connection Target",
-      "selectTarget": "Select a Robot or Manual SMCP target",
+      "selectTarget": "Select a Manager Robot",
       "requiresRunning": "Start this Computer before connecting.",
       "requiresTarget": "Select a connection target first.",
       "missingRobotAccountId": "robotAccountId is missing; this Robot cannot be connected.",
@@ -744,15 +744,16 @@
   },
   "manager": {
     "errors": {
-      "network_error": "Cannot reach the Manager server. Check your connection or the Manager URL.",
+      "network_error": "Cannot reach the Manager server. Check your connection or selected environment.",
       "unauthorized": "Your Manager session has expired. Please sign in again.",
+      "invalid_credentials": "The phone number, email, or password is incorrect.",
       "forbidden": "You do not have permission to access this resource.",
       "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
       "not_found": "The requested resource was not found.",
       "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
-      "missing_base_url": "The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.",
+      "missing_base_url": "The Manager environment could not be resolved. Select an environment again.",
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
@@ -764,10 +765,16 @@
     "login": {
       "title": "Sign in to TFRSManager",
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
-      "baseUrl": "Manager Base URL",
-      "baseUrlHint": "Leave empty to use the TFRS_MANAGER_BASE_URL environment variable.",
-      "phone": "Phone",
-      "phoneRequired": "Phone is required",
+      "environment": "Environment",
+      "environmentHint": "The client configures the Manager address for the selected environment.",
+      "environmentRequired": "Environment is required",
+      "environments": {
+        "staging": "Staging",
+        "beta": "Beta",
+        "prod": "Production"
+      },
+      "identifier": "Phone or email",
+      "identifierRequired": "Phone or email is required",
       "password": "Password",
       "passwordRequired": "Password is required",
       "submit": "Sign In",
@@ -778,6 +785,11 @@
       "title": "Choose an account",
       "description": "Your credentials match multiple accounts. Pick one to continue.",
       "select": "Select",
+      "back": "Back to sign in"
+    },
+    "onboarding": {
+      "title": "No organization account yet",
+      "description": "Complete organization setup or join an organization in TFRS FrontPortal, then return here and sign in again.",
       "back": "Back to sign in"
     },
     "employees": {

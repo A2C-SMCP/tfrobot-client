@@ -621,7 +621,7 @@ describe('computerStore', () => {
     });
   });
 
-  it('duplicates a Computer with Robot binding and connection target options', async () => {
+  it('duplicates a Computer with Robot binding and skill-home options', async () => {
     mockedInvoke.mockResolvedValueOnce({ ...baseStatus, id: 'computer-copy', name: 'Computer A Copy' });
 
     await useComputerStore.getState().duplicateInstance({
@@ -629,7 +629,6 @@ describe('computerStore', () => {
       name: 'Computer A Copy',
       description: 'Copy',
       copyRobotBinding: true,
-      connectionTargetId: 'target-a',
       skillHomeMode: 'copy',
     });
 
@@ -639,7 +638,6 @@ describe('computerStore', () => {
         name: 'Computer A Copy',
         description: 'Copy',
         copyRobotBinding: true,
-        connectionTargetId: 'target-a',
         skillHomeMode: 'copy',
       },
     });

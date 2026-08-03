@@ -6,10 +6,7 @@ use crate::services::connection_targets::{
 };
 use crate::services::keychain::{KeychainError, SecretStore};
 use crate::services::sdk_config::{normalize_mcp_input_references, SdkConfigService};
-use crate::services::settings::{
-    ManagerSessionConfig, ManagerSessionConfigError, PersistedManagerSession, SettingsService,
-    MANAGER_SESSION_SCHEMA_VERSION,
-};
+use crate::services::settings::{ManagerSessionConfig, ManagerSessionConfigError, SettingsService};
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use serde::{Deserialize, Serialize};
@@ -146,13 +143,7 @@ pub fn migrate_legacy_config(
         return Ok(MigrationOutcome::NotNeeded);
     }
 
-    let plan = build_plan(
-        config,
-        sdk_config,
-        settings,
-        secret_store,
-        legacy_settings.manager_session.as_ref(),
-    )?;
+    let plan = build_plan(config, sdk_config, settings, secret_store)?;
     let file_snapshots = capture_destination_snapshots(config, settings, &plan)?;
 
     let mut progress = MigrationProgress::default();
@@ -194,7 +185,6 @@ fn build_plan(
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
     secret_store: &dyn SecretStore,
-    legacy_manager_session: Option<&crate::services::settings::ManagerSessionSettings>,
 ) -> Result<MigrationPlan, MigrationError> {
     let legacy_instances = config.load_legacy_computer_instances()?;
     let mut seen_instance_ids = HashSet::new();
@@ -298,23 +288,9 @@ fn build_plan(
         manual_smcp_targets: targets.into_values().collect(),
     };
 
-    let mut manager_session = settings.load_global_manager_session()?;
-    if let Some(legacy) = legacy_manager_session {
-        let migrated = PersistedManagerSession::from(legacy);
-        match manager_session.session.as_ref() {
-            Some(existing) if existing != &migrated => {
-                return Err(MigrationError::Conflict(
-                    "Manager session differs between legacy and global storage".to_string(),
-                ));
-            }
-            _ => {
-                manager_session = ManagerSessionConfig {
-                    schema_version: MANAGER_SESSION_SCHEMA_VERSION,
-                    session: Some(migrated),
-                }
-            }
-        }
-    }
+    // Legacy Manager metadata contains an arbitrary URL and numeric database ID. It is cleaned up
+    // with the legacy settings file but never revived into the environment-scoped auth schema.
+    let manager_session = settings.load_global_manager_session()?;
 
     // Manual target credentials already use stable target IDs. Reading them during
     // preflight verifies keychain access without copying secrets into JSON.

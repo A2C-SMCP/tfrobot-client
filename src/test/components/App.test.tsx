@@ -3,6 +3,10 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import App from '@/App';
 
 const managerStoreMock = vi.hoisted(() => ({
+  session: null as null,
+  pendingAccountSelection: null as null,
+  onboardingUserId: null as number | null,
+  restoreAttempted: false,
   restoreSession: vi.fn().mockResolvedValue(null),
   handleAuthExpired: vi.fn(),
 }));
@@ -28,9 +32,10 @@ vi.mock('@/stores/themeStore', () => ({
 
 vi.mock('@/stores/managerStore', () => ({
   useManagerStore: vi.fn(() => ({
-    session: null,
-    pendingAccountSelection: null,
-    restoreAttempted: false,
+    session: managerStoreMock.session,
+    pendingAccountSelection: managerStoreMock.pendingAccountSelection,
+    onboardingUserId: managerStoreMock.onboardingUserId,
+    restoreAttempted: managerStoreMock.restoreAttempted,
     restoreSession: managerStoreMock.restoreSession,
     handleAuthExpired: managerStoreMock.handleAuthExpired,
   })),
@@ -95,6 +100,8 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     managerStoreMock.restoreSession.mockResolvedValue(null);
+    managerStoreMock.onboardingUserId = null;
+    managerStoreMock.restoreAttempted = false;
     runtimeStoreMock.error = null;
     runtimeStoreMock.initialize.mockResolvedValue(undefined);
     runtimeStoreMock.dispose.mockResolvedValue(undefined);
@@ -118,6 +125,15 @@ describe('App', () => {
     await waitFor(() => {
       expect(managerStoreMock.restoreSession).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('does not restore a previous session while onboarding guidance is active', async () => {
+    managerStoreMock.onboardingUserId = 99;
+
+    render(<App />);
+
+    await waitFor(() => expect(runtimeStoreMock.initialize).toHaveBeenCalled());
+    expect(managerStoreMock.restoreSession).not.toHaveBeenCalled();
   });
 
   it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {
