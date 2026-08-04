@@ -29,10 +29,13 @@
     "config": "配置",
     "connection": "连接",
     "connectionLayer": "连接层",
-    "robotConnections": "Robot 连接",
+    "robotConnections": "数字员工",
     "development": "开发",
     "system": "系统",
     "debugPanel": "调试面板"
+  },
+  "robotConnections": {
+    "title": "机器人列表"
   },
   "computer": {
     "title": "Computer",
@@ -828,7 +831,7 @@
       "managerRobots": "Manager Robots",
       "signedInAs": "当前登录：{{name}}",
       "empty": "当前账号下没有可用的数字员工。",
-      "robotId": "Robot ID",
+      "robotId": "机器人 ID",
       "namespace": "命名空间",
       "cluster": "集群",
       "description": "描述",
@@ -847,6 +850,15 @@
       "renew": "去续费",
       "department": "所属部门",
       "noDepartment": "未分配部门",
+      "status": {
+        "running": "运行中",
+        "suspended": "已暂停",
+        "stopped": "已停止",
+        "init_failed": "初始化失败",
+        "failed": "运行失败",
+        "stop_failed": "停止失败",
+        "unknown": "状态未知"
+      },
       "offlineBanner": "离线模式——正在展示最近一次加载的列表，恢复网络后将自动刷新。",
       "visibilityRevoked": "「{{name}}」已不可访问，已从列表中移除。"
     }

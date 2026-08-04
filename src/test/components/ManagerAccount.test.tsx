@@ -10,6 +10,7 @@ import type {
   ManagerError,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import i18n from '@/i18n';
 
 type ManagerStoreMock = {
   environment: 'staging' | 'beta' | 'prod' | null;
@@ -419,6 +420,38 @@ describe('ManagerAccount', () => {
       await waitFor(() => expect(fetchEmployeesIfStale).toHaveBeenCalled());
       expect(screen.getByText('bot-one')).toBeInTheDocument();
       expect(screen.getByText('robot-a')).toBeInTheDocument();
+    });
+
+    it('localizes employee status labels in Chinese', async () => {
+      await i18n.changeLanguage('zh');
+      try {
+        applyMock({
+          session: user,
+          employees: [employee, { ...employee, id: 12, name: 'bot-two', status: 'stop_failed' }],
+        });
+
+        render(<EmployeeList />);
+
+        expect(screen.getByText('运行中')).toBeInTheDocument();
+        expect(screen.getByText('停止失败')).toBeInTheDocument();
+        expect(screen.queryByText('running')).not.toBeInTheDocument();
+        expect(screen.queryByText('stop_failed')).not.toBeInTheDocument();
+      } finally {
+        await i18n.changeLanguage('en');
+      }
+    });
+
+    it('hides the identity summary while keeping refresh and employee content', () => {
+      applyMock({ session: user, employees: [employee] });
+
+      render(
+        <EmployeeList showIdentityActions={false} showIdentitySummary={false} />,
+      );
+
+      expect(screen.queryByText('Digital Employees')).not.toBeInTheDocument();
+      expect(screen.queryByText(`Signed in as ${user.accountName}`)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Refresh/i })).toBeInTheDocument();
+      expect(screen.getByText('bot-one')).toBeInTheDocument();
     });
 
     it('shows empty state when no employees', async () => {

@@ -4,7 +4,7 @@ import { EmployeeList } from '@/components/ManagerAccount/EmployeeList';
 import { managerSessionFromContext, useManagerStore } from '@/stores/managerStore';
 import { useTranslation } from 'react-i18next';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 export function RobotConnections() {
   const { t } = useTranslation();
@@ -14,15 +14,12 @@ export function RobotConnections() {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div>
         <Title level={3} style={{ marginBottom: 4 }}>
-          Robot Connections
+          {t('robotConnections.title')}
         </Title>
-        <Text type="secondary">
-          Manage Robot connection resources available to Computer instances.
-        </Text>
       </div>
 
       {session ? (
-        <EmployeeList showIdentityActions={false} />
+        <EmployeeList showIdentityActions={false} showIdentitySummary={false} />
       ) : (
         <Empty
           image={<LoginOutlined style={{ fontSize: 48 }} />}

@@ -55,6 +55,7 @@ const DISCONNECTED_STATUS: ConnectionStatusInfo = {
 interface EmployeeListProps {
   instanceId?: string;
   showIdentityActions?: boolean;
+  showIdentitySummary?: boolean;
 }
 
 function errorI18nKey(err: ManagerError): string {
@@ -87,7 +88,15 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
   return (emp.status ?? 'running') === 'running';
 }
 
-export function EmployeeList({ instanceId, showIdentityActions = true }: EmployeeListProps) {
+function employeeStatusI18nKey(status: string): string {
+  return `managerAccount.employees.status.${status}`;
+}
+
+export function EmployeeList({
+  instanceId,
+  showIdentityActions = true,
+  showIdentitySummary = true,
+}: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -206,17 +215,25 @@ export function EmployeeList({ instanceId, showIdentityActions = true }: Employe
   return (
     <Card>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div>
-            <Title level={4} style={{ marginBottom: 4 }}>
-              {t('managerAccount.employees.title')}
-            </Title>
-            {session && (
-              <Text type="secondary">
-                {t('managerAccount.employees.signedInAs', { name: session.accountName })}
-              </Text>
-            )}
-          </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: showIdentitySummary ? 'space-between' : 'flex-end',
+            alignItems: 'flex-start',
+          }}
+        >
+          {showIdentitySummary && (
+            <div>
+              <Title level={4} style={{ marginBottom: 4 }}>
+                {t('managerAccount.employees.title')}
+              </Title>
+              {session && (
+                <Text type="secondary">
+                  {t('managerAccount.employees.signedInAs', { name: session.accountName })}
+                </Text>
+              )}
+            </div>
+          )}
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => fetchEmployees()} loading={loading}>
               {t('common.refresh')}
@@ -347,7 +364,11 @@ export function EmployeeList({ instanceId, showIdentityActions = true }: Employe
                           </Tag>
                         )}
                         {emp.status && (
-                          <Tag color={employeeStatusTagColor(emp.status)}>{emp.status}</Tag>
+                          <Tag color={employeeStatusTagColor(emp.status)}>
+                            {t(employeeStatusI18nKey(emp.status), {
+                              defaultValue: t('managerAccount.employees.status.unknown'),
+                            })}
+                          </Tag>
                         )}
                         {emp.templateDisplayName && <Tag>{emp.templateDisplayName}</Tag>}
                         {emp.templateType && <Tag color="purple">{emp.templateType}</Tag>}

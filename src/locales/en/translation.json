@@ -34,6 +34,9 @@
     "system": "SYSTEM",
     "debugPanel": "Debug Panel"
   },
+  "robotConnections": {
+    "title": "Robot List"
+  },
   "computer": {
     "title": "Computer",
     "create": "Create Computer",
@@ -847,6 +850,15 @@
       "renew": "Renew subscription",
       "department": "Department",
       "noDepartment": "Unassigned",
+      "status": {
+        "running": "Running",
+        "suspended": "Suspended",
+        "stopped": "Stopped",
+        "init_failed": "Initialization Failed",
+        "failed": "Failed",
+        "stop_failed": "Stop Failed",
+        "unknown": "Unknown Status"
+      },
       "offlineBanner": "Offline — showing the last loaded list. It will refresh automatically when the connection is restored.",
       "visibilityRevoked": "\"{{name}}\" is no longer available and was removed from the list."
     }
