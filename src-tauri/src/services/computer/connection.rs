@@ -373,9 +373,7 @@ impl ComputerInstanceRuntime {
     /// Remote teardown is best-effort: even when the SDK reports an error, the refresh task,
     /// socket handle and client-owned connection authority are removed locally so credentials
     /// from the departing Context cannot remain usable. Manual SMCP state is never touched.
-    pub async fn clear_manager_connection_for_context_transaction(
-        &self,
-    ) -> Result<bool, String> {
+    pub async fn clear_manager_connection_for_context_transaction(&self) -> Result<bool, String> {
         const MANAGER_SOURCE: &str = "manager_robot";
         let _guard = self.lifecycle_lock.lock().await;
         let connection_is_manager = self

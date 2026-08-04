@@ -23,6 +23,7 @@ import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import {
   currentEmployeeResource,
+  managerContextScope,
   managerSessionFromContext,
   useManagerStore,
   type DepartmentRef,
@@ -53,6 +54,7 @@ const DISCONNECTED_STATUS: ConnectionStatusInfo = {
 
 interface EmployeeListProps {
   instanceId?: string;
+  showIdentityActions?: boolean;
 }
 
 function errorI18nKey(err: ManagerError): string {
@@ -85,7 +87,7 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
   return (emp.status ?? 'running') === 'running';
 }
 
-export function EmployeeList({ instanceId }: EmployeeListProps) {
+export function EmployeeList({ instanceId, showIdentityActions = true }: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -103,6 +105,7 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
     dismissPaymentRequired,
   } = useManagerStore();
   const session = managerSessionFromContext(context);
+  const authenticatedScope = managerContextScope(context);
   const resource = currentEmployeeResource({ context, employeeResources });
   const employees = resource?.employees ?? EMPTY_EMPLOYEES;
   const loading = identityLoading
@@ -127,12 +130,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
-    if (session) {
+    if (authenticatedScope) {
       fetchEmployeesIfStale().catch(() => {
         /* error stored in store */
       });
     }
-  }, [session, fetchEmployeesIfStale]);
+  }, [authenticatedScope, fetchEmployeesIfStale]);
 
   // 在线/离线探测：离线 → 在线跳变时 store 会自动校准 refetch。
   useEffect(() => {
@@ -218,9 +221,11 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
             <Button icon={<ReloadOutlined />} onClick={() => fetchEmployees()} loading={loading}>
               {t('common.refresh')}
             </Button>
-            <Button icon={<LogoutOutlined />} danger onClick={handleLogout} loading={loading}>
-              {t('managerAccount.login.logout')}
-            </Button>
+            {showIdentityActions && (
+              <Button icon={<LogoutOutlined />} danger onClick={handleLogout} loading={loading}>
+                {t('managerAccount.login.logout')}
+              </Button>
+            )}
           </Space>
         </div>
 

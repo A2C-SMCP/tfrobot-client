@@ -16,6 +16,7 @@ import {
   useComputerStore,
   type ComputerInstance,
 } from '@/stores/computerStore';
+import { useManagerStore } from '@/stores/managerStore';
 import {
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
@@ -65,6 +66,7 @@ function ComputerCard({
   loading: boolean;
 }) {
   const { t } = useTranslation();
+  const currentManagerContext = useManagerStore((state) => state.context.contextKey);
   const stopAction = usesStopAction(instance.status);
   const startStopLabel = instance.status === 'starting'
     ? t('computer.runtime.actionProgress.starting')
@@ -83,7 +85,7 @@ function ComputerCard({
   const startStopDisabledReason = startStopCapability.disabled_reason
     ? t(`computer.runtime.actionDisabledReasons.${startStopCapability.disabled_reason}`)
     : undefined;
-  const connection = resolveComputerConnection(instance);
+  const connection = resolveComputerConnection(instance, currentManagerContext);
   const disconnectDisabledReason = connection.actions.disconnect.disabled_reason
     ? t(`computer.connectionActions.disabledReasons.${connection.actions.disconnect.disabled_reason}`)
     : undefined;

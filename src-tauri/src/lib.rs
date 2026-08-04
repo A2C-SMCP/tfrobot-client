@@ -277,6 +277,13 @@ pub fn run() {
             }
 
             let state = AppState::try_new(config_service, log_service, settings_service)?;
+            tauri::async_runtime::block_on(state.manager_context.set_lifecycle_sink(Arc::new(
+                commands::manager::TauriManagerContextLifecycleSink::new(
+                    state.config.clone(),
+                    state.computer_registry.clone(),
+                    state.computer_lifecycle_lock.clone(),
+                ),
+            )));
             tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
                 commands::manager::TauriManagerContextEventSink::new(app.handle().clone()),
             )));
@@ -406,6 +413,8 @@ pub fn run() {
             commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,
+            commands::manager::manager_list_accounts,
+            commands::manager::manager_switch_account,
             commands::manager::manager_list_digital_employees,
             commands::manager::manager_logout,
         ])

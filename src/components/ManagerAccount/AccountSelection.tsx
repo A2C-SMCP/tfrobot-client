@@ -9,7 +9,11 @@ function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
 }
 
-export function AccountSelection() {
+interface AccountSelectionProps {
+  embedded?: boolean;
+}
+
+export function AccountSelection({ embedded = false }: AccountSelectionProps) {
   const { t } = useTranslation();
   const { pendingAccountSelection, selectAccount, identityLoading, identityError, clearError, logout } =
     useManagerStore();
@@ -25,9 +29,8 @@ export function AccountSelection() {
     }
   };
 
-  return (
-    <Card>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+  const content = (
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
           <Title level={4} style={{ marginBottom: 4 }}>
             {t('managerAccount.accountSelection.title')}
@@ -85,7 +88,7 @@ export function AccountSelection() {
         <Button icon={<ArrowLeftOutlined />} onClick={() => void logout()} block>
           {t('managerAccount.accountSelection.back')}
         </Button>
-      </Space>
-    </Card>
+    </Space>
   );
+  return embedded ? content : <Card>{content}</Card>;
 }

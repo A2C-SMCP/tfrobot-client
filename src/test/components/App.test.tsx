@@ -87,6 +87,11 @@ vi.mock('@/components/Computer', () => ({
 vi.mock('@/components/ManagerAccount', () => ({
   ManagerAccount: () => <div>ManagerAccount</div>,
 }));
+vi.mock('@/components/ManagerAccount/GlobalManagerAccount', () => ({
+  GlobalManagerAccount: () => (
+    <button aria-label="Manager Account">Global Manager Account</button>
+  ),
+}));
 vi.mock('@/components/ComputerSettings', () => ({
   ComputerSettings: ({
     initialSection,
@@ -147,6 +152,15 @@ describe('App', () => {
     await waitFor(() => {
       expect(managerStoreMock.restoreSession).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('keeps the global Manager account entry visible on every page', async () => {
+    render(<App />);
+    expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Logs'));
+    await waitFor(() => expect(screen.getByText('LogViewer')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
   });
 
   it('does not restore a previous session while onboarding guidance is active', async () => {

@@ -8,6 +8,7 @@ import {
   type DigitalEmployeeBrief,
   type LoginResult,
   type ManagerContextSnapshot,
+  type ManagerAccountSummary,
   type ManagerError,
 } from '@/stores/managerStore';
 import { useComputerStore } from '@/stores/computerStore';
@@ -201,6 +202,88 @@ describe('managerStore authoritative Context', () => {
     expect(useManagerStore.getState().restoreAttempted).toBe(true);
   });
 
+  it('scopes the switch-account directory to the authoritative Context revision', async () => {
+    const contextA = authenticatedContext(1);
+    useManagerStore.getState().applyContext(contextA);
+    const accounts: ManagerAccountSummary[] = [{
+      accountId: 'account-b',
+      accountName: 'Account B',
+      nickname: 'B',
+      organizationId: 'organization-b',
+      organizationName: 'Organization B',
+      organizationType: 'team',
+      role: 'member',
+    }];
+    mockedInvoke.mockResolvedValueOnce(accounts);
+
+    await expect(useManagerStore.getState().fetchAccounts()).resolves.toEqual(accounts);
+    expect(mockedInvoke).toHaveBeenCalledWith('manager_list_accounts');
+    expect(useManagerStore.getState().availableAccounts).toEqual(accounts);
+    expect(useManagerStore.getState().accountDirectoryScope).toBe(managerContextScope(contextA));
+
+    useManagerStore.getState().applyContext(
+      authenticatedContext(2, 'account-b', 'organization-b'),
+    );
+    expect(useManagerStore.getState().availableAccounts).toBeNull();
+    expect(useManagerStore.getState().accountDirectoryScope).toBeNull();
+  });
+
+  it('drops an account directory response from the departing Context', async () => {
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    const request = deferred<ManagerAccountSummary[]>();
+    mockedInvoke.mockReturnValueOnce(request.promise);
+    const fetchPromise = useManagerStore.getState().fetchAccounts();
+
+    useManagerStore.getState().applyContext(
+      authenticatedContext(2, 'account-b', 'organization-b'),
+    );
+    request.resolve([{
+      accountId: 'old-account',
+      accountName: 'Old Account',
+      nickname: 'Old',
+      organizationId: 'old-organization',
+      organizationName: 'Old Organization',
+      organizationType: 'team',
+      role: 'owner',
+    }]);
+
+    await expect(fetchPromise).resolves.toEqual([]);
+    expect(useManagerStore.getState().availableAccounts).toBeNull();
+  });
+
+  it('switches accounts through the backend transaction and accepts only its Context snapshot', async () => {
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    const switched = authenticatedContext(2, 'account-b', 'organization-b');
+    mockedInvoke
+      .mockResolvedValueOnce({ ignoredIdentity: 'not-authoritative' })
+      .mockResolvedValueOnce(switched);
+
+    await useManagerStore.getState().switchAccount('account-b');
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(1, 'manager_switch_account', {
+      accountId: 'account-b',
+    });
+    expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'manager_get_context');
+    expect(useManagerStore.getState().context).toEqual(switched);
+    expect(useManagerStore.getState().identityLoading).toBe(false);
+  });
+
+  it('reconciles signed-out Context even when switch reports cleanup or auth failure', async () => {
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    const unauthorized = { kind: 'unauthorized' } satisfies ManagerError;
+    mockedInvoke
+      .mockRejectedValueOnce(unauthorized)
+      .mockResolvedValueOnce(signedOutContext(2));
+
+    await expect(useManagerStore.getState().switchAccount('account-b')).rejects.toEqual(
+      unauthorized,
+    );
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'manager_get_context');
+    expect(useManagerStore.getState().context).toEqual(signedOutContext(2));
+    expect(useManagerStore.getState().identityError).toEqual(unauthorized);
+  });
+
   it('scopes employee lists by ContextKey plus revision, including identical employee IDs', async () => {
     const contextA = authenticatedContext(1);
     useManagerStore.getState().applyContext(contextA);
@@ -275,6 +358,21 @@ describe('managerStore authoritative Context', () => {
     expect(resource?.employees).toEqual([employeeA]);
     expect(resource?.error).toEqual(error);
     expect(useManagerStore.getState().online).toBe(false);
+  });
+
+  it('treats a successful empty employee list as fresh', async () => {
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    mockedInvoke.mockResolvedValueOnce([]);
+
+    await useManagerStore.getState().fetchEmployeesIfStale();
+    await useManagerStore.getState().fetchEmployeesIfStale();
+
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke).toHaveBeenCalledWith('manager_list_digital_employees');
+    expect(currentEmployeeResource(useManagerStore.getState())).toMatchObject({
+      employees: [],
+      loading: false,
+    });
   });
 
   it('tracks payment and selection state in the revisioned resource', async () => {
@@ -355,5 +453,23 @@ describe('managerStore authoritative Context', () => {
     expect(mockedInvoke).toHaveBeenNthCalledWith(1, 'manager_logout');
     expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'manager_get_context');
     expect(useManagerStore.getState().context).toEqual(signedOutContext(2));
+  });
+
+  it('reconciles signed-out Context when logout completes with cleanup diagnostics', async () => {
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    const diagnostic: ManagerError = {
+      kind: 'other',
+      detail: { status: 0, body: 'Manager logout completed locally with cleanup diagnostics' },
+    };
+    mockedInvoke
+      .mockRejectedValueOnce(diagnostic)
+      .mockResolvedValueOnce(signedOutContext(2));
+
+    await expect(useManagerStore.getState().logout()).rejects.toEqual(diagnostic);
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(1, 'manager_logout');
+    expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'manager_get_context');
+    expect(useManagerStore.getState().context).toEqual(signedOutContext(2));
+    expect(useManagerStore.getState().identityError).toEqual(diagnostic);
   });
 });

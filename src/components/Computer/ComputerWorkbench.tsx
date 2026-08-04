@@ -2,6 +2,7 @@ import { Card } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { DesktopResources } from '@/components/DesktopResources';
 import type { ComputerInstance } from '@/stores/computerStore';
+import { useManagerStore } from '@/stores/managerStore';
 import {
   useRuntimeStore,
   type ComputerRuntimeEventRecord,
@@ -47,7 +48,8 @@ export function ComputerWorkbench({
   onOpenPlugin,
 }: ComputerWorkbenchProps) {
   const { t } = useTranslation();
-  const connection = resolveComputerConnection(instance);
+  const currentManagerContext = useManagerStore((state) => state.context.contextKey);
+  const connection = resolveComputerConnection(instance, currentManagerContext);
   const recentEvents = useRuntimeStore((state) => state.eventsByInstance[instance.id])
     ?? EMPTY_RUNTIME_EVENTS;
   const {

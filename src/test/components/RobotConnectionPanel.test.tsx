@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
-import { useComputerStore, type ComputerConnectionTarget } from '@/stores/computerStore';
+import {
+  useComputerStore,
+  type ComputerConnectionTarget,
+  type RobotBindingMetadata,
+} from '@/stores/computerStore';
 import { managerContextScope, useManagerStore, type ManagerContextSnapshot } from '@/stores/managerStore';
 import { runtimeSnapshot } from '../helpers/store';
 
@@ -25,6 +29,7 @@ const managerTarget = (
 
 function setComputer(
   target: ComputerConnectionTarget | null = null,
+  robotBinding: RobotBindingMetadata | null = null,
 ) {
   useComputerStore.setState({
     instances: [
@@ -34,6 +39,7 @@ function setComputer(
         status: 'running',
         connectionStatus: 'disconnected',
         connectionPolicy: { target, auto_connect: false },
+        robotBinding,
         mcpServerCount: 0,
         runtime: runtimeSnapshot(),
       },
@@ -217,10 +223,104 @@ describe('RobotConnectionPanel', () => {
 
     expect(await screen.findByText('Running Robot')).toBeInTheDocument();
     expect(screen.getByText('Select a Manager Robot')).toBeInTheDocument();
+    expect(screen.getByText('This Robot binding is dormant')).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
     expect(mockedInvoke).not.toHaveBeenCalledWith(
       'update_computer_connection_policy',
       expect.anything(),
     );
+  });
+
+  it('lets a migrated needs-rebind profile explicitly select a current Context Robot', async () => {
+    setComputer(null, {
+      state: 'needs_rebind',
+      employee_id: 7,
+      last_resolved_robot_account_id: 'legacy-account',
+      robot_name: 'Legacy Robot',
+    });
+    setManagerRobots();
+    mockedInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'update_computer_connection_policy') return managerPolicyResponse();
+      return null;
+    });
+
+    render(<RobotConnectionPanel instanceId="computer-a" />);
+
+    expect(await screen.findByText('This migrated binding needs a Robot selection'))
+      .toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole('combobox'));
+    fireEvent.click(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)'));
+
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith(
+      'update_computer_connection_policy',
+      {
+        request: {
+          id: 'computer-a',
+          target: managerTarget(25, '2525'),
+          autoConnect: false,
+        },
+      },
+    ));
+  });
+
+  it('requires an explicit action to reactivate a dormant same-Context binding', async () => {
+    setComputer(managerTarget(25, '2525'), {
+      context_key: managerContextKey,
+      state: 'dormant',
+      employee_id: 25,
+      last_resolved_robot_account_id: '2525',
+      robot_name: 'Running Robot',
+    });
+    setManagerRobots();
+    mockedInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'update_computer_connection_policy') return managerPolicyResponse();
+      return null;
+    });
+
+    render(<RobotConnectionPanel instanceId="computer-a" />);
+
+    expect(await screen.findByText('This Robot binding is dormant')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reactivate' }));
+
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith(
+      'update_computer_connection_policy',
+      {
+        request: {
+          id: 'computer-a',
+          target: managerTarget(25, '2525'),
+          autoConnect: false,
+        },
+      },
+    ));
+  });
+
+  it('marks a no-longer-visible active target as permission-revoked and allows reselection', async () => {
+    setComputer(managerTarget(99, 'stale-account'), {
+      context_key: managerContextKey,
+      state: 'active',
+      employee_id: 99,
+      last_resolved_robot_account_id: 'stale-account',
+      robot_name: 'Revoked Robot',
+    });
+    setManagerRobots();
+    mockedInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'update_computer_connection_policy') return managerPolicyResponse();
+      return null;
+    });
+
+    render(<RobotConnectionPanel instanceId="computer-a" />);
+
+    expect(await screen.findByText('The saved Robot is no longer visible')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
+    fireEvent.mouseDown(screen.getByRole('combobox'));
+    fireEvent.click(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)'));
+
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith(
+      'update_computer_connection_policy',
+      expect.objectContaining({
+        request: expect.objectContaining({ target: managerTarget(25, '2525') }),
+      }),
+    ));
   });
 });

@@ -265,13 +265,30 @@
       "selectTarget": "Select a Manager Robot",
       "requiresRunning": "Start this Computer before connecting.",
       "requiresTarget": "Select a connection target first.",
-      "missingRobotAccountId": "robotAccountId is missing; this Robot cannot be connected.",
+      "targetUnavailable": "Select an active Robot in the current Manager account before connecting.",
       "robotNotRunning": "This Robot is not running and cannot be connected.",
       "manualManagedGlobally": "Manual SMCP targets are managed globally on this page; select one above to bind it to this Computer.",
       "readOnlyTitle": "This page shows connection resources available to this Computer.",
-      "readOnlyDescription": "Connection status, login, configuration, and connect/disconnect actions are managed on the Robot Connections page.",
+      "readOnlyDescription": "Robot resources are selected here. Manager identity is managed from the global account entry in the app header.",
       "openRobotConnections": "Open Robot Connections",
-      "managerLoginRequired": "No Manager account is signed in. Sign in on the Robot Connections page to view Robots.",
+      "managerLoginRequired": "No Manager account is signed in.",
+      "useGlobalManagerAccount": "Use the Manager Account entry in the app header to sign in.",
+      "savedManagerRobot": "Saved Robot (employee {{employeeId}})",
+      "binding": {
+        "reactivate": "Reactivate",
+        "dormant": {
+          "title": "This Robot binding is dormant",
+          "description": "It belongs to a previous Context or was safely disconnected. Select a Robot in the current Context, or explicitly reactivate this matching binding."
+        },
+        "needs_rebind": {
+          "title": "This migrated binding needs a Robot selection",
+          "description": "The legacy profile has no account or organization scope. Select a Robot from the current Context to finish the safe migration."
+        },
+        "permission_revoked": {
+          "title": "The saved Robot is no longer visible",
+          "description": "Your access may have changed or the Robot was removed. Select another visible Robot; the old binding will not connect automatically."
+        }
+      },
       "manualTargetsTitle": "Global Manual SMCP Configurations",
       "configureTargets": "Configure",
       "openTargetDetails": "Details",
@@ -763,6 +780,21 @@
   },
   "managerAccount": {
     "navLabel": "Manager Account",
+    "global": {
+      "environment": "Environment",
+      "organization": "Organization",
+      "account": "Account",
+      "switchAccount": "Switch account or organization",
+      "loadingAccounts": "Loading accounts…",
+      "noAccounts": "No other accounts are available.",
+      "current": "Current",
+      "relogin": "Sign in again",
+      "backToAccount": "Back to account",
+      "completeSignIn": "Complete sign-in",
+      "setupRequired": "Account setup required",
+      "sessionExpired": "Session expired",
+      "robotConnectionsSignIn": "Sign in from the global Manager Account entry in the app header to view Robots. Local Computer and Manual SMCP features remain available."
+    },
     "login": {
       "title": "Sign in to TFRSManager",
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",

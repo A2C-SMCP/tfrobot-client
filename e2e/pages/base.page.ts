@@ -16,12 +16,12 @@ export class BasePage {
   }
 
   async getThemeToggle() {
-    // The sun/moon icon button in header
-    return this.header.locator('button').first();
+    // The account entry is first; theme remains beside it and before language.
+    return this.header.locator('button').nth(1);
   }
 
   async getLanguageToggle() {
     // The EN/中 button in header
-    return this.header.locator('button').nth(1);
+    return this.header.locator('button').nth(2);
   }
 }

@@ -25,6 +25,7 @@ import {
 } from '@/stores/computerStore';
 import {
   currentEmployeeResource,
+  managerContextScope,
   managerSessionFromContext,
   useManagerStore,
   type DepartmentRef,
@@ -74,21 +75,24 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     fetchEmployeesIfStale,
   } = useManagerStore();
   const session = managerSessionFromContext(context);
+  const authenticatedScope = managerContextScope(context);
   const managerResource = currentEmployeeResource({ context, employeeResources });
   const employees = managerResource?.employees ?? EMPTY_MANAGER_EMPLOYEES;
   const managerLoading = identityLoading || managerResource?.loading === true;
   const managerError = managerResource?.error ?? identityError;
+  const employeeListLoaded = managerResource?.lastFetchAt !== null
+    && managerResource?.lastFetchAt !== undefined;
   const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
-    if (session) {
+    if (authenticatedScope) {
       fetchEmployeesIfStale().catch(() => {
         /* error is rendered from manager store */
       });
     }
-  }, [fetchEmployeesIfStale, session]);
+  }, [authenticatedScope, fetchEmployeesIfStale]);
 
   useEffect(() => {
     setSelectedTargetValue(managerTargetToValue(
@@ -111,6 +115,13 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     ),
     [context.contextKey, employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
   );
+  const bindingPresentation = managerBindingPresentation(
+    selectedInstance?.connectionPolicy.target,
+    selectedInstance?.robotBinding,
+    context.contextKey,
+    employees,
+    employeeListLoaded,
+  );
   const targetOptions = useMemo(() => {
     if (!context.contextKey) return [];
     const managerOptions = employees
@@ -123,14 +134,30 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
           lastResolvedRobotAccountId: employee.robotAccountId,
         })!,
         label: formatManagerRobotOption(employee),
+        disabled: false,
       }));
+    const persistedTarget = selectedInstance?.connectionPolicy.target;
+    if (
+      persistedTarget?.type === 'manager_robot'
+      && sameContextKey(persistedTarget.contextKey, context.contextKey)
+      && !employees.some((employee) => employee.id === persistedTarget.employeeId)
+    ) {
+      managerOptions.push({
+        value: targetToValue(persistedTarget)!,
+        label: selectedInstance?.robotBinding?.robot_name
+          ?? t('computer.connectionActions.savedManagerRobot', {
+            employeeId: persistedTarget.employeeId,
+          }),
+        disabled: true,
+      });
+    }
     return [
       {
         label: t('managerAccount.employees.managerRobots'),
         options: managerOptions,
       },
     ];
-  }, [context.contextKey, employees, t]);
+  }, [context.contextKey, employees, selectedInstance, t]);
 
   const rollbackPolicyControls = useCallback(() => {
     setSelectedTargetValue(managerTargetToValue(
@@ -182,6 +209,11 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     void savePolicy(selectedTarget, checked);
   };
 
+  const handleReactivate = () => {
+    if (!selectedTarget) return;
+    void savePolicy(selectedTarget, false);
+  };
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Alert
@@ -201,11 +233,31 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       />
 
       <Card size="small" title={t('computer.connectionActions.targetTitle')}>
-        <Space wrap>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {bindingPresentation !== 'active' && bindingPresentation !== 'unbound' && (
+            <Alert
+              type={bindingPresentation === 'permission_revoked' ? 'error' : 'warning'}
+              showIcon
+              message={t(`computer.connectionActions.binding.${bindingPresentation}.title`)}
+              description={t(
+                `computer.connectionActions.binding.${bindingPresentation}.description`,
+              )}
+              action={bindingPresentation === 'dormant' && selectedTarget ? (
+                <Button
+                  size="small"
+                  disabled={savingPolicy || !session}
+                  onClick={handleReactivate}
+                >
+                  {t('computer.connectionActions.binding.reactivate')}
+                </Button>
+              ) : undefined}
+            />
+          )}
+          <Space wrap>
           <Select
             allowClear
-            disabled={savingPolicy}
-            style={{ minWidth: 360 }}
+            disabled={savingPolicy || !session}
+            style={{ width: 'min(480px, 100%)', minWidth: 240 }}
             value={selectedTargetValue}
             placeholder={t('computer.connectionActions.selectTarget')}
             aria-label={t('computer.connectionActions.selectTarget')}
@@ -221,12 +273,13 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
           <Space>
             <Switch
               checked={autoConnect}
-              disabled={!selectedTarget}
+              disabled={!selectedTarget || bindingPresentation !== 'active'}
               loading={savingPolicy}
               aria-label={t('connection.form.autoConnect')}
               onChange={handleAutoConnectChange}
             />
             <Text>{t('connection.form.autoConnect')}</Text>
+          </Space>
           </Space>
         </Space>
       </Card>
@@ -322,13 +375,12 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       ) : (
         <Card>
           <Empty description={t('computer.connectionActions.managerLoginRequired')}>
-            <Button
-              type="primary"
-              icon={<LoginOutlined />}
-              onClick={() => onNavigate?.('robot-connections')}
-            >
-              {t('computer.connectionActions.openRobotConnections')}
-            </Button>
+            <Space>
+              <LoginOutlined />
+              <Text type="secondary">
+                {t('computer.connectionActions.useGlobalManagerAccount')}
+              </Text>
+            </Space>
           </Empty>
         </Card>
       )}
@@ -409,4 +461,44 @@ function sameContextKey(left: ManagerContextKey, right: ManagerContextKey): bool
   return left.environment === right.environment
     && left.accountId === right.accountId
     && left.organizationId === right.organizationId;
+}
+
+type ManagerBindingPresentation =
+  | 'active'
+  | 'dormant'
+  | 'needs_rebind'
+  | 'permission_revoked'
+  | 'unbound';
+
+function managerBindingPresentation(
+  target: ComputerConnectionTarget | null | undefined,
+  binding: {
+    context_key?: ManagerContextKey;
+    state: 'active' | 'dormant' | 'needs_rebind';
+    employee_id: number;
+  } | null | undefined,
+  currentContext: ManagerContextKey | null,
+  employees: DigitalEmployeeBrief[],
+  employeeListLoaded: boolean,
+): ManagerBindingPresentation {
+  if (binding?.state === 'needs_rebind') return 'needs_rebind';
+  const managerTarget = target?.type === 'manager_robot' ? target : null;
+  if (!managerTarget && !binding) return 'unbound';
+  if (
+    currentContext === null
+    || managerTarget === null
+    || !sameContextKey(managerTarget.contextKey, currentContext)
+    || (binding?.context_key !== undefined
+      && !sameContextKey(binding.context_key, currentContext))
+    || binding?.state === 'dormant'
+  ) {
+    return 'dormant';
+  }
+  if (
+    employeeListLoaded
+    && !employees.some((employee) => employee.id === managerTarget.employeeId)
+  ) {
+    return 'permission_revoked';
+  }
+  return 'active';
 }

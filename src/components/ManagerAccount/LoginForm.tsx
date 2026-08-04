@@ -16,9 +16,10 @@ function errorI18nKey(err: ManagerError): string {
 
 interface LoginFormProps {
   onSubmitted?: () => void;
+  embedded?: boolean;
 }
 
-export function LoginForm({ onSubmitted }: LoginFormProps) {
+export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const { context, login, identityLoading, identityError, clearError } = useManagerStore();
@@ -37,9 +38,8 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
     }
   };
 
-  return (
-    <Card>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+  const content = (
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
           <Title level={4} style={{ marginBottom: 4 }}>
             {t('managerAccount.login.title')}
@@ -111,7 +111,7 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
             </Button>
           </Form.Item>
         </Form>
-      </Space>
-    </Card>
+    </Space>
   );
+  return embedded ? content : <Card>{content}</Card>;
 }

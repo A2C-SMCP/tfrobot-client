@@ -200,6 +200,8 @@ impl ManagerContextCoordinator {
         password: &str,
     ) -> Result<LoginResult, ManagerError> {
         let _transaction = self.transaction_lock.lock().await;
+        let (_transition, cleanup_errors) = self.begin_context_transition().await;
+        self.log_cleanup_errors("login", &cleanup_errors);
         // Persist SignedOut before mutating keychain/session state. A crash or rollback failure
         // can then only lose auto-restore, never revive the previous account. Failed login
         // attempts restore the prior metadata because ManagerClient leaves that session intact.
@@ -237,7 +239,7 @@ impl ManagerContextCoordinator {
                     self.abort_incomplete_authentication().await;
                     return Err(error);
                 }
-                self.transition(authenticated_snapshot(environment, current))
+                self.transition_identity(authenticated_snapshot(environment, current))
                     .await;
             }
             LoginResult::AccountSelectionRequired { .. } => {
@@ -245,7 +247,7 @@ impl ManagerContextCoordinator {
                     self.abort_incomplete_authentication().await;
                     return Err(error);
                 }
-                self.transition(ManagerContextSnapshot {
+                self.transition_identity(ManagerContextSnapshot {
                     auth_state: ManagerAuthState::AccountSelectionRequired,
                     environment: Some(environment),
                     ..ManagerContextSnapshot::default()
@@ -257,7 +259,7 @@ impl ManagerContextCoordinator {
                     self.abort_incomplete_authentication().await;
                     return Err(error);
                 }
-                self.transition(ManagerContextSnapshot {
+                self.transition_identity(ManagerContextSnapshot {
                     auth_state: ManagerAuthState::OnboardingRequired,
                     environment: Some(environment),
                     user: Some(ManagerContextUser {
@@ -276,6 +278,8 @@ impl ManagerContextCoordinator {
 
     pub async fn select_account(&self, account_id: &str) -> Result<UserInfo, ManagerError> {
         let _transaction = self.transaction_lock.lock().await;
+        let (_transition, cleanup_errors) = self.begin_context_transition().await;
+        self.log_cleanup_errors("account selection", &cleanup_errors);
         let pending_generation = self.client.current_session_generation();
         let user = match self.client.select_account(account_id).await {
             Ok(user) => user,
@@ -312,13 +316,15 @@ impl ManagerContextCoordinator {
             self.abort_incomplete_authentication().await;
             return Err(error);
         }
-        self.transition(authenticated_snapshot(environment, current))
+        self.transition_identity(authenticated_snapshot(environment, current))
             .await;
         Ok(user)
     }
 
     pub async fn restore_session(&self) -> Result<Option<RestoredManagerSession>, ManagerError> {
         let _transaction = self.transaction_lock.lock().await;
+        let (_transition, cleanup_errors) = self.begin_context_transition().await;
+        self.log_cleanup_errors("session restore", &cleanup_errors);
         let saved = self
             .settings
             .load_global_manager_session()
@@ -369,28 +375,88 @@ impl ManagerContextCoordinator {
                 account_name: current.account_name.clone(),
             },
         };
-        self.transition(authenticated_snapshot(saved.environment, current))
+        self.transition_identity(authenticated_snapshot(saved.environment, current))
             .await;
         Ok(Some(restored))
     }
 
     pub async fn logout(&self) -> Result<(), ManagerError> {
         let _transaction = self.transaction_lock.lock().await;
-        // The durable SignedOut tombstone is the commit point. If it cannot be written, keep the
-        // live session/context unchanged. Once written, a keychain deletion failure cannot revive
-        // the account on restart and is safe to report as cleanup telemetry rather than logout
-        // failure (which would leave the legacy frontend projection stale until TFRC-90).
-        self.clear_persisted_session()?;
+        let (_transition, mut cleanup_errors) = self.begin_context_transition().await;
+        // Local authority is cleared even if persistence, Keychain, or remote connection teardown
+        // reports an error. A failed cleanup must never leave the old Context usable in memory.
+        if let Err(error) = self.clear_persisted_session() {
+            cleanup_errors.push(error.to_string());
+        }
         if let Err(error) = self.client.logout().await {
-            log::warn!("manager: signed out but failed to delete dormant keychain JWT: {error}");
+            cleanup_errors.push(error.to_string());
         }
         self.transition(ManagerContextSnapshot::default()).await;
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            self.log_cleanup_errors("logout", &cleanup_errors);
+            Err(ManagerError::Other {
+                status: 0,
+                body: "Manager logout completed locally with cleanup diagnostics".to_string(),
+            })
+        }
+    }
+
+    pub async fn list_accounts(&self) -> Result<Vec<ManagerAccountSummary>, ManagerError> {
+        let generation = self.capture_authenticated_generation().await?;
+        let outcome = self.client.list_accounts_outcome().await?;
+        self.handle_authenticated_outcome_for_generation(outcome, Some(generation))
+            .await
+    }
+
+    pub async fn switch_account(&self, account_id: &str) -> Result<(), ManagerError> {
+        let _transaction = self.transaction_lock.lock().await;
+        let departing_generation = self.ensure_authenticated_generation_locked(None).await?;
+        let environment = self
+            .snapshot
+            .read()
+            .await
+            .environment
+            .ok_or(ManagerError::MissingBaseUrl)?;
+        let (_transition, cleanup_errors) = self.begin_context_transition().await;
+        self.log_cleanup_errors("account switch", &cleanup_errors);
+
+        let switched = match self.client.switch_account(account_id).await {
+            Ok(switched) => switched,
+            Err(ManagerError::Unauthorized) => {
+                self.apply_auth_failure_for_generation(departing_generation)
+                    .await;
+                return Err(ManagerError::Unauthorized);
+            }
+            Err(error) => return Err(error),
+        };
+        let current = match self.get_current_user_in_identity_transaction().await {
+            Ok(current) => current,
+            Err(ManagerError::Unauthorized) => return Err(ManagerError::Unauthorized),
+            Err(error) => {
+                self.abort_incomplete_authentication().await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = validate_switched_identity(&switched, &current) {
+            self.abort_incomplete_authentication().await;
+            return Err(error);
+        }
+        if let Err(error) = self.persist_authenticated(environment, &current) {
+            self.abort_incomplete_authentication().await;
+            return Err(error);
+        }
+        self.transition_identity(authenticated_snapshot(environment, current))
+            .await;
         Ok(())
     }
 
     pub async fn list_digital_employees(&self) -> Result<Vec<DigitalEmployeeBrief>, ManagerError> {
+        let generation = self.capture_authenticated_generation().await?;
         let outcome = self.client.list_digital_employees_outcome().await?;
-        self.handle_authenticated_outcome(outcome).await
+        self.handle_authenticated_outcome_for_generation(outcome, Some(generation))
+            .await
     }
 
     pub async fn capture_authenticated_generation(&self) -> Result<u64, ManagerError> {
@@ -462,8 +528,10 @@ impl ManagerContextCoordinator {
         &self,
         employee_id: u64,
     ) -> Result<ConnectionInfoResponse, ManagerError> {
+        let generation = self.capture_authenticated_generation().await?;
         let outcome = self.client.get_connection_info_outcome(employee_id).await?;
-        self.handle_authenticated_outcome(outcome).await
+        self.handle_authenticated_outcome_for_generation(outcome, Some(generation))
+            .await
     }
 
     pub async fn get_connection_info_for_generation(
@@ -483,11 +551,13 @@ impl ManagerContextCoordinator {
         robot_account_id: &str,
         scope: Option<String>,
     ) -> Result<ExchangedToken, ManagerError> {
+        let generation = self.capture_authenticated_generation().await?;
         let outcome = self
             .client
             .exchange_token_outcome(robot_account_id, scope)
             .await?;
-        self.handle_authenticated_outcome(outcome).await
+        self.handle_authenticated_outcome_for_generation(outcome, Some(generation))
+            .await
     }
 
     pub async fn exchange_token_for_generation(
@@ -513,22 +583,14 @@ impl ManagerContextCoordinator {
         self.settle_authenticated_outcome(outcome).await
     }
 
-    async fn handle_authenticated_outcome<T>(
-        &self,
-        outcome: ManagerRequestOutcome<T>,
-    ) -> Result<T, ManagerError> {
-        self.handle_authenticated_outcome_for_generation(outcome, None)
-            .await
-    }
-
     async fn handle_authenticated_outcome_for_generation<T>(
         &self,
         outcome: ManagerRequestOutcome<T>,
         expected_generation: Option<u64>,
     ) -> Result<T, ManagerError> {
-        // Identity transactions and authenticated response settlement share one serialization
-        // point. A response therefore cannot commit data from an account generation that has
-        // already been replaced by login, account selection, restore, logout, or a current 401.
+        // Request start is linearized by capture/ensure under this same lock. The network work may
+        // overlap a Context transition, but its result can never settle after that generation is
+        // replaced. New request starts see `transitioning` and fail closed.
         let _transaction = self.transaction_lock.lock().await;
         if expected_generation.is_some_and(|expected| outcome.generation != expected) {
             return Err(ManagerError::ContextChanged);
@@ -540,6 +602,9 @@ impl ManagerContextCoordinator {
         &self,
         expected_generation: Option<u64>,
     ) -> Result<u64, ManagerError> {
+        if self.transitioning.load(Ordering::Acquire) {
+            return Err(ManagerError::ContextChanged);
+        }
         let generation = self.client.current_session_generation();
         let snapshot = self.snapshot.read().await;
         if snapshot.auth_state != ManagerAuthState::Authenticated
@@ -579,6 +644,8 @@ impl ManagerContextCoordinator {
         if failed_generation == 0 || failed_generation != self.client.current_session_generation() {
             return;
         }
+        let (_transition, cleanup_errors) = self.begin_context_transition().await;
+        self.log_cleanup_errors("authentication expiry", &cleanup_errors);
         // The coordinator transaction lock is held by every caller. Persist the SignedOut
         // tombstone before clearing the session/keychain, then publish the matching snapshot and
         // events in the same serialized transition. If the response future is cancelled before
@@ -593,6 +660,36 @@ impl ManagerContextCoordinator {
         {
             self.transition(ManagerContextSnapshot::default()).await;
             self.publish_auth_expired().await;
+        }
+    }
+
+    async fn begin_context_transition(&self) -> (ManagerContextTransitionGuard<'_>, Vec<String>) {
+        let owns_transition = self
+            .transitioning
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        let guard = ManagerContextTransitionGuard {
+            transitioning: &self.transitioning,
+            owns_transition,
+        };
+        if !owns_transition {
+            return (guard, Vec::new());
+        }
+        let departing_context = self.snapshot.read().await.context_key.clone();
+        let sink = self.lifecycle_sink.read().await.clone();
+        let errors = match sink {
+            Some(sink) => {
+                sink.cleanup_manager_context(departing_context.as_ref())
+                    .await
+            }
+            None => Vec::new(),
+        };
+        (guard, errors)
+    }
+
+    fn log_cleanup_errors(&self, operation: &str, errors: &[String]) {
+        for error in errors {
+            log::warn!("manager: {operation} cleanup diagnostic: {error}");
         }
     }
 
@@ -654,9 +751,25 @@ impl ManagerContextCoordinator {
     }
 
     async fn transition(&self, mut next: ManagerContextSnapshot) {
+        self.transition_with_revision_policy(&mut next, false).await;
+    }
+
+    /// Commits a successful identity transaction as a public revision boundary even when the
+    /// redacted identity payload is unchanged. This keeps frontend resource scopes aligned with
+    /// the Manager client's new authenticated session generation after an explicit re-login,
+    /// account selection, switch, or restore.
+    async fn transition_identity(&self, mut next: ManagerContextSnapshot) {
+        self.transition_with_revision_policy(&mut next, true).await;
+    }
+
+    async fn transition_with_revision_policy(
+        &self,
+        next: &mut ManagerContextSnapshot,
+        force_revision: bool,
+    ) {
         let snapshot = {
             let mut current = self.snapshot.write().await;
-            if same_payload(&current, &next) {
+            if !force_revision && same_payload(&current, next) {
                 return;
             }
             next.revision = current
@@ -664,7 +777,7 @@ impl ManagerContextCoordinator {
                 .checked_add(1)
                 .expect("Manager Context revision overflow");
             *current = next.clone();
-            next
+            next.clone()
         };
         let sink = self.event_sink.read().await.clone();
         if let Some(sink) = sink {
@@ -750,6 +863,29 @@ fn validate_authenticated_identity(
     Ok(())
 }
 
+fn validate_switched_identity(
+    switched: &SwitchedManagerAccount,
+    current: &ManagerCurrentUser,
+) -> Result<(), ManagerError> {
+    let switched_user = UserInfo {
+        user_id: switched.user_id.clone(),
+        account_id: switched.account_id.clone(),
+        account_name: switched.account_name.clone(),
+    };
+    validate_authenticated_identity(&switched_user, current)?;
+    if switched.account_name != current.account_name
+        || switched.organization_id != current.organization_id
+        || switched.organization_name != current.organization_name
+        || (!switched.organization_type.is_empty()
+            && switched.organization_type != current.organization_type)
+    {
+        return Err(ManagerError::InvalidResponse(
+            "switch-account identity does not match /auth/me".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn same_payload(current: &ManagerContextSnapshot, next: &ManagerContextSnapshot) -> bool {
     current.auth_state == next.auth_state
         && current.environment == next.environment
@@ -790,9 +926,17 @@ mod tests {
         coordinator.transition(selecting).await;
         assert_eq!(coordinator.snapshot().await.revision, 1);
         coordinator
-            .transition(ManagerContextSnapshot::default())
+            .transition_identity(ManagerContextSnapshot {
+                auth_state: ManagerAuthState::AccountSelectionRequired,
+                environment: Some(ManagerEnvironment::Staging),
+                ..ManagerContextSnapshot::default()
+            })
             .await;
         assert_eq!(coordinator.snapshot().await.revision, 2);
+        coordinator
+            .transition(ManagerContextSnapshot::default())
+            .await;
+        assert_eq!(coordinator.snapshot().await.revision, 3);
     }
 
     #[test]

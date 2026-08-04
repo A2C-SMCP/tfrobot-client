@@ -5,6 +5,7 @@ import type {
   UserInfo,
   DigitalEmployeeBrief,
   AccountOption,
+  ManagerAccountSummary,
   ManagerContextSnapshot,
   ManagerError,
 } from '@/stores/managerStore';
@@ -19,11 +20,15 @@ type ManagerStoreMock = {
   loading: boolean;
   restoreAttempted: boolean;
   error: ManagerError | null;
+  availableAccounts: ManagerAccountSummary[] | null;
+  accountsLoading: boolean;
   paymentRequired: { message: string; redirectUrl?: string } | null;
   online: boolean;
   restoreSession: ReturnType<typeof vi.fn>;
   login: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
+  fetchAccounts: ReturnType<typeof vi.fn>;
+  switchAccount: ReturnType<typeof vi.fn>;
   fetchEmployees: ReturnType<typeof vi.fn>;
   fetchEmployeesIfStale: ReturnType<typeof vi.fn>;
   setOnline: ReturnType<typeof vi.fn>;
@@ -44,11 +49,15 @@ const mockStore: ManagerStoreMock = {
   loading: false,
   restoreAttempted: true,
   error: null,
+  availableAccounts: null,
+  accountsLoading: false,
   paymentRequired: null,
   online: true,
   restoreSession: vi.fn().mockResolvedValue(null),
   login: vi.fn().mockResolvedValue({ kind: 'authenticated' }),
   selectAccount: vi.fn().mockResolvedValue(undefined),
+  fetchAccounts: vi.fn().mockResolvedValue([]),
+  switchAccount: vi.fn().mockResolvedValue(undefined),
   fetchEmployees: vi.fn().mockResolvedValue(undefined),
   fetchEmployeesIfStale: vi.fn().mockResolvedValue(undefined),
   setOnline: vi.fn(),
@@ -77,6 +86,7 @@ import { LoginForm } from '@/components/ManagerAccount/LoginForm';
 import { AccountSelection } from '@/components/ManagerAccount/AccountSelection';
 import { EmployeeList } from '@/components/ManagerAccount/EmployeeList';
 import { ManagerAccount } from '@/components/ManagerAccount';
+import { GlobalManagerAccount } from '@/components/ManagerAccount/GlobalManagerAccount';
 
 const mockUseManagerStore = vi.mocked(useManagerStore);
 const mockedInvoke = vi.mocked(invoke);
@@ -142,6 +152,7 @@ function adaptMock(store: ManagerStoreMock) {
     contextInitialized: true,
     identityLoading: store.loading,
     identityError: store.error,
+    accountDirectoryScope: scope,
     employeeResources: scope
       ? {
         [scope]: {
@@ -226,6 +237,105 @@ describe('ManagerAccount', () => {
     });
   });
 
+  describe('GlobalManagerAccount', () => {
+    it('opens an app-wide sign-in dialog and restores focus with Escape', async () => {
+      render(<GlobalManagerAccount />);
+      const trigger = screen.getByRole('button', { name: /Sign In/i });
+
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();
+
+      fireEvent.keyDown(dialog, { key: 'Escape' });
+      await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
+      await waitFor(() => expect(trigger).toHaveFocus());
+    });
+
+    it('shows current Context and switches only through the store transaction action', async () => {
+      const accounts: ManagerAccountSummary[] = [
+        {
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+          nickname: 'Current Account',
+          organizationId: 'org-legacy-9',
+          organizationName: 'Organization',
+          organizationType: 'enterprise',
+          role: 'owner',
+        },
+        {
+          accountId: '42',
+          accountName: 'other_account',
+          nickname: 'Other Account',
+          organizationId: '84',
+          organizationName: 'Other Organization',
+          organizationType: 'enterprise',
+          role: 'member',
+        },
+      ];
+      const fetchAccounts = vi.fn().mockResolvedValue(accounts);
+      const switchAccount = vi.fn().mockResolvedValue(undefined);
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+        },
+        availableAccounts: accounts,
+        fetchAccounts,
+        switchAccount,
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Staging')).toBeInTheDocument();
+      expect(screen.getByText('client_uat')).toBeInTheDocument();
+      expect(fetchAccounts).toHaveBeenCalledOnce();
+
+      fireEvent.click(screen.getByRole('button', { name: /Other Account/i }));
+      await waitFor(() => expect(switchAccount).toHaveBeenCalledWith('42'));
+    });
+
+    it('surfaces pending account selection from every page entry', async () => {
+      applyMock({
+        pendingAccountSelection: [{
+          accountId: '42',
+          accountName: 'Account 42',
+          nickname: 'Account 42',
+          organizationId: '84',
+          organizationName: 'Organization 84',
+          organizationType: 'enterprise',
+        }],
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Complete sign-in/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Choose an account')).toBeInTheDocument();
+    });
+
+    it('loads the account directory when sign-in completes while the panel stays open', async () => {
+      const fetchAccounts = vi.fn().mockResolvedValue([]);
+      const view = render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(fetchAccounts).not.toHaveBeenCalled();
+
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: '16',
+          accountName: 'client_uat',
+        },
+        fetchAccounts,
+      });
+      view.rerender(<GlobalManagerAccount />);
+
+      await waitFor(() => expect(fetchAccounts).toHaveBeenCalledOnce());
+      expect(screen.getByText('No other accounts are available.')).toBeInTheDocument();
+    });
+  });
+
   describe('AccountSelection', () => {
     it('lists accounts and triggers selectAccount', async () => {
       const selectAccount = vi.fn().mockResolvedValue(undefined);
@@ -295,6 +405,17 @@ describe('ManagerAccount', () => {
       expect(
         screen.getByText('No digital employees are available for this account.'),
       ).toBeInTheDocument();
+    });
+
+    it('does not refetch an empty employee list when the authenticated scope is unchanged', async () => {
+      const fetchEmployeesIfStale = vi.fn().mockResolvedValue(undefined);
+      applyMock({ session: user, employees: [], fetchEmployeesIfStale });
+      const view = render(<EmployeeList instanceId="computer-a" />);
+      await waitFor(() => expect(fetchEmployeesIfStale).toHaveBeenCalledOnce());
+
+      view.rerender(<EmployeeList instanceId="computer-a" />);
+
+      await waitFor(() => expect(fetchEmployeesIfStale).toHaveBeenCalledOnce());
     });
 
     it('renders Manager robots as resources without connection actions when no Computer is scoped', () => {

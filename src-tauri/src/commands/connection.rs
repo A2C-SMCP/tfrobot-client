@@ -1170,7 +1170,7 @@ fn manager_connection_params_from_resolved(
             context_key: Some(context_key),
             state: ManagerRobotBindingState::Active,
             employee_id: employee.id,
-            robot_id: employee.robot_id.or_else(|| Some(office_id)),
+            robot_id: employee.robot_id.or(Some(office_id)),
             last_resolved_robot_account_id: Some(robot_account_id),
             namespace: employee.namespace.or(connection_info.namespace),
             robot_name: Some(employee.name),
@@ -1403,7 +1403,7 @@ async fn commit_refreshed_robot_binding(
     let connection = runtime
         .connection_state_snapshot()
         .await
-        .ok_or_else(|| ManagerError::ContextChanged)?;
+        .ok_or(ManagerError::ContextChanged)?;
     if connection.generation != connection_generation
         || connection.source_type != SOURCE_MANAGER_ROBOT
         || connection.employee_id != Some(params.employee_id)

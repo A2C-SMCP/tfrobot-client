@@ -19,6 +19,17 @@ export interface AccountOption {
   organizationType: string;
 }
 
+export interface ManagerAccountSummary {
+  accountId: string;
+  accountName: string;
+  nickname: string;
+  organizationId: string;
+  organizationName: string;
+  organizationType: string;
+  role: string;
+  avatar?: string;
+}
+
 export interface DepartmentAncestor {
   id: string;
   name: string;
@@ -143,6 +154,9 @@ export interface ManagerState {
   identityLoading: boolean;
   restoreAttempted: boolean;
   identityError: ManagerError | null;
+  availableAccounts: ManagerAccountSummary[] | null;
+  accountDirectoryScope: string | null;
+  accountsLoading: boolean;
   employeeResources: Record<string, ManagerEmployeeResource>;
   online: boolean;
 
@@ -155,6 +169,8 @@ export interface ManagerState {
     password: string,
   ) => Promise<LoginResult>;
   selectAccount: (accountId: string) => Promise<void>;
+  fetchAccounts: () => Promise<ManagerAccountSummary[]>;
+  switchAccount: (accountId: string) => Promise<void>;
   fetchEmployees: () => Promise<void>;
   fetchEmployeesIfStale: (maxAgeMs?: number) => Promise<void>;
   setOnline: (online: boolean) => void;
@@ -188,6 +204,9 @@ const initialState = {
   identityLoading: false,
   restoreAttempted: false,
   identityError: null as ManagerError | null,
+  availableAccounts: null as ManagerAccountSummary[] | null,
+  accountDirectoryScope: null as string | null,
+  accountsLoading: false,
   employeeResources: {} as Record<string, ManagerEmployeeResource>,
   online: true,
 };
@@ -296,6 +315,9 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
       if (state.contextInitialized && snapshot.revision === state.context.revision) return state;
       accepted = true;
       const resource = createEmployeeResource(snapshot);
+      const nextScope = managerContextScope(snapshot);
+      const preserveAccountDirectory = nextScope !== null
+        && state.accountDirectoryScope === nextScope;
       const employeeResources = resource && !state.employeeResources[resource.scope]
         ? { ...state.employeeResources, [resource.scope]: resource }
         : state.employeeResources;
@@ -305,6 +327,9 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         pendingAccountSelection: snapshot.authState === 'account_selection_required'
           ? state.pendingAccountSelection
           : null,
+        availableAccounts: preserveAccountDirectory ? state.availableAccounts : null,
+        accountDirectoryScope: preserveAccountDirectory ? state.accountDirectoryScope : null,
+        accountsLoading: preserveAccountDirectory ? state.accountsLoading : false,
         employeeResources,
       };
     });
@@ -404,6 +429,60 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     }
   },
 
+  fetchAccounts: async () => {
+    const scope = managerContextScope(get().context);
+    if (scope === null) throw { kind: 'no_session' } satisfies ManagerError;
+    if (get().accountsLoading && get().accountDirectoryScope === scope) {
+      return get().availableAccounts ?? [];
+    }
+    set({ accountsLoading: true, accountDirectoryScope: scope });
+    try {
+      const accounts = await invoke<ManagerAccountSummary[]>('manager_list_accounts');
+      if (managerContextScope(get().context) !== scope) {
+        info('manager: discarded stale account list response after Context change');
+        return [];
+      }
+      set({
+        availableAccounts: accounts,
+        accountDirectoryScope: scope,
+        accountsLoading: false,
+      });
+      return accounts;
+    } catch (e) {
+      const err = toManagerError(e);
+      if (managerContextScope(get().context) !== scope) {
+        info('manager: discarded stale account list error after Context change');
+        return [];
+      }
+      set({ identityError: err, accountsLoading: false });
+      throw err;
+    }
+  },
+
+  switchAccount: async (accountId) => {
+    set({ identityLoading: true, identityError: null });
+    let commandError: ManagerError | null = null;
+    try {
+      await invoke('manager_switch_account', { accountId });
+    } catch (e) {
+      commandError = toManagerError(e);
+      warn(`manager: switch_account failed, kind=${commandError.kind}`);
+    }
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      if (commandError === null) commandError = toManagerError(e);
+    }
+    set({
+      identityLoading: false,
+      identityError: commandError,
+      availableAccounts: null,
+      accountDirectoryScope: null,
+      accountsLoading: false,
+    });
+    if (commandError !== null) throw commandError;
+  },
+
   fetchEmployees: async () => {
     const context = get().context;
     const scope = managerContextScope(context);
@@ -458,7 +537,6 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     const resource = currentEmployeeResource(get());
     if (!resource || resource.loading) return;
     const fresh = resource.lastFetchAt !== null
-      && resource.employees.length > 0
       && Date.now() - resource.lastFetchAt < maxAgeMs;
     if (!fresh) await get().fetchEmployees();
   },
@@ -545,19 +623,29 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
 
   logout: async () => {
     set({ identityLoading: true, identityError: null });
+    let commandError: ManagerError | null = null;
     try {
       await invoke('manager_logout');
-      await get().refreshContext();
-      info('manager: logout ok');
-      set({
-        pendingAccountSelection: null,
-        identityLoading: false,
-        restoreAttempted: true,
-      });
     } catch (e) {
-      const err = toManagerError(e);
-      set({ identityError: err, identityLoading: false });
-      throw err;
+      commandError = toManagerError(e);
+    }
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      if (commandError === null) commandError = toManagerError(e);
+    }
+    if (commandError === null) info('manager: logout ok');
+    set({
+      pendingAccountSelection: null,
+      identityLoading: false,
+      identityError: commandError,
+      restoreAttempted: true,
+      availableAccounts: null,
+      accountDirectoryScope: null,
+      accountsLoading: false,
+    });
+    if (commandError !== null) {
+      throw commandError;
     }
   },
 

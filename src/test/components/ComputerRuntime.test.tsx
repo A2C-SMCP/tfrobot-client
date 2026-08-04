@@ -59,6 +59,39 @@ function renderRuntime(
 }
 
 describe('ComputerRuntime', () => {
+  it('allows Manager connect only for an active binding in the current Context', () => {
+    const contextKey = {
+      environment: 'staging' as const,
+      accountId: '23',
+      organizationId: '1',
+    };
+    const computer = instance({
+      connectionPolicy: {
+        target: {
+          type: 'manager_robot',
+          contextKey,
+          employeeId: 1001,
+        },
+        auto_connect: false,
+      },
+      robotBinding: {
+        context_key: contextKey,
+        state: 'active',
+        employee_id: 1001,
+      },
+    });
+
+    expect(resolveComputerConnection(computer, contextKey).targetConnectable).toBe(true);
+    expect(resolveComputerConnection(computer, {
+      ...contextKey,
+      accountId: '99',
+    }).targetConnectable).toBe(false);
+    expect(resolveComputerConnection({
+      ...computer,
+      robotBinding: { ...computer.robotBinding!, state: 'dormant' },
+    }, contextKey).targetConnectable).toBe(false);
+  });
+
   it('composes MCP runtime and active capability summary without duplicating header actions', () => {
     renderRuntime();
 

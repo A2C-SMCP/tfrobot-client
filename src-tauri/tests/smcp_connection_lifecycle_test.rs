@@ -820,6 +820,7 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
         .read_owned()
         .await
         .is_none());
+    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_none());
     assert!(!runtime.is_connected().await);
     assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
 
@@ -2933,4 +2934,183 @@ async fn close_smcp_connection_aborts_refresh_task() {
         snapshot,
         "refresh task must be aborted by close_smcp_connection (no revive)"
     );
+}
+
+#[tokio::test]
+async fn manager_context_cleanup_disconnects_manager_and_aborts_refresh_task() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "manager-cleanup-office",
+            "manager-cleanup-computer",
+        )
+        .await
+        .expect("connect manager socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manager-cleanup-profile".to_string(),
+            url: server_url,
+            office_id: "manager-cleanup-office".to_string(),
+            computer_name: "manager-cleanup-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:employee:42".to_string()),
+            target_name: Some("Manager Robot".to_string()),
+            employee_id: Some(42),
+            generation: 42,
+        })
+        .await
+        .expect("install manager connection authority");
+    runtime
+        .set_refresh_task(tokio::spawn(std::future::pending()))
+        .await;
+
+    assert!(runtime
+        .clear_manager_connection_for_context_transaction()
+        .await
+        .unwrap());
+    assert!(runtime
+        .connection_handle_for_test()
+        .read_owned()
+        .await
+        .is_none());
+    assert!(!runtime.has_refresh_task_for_test().await);
+    assert_eq!(
+        runtime.connection_snapshot().await.status,
+        ClientConnectionStatus::Disconnected
+    );
+    wait_for("Manager Context cleanup left the socket active", || {
+        stats.active() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn manager_context_cleanup_failure_still_drops_local_connection_authority() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "manager-failure-office",
+            "manager-failure-computer",
+        )
+        .await
+        .expect("connect manager socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manager-failure-profile".to_string(),
+            url: server_url,
+            office_id: "manager-failure-office".to_string(),
+            computer_name: "manager-failure-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:employee:84".to_string()),
+            target_name: Some("Manager Robot".to_string()),
+            employee_id: Some(84),
+            generation: 84,
+        })
+        .await
+        .expect("install manager connection authority");
+    runtime
+        .set_refresh_task(tokio::spawn(std::future::pending()))
+        .await;
+    runtime.fail_next_smcp_disconnect_for_test();
+
+    let error = runtime
+        .clear_manager_connection_for_context_transaction()
+        .await
+        .unwrap_err();
+    assert!(error.contains("Injected Socket.IO disconnect failure"));
+    assert!(runtime
+        .connection_handle_for_test()
+        .read_owned()
+        .await
+        .is_none());
+    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_none());
+    assert!(!runtime.has_refresh_task_for_test().await);
+    let connection = runtime.connection_snapshot().await;
+    assert_eq!(connection.status, ClientConnectionStatus::Disconnected);
+    assert!(connection.last_error.as_ref().is_some_and(|error| {
+        error
+            .message
+            .contains("could not confirm remote disconnect")
+            && error.retryable
+    }));
+    // The peer may remain active because this test deliberately makes remote disconnect fail;
+    // the safety invariant is that no local runtime handle or authority can reuse that socket.
+    assert_eq!(stats.active(), 1);
+}
+
+#[tokio::test]
+async fn manager_context_cleanup_leaves_manual_smcp_connection_untouched() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let (server_url, stats) = start_smcp_socket_server().await;
+    runtime
+        .connect_smcp_socketio(
+            &server_url,
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            "manual-preserved-office",
+            "manual-preserved-computer",
+        )
+        .await
+        .expect("connect manual socket");
+    runtime
+        .install_connection_state(ConnectionState {
+            profile_name: "manual-preserved-profile".to_string(),
+            url: server_url,
+            office_id: "manual-preserved-office".to_string(),
+            computer_name: "manual-preserved-computer".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manual_smcp".to_string(),
+            target_id: Some("manual:preserved".to_string()),
+            target_name: Some("Manual target".to_string()),
+            employee_id: None,
+            generation: 7,
+        })
+        .await
+        .expect("install manual connection authority");
+    runtime
+        .set_refresh_task(tokio::spawn(std::future::pending()))
+        .await;
+
+    assert!(!runtime
+        .clear_manager_connection_for_context_transaction()
+        .await
+        .unwrap());
+    assert_eq!(stats.active(), 1);
+    assert!(runtime.has_refresh_task_for_test().await);
+    let connection = runtime.connection_snapshot().await;
+    assert_eq!(connection.status, ClientConnectionStatus::Connected);
+    assert_eq!(
+        connection
+            .context
+            .as_ref()
+            .map(|context| context.source_type.as_str()),
+        Some("manual_smcp")
+    );
+
+    let connection = runtime.take_connection_state().await.unwrap();
+    close_smcp_connection(&runtime, connection)
+        .await
+        .expect("manual test cleanup");
 }

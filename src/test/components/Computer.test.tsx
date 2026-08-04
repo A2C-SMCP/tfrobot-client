@@ -5,6 +5,7 @@ import { Computer } from '@/components/Computer';
 import { useComputerStore } from '@/stores/computerStore';
 import { useInputStore } from '@/stores/inputStore';
 import { useRuntimeStore } from '@/stores/runtimeStore';
+import { useManagerStore } from '@/stores/managerStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockInvoke = vi.mocked(invoke);
@@ -23,6 +24,29 @@ const managerTarget = (employeeId: number, lastResolvedRobotAccountId?: string) 
   employeeId,
   lastResolvedRobotAccountId,
 });
+
+function authenticateManagerContext() {
+  useManagerStore.getState().applyContext({
+    revision: 1,
+    authState: 'authenticated',
+    environment: managerContextKey.environment,
+    contextKey: managerContextKey,
+    user: { id: '9', nickname: 'User', email: '', phone: '' },
+    account: {
+      id: managerContextKey.accountId,
+      name: 'account-a',
+      nickname: 'User',
+      avatar: '',
+      employeeNo: '',
+    },
+    organization: {
+      id: managerContextKey.organizationId,
+      name: 'Organization A',
+      organizationType: 'enterprise',
+    },
+    permissions: [],
+  });
+}
 
 const mockComputerInstances = [
   {
@@ -296,6 +320,7 @@ describe('Computer', () => {
   }, 20000);
 
   it('does not require a persisted robotAccountId diagnostic for list connection', async () => {
+    authenticateManagerContext();
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,
@@ -452,6 +477,7 @@ describe('Computer', () => {
   }, 20000);
 
   it('does not require a persisted robotAccountId diagnostic for detail connection', async () => {
+    authenticateManagerContext();
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,

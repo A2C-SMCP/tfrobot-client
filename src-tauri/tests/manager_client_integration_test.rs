@@ -14,14 +14,15 @@
 //! 不依赖 `hyper`/`warp` 等重量级 server，用轻量 `tokio::net::TcpListener` mock。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tfrobot_client_lib::services::keychain::{InMemorySecretStore, SecretStore};
 use tfrobot_client_lib::services::manager_client::{LoginResult, ManagerClient, ManagerError};
 use tfrobot_client_lib::services::manager_context::{
-    ManagerAuthState, ManagerContextCoordinator, ManagerContextEventSink, ManagerContextSnapshot,
+    ManagerAuthState, ManagerContextCoordinator, ManagerContextEventSink, ManagerContextKey,
+    ManagerContextLifecycleSink, ManagerContextSnapshot,
 };
 use tfrobot_client_lib::services::manager_environment::ManagerEnvironment;
 use tfrobot_client_lib::services::settings::SettingsService;
@@ -61,6 +62,51 @@ struct RecordingContextEvents {
     auth_expired: AtomicUsize,
 }
 
+#[derive(Default)]
+struct RecordingLifecycle {
+    contexts: StdMutex<Vec<Option<ManagerContextKey>>>,
+}
+
+#[async_trait::async_trait]
+impl ManagerContextLifecycleSink for RecordingLifecycle {
+    async fn cleanup_manager_context(
+        &self,
+        departing_context: Option<&ManagerContextKey>,
+    ) -> Vec<String> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .push(departing_context.cloned());
+        Vec::new()
+    }
+}
+
+#[derive(Default)]
+struct BlockingFirstLifecycle {
+    contexts: StdMutex<Vec<Option<ManagerContextKey>>>,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait::async_trait]
+impl ManagerContextLifecycleSink for BlockingFirstLifecycle {
+    async fn cleanup_manager_context(
+        &self,
+        departing_context: Option<&ManagerContextKey>,
+    ) -> Vec<String> {
+        let should_block = {
+            let mut contexts = self.contexts.lock().unwrap();
+            contexts.push(departing_context.cloned());
+            contexts.len() == 1
+        };
+        if should_block {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Vec::new()
+    }
+}
+
 impl ManagerContextEventSink for RecordingContextEvents {
     fn emit_context_changed(&self, snapshot: &ManagerContextSnapshot) -> Result<(), String> {
         self.snapshots.lock().unwrap().push(snapshot.clone());
@@ -96,6 +142,7 @@ async fn spawn_mock_manager(
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let cap_clone = captured.clone();
+    let script = Arc::new(Mutex::new(script));
 
     let handle = tokio::spawn(async move {
         loop {
@@ -168,10 +215,23 @@ async fn spawn_mock_manager(
                 });
 
                 // 匹配 script
-                let matched = script
-                    .iter()
-                    .find(|r| request_line.contains(r.path_contains))
-                    .cloned();
+                let matched = {
+                    let mut script = script.lock().await;
+                    let matched_index = script
+                        .iter()
+                        .position(|response| request_line.contains(response.path_contains));
+                    matched_index.map(|index| {
+                        let matched = script[index].clone();
+                        let has_later_match = script[index + 1..]
+                            .iter()
+                            .any(|response| response.path_contains == matched.path_contains);
+                        if has_later_match {
+                            script.remove(index)
+                        } else {
+                            matched
+                        }
+                    })
+                };
                 let resp = match matched {
                     Some(r) => {
                         tokio::time::sleep(r.response_delay).await;
@@ -351,7 +411,7 @@ fn single_account_login_data(token: &str) -> serde_json::Value {
     serde_json::json!({
         "token": token,
         "userId": 9,
-        "accountId": "org-legacy-9:account-16",
+        "accountId": 16,
         "accountName": "client_uat",
     })
 }
@@ -363,13 +423,30 @@ fn current_user_data() -> serde_json::Value {
         "email": "client@example.com",
         "phone": "13800000000",
         "accountAvatar": "https://example.com/avatar.png",
-        "accountId": "org-legacy-9:account-16",
+        "accountId": 16,
         "accountName": "client_uat",
         "employeeNo": "000016",
-        "organizationId": "org-legacy-9",
+        "organizationId": 9,
         "organizationName": "Client UAT Org",
         "organizationType": "enterprise",
         "permissions": ["robot:read"]
+    })
+}
+
+fn switched_current_user_data() -> serde_json::Value {
+    serde_json::json!({
+        "id": 9,
+        "nickname": "Client UAT",
+        "email": "client@example.com",
+        "phone": "13800000000",
+        "accountAvatar": "https://example.com/switched-avatar.png",
+        "accountId": 42,
+        "accountName": "client_switched",
+        "employeeNo": "000042",
+        "organizationId": 84,
+        "organizationName": "Switched Organization",
+        "organizationType": "enterprise",
+        "permissions": ["robot:read", "robot:connect"]
     })
 }
 
@@ -393,7 +470,7 @@ async fn login_success_writes_session_and_returns_authenticated() {
     match result {
         LoginResult::Authenticated { user } => {
             assert_eq!(user.user_id, "9");
-            assert_eq!(user.account_id, "org-legacy-9:account-16");
+            assert_eq!(user.account_id, "16");
             assert_eq!(user.account_name, "client_uat");
         }
         _ => panic!("expected Authenticated variant"),
@@ -450,8 +527,8 @@ async fn current_user_returns_complete_redacted_context_identity() {
 
     let current = client.get_current_user().await.unwrap();
     assert_eq!(current.id, "9");
-    assert_eq!(current.account_id, "org-legacy-9:account-16");
-    assert_eq!(current.organization_id, "org-legacy-9");
+    assert_eq!(current.account_id, "16");
+    assert_eq!(current.organization_id, "9");
     assert_eq!(current.organization_name, "Client UAT Org");
     assert_eq!(current.permissions, vec!["robot:read"]);
 
@@ -496,15 +573,15 @@ async fn context_login_persists_complete_server_identity_and_logout_clears_it() 
     assert_eq!(snapshot.auth_state, ManagerAuthState::Authenticated);
     let key = snapshot.context_key.unwrap();
     assert_eq!(key.environment, ManagerEnvironment::Staging);
-    assert_eq!(key.account_id, "org-legacy-9:account-16");
-    assert_eq!(key.organization_id, "org-legacy-9");
+    assert_eq!(key.account_id, "16");
+    assert_eq!(key.organization_id, "9");
     assert_eq!(snapshot.user.unwrap().id, "9");
     assert_eq!(snapshot.permissions, vec!["robot:read"]);
 
     let persisted = settings.load_global_manager_session().unwrap();
     let persisted = persisted.session.unwrap();
-    assert_eq!(persisted.account_id, "org-legacy-9:account-16");
-    assert_eq!(persisted.organization_id.as_deref(), Some("org-legacy-9"));
+    assert_eq!(persisted.account_id, "16");
+    assert_eq!(persisted.organization_id.as_deref(), Some("9"));
     let persisted_json = serde_json::to_string(&persisted)
         .unwrap()
         .to_ascii_lowercase();
@@ -512,6 +589,8 @@ async fn context_login_persists_complete_server_identity_and_logout_clears_it() 
         assert!(!persisted_json.contains(forbidden));
     }
 
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
     coordinator.logout().await.unwrap();
     let signed_out = coordinator.snapshot().await;
     assert_eq!(signed_out.revision, 2);
@@ -521,6 +600,177 @@ async fn context_login_persists_complete_server_identity_and_logout_clears_it() 
         .unwrap()
         .session
         .is_none());
+    assert_eq!(lifecycle.contexts.lock().unwrap().len(), 1);
+    assert_eq!(
+        lifecycle.contexts.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .account_id,
+        "16"
+    );
+}
+
+#[tokio::test]
+async fn context_lists_accounts_with_current_bearer_without_exposing_credentials() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-account-list")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        json_script(
+            "/api/v1/accounts/my",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "accounts": [{
+                    "accountId": 42,
+                    "accountName": "client_switched",
+                    "nickname": "Switched",
+                    "organizationId": 84,
+                    "organizationName": "Switched Organization",
+                    "organizationType": "enterprise",
+                    "role": "owner",
+                    "avatar": "https://example.com/switched-avatar.png"
+                }]
+            })),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let coordinator = test_context_coordinator(
+        base,
+        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        InMemorySecretStore::shared(),
+    );
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let accounts = coordinator.list_accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].account_id, "42");
+    assert_eq!(accounts[0].organization_id, "84");
+    let serialized = serde_json::to_string(&accounts)
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(!serialized.contains("jwt"));
+    assert!(!serialized.contains("token"));
+
+    let requests = captured.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| request.request_line.contains("/api/v1/accounts/my"))
+        .unwrap();
+    assert_eq!(request.request_line, "GET /api/v1/accounts/my HTTP/1.1");
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some("Bearer jwt-account-list")
+    );
+}
+
+#[tokio::test]
+async fn context_switch_account_cleans_departing_context_and_publishes_one_final_snapshot() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-before-switch")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        json_script(
+            "/api/v1/auth/switch-account",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "token": "jwt-after-switch",
+                "userId": 9,
+                "accountId": 42,
+                "accountName": "client_switched",
+                "organizationId": 84,
+                "organizationName": "Switched Organization",
+                "organizationType": "enterprise"
+            })),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(switched_current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+    let events = Arc::new(RecordingContextEvents::default());
+    coordinator.set_event_sink(events.clone()).await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
+
+    coordinator.switch_account("42").await.unwrap();
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.auth_state, ManagerAuthState::Authenticated);
+    assert_eq!(snapshot.context_key.as_ref().unwrap().account_id, "42");
+    assert_eq!(snapshot.context_key.as_ref().unwrap().organization_id, "84");
+    assert_eq!(snapshot.account.as_ref().unwrap().name, "client_switched");
+    assert_eq!(snapshot.permissions, vec!["robot:read", "robot:connect"]);
+    assert_eq!(events.snapshots.lock().unwrap().len(), 2);
+    assert_eq!(
+        lifecycle.contexts.lock().unwrap().as_slice(),
+        &[Some(ManagerContextKey {
+            environment: ManagerEnvironment::Staging,
+            account_id: "16".to_string(),
+            organization_id: "9".to_string(),
+        })]
+    );
+    let persisted = settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .unwrap();
+    assert_eq!(persisted.account_id, "42");
+    assert_eq!(persisted.organization_id.as_deref(), Some("84"));
+
+    let requests = captured.lock().await;
+    let switch_request = requests
+        .iter()
+        .find(|request| request.request_line.contains("/api/v1/auth/switch-account"))
+        .unwrap();
+    assert_eq!(
+        switch_request
+            .headers
+            .get("authorization")
+            .map(String::as_str),
+        Some("Bearer jwt-before-switch")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&switch_request.body).unwrap(),
+        serde_json::json!({"accountId": 42})
+    );
+    let switched_me = requests
+        .iter()
+        .filter(|request| request.request_line.contains("/api/v1/auth/me"))
+        .nth(1)
+        .unwrap();
+    assert_eq!(
+        switched_me.headers.get("authorization").map(String::as_str),
+        Some("Bearer jwt-after-switch")
+    );
 }
 
 #[tokio::test]
@@ -534,10 +784,10 @@ async fn context_account_selection_is_an_atomic_revisioned_transition() {
                 "tempToken": "temporary-secret",
                 "expiresIn": 300,
                 "accounts": [{
-                    "accountId": "org-legacy-9:account-16",
+                    "accountId": 16,
                     "accountName": "client_uat",
                     "nickname": "Client UAT",
-                    "organizationId": "org-legacy-9",
+                    "organizationId": 9,
                     "organizationName": "Client UAT Org",
                     "organizationType": "enterprise"
                 }]
@@ -577,10 +827,7 @@ async fn context_account_selection_is_an_atomic_revisioned_transition() {
         .session
         .is_none());
 
-    coordinator
-        .select_account("org-legacy-9:account-16")
-        .await
-        .unwrap();
+    coordinator.select_account("16").await.unwrap();
     let authenticated = coordinator.snapshot().await;
     assert_eq!(authenticated.revision, 2);
     assert_eq!(authenticated.auth_state, ManagerAuthState::Authenticated);
@@ -673,7 +920,7 @@ async fn context_restore_revalidates_keychain_session_with_auth_me() {
         .unwrap();
     assert_eq!(restored.environment, ManagerEnvironment::Prod);
     assert_eq!(restored.user.user_id, "9");
-    assert_eq!(restored.user.account_id, "org-legacy-9:account-16");
+    assert_eq!(restored.user.account_id, "16");
     let upgraded = settings.load_global_manager_session().unwrap();
     assert_eq!(upgraded.schema_version, 3);
     let upgraded = upgraded.session.unwrap();
@@ -681,7 +928,7 @@ async fn context_restore_revalidates_keychain_session_with_auth_me() {
     assert_eq!(upgraded.user_nickname.as_deref(), Some("Client UAT"));
     assert_eq!(upgraded.user_email.as_deref(), Some("client@example.com"));
     assert_eq!(upgraded.user_phone.as_deref(), Some("13800000000"));
-    assert_eq!(upgraded.account_id, "org-legacy-9:account-16");
+    assert_eq!(upgraded.account_id, "16");
     assert_eq!(upgraded.account_name, "client_uat");
     assert_eq!(upgraded.account_nickname.as_deref(), Some("Client UAT"));
     assert_eq!(
@@ -689,7 +936,7 @@ async fn context_restore_revalidates_keychain_session_with_auth_me() {
         Some("https://example.com/avatar.png")
     );
     assert_eq!(upgraded.employee_no.as_deref(), Some("000016"));
-    assert_eq!(upgraded.organization_id.as_deref(), Some("org-legacy-9"));
+    assert_eq!(upgraded.organization_id.as_deref(), Some("9"));
     assert_eq!(
         upgraded.organization_name.as_deref(),
         Some("Client UAT Org")
@@ -784,6 +1031,8 @@ async fn context_unauthorized_clears_identity_and_emits_expiry_once() {
         .login(ManagerEnvironment::Staging, "client@example.com", "secret")
         .await
         .unwrap();
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
 
     let error = coordinator.list_digital_employees().await.unwrap_err();
     assert!(matches!(error, ManagerError::Unauthorized));
@@ -800,6 +1049,113 @@ async fn context_unauthorized_clears_identity_and_emits_expiry_once() {
         .unwrap()
         .session
         .is_none());
+    assert_eq!(lifecycle.contexts.lock().unwrap().len(), 1);
+    assert_eq!(
+        lifecycle.contexts.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .account_id,
+        "16"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_switch_unauthorized_and_logout_serialize_cleanup_without_old_commits() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-concurrent-old")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        delayed_raw_script(
+            "/api/v1/digital-employees",
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"code":401,"message":"expired old request","data":null}"#,
+            Duration::from_millis(500),
+        ),
+        json_script(
+            "/api/v1/auth/switch-account",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "token": "jwt-concurrent-new",
+                "userId": 9,
+                "accountId": 42,
+                "accountName": "client_switched",
+                "organizationId": 84,
+                "organizationName": "Switched Organization",
+                "organizationType": "enterprise"
+            })),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(switched_current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        InMemorySecretStore::shared(),
+    ));
+    let events = Arc::new(RecordingContextEvents::default());
+    coordinator.set_event_sink(events.clone()).await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let lifecycle = Arc::new(BlockingFirstLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
+
+    let old_unauthorized = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.list_digital_employees().await }
+    });
+    wait_for_captured_request(&captured, "/api/v1/digital-employees").await;
+
+    let switch = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.switch_account("42").await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), lifecycle.entered.notified())
+        .await
+        .expect("switch should enter the common lifecycle cleanup");
+
+    // The transition owns the identity lock before any connection generation can be captured.
+    assert!(tokio::time::timeout(
+        Duration::from_millis(50),
+        coordinator.capture_authenticated_generation(),
+    )
+    .await
+    .is_err());
+
+    let logout = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.logout().await }
+    });
+    lifecycle.release.notify_one();
+
+    switch.await.unwrap().unwrap();
+    logout.await.unwrap().unwrap();
+    assert!(matches!(
+        old_unauthorized.await.unwrap().unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.auth_state, ManagerAuthState::SignedOut);
+    assert_eq!(snapshot.revision, 3);
+    assert_eq!(events.auth_expired.load(Ordering::SeqCst), 0);
+    let contexts = lifecycle.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts[0].as_ref().unwrap().account_id, "16");
+    assert_eq!(contexts[1].as_ref().unwrap().account_id, "42");
 }
 
 #[tokio::test]
@@ -853,8 +1209,11 @@ async fn stale_unauthorized_after_relogin_cannot_clear_the_new_context() {
 
     let snapshot = coordinator.snapshot().await;
     assert_eq!(snapshot.auth_state, ManagerAuthState::Authenticated);
-    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.revision, 2);
     assert_eq!(events.auth_expired.load(Ordering::SeqCst), 0);
+    let emitted = events.snapshots.lock().unwrap();
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(emitted[1], snapshot);
 }
 
 #[tokio::test]
@@ -1085,6 +1444,72 @@ async fn generation_guarded_commit_excludes_logout_until_local_side_effect_finis
 }
 
 #[tokio::test]
+async fn departing_context_cleanup_rejects_an_old_generation_commit_before_side_effects() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-cleanup-guard")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        InMemorySecretStore::shared(),
+    ));
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let generation = coordinator
+        .capture_authenticated_generation()
+        .await
+        .unwrap();
+    let lifecycle = Arc::new(BlockingFirstLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
+
+    let logout = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.logout().await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), lifecycle.entered.notified())
+        .await
+        .expect("logout should enter departing-context cleanup");
+
+    let side_effect_ran = Arc::new(AtomicBool::new(false));
+    let commit = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let side_effect_ran = side_effect_ran.clone();
+        async move {
+            coordinator
+                .commit_for_authenticated_generation(generation, || async move {
+                    side_effect_ran.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(!commit.is_finished());
+    assert!(!side_effect_ran.load(Ordering::SeqCst));
+
+    lifecycle.release.notify_one();
+    logout.await.unwrap().unwrap();
+    assert!(matches!(
+        commit.await.unwrap().unwrap_err(),
+        ManagerError::NoSession | ManagerError::ContextChanged
+    ));
+    assert!(!side_effect_ran.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn login_uses_email_field_for_email_identifier() {
     let script = vec![json_script(
         "/auth/login-by-password",
@@ -1173,10 +1598,10 @@ async fn login_multi_account_returns_account_selection_required() {
             "tempToken": "temp-xyz",
             "expiresIn": 300,
             "accounts": [
-                {"accountId": "org-2:account-2", "accountName": "testuser2_enterprise", "nickname": "测试用户2",
-                 "organizationId": "org-2", "organizationName": "测试企业", "organizationType": "enterprise"},
-                {"accountId": "org-1:account-3", "accountName": "testuser2_personal", "nickname": "测试用户2",
-                 "organizationId": "org-1", "organizationName": "one-person-org-1", "organizationType": "personal"}
+                {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "测试用户2",
+                 "organizationId": 2, "organizationName": "测试企业", "organizationType": "enterprise"},
+                {"accountId": 3, "accountName": "testuser2_personal", "nickname": "测试用户2",
+                 "organizationId": 1, "organizationName": "one-person-org-1", "organizationType": "personal"}
             ]
         })),
     )];
@@ -1191,7 +1616,8 @@ async fn login_multi_account_returns_account_selection_required() {
     match result {
         LoginResult::AccountSelectionRequired { accounts } => {
             assert_eq!(accounts.len(), 2);
-            assert_eq!(accounts[0].account_id, "org-2:account-2");
+            assert_eq!(accounts[0].account_id, "2");
+            assert_eq!(accounts[0].organization_id, "2");
             assert_eq!(accounts[0].account_name, "testuser2_enterprise");
             assert_eq!(accounts[0].organization_type, "enterprise");
             assert_eq!(accounts[1].organization_type, "personal");
@@ -1211,8 +1637,8 @@ async fn select_account_completes_session() {
                 "tempToken": "temp-xyz",
                 "expiresIn": 300,
                 "accounts": [
-                    {"accountId": "org-2:account-2", "accountName": "testuser2_enterprise", "nickname": "n",
-                     "organizationId": "org-2", "organizationName": "ent", "organizationType": "enterprise"}
+                    {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "n",
+                     "organizationId": 2, "organizationName": "ent", "organizationType": "enterprise"}
                 ]
             })),
         ),
@@ -1222,7 +1648,7 @@ async fn select_account_completes_session() {
             envelope(serde_json::json!({
                 "token": "final-jwt",
                 "userId": 2,
-                "accountId": "org-2:account-2",
+                "accountId": 2,
                 "accountName": "testuser2_enterprise"
             })),
         ),
@@ -1234,19 +1660,16 @@ async fn select_account_completes_session() {
         .login(Some(base), "13900139000", "Test@123456")
         .await
         .unwrap();
-    let user = client
-        .select_account("org-2:account-2")
-        .await
-        .expect("select-account");
-    assert_eq!(user.account_id, "org-2:account-2");
+    let user = client.select_account("2").await.expect("select-account");
+    assert_eq!(user.account_id, "2");
     assert_eq!(user.account_name, "testuser2_enterprise");
 
-    // 第二个请求 body 应当是 tempToken + opaque accountId string
+    // 第二个请求 body 遵循 Manager numeric transport contract；公开 DTO 仍使用 opaque string。
     let reqs = captured.lock().await;
     assert_eq!(reqs.len(), 2);
     let select_body: serde_json::Value = serde_json::from_str(&reqs[1].body).unwrap();
     assert_eq!(select_body["tempToken"], "temp-xyz");
-    assert_eq!(select_body["accountId"], "org-2:account-2");
+    assert_eq!(select_body["accountId"], 2);
     // sessionToken 不应再出现
     assert!(select_body.get("sessionToken").is_none());
 }
@@ -1254,7 +1677,7 @@ async fn select_account_completes_session() {
 #[tokio::test]
 async fn select_account_without_pending_session_errors() {
     let client = test_manager_client();
-    let err = client.select_account("org-1:account-1").await.unwrap_err();
+    let err = client.select_account("1").await.unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
 

@@ -1536,6 +1536,121 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manager_profile_migrates_to_needs_rebind_with_backup_and_no_auto_connect() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-manager").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-manager".to_string(),
+            name: "Manager Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManagerRobot,
+                    id: "42".to_string(),
+                    robot_account_id: Some("robot-account-42".to_string()),
+                }),
+                auto_connect: true,
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-manager").unwrap();
+
+        assert!(migrated.connection_policy.target.is_none());
+        assert!(!migrated.connection_policy.auto_connect);
+        let binding = migrated.robot_binding.unwrap();
+        assert_eq!(binding.context_key, None);
+        assert_eq!(binding.state, ManagerRobotBindingState::NeedsRebind);
+        assert_eq!(binding.employee_id, 42);
+        assert_eq!(
+            binding.last_resolved_robot_account_id.as_deref(),
+            Some("robot-account-42")
+        );
+        let backup_path = profile_path.with_file_name(LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME);
+        let backup: LegacyComputerProfileV1 =
+            serde_json::from_slice(&std::fs::read(backup_path).unwrap()).unwrap();
+        assert_eq!(backup, legacy);
+        let persisted: ComputerProfile =
+            serde_json::from_slice(&std::fs::read(profile_path).unwrap()).unwrap();
+        assert_eq!(persisted.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_manual_profile_preserves_target_and_auto_connect_semantics() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-manual").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-manual".to_string(),
+            name: "Manual Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManualSmcp,
+                    id: "manual-office".to_string(),
+                    robot_account_id: None,
+                }),
+                auto_connect: true,
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-manual").unwrap();
+
+        assert!(matches!(
+            migrated.connection_policy.target,
+            Some(ComputerConnectionTarget::ManualSmcp { ref id })
+                if id == "manual-office"
+        ));
+        assert!(migrated.connection_policy.auto_connect);
+        assert!(migrated.robot_binding.is_none());
+    }
+
+    #[test]
+    fn invalid_legacy_manager_profile_remains_intact_for_recovery() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-invalid").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-invalid".to_string(),
+            name: "Invalid Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManagerRobot,
+                    id: "42".to_string(),
+                    robot_account_id: None,
+                }),
+                auto_connect: true,
+            },
+            robot_binding: Some(LegacyRobotBindingV1 {
+                employee_id: 84,
+                robot_id: None,
+                robot_account_id: None,
+                namespace: None,
+                robot_name: None,
+            }),
+        };
+        let original = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&profile_path, &original).unwrap();
+
+        assert!(matches!(
+            svc.load_computer_profile("computer-invalid").unwrap_err(),
+            ConfigError::InvalidComputerProfile { .. }
+        ));
+        assert_eq!(std::fs::read(&profile_path).unwrap(), original);
+        assert!(!profile_path
+            .with_file_name(LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME)
+            .exists());
+    }
+
+    #[test]
     fn computer_profile_serialization_excludes_runtime_sdk_and_secret_fields() {
         let mut instance = ComputerInstance::new("computer-a", "Computer A");
         instance.inputs.push(InputDefinition::PromptString {

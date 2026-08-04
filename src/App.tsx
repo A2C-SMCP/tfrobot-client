@@ -18,6 +18,7 @@ import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { ComputerSettings } from './components/ComputerSettings';
+import { GlobalManagerAccount } from './components/ManagerAccount/GlobalManagerAccount';
 import {
   legacyComputerSettingsSection,
   parsePluginSettingsTarget,
@@ -232,7 +233,8 @@ function App() {
         <Title level={4} className={styles.title}>
           {t('app.name')}
         </Title>
-        <Space>
+        <Space className={styles.headerActions} size="small">
+          <GlobalManagerAccount />
           <Button
             type="text"
             className={styles.headerBtn}

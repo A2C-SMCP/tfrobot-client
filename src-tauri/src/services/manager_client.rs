@@ -167,7 +167,7 @@ struct LoginRequestBody<'a> {
 #[serde(rename_all = "camelCase")]
 struct SelectAccountRequestBody<'a> {
     temp_token: &'a str,
-    account_id: &'a str,
+    account_id: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +183,7 @@ struct SwitchAccountRequestBody {
 pub struct UserInfo {
     #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub user_id: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub account_id: String,
     pub account_name: String,
 }
@@ -229,11 +230,13 @@ struct AuthenticatedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountOption {
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub account_id: String,
     pub account_name: String,
     #[serde(default)]
     pub nickname: String,
     #[serde(default)]
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub organization_id: String,
     #[serde(default)]
     pub organization_name: String,
@@ -899,6 +902,7 @@ impl ManagerClient {
     /// 必须在 `login()` 返回 `AccountSelectionRequired` 之后调用。
     /// 请求体字段：`{tempToken, accountId}`；响应同单账户登录。
     pub async fn select_account(&self, account_id: &str) -> Result<UserInfo, ManagerError> {
+        let numeric_account_id = parse_positive_account_id(account_id, "select-account")?;
         let session = self.require_session().await?;
         let pending = session
             .pending_session_token
@@ -911,7 +915,7 @@ impl ManagerClient {
             .post(&url)
             .json(&SelectAccountRequestBody {
                 temp_token: &pending,
-                account_id,
+                account_id: numeric_account_id,
             })
             .send()
             .await
@@ -1003,16 +1007,7 @@ impl ManagerClient {
         &self,
         account_id: &str,
     ) -> Result<SwitchedManagerAccount, ManagerError> {
-        let account_id = account_id.parse::<u64>().map_err(|_| {
-            ManagerError::InvalidResponse(
-                "switch-account requires a positive numeric accountId".to_string(),
-            )
-        })?;
-        if account_id == 0 {
-            return Err(ManagerError::InvalidResponse(
-                "switch-account requires a positive numeric accountId".to_string(),
-            ));
-        }
+        let account_id = parse_positive_account_id(account_id, "switch-account")?;
         let session = self.require_session().await?;
         if session.jwt.is_empty() {
             return Err(ManagerError::NoSession);
@@ -1300,6 +1295,18 @@ fn strip_trailing_slash(url: String) -> String {
     }
 }
 
+fn parse_positive_account_id(account_id: &str, operation: &str) -> Result<u64, ManagerError> {
+    account_id
+        .parse::<u64>()
+        .ok()
+        .filter(|account_id| *account_id > 0)
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse(format!(
+                "{operation} requires a positive numeric accountId"
+            ))
+        })
+}
+
 /// 解析 402 响应体。兼容两种形态：
 /// - envelope：`{code, message, data: {message?, redirectUrl?}}`
 /// - 裸对象：`{message?, redirectUrl?}`
@@ -1438,7 +1445,7 @@ mod tests {
             "data": {
                 "token": "jwt-abc",
                 "userId": 9,
-                "accountId": "org-legacy-9:account-16",
+                "accountId": 16,
                 "accountName": "client_uat"
             }
         }"#;
@@ -1447,7 +1454,7 @@ mod tests {
             LoginData::SingleAccount(payload) => {
                 assert_eq!(payload.token, "jwt-abc");
                 assert_eq!(payload.user.user_id, "9");
-                assert_eq!(payload.user.account_id, "org-legacy-9:account-16");
+                assert_eq!(payload.user.account_id, "16");
                 assert_eq!(payload.user.account_name, "client_uat");
             }
             _ => panic!("expected SingleAccount branch"),
@@ -1464,10 +1471,10 @@ mod tests {
                 "tempToken": "temp-xyz",
                 "expiresIn": 300,
                 "accounts": [
-                    {"accountId": "org-2:account-2", "accountName": "testuser2_enterprise", "nickname": "测试用户2",
-                     "organizationId": "org-2", "organizationName": "测试企业", "organizationType": "enterprise"},
-                    {"accountId": "org-1:account-3", "accountName": "testuser2_personal", "nickname": "测试用户2",
-                     "organizationId": "org-1", "organizationName": "one-person-org-1", "organizationType": "personal"}
+                    {"accountId": 2, "accountName": "testuser2_enterprise", "nickname": "测试用户2",
+                     "organizationId": 2, "organizationName": "测试企业", "organizationType": "enterprise"},
+                    {"accountId": 3, "accountName": "testuser2_personal", "nickname": "测试用户2",
+                     "organizationId": 1, "organizationName": "one-person-org-1", "organizationType": "personal"}
                 ]
             }
         }"#;
@@ -1477,7 +1484,8 @@ mod tests {
                 assert_eq!(payload.temp_token, "temp-xyz");
                 assert_eq!(payload.expires_in, 300);
                 assert_eq!(payload.accounts.len(), 2);
-                assert_eq!(payload.accounts[0].account_id, "org-2:account-2");
+                assert_eq!(payload.accounts[0].account_id, "2");
+                assert_eq!(payload.accounts[0].organization_id, "2");
                 assert_eq!(payload.accounts[0].organization_type, "enterprise");
                 assert_eq!(payload.accounts[1].account_name, "testuser2_personal");
             }
