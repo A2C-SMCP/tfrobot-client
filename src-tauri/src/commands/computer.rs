@@ -12,6 +12,7 @@ use crate::services::computer::{
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
+use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -573,13 +574,23 @@ pub async fn start_computer_instance_core(
             if let Err(error) =
                 connect_computer_connection_target_by_policy(app, state, &id, target).await
             {
-                let _ = state.log_service.write_for_instance(
-                    "warn",
-                    "connection",
-                    &format!("Auto connect failed: {error}"),
-                    None,
-                    Some(&id),
-                );
+                if let Err(persist_error) = state
+                    .observability
+                    .record_activity_async(ActivityEventDraft::computer(
+                        &id,
+                        ActivityLevel::Warn,
+                        "connection",
+                        "smcp_connection",
+                        "auto_connect",
+                        ActivityOutcome::Failed,
+                        crate::services::observability::redact_text(&format!(
+                            "Auto connect failed: {error}"
+                        )),
+                    ))
+                    .await
+                {
+                    log::error!("failed to persist auto-connect failure activity: {persist_error}");
+                }
             }
         }
     }
@@ -1199,9 +1210,9 @@ mod tests {
     use crate::commands::inputs::InputDefinition;
     use crate::services::computer::ComputerRuntimeState;
     use crate::services::config::ConfigService;
-    use crate::services::logger::LogService;
     use crate::services::manager_context::ManagerContextKey;
     use crate::services::manager_environment::ManagerEnvironment;
+    use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
     use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
     use tempfile::TempDir;
@@ -1212,7 +1223,7 @@ mod tests {
         config
             .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
             .unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
     }

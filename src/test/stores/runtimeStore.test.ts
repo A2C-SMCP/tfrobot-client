@@ -68,7 +68,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 1,
           runtime: initialRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });
@@ -356,7 +356,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 0,
           runtime: connectedRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });
@@ -592,7 +592,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 0,
           runtime: retiredRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });

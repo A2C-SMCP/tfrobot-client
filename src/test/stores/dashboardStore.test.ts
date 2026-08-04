@@ -46,7 +46,7 @@ const mockData: DashboardData = {
       }),
     },
   ],
-  recent_logs: [],
+  recent_activity: [],
   runtimes: [
     { name: 'Node.js', path: '/usr/bin/node', available: true },
     { name: 'Python', path: undefined, available: false },

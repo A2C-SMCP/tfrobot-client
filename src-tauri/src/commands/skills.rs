@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
-    use crate::services::logger::LogService;
+    use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
     use tempfile::TempDir;
 
@@ -325,7 +325,7 @@ mod tests {
             "---\nname: example-skill\ndescription: Example skill\n---\nBody\n",
         )
         .unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
     }
@@ -373,7 +373,7 @@ mod tests {
         config.add_computer_instance(computer_b).unwrap();
         write_skill(&custom_a, "a-only", "A helper", "A body");
         write_skill(&custom_b, "b-only", "B helper", "B body");
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         let state = AppState::new(config, log_service, settings_service);
         state

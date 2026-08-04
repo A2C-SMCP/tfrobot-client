@@ -16,7 +16,7 @@ use tfrobot_client_lib::services::connection_targets::{
     manual_target_keychain_id, ConnectionTargetsConfig, ManualSmcpTarget,
 };
 use tfrobot_client_lib::services::keychain::{self, InMemorySecretStore, SecretStore};
-use tfrobot_client_lib::services::logger::LogService;
+use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::{
     AppSettings, ManagerSessionSettings, SettingsService,
 };
@@ -131,7 +131,7 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
         .unwrap();
     let state = AppState::try_new_with_secret_store(
         config,
-        LogService::new(directory.path()).unwrap(),
+        ObservabilityService::new(directory.path()).unwrap(),
         settings,
         secrets.clone(),
     )
@@ -251,7 +251,7 @@ async fn startup_does_not_import_legacy_global_inputs_or_read_unscoped_keychain_
 
     let state = AppState::try_new_with_secret_store(
         config,
-        LogService::new(directory.path()).unwrap(),
+        ObservabilityService::new(directory.path()).unwrap(),
         SettingsService::new(directory.path().to_path_buf()),
         secrets.clone(),
     )

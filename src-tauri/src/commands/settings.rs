@@ -1,7 +1,8 @@
+use crate::services::observability::ObservabilityRetention;
 use crate::services::settings::AppSettings;
 use crate::AppState;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
@@ -10,9 +11,30 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, Str
 
 #[tauri::command]
 pub async fn update_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    settings: AppSettings,
+    mut settings: AppSettings,
 ) -> Result<(), String> {
+    settings.normalize();
+    // Persist first: retention cleanup is destructive and must never run for a setting that could
+    // not be committed atomically.
+    state
+        .settings_service
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    state.diagnostics.set_level(settings.diagnostic_log_level);
+    let retention = ObservabilityRetention {
+        activity_days: settings.activity_retention_days,
+        tool_history_days: settings.tool_history_retention_days,
+    };
+    let observability = state.observability.as_ref().clone();
+    tauri::async_runtime::spawn_blocking(move || observability.apply_retention(retention))
+        .await
+        .map_err(|error| error.to_string())??;
+    if let Ok(log_dir) = app.path().app_log_dir() {
+        crate::cleanup_old_log_files(&log_dir, settings.diagnostic_retention_days as u64);
+    }
+
     // Apply custom PATH change immediately (no restart needed)
     match &settings.custom_path {
         Some(path) if !path.is_empty() => {
@@ -27,10 +49,7 @@ pub async fn update_settings(
         }
     }
 
-    state
-        .settings_service
-        .save(&settings)
-        .map_err(|e| e.to_string())
+    Ok(())
 }
 
 #[tauri::command]

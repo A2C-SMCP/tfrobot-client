@@ -3,7 +3,7 @@ import { useConnectionStore } from '@/stores/connectionStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
 import { useInputStore } from '@/stores/inputStore';
-import { useLogStore } from '@/stores/logStore';
+import { useActivityStore } from '@/stores/activityStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useDesktopStore } from '@/stores/desktopStore';
@@ -110,7 +110,7 @@ export function resetAllStores() {
     useDashboardStore,
     useDebugStore,
     useInputStore,
-    useLogStore,
+    useActivityStore,
     useSettingsStore,
     useThemeStore,
     useDesktopStore,

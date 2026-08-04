@@ -2,7 +2,7 @@ use crate::services::computer::{
     ClientConnectionStateSnapshot, ClientConnectionStatus, ConnectionStateSummary,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
-use crate::services::logger::LogFilter;
+use crate::services::observability::{ActivityEvent, ActivityQuery};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -21,7 +21,7 @@ pub struct DashboardData {
     pub computer_stopped: usize,
     pub computer_connected: usize,
     pub computers: Vec<DashboardComputerSummary>,
-    pub recent_logs: Vec<crate::services::logger::LogEntry>,
+    pub recent_activity: Vec<ActivityEvent>,
     pub runtimes: Vec<RuntimeInfo>,
 }
 
@@ -110,14 +110,19 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
     let computer_total = computers.len();
     let computer_stopped = computer_total.saturating_sub(computer_running);
 
-    // Recent logs
-    let recent_logs = state
-        .log_service
-        .query(&LogFilter {
+    // Recent user-visible activity across the client and all Computers.
+    let recent_activity = state
+        .observability
+        .query_activity_async(ActivityQuery {
             limit: Some(10),
             ..Default::default()
         })
-        .unwrap_or_default();
+        .await
+        .map(|page| page.items)
+        .unwrap_or_else(|error| {
+            log::error!("failed to load dashboard activity: {error}");
+            Vec::new()
+        });
     // Runtime detection
     let runtimes = vec![
         detect_runtime("Node.js", "node"),
@@ -132,7 +137,7 @@ pub async fn get_dashboard_data_core(state: &AppState) -> Result<DashboardData, 
         computer_stopped,
         computer_connected,
         computers,
-        recent_logs,
+        recent_activity,
         runtimes,
     })
 }
@@ -142,7 +147,9 @@ mod tests {
     use super::*;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
-    use crate::services::logger::LogService;
+    use crate::services::observability::{
+        ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
     use crate::AppState;
     use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
@@ -157,7 +164,7 @@ mod tests {
         config
             .add_computer_instance(ComputerInstance::new("computer-b", "Computer B"))
             .unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
     }
@@ -187,12 +194,28 @@ mod tests {
             .await
             .unwrap();
         state
-            .log_service
-            .write_for_instance("error", "mcp", "Server failed", None, Some("computer-a"))
+            .observability
+            .record_activity(&ActivityEventDraft::computer(
+                "computer-a",
+                ActivityLevel::Error,
+                "mcp",
+                "server",
+                "start",
+                ActivityOutcome::Failed,
+                "Server failed",
+            ))
             .unwrap();
         state
-            .log_service
-            .write_for_instance("info", "mcp", "Server ok", None, Some("computer-b"))
+            .observability
+            .record_activity(&ActivityEventDraft::computer(
+                "computer-b",
+                ActivityLevel::Info,
+                "mcp",
+                "server",
+                "start",
+                ActivityOutcome::Succeeded,
+                "Server ok",
+            ))
             .unwrap();
 
         let data = get_dashboard_data_core(&state).await.unwrap();
@@ -201,7 +224,7 @@ mod tests {
         assert_eq!(data.computer_running, 1);
         assert_eq!(data.computer_stopped, 1);
         assert!(data
-            .recent_logs
+            .recent_activity
             .iter()
             .any(|log| log.message == "Server failed"));
         let computer_a = data

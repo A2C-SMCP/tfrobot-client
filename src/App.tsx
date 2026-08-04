@@ -13,7 +13,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
 import { Dashboard } from './components/Dashboard';
-import { LogViewer } from './components/LogViewer';
+import { ActivityViewer } from './components/ActivityViewer';
 import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
@@ -219,7 +219,7 @@ function App() {
       case 'robot-connections':
         return <RobotConnections />;
       case 'logs':
-        return <LogViewer />;
+        return <ActivityViewer />;
       case 'settings':
         return <Settings />;
       default:

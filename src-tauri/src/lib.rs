@@ -7,9 +7,12 @@ use services::computer::{ComputerInstance, ComputerInstancesConfig, ComputerRegi
 use services::config::ConfigService;
 use services::config_migration::{migrate_legacy_config, MigrationError};
 use services::keychain::{SecretStore, SystemSecretStore};
-use services::logger::LogService;
 use services::manager_client::ManagerClient;
 use services::manager_context::ManagerContextCoordinator;
+use services::observability::{
+    initialize_tracing, ActivityEventDraft, ActivityLevel, ActivityOutcome, Diagnostics,
+    ObservabilityRetention, ObservabilityService,
+};
 use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
 use std::path::Path;
@@ -38,8 +41,10 @@ pub struct AppState {
     pub computer_lifecycle_lock: Arc<Mutex<()>>,
     /// Serializes per-Computer input definition/value mutations through runtime compensation.
     pub input_mutation_lock: Arc<Mutex<()>>,
-    /// Log service for SQLite-backed logging
-    pub log_service: Arc<LogService>,
+    /// User-visible activity journal and durable tool-call audit history.
+    pub observability: Arc<ObservabilityService>,
+    /// Runtime diagnostic verbosity controller. Diagnostics never enter the activity database.
+    pub diagnostics: Arc<Diagnostics>,
     /// Settings persistence service
     pub settings_service: Arc<SettingsService>,
     /// Backend-authoritative TFRSManager identity context and HTTP coordinator.
@@ -61,21 +66,21 @@ pub enum AppStateInitError {
 impl AppState {
     pub fn new(
         config: ConfigService,
-        log_service: LogService,
+        observability: ObservabilityService,
         settings_service: SettingsService,
     ) -> Self {
-        Self::try_new(config, log_service, settings_service)
+        Self::try_new(config, observability, settings_service)
             .expect("failed to initialize application state")
     }
 
     pub fn try_new(
         config: ConfigService,
-        log_service: LogService,
+        observability: ObservabilityService,
         settings_service: SettingsService,
     ) -> Result<Self, AppStateInitError> {
         Self::try_new_with_secret_store(
             config,
-            log_service,
+            observability,
             settings_service,
             Arc::new(SystemSecretStore),
         )
@@ -83,22 +88,24 @@ impl AppState {
 
     pub fn new_with_secret_store(
         config: ConfigService,
-        log_service: LogService,
+        observability: ObservabilityService,
         settings_service: SettingsService,
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
-        Self::try_new_with_secret_store(config, log_service, settings_service, secret_store)
+        Self::try_new_with_secret_store(config, observability, settings_service, secret_store)
             .expect("failed to initialize application state")
     }
 
     pub fn try_new_with_secret_store(
         config: ConfigService,
-        log_service: LogService,
+        observability: ObservabilityService,
         settings_service: SettingsService,
         secret_store: Arc<dyn SecretStore>,
     ) -> Result<Self, AppStateInitError> {
         let config = Arc::new(config);
         let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
+        let initial_settings = settings_service.load();
+        let diagnostics = Arc::new(Diagnostics::new(initial_settings.diagnostic_log_level));
         let settings_service = Arc::new(settings_service);
         let manager_client = Arc::new(ManagerClient::new_with_secret_store(secret_store.clone()));
         let manager_context = Arc::new(ManagerContextCoordinator::new(
@@ -143,7 +150,8 @@ impl AppState {
             )),
             computer_lifecycle_lock: Arc::new(Mutex::new(())),
             input_mutation_lock: Arc::new(Mutex::new(())),
-            log_service: Arc::new(log_service),
+            observability: Arc::new(observability),
+            diagnostics,
             settings_service,
             manager_context,
         })
@@ -189,8 +197,9 @@ fn hydrate_computer_instance(
 }
 
 /// Remove log files older than `retention_days` from the given directory.
-fn cleanup_old_log_files(log_dir: &Path, retention_days: u64) {
+pub(crate) fn cleanup_old_log_files(log_dir: &Path, retention_days: u64) {
     if let Ok(entries) = std::fs::read_dir(log_dir) {
+        let retention_days = retention_days.max(1);
         let cutoff =
             std::time::SystemTime::now() - std::time::Duration::from_secs(retention_days * 86400);
         for entry in entries.flatten() {
@@ -207,6 +216,9 @@ fn cleanup_old_log_files(log_dir: &Path, retention_days: u64) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(error) = initialize_tracing() {
+        eprintln!("failed to initialize structured diagnostics: {error}");
+    }
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -218,7 +230,8 @@ pub fn run() {
                     Target::new(TargetKind::Webview),
                 ])
                 .timezone_strategy(TimezoneStrategy::UseLocal)
-                .level(log::LevelFilter::Info)
+                // The runtime max level is controlled by Diagnostics from persisted settings.
+                .level(log::LevelFilter::Trace)
                 .max_file_size(5_000_000) // 5MB per file
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .build(),
@@ -235,11 +248,6 @@ pub fn run() {
             }
         }))
         .setup(|app| {
-            // Clean up old log files from the system log directory
-            if let Ok(log_dir) = app.path().app_log_dir() {
-                cleanup_old_log_files(&log_dir, 3);
-            }
-
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -252,8 +260,8 @@ pub fn run() {
             )
             .expect("Failed to initialize config service");
 
-            let log_service =
-                LogService::new(&app_data_dir).expect("Failed to initialize log service");
+            let observability = ObservabilityService::new(&app_data_dir)
+                .expect("Failed to initialize observability database");
 
             let settings_service = SettingsService::new_with_client_computers_paths(
                 app_data_dir.clone(),
@@ -262,6 +270,9 @@ pub fn run() {
 
             // Use configured log retention days for cleanup
             let settings = settings_service.load();
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                cleanup_old_log_files(&log_dir, settings.diagnostic_retention_days as u64);
+            }
 
             // Apply user's custom PATH override if configured
             if let Some(ref custom_path) = settings.custom_path {
@@ -276,7 +287,8 @@ pub fn run() {
                 );
             }
 
-            let state = AppState::try_new(config_service, log_service, settings_service)?;
+            let state = AppState::try_new(config_service, observability, settings_service)?;
+            state.diagnostics.set_level(settings.diagnostic_log_level);
             tauri::async_runtime::block_on(state.manager_context.set_lifecycle_sink(Arc::new(
                 commands::manager::TauriManagerContextLifecycleSink::new(
                     state.config.clone(),
@@ -289,12 +301,25 @@ pub fn run() {
             )));
 
             // Write startup log and cleanup old entries
-            let _ = state
-                .log_service
-                .write("info", "system", "Application started", None);
-            let _ = state
-                .log_service
-                .cleanup(settings.log_retention_days as i64);
+            if let Err(error) = state
+                .observability
+                .record_activity(&ActivityEventDraft::client(
+                    ActivityLevel::Info,
+                    "system",
+                    "application_lifecycle",
+                    "start",
+                    ActivityOutcome::Succeeded,
+                    "Application started",
+                ))
+            {
+                log::error!("failed to persist startup activity: {error}");
+            }
+            if let Err(error) = state.observability.apply_retention(ObservabilityRetention {
+                activity_days: settings.activity_retention_days,
+                tool_history_days: settings.tool_history_retention_days,
+            }) {
+                log::error!("failed to apply observability retention: {error}");
+            }
 
             log::info!("Configured Computer runtimes loaded; instances remain stopped");
 
@@ -396,10 +421,11 @@ pub fn run() {
             // Desktop resources
             commands::desktop::get_desktop,
             commands::desktop::get_window_detail,
-            // Logs
-            commands::logs::get_logs,
-            commands::logs::export_logs,
-            commands::logs::clear_logs,
+            // Activity journal and diagnostics
+            commands::activity::get_activity,
+            commands::activity::export_activity,
+            commands::activity::clear_activity,
+            commands::diagnostics::set_diagnostic_log_level,
             // Dashboard
             commands::dashboard::get_dashboard_data,
             // Settings
@@ -426,11 +452,21 @@ pub fn run() {
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
                     state.computer_registry.shutdown_all().await;
+                    if let Err(error) = state
+                        .observability
+                        .record_activity_async(ActivityEventDraft::client(
+                            ActivityLevel::Info,
+                            "system",
+                            "application_lifecycle",
+                            "shutdown",
+                            ActivityOutcome::Succeeded,
+                            "Application shutting down",
+                        ))
+                        .await
+                    {
+                        log::error!("failed to persist shutdown activity: {error}");
+                    }
                 });
-                let _ =
-                    state
-                        .log_service
-                        .write("info", "system", "Application shutting down", None);
             }
         });
 }
@@ -504,7 +540,7 @@ mod tests {
     async fn app_state_allows_empty_computer_registry() {
         let dir = TempDir::new().unwrap();
         let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
 
         let state = AppState::new(config, log_service, settings_service);
@@ -519,7 +555,7 @@ mod tests {
         config
             .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
             .unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
 
         let state = AppState::new(config, log_service, settings_service);

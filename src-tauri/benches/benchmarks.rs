@@ -6,18 +6,32 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::config::ConfigService;
-use tfrobot_client_lib::services::logger::{LogFilter, LogService};
+use tfrobot_client_lib::services::observability::{
+    ActivityEventDraft, ActivityLevel, ActivityOutcome, ActivityQuery, ObservabilityRetention,
+    ObservabilityService,
+};
 use tfrobot_client_lib::services::sdk_config::SdkConfigService;
 
-// ── LogService Benchmarks ──
+fn benchmark_activity(message: impl Into<String>) -> ActivityEventDraft {
+    ActivityEventDraft::client(
+        ActivityLevel::Info,
+        "bench",
+        "benchmark",
+        "write",
+        ActivityOutcome::Succeeded,
+        message,
+    )
+}
+
+// ── Activity journal benchmarks ──
 
 fn bench_log_write(c: &mut Criterion) {
     let tmp = tempdir().unwrap();
-    let svc = LogService::new(tmp.path()).unwrap();
+    let svc = ObservabilityService::new(tmp.path()).unwrap();
 
     c.bench_function("log_write_single", |b| {
         b.iter(|| {
-            svc.write("info", "bench", "benchmark message", None)
+            svc.record_activity(&benchmark_activity("benchmark message"))
                 .unwrap();
         });
     });
@@ -25,11 +39,11 @@ fn bench_log_write(c: &mut Criterion) {
 
 fn bench_log_query(c: &mut Criterion) {
     let tmp = tempdir().unwrap();
-    let svc = LogService::new(tmp.path()).unwrap();
+    let svc = ObservabilityService::new(tmp.path()).unwrap();
 
     // Pre-fill data
     for i in 0..10_000 {
-        svc.write("info", "bench", &format!("msg {i}"), None)
+        svc.record_activity(&benchmark_activity(format!("msg {i}")))
             .unwrap();
     }
 
@@ -40,31 +54,31 @@ fn bench_log_query(c: &mut Criterion) {
             BenchmarkId::new("with_limit", limit),
             &limit,
             |b, &limit| {
-                let filter = LogFilter {
+                let filter = ActivityQuery {
                     limit: Some(limit),
                     ..Default::default()
                 };
-                b.iter(|| svc.query(&filter).unwrap());
+                b.iter(|| svc.query_activity(&filter).unwrap());
             },
         );
     }
 
     group.bench_function("with_keyword_filter", |b| {
-        let filter = LogFilter {
+        let filter = ActivityQuery {
             keyword: Some("msg 5000".into()),
             limit: Some(100),
             ..Default::default()
         };
-        b.iter(|| svc.query(&filter).unwrap());
+        b.iter(|| svc.query_activity(&filter).unwrap());
     });
 
     group.bench_function("with_level_filter", |b| {
-        let filter = LogFilter {
-            levels: Some(vec!["info".to_string()]),
+        let filter = ActivityQuery {
+            levels: Some(vec![ActivityLevel::Info]),
             limit: Some(100),
             ..Default::default()
         };
-        b.iter(|| svc.query(&filter).unwrap());
+        b.iter(|| svc.query_activity(&filter).unwrap());
     });
 
     group.finish();
@@ -75,15 +89,19 @@ fn bench_log_cleanup(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let tmp = tempdir().unwrap();
-                let svc = LogService::new(tmp.path()).unwrap();
+                let svc = ObservabilityService::new(tmp.path()).unwrap();
                 for i in 0..10_000 {
-                    svc.write("info", "bench", &format!("msg {i}"), None)
+                    svc.record_activity(&benchmark_activity(format!("msg {i}")))
                         .unwrap();
                 }
                 (svc, tmp)
             },
             |(svc, _tmp)| {
-                svc.cleanup(0).unwrap();
+                svc.cleanup(ObservabilityRetention {
+                    activity_days: 0,
+                    tool_history_days: 0,
+                })
+                .unwrap();
             },
         );
     });

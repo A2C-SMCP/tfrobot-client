@@ -61,9 +61,9 @@ const mockDashboardData = {
       mcp_server_count: 2,
     },
   ],
-  recent_logs: [
-    { id: 1, timestamp: '2025-01-01T10:00:00Z', level: 'info', category: 'system', message: 'Server started' },
-    { id: 2, timestamp: '2025-01-01T10:01:00Z', level: 'error', category: 'mcp', message: 'Connection failed' },
+  recent_activity: [
+    { id: 1, timestamp: '2025-01-01T10:00:00Z', scope: { kind: 'client' }, level: 'info', category: 'system', event_type: 'lifecycle', operation: 'start', outcome: 'succeeded', message: 'Server started' },
+    { id: 2, timestamp: '2025-01-01T10:01:00Z', scope: { kind: 'computer', computer_id: 'computer-a' }, level: 'error', category: 'mcp', event_type: 'connection', operation: 'connect', outcome: 'failed', message: 'Connection failed' },
   ],
   runtimes: [
     { name: 'Node.js', path: '/usr/local/bin/node', available: true },
@@ -159,7 +159,7 @@ describe('Dashboard', () => {
 
   it('renders empty activity when no logs', () => {
     mockUseDashboardStore.mockReturnValue({
-      data: { ...mockDashboardData, recent_logs: [] },
+      data: { ...mockDashboardData, recent_activity: [] },
       loading: false,
       fetchDashboard: mockFetchDashboard,
     } as any);
