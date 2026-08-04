@@ -16,7 +16,6 @@ import {
   DownOutlined,
   LoginOutlined,
   LogoutOutlined,
-  ReloadOutlined,
   SwapOutlined,
   UserOutlined,
 } from '@ant-design/icons';
@@ -42,7 +41,6 @@ export function GlobalManagerAccount() {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const [relogin, setRelogin] = useState(false);
   const {
     context,
     pendingAccountSelection,
@@ -75,15 +73,11 @@ export function GlobalManagerAccount() {
         ?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [open, context.authState, relogin]);
+  }, [open, context.authState]);
 
   const updateOpen = (next: boolean) => {
     setOpen(next);
-    if (next) {
-      setRelogin(false);
-      return;
-    }
-    window.requestAnimationFrame(() => triggerRef.current?.focus());
+    if (!next) window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
 
   const handleSwitch = async (accountId: string) => {
@@ -184,37 +178,24 @@ export function GlobalManagerAccount() {
         )}
       </Space>
       <Divider className={styles.divider} />
-      <Space className={styles.actions} wrap>
+      <div className={styles.logoutArea}>
         <Button
-          icon={<ReloadOutlined />}
-          disabled={identityLoading}
-          onClick={() => setRelogin(true)}
-        >
-          {t('managerAccount.global.relogin')}
-        </Button>
-        <Button
-          danger
+          color="danger"
+          variant="filled"
+          block
+          className={styles.logoutButton}
           icon={<LogoutOutlined />}
           loading={identityLoading}
           onClick={() => void handleLogout()}
         >
           {t('managerAccount.login.logout')}
         </Button>
-      </Space>
+      </div>
     </>
   ) : null;
 
   let panelContent;
-  if (relogin) {
-    panelContent = (
-      <>
-        <Button type="link" className={styles.back} onClick={() => setRelogin(false)}>
-          {t('managerAccount.global.backToAccount')}
-        </Button>
-        <LoginForm embedded onSubmitted={() => setRelogin(false)} />
-      </>
-    );
-  } else if (context.authState === 'account_selection_required' && pendingAccountSelection) {
+  if (context.authState === 'account_selection_required' && pendingAccountSelection) {
     panelContent = <AccountSelection embedded />;
   } else if (context.authState === 'onboarding_required') {
     panelContent = (

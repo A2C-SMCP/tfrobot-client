@@ -35,8 +35,7 @@
 }
 
 .identityHeader,
-.section,
-.actions {
+.section {
   width: 100%;
 }
 
@@ -102,14 +101,20 @@
   font-size: 12px;
 }
 
-.actions {
-  justify-content: flex-end;
+.logoutArea {
+  width: 100%;
+  padding: 2px 0;
 }
 
-.back {
-  height: auto;
-  margin: -4px 0 8px;
-  padding: 0;
+.logoutButton {
+  height: 40px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.logoutButton:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 .error {

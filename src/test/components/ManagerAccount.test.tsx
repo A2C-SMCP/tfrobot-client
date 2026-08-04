@@ -296,6 +296,28 @@ describe('ManagerAccount', () => {
       await waitFor(() => expect(switchAccount).toHaveBeenCalledWith('42'));
     });
 
+    it('offers one clear sign-out action without an ineffective re-login path', async () => {
+      const logout = vi.fn().mockResolvedValue(undefined);
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: '16',
+          accountName: 'client_uat',
+        },
+        availableAccounts: [],
+        logout,
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+
+      expect(screen.queryByRole('button', { name: /Sign in again/i })).not.toBeInTheDocument();
+      const signOut = screen.getByRole('button', { name: /Sign Out/i });
+      fireEvent.click(signOut);
+      await waitFor(() => expect(logout).toHaveBeenCalledOnce());
+    });
+
     it('surfaces pending account selection from every page entry', async () => {
       applyMock({
         pendingAccountSelection: [{

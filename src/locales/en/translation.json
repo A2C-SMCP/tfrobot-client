@@ -788,8 +788,6 @@
       "loadingAccounts": "Loading accounts…",
       "noAccounts": "No other accounts are available.",
       "current": "Current",
-      "relogin": "Sign in again",
-      "backToAccount": "Back to account",
       "completeSignIn": "Complete sign-in",
       "setupRequired": "Account setup required",
       "sessionExpired": "Session expired",

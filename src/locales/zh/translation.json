@@ -788,8 +788,6 @@
       "loadingAccounts": "正在加载账号…",
       "noAccounts": "没有其他可切换账号。",
       "current": "当前",
-      "relogin": "重新登录",
-      "backToAccount": "返回账号信息",
       "completeSignIn": "继续完成登录",
       "setupRequired": "需要完成账号设置",
       "sessionExpired": "登录已过期",
