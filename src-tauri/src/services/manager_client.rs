@@ -162,18 +162,28 @@ struct LoginRequestBody<'a> {
     password: &'a str,
 }
 
+/// Account IDs are opaque in the current public contract, while older Manager deployments used
+/// positive JSON numbers. Preserve public strings exactly and retain numeric wire compatibility
+/// for legacy IDs that round-trip canonically through `u64`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum WireAccountId<'a> {
+    LegacyNumber(u64),
+    Opaque(&'a str),
+}
+
 /// select-account 请求体。`POST /auth/select-account`。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SelectAccountRequestBody<'a> {
     temp_token: &'a str,
-    account_id: u64,
+    account_id: WireAccountId<'a>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SwitchAccountRequestBody {
-    account_id: u64,
+struct SwitchAccountRequestBody<'a> {
+    account_id: WireAccountId<'a>,
 }
 
 /// 登录成功后 Manager 下发的用户/账户信息（扁平 4 字段，**无嵌套 user 对象**）。
@@ -902,7 +912,7 @@ impl ManagerClient {
     /// 必须在 `login()` 返回 `AccountSelectionRequired` 之后调用。
     /// 请求体字段：`{tempToken, accountId}`；响应同单账户登录。
     pub async fn select_account(&self, account_id: &str) -> Result<UserInfo, ManagerError> {
-        let numeric_account_id = parse_positive_account_id(account_id, "select-account")?;
+        let wire_account_id = wire_account_id(account_id, "select-account")?;
         let session = self.require_session().await?;
         let pending = session
             .pending_session_token
@@ -915,7 +925,7 @@ impl ManagerClient {
             .post(&url)
             .json(&SelectAccountRequestBody {
                 temp_token: &pending,
-                account_id: numeric_account_id,
+                account_id: wire_account_id,
             })
             .send()
             .await
@@ -1007,7 +1017,7 @@ impl ManagerClient {
         &self,
         account_id: &str,
     ) -> Result<SwitchedManagerAccount, ManagerError> {
-        let account_id = parse_positive_account_id(account_id, "switch-account")?;
+        let wire_account_id = wire_account_id(account_id, "switch-account")?;
         let session = self.require_session().await?;
         if session.jwt.is_empty() {
             return Err(ManagerError::NoSession);
@@ -1017,7 +1027,9 @@ impl ManagerClient {
             .http
             .post(url)
             .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
-            .json(&SwitchAccountRequestBody { account_id })
+            .json(&SwitchAccountRequestBody {
+                account_id: wire_account_id,
+            })
             .send()
             .await
             .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
@@ -1029,7 +1041,7 @@ impl ManagerClient {
             .await
             .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
         let SwitchAccountPayload { token, identity } = envelope.data;
-        if identity.account_id != account_id.to_string() {
+        if identity.account_id != account_id {
             return Err(ManagerError::InvalidResponse(
                 "switch-account response accountId does not match the request".to_string(),
             ));
@@ -1295,16 +1307,21 @@ fn strip_trailing_slash(url: String) -> String {
     }
 }
 
-fn parse_positive_account_id(account_id: &str, operation: &str) -> Result<u64, ManagerError> {
-    account_id
-        .parse::<u64>()
-        .ok()
-        .filter(|account_id| *account_id > 0)
-        .ok_or_else(|| {
-            ManagerError::InvalidResponse(format!(
-                "{operation} requires a positive numeric accountId"
-            ))
-        })
+fn wire_account_id<'a>(
+    account_id: &'a str,
+    operation: &str,
+) -> Result<WireAccountId<'a>, ManagerError> {
+    if account_id.trim().is_empty() {
+        return Err(ManagerError::InvalidResponse(format!(
+            "{operation} requires a non-empty accountId"
+        )));
+    }
+    match account_id.parse::<u64>() {
+        Ok(value) if value > 0 && value.to_string() == account_id => {
+            Ok(WireAccountId::LegacyNumber(value))
+        }
+        _ => Ok(WireAccountId::Opaque(account_id)),
+    }
 }
 
 /// 解析 402 响应体。兼容两种形态：
@@ -1418,6 +1435,49 @@ mod tests {
 
         let err = ManagerClient::resolve_base_url(Some("   ".to_string())).unwrap_err();
         assert!(matches!(err, ManagerError::MissingBaseUrl));
+    }
+
+    #[test]
+    fn account_id_wire_contract_preserves_every_noncanonical_nonempty_string() {
+        let cases = [
+            ("1", serde_json::json!(1)),
+            ("18446744073709551615", serde_json::json!(u64::MAX)),
+            ("0", serde_json::json!("0")),
+            ("00", serde_json::json!("00")),
+            ("01", serde_json::json!("01")),
+            ("+0", serde_json::json!("+0")),
+            (
+                "18446744073709551616",
+                serde_json::json!("18446744073709551616"),
+            ),
+            ("acct_public_42", serde_json::json!("acct_public_42")),
+        ];
+
+        for (account_id, expected) in cases {
+            let select = serde_json::to_value(SelectAccountRequestBody {
+                temp_token: "temp-token",
+                account_id: wire_account_id(account_id, "select-account").unwrap(),
+            })
+            .unwrap();
+            let switch = serde_json::to_value(SwitchAccountRequestBody {
+                account_id: wire_account_id(account_id, "switch-account").unwrap(),
+            })
+            .unwrap();
+
+            assert_eq!(
+                select["accountId"], expected,
+                "select accountId={account_id}"
+            );
+            assert_eq!(
+                switch["accountId"], expected,
+                "switch accountId={account_id}"
+            );
+        }
+
+        for account_id in ["", " ", "\t\r\n"] {
+            assert!(wire_account_id(account_id, "select-account").is_err());
+            assert!(wire_account_id(account_id, "switch-account").is_err());
+        }
     }
 
     #[test]

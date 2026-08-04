@@ -611,6 +611,63 @@ async fn context_login_persists_complete_server_identity_and_logout_clears_it() 
 }
 
 #[tokio::test]
+async fn manual_login_recovers_from_incomplete_v3_session_metadata() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-recovered-login")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    std::fs::create_dir_all(settings.global_manager_session_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        settings.global_manager_session_path(),
+        r#"{
+          "schema_version": 3,
+          "session": {
+            "environment": "staging",
+            "userId": "9",
+            "accountId": "16",
+            "accountName": "client_uat",
+            "organizationId": "9",
+            "organizationName": "Client UAT Org",
+            "organizationType": "enterprise"
+          }
+        }"#,
+    )
+    .unwrap();
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .expect("manual login must replace invalid restore-only metadata");
+
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]
+        .request_line
+        .starts_with("POST /auth/login-by-password"));
+    assert!(requests[1].request_line.starts_with("GET /api/v1/auth/me"));
+    drop(requests);
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .unwrap()
+        .has_complete_identity());
+}
+
+#[tokio::test]
 async fn context_lists_accounts_with_current_bearer_without_exposing_credentials() {
     let (base, captured, _handle) = spawn_mock_manager(vec![
         json_script(
@@ -959,6 +1016,71 @@ async fn context_restore_revalidates_keychain_session_with_auth_me() {
 }
 
 #[tokio::test]
+async fn context_restore_revalidates_incomplete_v3_metadata_with_auth_me() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-incomplete-v3")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let secrets = InMemorySecretStore::shared();
+    test_context_coordinator(base.clone(), settings.clone(), secrets.clone())
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    std::fs::write(
+        settings.global_manager_session_path(),
+        r#"{
+          "schema_version": 3,
+          "session": {
+            "environment": "staging",
+            "userId": "9",
+            "accountId": "16",
+            "accountName": "client_uat",
+            "organizationId": "9",
+            "organizationName": "Client UAT Org",
+            "organizationType": "enterprise"
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let restored = test_context_coordinator(base, settings.clone(), secrets)
+        .restore_session()
+        .await
+        .expect("incomplete v3 metadata must be revalidated instead of blocking restore")
+        .expect("the live keychain session should restore");
+
+    assert_eq!(restored.user.account_id, "16");
+    let upgraded = settings.load_global_manager_session().unwrap();
+    assert_eq!(upgraded.schema_version, 3);
+    assert!(upgraded.session.unwrap().has_complete_identity());
+    let requests = captured.lock().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.request_line.contains("/api/v1/auth/me"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn transient_restore_validation_failure_preserves_retryable_credentials() {
     let (base, _, server) = spawn_mock_manager(vec![
         json_script(
@@ -998,6 +1120,79 @@ async fn transient_restore_validation_failure_preserves_retryable_credentials() 
         .await
         .unwrap_err();
     assert!(matches!(retry_error, ManagerError::NetworkError(_)));
+}
+
+#[tokio::test]
+async fn context_switch_account_preserves_opaque_public_id_on_the_wire() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-before-opaque-switch")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        json_script(
+            "/api/v1/auth/switch-account",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "token": "jwt-after-opaque-switch",
+                "userId": 9,
+                "accountId": "acct_public_42",
+                "accountName": "client_public",
+                "organizationId": "org_public_84",
+                "organizationName": "Public Organization",
+                "organizationType": "enterprise"
+            })),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "id": 9,
+                "nickname": "Client Public",
+                "email": "client@example.com",
+                "phone": "13800000000",
+                "accountAvatar": "",
+                "accountId": "acct_public_42",
+                "accountName": "client_public",
+                "employeeNo": "000042",
+                "organizationId": "org_public_84",
+                "organizationName": "Public Organization",
+                "organizationType": "enterprise",
+                "permissions": ["robot:read"]
+            })),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let coordinator = test_context_coordinator(
+        base,
+        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        InMemorySecretStore::shared(),
+    );
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    coordinator
+        .switch_account("acct_public_42")
+        .await
+        .expect("opaque public account IDs must remain strings on the wire");
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.context_key.unwrap().account_id, "acct_public_42");
+    let requests = captured.lock().await;
+    let switch_request = requests
+        .iter()
+        .find(|request| request.request_line.contains("/api/v1/auth/switch-account"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&switch_request.body).unwrap();
+    assert_eq!(body["accountId"], "acct_public_42");
 }
 
 #[tokio::test]
@@ -1672,6 +1867,55 @@ async fn select_account_completes_session() {
     assert_eq!(select_body["accountId"], 2);
     // sessionToken 不应再出现
     assert!(select_body.get("sessionToken").is_none());
+}
+
+#[tokio::test]
+async fn select_account_preserves_opaque_public_id_on_the_wire() {
+    let script = vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "message": "请选择要登录的账户",
+                "tempToken": "temp-public",
+                "expiresIn": 300,
+                "accounts": [{
+                    "accountId": "acct_public_02",
+                    "accountName": "public_enterprise",
+                    "organizationId": "org_public_02",
+                    "organizationName": "Public Enterprise",
+                    "organizationType": "enterprise"
+                }]
+            })),
+        ),
+        json_script(
+            "/auth/select-account",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "token": "final-public-jwt",
+                "userId": 2,
+                "accountId": "acct_public_02",
+                "accountName": "public_enterprise"
+            })),
+        ),
+    ];
+    let (base, captured, _handle) = spawn_mock_manager(script).await;
+    let client = test_manager_client();
+    client
+        .login(Some(base), "13900139000", "Test@123456")
+        .await
+        .unwrap();
+
+    let user = client
+        .select_account("acct_public_02")
+        .await
+        .expect("opaque public account IDs must be supported during account selection");
+
+    assert_eq!(user.account_id, "acct_public_02");
+    let requests = captured.lock().await;
+    let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(body["tempToken"], "temp-public");
+    assert_eq!(body["accountId"], "acct_public_02");
 }
 
 #[tokio::test]

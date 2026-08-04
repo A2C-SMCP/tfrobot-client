@@ -205,10 +205,18 @@ impl ManagerContextCoordinator {
         // Persist SignedOut before mutating keychain/session state. A crash or rollback failure
         // can then only lose auto-restore, never revive the previous account. Failed login
         // attempts restore the prior metadata because ManagerClient leaves that session intact.
-        let previous_metadata = self
-            .settings
-            .load_global_manager_session()
-            .map_err(manager_settings_error)?;
+        let previous_metadata = match self.settings.load_global_manager_session() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                // Automatic restore remains fail-closed, but invalid restore-only metadata must
+                // never prevent an explicit login from replacing it with server-verified state.
+                // The following atomic SignedOut write still surfaces real persistence failures.
+                log::warn!(
+                    "manager: discarding unreadable session metadata before explicit login: {error}"
+                );
+                ManagerSessionConfig::default()
+            }
+        };
         self.clear_persisted_session()?;
         let result = self
             .client

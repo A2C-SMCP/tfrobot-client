@@ -206,13 +206,24 @@ impl SettingsService {
             // and require one fresh login instead of reviving ambiguous credentials.
             return Ok(ManagerSessionConfig::default());
         }
-        let config: ManagerSessionConfig = serde_json::from_value(value)?;
+        let mut config: ManagerSessionConfig = serde_json::from_value(value)?;
         if stored_version == Some(2) {
             // Schema v2 is not authenticated context: it has no organization identity. Preserve
             // it only long enough for restore to validate the JWT against live `/auth/me`.
             return Ok(config);
         }
         validate_manager_session_schema(&config)?;
+        if config
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.has_complete_identity())
+        {
+            // Some pre-release schema-v3 clients persisted only the scoped identity fields. Treat
+            // that metadata exactly like a v2 restore hint: it grants no authority by itself and
+            // must be replaced from a successful live `/auth/me` response before use.
+            config.schema_version = 2;
+            return Ok(config);
+        }
         validate_complete_manager_session(&config)?;
         Ok(config)
     }
@@ -513,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn global_manager_session_v3_rejects_missing_organization_context() {
+    fn global_manager_session_incomplete_v3_becomes_restore_hint() {
         let (svc, _tmp) = setup();
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
@@ -537,14 +548,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            svc.load_global_manager_session().unwrap_err(),
-            ManagerSessionConfigError::IncompleteContext
-        ));
+        let config = svc.load_global_manager_session().unwrap();
+        assert_eq!(config.schema_version, 2);
+        assert!(!config.session.unwrap().has_complete_identity());
     }
 
     #[test]
-    fn global_manager_session_v3_rejects_empty_scoped_ids() {
+    fn global_manager_session_v3_with_empty_scope_has_no_authority() {
         let (svc, _tmp) = setup();
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
@@ -571,14 +581,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            svc.load_global_manager_session().unwrap_err(),
-            ManagerSessionConfigError::IncompleteContext
-        ));
+        let config = svc.load_global_manager_session().unwrap();
+        assert_eq!(config.schema_version, 2);
+        assert!(!config.session.unwrap().has_complete_identity());
     }
 
     #[test]
-    fn global_manager_session_v3_rejects_partial_redacted_identity() {
+    fn global_manager_session_partial_v3_becomes_restore_hint() {
         let (svc, _tmp) = setup();
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
@@ -604,10 +613,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            svc.load_global_manager_session().unwrap_err(),
-            ManagerSessionConfigError::IncompleteContext
-        ));
+        let config = svc.load_global_manager_session().unwrap();
+        assert_eq!(config.schema_version, 2);
+        assert!(!config.session.unwrap().has_complete_identity());
     }
 
     #[test]
