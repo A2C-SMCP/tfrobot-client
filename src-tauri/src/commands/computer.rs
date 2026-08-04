@@ -6,8 +6,8 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
-    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance, ComputerInstanceId,
-    ComputerRuntimeAction, ConnectionStateSummary, RobotBindingMetadata,
+    ComputerConnectionTarget, ComputerInstance, ComputerInstanceId, ComputerRuntimeAction,
+    ConnectionStateSummary, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::keychain;
@@ -289,11 +289,7 @@ pub async fn duplicate_computer_instance_core(
             .config
             .get_manual_smcp_target(&target_id)
             .map_err(|error| error.to_string())?;
-        instance.connection_policy.target = Some(ComputerConnectionTarget {
-            target_type: ComputerConnectionTargetType::ManualSmcp,
-            id: target_id,
-            robot_account_id: None,
-        });
+        instance.connection_policy.target = Some(ComputerConnectionTarget::manual_smcp(target_id));
     }
     state
         .config
@@ -773,29 +769,17 @@ async fn connect_computer_connection_target_by_policy(
     id: &str,
     target: &ComputerConnectionTarget,
 ) -> Result<(), String> {
-    match target.target_type {
-        ComputerConnectionTargetType::ManualSmcp => {
+    match target {
+        ComputerConnectionTarget::ManualSmcp { .. } => {
             connect_connection_target_for_policy_core(state, id, target).await
         }
-        ComputerConnectionTargetType::ManagerRobot => {
-            let employee_id = target
-                .id
-                .parse::<u64>()
-                .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
-            let robot_account_id = target
-                .robot_account_id
-                .clone()
-                .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
-            connect_manager_robot_target_for_policy(
-                state,
-                id,
-                employee_id,
-                robot_account_id,
-                target,
-            )
+        ComputerConnectionTarget::ManagerRobot {
+            context_key,
+            employee_id,
+            ..
+        } => connect_manager_robot_target_for_policy(state, id, context_key, *employee_id, target)
             .await
-            .map_err(|error| error.to_string())
-        }
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -804,29 +788,14 @@ fn validate_connection_target_reference(
     target: Option<&ComputerConnectionTarget>,
 ) -> Result<(), String> {
     match target {
-        Some(ComputerConnectionTarget {
-            target_type: ComputerConnectionTargetType::ManualSmcp,
-            id,
-            ..
-        }) => {
+        Some(ComputerConnectionTarget::ManualSmcp { id }) => {
             state
                 .config
                 .get_manual_smcp_target(id)
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
-        Some(ComputerConnectionTarget {
-            target_type: ComputerConnectionTargetType::ManagerRobot,
-            id,
-            robot_account_id,
-        }) => {
-            id.parse::<u64>()
-                .map_err(|_| "Manager Robot target id must be a numeric employee id".to_string())?;
-            robot_account_id
-                .clone()
-                .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
-            Ok(())
-        }
+        Some(ComputerConnectionTarget::ManagerRobot { .. }) => Ok(()),
         None => Ok(()),
     }
 }

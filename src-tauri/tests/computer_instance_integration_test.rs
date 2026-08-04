@@ -18,7 +18,7 @@ use tfrobot_client_lib::commands::connection::{
 };
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
 use tfrobot_client_lib::services::computer::{
-    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance, RobotBindingMetadata,
+    ComputerConnectionTarget, ComputerInstance, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
@@ -513,19 +513,12 @@ async fn policy_connect_rejects_a_target_replaced_before_transaction_prepare() {
             })
             .unwrap();
     }
-    let stale_target = ComputerConnectionTarget {
-        target_type: ComputerConnectionTargetType::ManualSmcp,
-        id: "target-a".to_string(),
-        robot_account_id: None,
-    };
+    let stale_target = ComputerConnectionTarget::manual_smcp("target-a");
     state
         .config
         .update_computer_instance(&created.id, |instance| {
-            instance.connection_policy.target = Some(ComputerConnectionTarget {
-                target_type: ComputerConnectionTargetType::ManualSmcp,
-                id: "target-b".to_string(),
-                robot_account_id: None,
-            });
+            instance.connection_policy.target =
+                Some(ComputerConnectionTarget::manual_smcp("target-b"));
         })
         .unwrap();
 
@@ -534,17 +527,15 @@ async fn policy_connect_rejects_a_target_replaced_before_transaction_prepare() {
         .unwrap_err();
 
     assert!(error.contains("changed before the connection could start"));
-    assert_eq!(
+    assert!(matches!(
         state
             .config
             .get_computer_instance(&created.id)
             .unwrap()
             .connection_policy
-            .target
-            .unwrap()
-            .id,
-        "target-b"
-    );
+            .target,
+        Some(ComputerConnectionTarget::ManualSmcp { ref id }) if id == "target-b"
+    ));
 }
 
 #[tokio::test]
@@ -577,9 +568,11 @@ async fn duplicate_copies_configuration_without_runtime_state() {
         .config
         .update_computer_instance(&source.id, |instance| {
             instance.robot_binding = Some(RobotBindingMetadata {
+                context_key: None,
+                state: ManagerRobotBindingState::NeedsRebind,
                 employee_id: 42,
                 robot_id: Some("robot-42".to_string()),
-                robot_account_id: Some("4200".to_string()),
+                last_resolved_robot_account_id: Some("4200".to_string()),
                 namespace: Some("test".to_string()),
                 robot_name: Some("Robot 42".to_string()),
             });
@@ -676,14 +669,10 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             .and_then(|binding| binding.robot_name.as_deref()),
         Some("Robot 42")
     );
-    assert_eq!(
-        duplicate_config
-            .connection_policy
-            .target
-            .as_ref()
-            .map(|target| target.id.as_str()),
-        Some(target.id.as_str())
-    );
+    assert!(matches!(
+        duplicate_config.connection_policy.target.as_ref(),
+        Some(ComputerConnectionTarget::ManualSmcp { id }) if id == &target.id
+    ));
     assert!(!duplicate.running);
     assert!(!duplicate.connected);
     assert!(!source_sdk_snapshot.revision.0.is_empty());

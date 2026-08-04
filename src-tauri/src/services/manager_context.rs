@@ -7,7 +7,7 @@
 
 use std::{future::Future, sync::Arc};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::services::manager_client::{
@@ -32,7 +32,7 @@ pub enum ManagerAuthState {
     Authenticated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerContextKey {
     pub environment: ManagerEnvironment,
@@ -367,6 +367,21 @@ impl ManagerContextCoordinator {
         self.ensure_authenticated_generation_locked(Some(expected_generation))
             .await
             .map(|_| ())
+    }
+
+    pub async fn context_key_for_generation(
+        &self,
+        expected_generation: u64,
+    ) -> Result<ManagerContextKey, ManagerError> {
+        let _transaction = self.transaction_lock.lock().await;
+        self.ensure_authenticated_generation_locked(Some(expected_generation))
+            .await?;
+        self.snapshot
+            .read()
+            .await
+            .context_key
+            .clone()
+            .ok_or(ManagerError::NoSession)
     }
 
     /// Runs an irreversible local side effect while identity transitions are excluded.

@@ -28,7 +28,7 @@ use tfrobot_client_lib::commands::connection::{
 };
 use tfrobot_client_lib::services::computer::{
     ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState,
-    RobotBindingMetadata,
+    ManagerRobotBindingState, RobotBindingMetadata,
 };
 use tfrobot_client_lib::services::computer_runtime_events::{
     ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
@@ -2035,9 +2035,11 @@ async fn stale_snapshot_after_reconnect_failure_does_not_block_manual_reconnect(
         robot_account_id: "org-legacy-18:account-24".to_string(),
         scope: None,
         robot_binding: RobotBindingMetadata {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
             employee_id: 1,
             robot_id: Some("stale-office".to_string()),
-            robot_account_id: Some("org-legacy-18:account-24".to_string()),
+            last_resolved_robot_account_id: Some("org-legacy-18:account-24".to_string()),
             namespace: Some("tfrobotserver".to_string()),
             robot_name: Some("Robot".to_string()),
         },
@@ -2321,9 +2323,11 @@ async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
         robot_account_id: "42".to_string(),
         scope: None,
         robot_binding: RobotBindingMetadata {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
             employee_id: 1,
             robot_id: Some("refreshing-office".to_string()),
-            robot_account_id: Some("42".to_string()),
+            last_resolved_robot_account_id: Some("42".to_string()),
             namespace: Some("tfrobotserver".to_string()),
             robot_name: Some("Robot".to_string()),
         },
@@ -2595,9 +2599,11 @@ async fn reconnect_with_token_records_diagnostic_on_sdk_build_failure() {
         robot_account_id: "42".to_string(),
         scope: None,
         robot_binding: RobotBindingMetadata {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
             employee_id: 1,
             robot_id: Some("office".to_string()),
-            robot_account_id: Some("42".to_string()),
+            last_resolved_robot_account_id: Some("42".to_string()),
             namespace: Some("tfrobotserver".to_string()),
             robot_name: Some("Robot".to_string()),
         },
@@ -2727,9 +2733,11 @@ async fn reconnect_with_token_reconnects_socket_and_refreshes_snapshot() {
         robot_account_id: "42".to_string(),
         scope: None,
         robot_binding: RobotBindingMetadata {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
             employee_id: 1,
             robot_id: Some("office".to_string()),
-            robot_account_id: Some("42".to_string()),
+            last_resolved_robot_account_id: Some("42".to_string()),
             namespace: Some("tfrobotserver".to_string()),
             robot_name: Some("Robot".to_string()),
         },
@@ -2833,9 +2841,11 @@ async fn reconnect_with_token_stale_generation_does_not_touch_socket() {
         robot_account_id: "42".to_string(),
         scope: None,
         robot_binding: RobotBindingMetadata {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
             employee_id: 1,
             robot_id: Some("office".to_string()),
-            robot_account_id: Some("42".to_string()),
+            last_resolved_robot_account_id: Some("42".to_string()),
             namespace: Some("tfrobotserver".to_string()),
             robot_name: Some("Robot".to_string()),
         },

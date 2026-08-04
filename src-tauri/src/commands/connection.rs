@@ -2,14 +2,13 @@ use crate::commands::runtime_sync::apply_updated_computer_instance;
 use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationTarget, ClientConnectionOperationToken,
     ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
-    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInstance,
-    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeState, RobotBindingMetadata,
-    SmcpReconnectOutcome,
+    ComputerConnectionTarget, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeAction,
+    ComputerRuntimeState, ManagerRobotBindingState, RobotBindingMetadata, SmcpReconnectOutcome,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
 use crate::services::manager_client::{DigitalEmployeeBrief, ExchangedToken, ManagerError};
-use crate::services::manager_context::ManagerContextCoordinator;
+use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -248,7 +247,10 @@ pub async fn connect_connection_target_for_policy_core(
     instance_id: &str,
     target: &ComputerConnectionTarget,
 ) -> Result<(), String> {
-    connect_connection_target_with_policy(state, instance_id, &target.id, Some(target)).await
+    let ComputerConnectionTarget::ManualSmcp { id } = target else {
+        return Err("Expected a Manual SMCP connection target".to_string());
+    };
+    connect_connection_target_with_policy(state, instance_id, id, Some(target)).await
 }
 
 async fn connect_connection_target_with_policy(
@@ -432,11 +434,9 @@ async fn commit_manual_connection_target(
     let updated = state
         .config
         .update_computer_instance(instance_id, |instance| {
-            instance.connection_policy.target = Some(ComputerConnectionTarget {
-                target_type: ComputerConnectionTargetType::ManualSmcp,
-                id: expected_target.id.clone(),
-                robot_account_id: None,
-            });
+            instance.connection_policy.target = Some(ComputerConnectionTarget::manual_smcp(
+                expected_target.id.clone(),
+            ));
         })
         .map_err(|error| error.to_string())?;
     apply_updated_computer_instance(state, previous, updated).await?;
@@ -768,6 +768,10 @@ pub async fn manager_connect_smcp(
             .manager_context
             .capture_authenticated_generation()
             .await?;
+        let context_key = state
+            .manager_context
+            .context_key_for_generation(manager_generation)
+            .await?;
         let employee = validate_manager_robot_account(
             state.inner(),
             manager_generation,
@@ -808,12 +812,14 @@ pub async fn manager_connect_smcp(
             robot_account_id: robot_account_id.clone(),
             scope,
             robot_binding: RobotBindingMetadata {
+                context_key: Some(context_key),
+                state: ManagerRobotBindingState::Active,
                 employee_id,
                 robot_id: robot_id
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| employee.robot_id.clone())
                     .or_else(|| Some(office_id.clone())),
-                robot_account_id: Some(robot_account_id.clone()),
+                last_resolved_robot_account_id: Some(robot_account_id.clone()),
                 namespace: namespace
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| employee.namespace.clone())
@@ -863,8 +869,8 @@ pub async fn manager_connect_smcp(
 pub(crate) async fn connect_manager_robot_target_for_policy(
     state: &AppState,
     instance_id: &str,
+    expected_context_key: &ManagerContextKey,
     employee_id: u64,
-    robot_account_id: String,
     required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
     let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
@@ -879,13 +885,15 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             .manager_context
             .capture_authenticated_generation()
             .await?;
-        let employee = validate_manager_robot_account(
-            state,
-            manager_generation,
-            employee_id,
-            &robot_account_id,
-        )
-        .await?;
+        let current_context_key = state
+            .manager_context
+            .context_key_for_generation(manager_generation)
+            .await?;
+        if &current_context_key != expected_context_key {
+            return Err(ManagerError::ContextChanged);
+        }
+        let (employee, robot_account_id) =
+            resolve_manager_robot_account(state, manager_generation, employee_id).await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -927,12 +935,14 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             robot_account_id: robot_account_id.clone(),
             scope: None,
             robot_binding: RobotBindingMetadata {
+                context_key: Some(current_context_key),
+                state: ManagerRobotBindingState::Active,
                 employee_id,
                 robot_id: employee
                     .robot_id
                     .clone()
                     .or_else(|| Some(office_id.clone())),
-                robot_account_id: Some(robot_account_id.clone()),
+                last_resolved_robot_account_id: Some(robot_account_id.clone()),
                 namespace: employee
                     .namespace
                     .clone()
@@ -1054,6 +1064,31 @@ async fn validate_manager_robot_account(
         .list_digital_employees_for_generation(manager_generation)
         .await?;
     validate_manager_robot_account_from_list(&employees, employee_id, robot_account_id)
+}
+
+async fn resolve_manager_robot_account(
+    state: &AppState,
+    manager_generation: u64,
+    employee_id: u64,
+) -> Result<(DigitalEmployeeBrief, String), ManagerError> {
+    let employees = state
+        .manager_context
+        .list_digital_employees_for_generation(manager_generation)
+        .await?;
+    let employee = employees
+        .into_iter()
+        .find(|item| item.id == employee_id)
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse(format!(
+                "Manager Robot target employee {employee_id} is not visible"
+            ))
+        })?;
+    let robot_account_id = employee.robot_account_id.clone().ok_or_else(|| {
+        ManagerError::InvalidResponse(format!(
+            "robotAccountId missing for Manager Robot target employee {employee_id}"
+        ))
+    })?;
+    Ok((employee, robot_account_id))
 }
 
 fn validate_manager_robot_account_from_list(
@@ -1244,6 +1279,16 @@ async fn commit_robot_binding(
     robot_binding: &RobotBindingMetadata,
     expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
+    let context_key = robot_binding.context_key.clone().ok_or_else(|| {
+        ManagerError::InvalidResponse(
+            "active Manager Robot binding is missing its Context key".to_string(),
+        )
+    })?;
+    if robot_binding.state != ManagerRobotBindingState::Active {
+        return Err(ManagerError::InvalidResponse(
+            "only an active Manager Robot binding can be committed".to_string(),
+        ));
+    }
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
@@ -1265,11 +1310,11 @@ async fn commit_robot_binding(
         .config
         .update_computer_instance(instance_id, |instance| {
             instance.robot_binding = Some(robot_binding.clone());
-            instance.connection_policy.target = Some(ComputerConnectionTarget {
-                target_type: ComputerConnectionTargetType::ManagerRobot,
-                id: robot_binding.employee_id.to_string(),
-                robot_account_id: robot_binding.robot_account_id.clone(),
-            });
+            instance.connection_policy.target = Some(ComputerConnectionTarget::manager_robot(
+                context_key,
+                robot_binding.employee_id,
+                robot_binding.last_resolved_robot_account_id.clone(),
+            ));
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
     apply_updated_computer_instance(state, previous, updated)
