@@ -106,7 +106,7 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
     .unwrap();
     let legacy_settings = AppSettings {
         manager_session: Some(ManagerSessionSettings {
-            base_url: "https://manager.example.test".to_string(),
+            base_url: "https://api-staging.turingfocus.cn".to_string(),
             user_id: 7,
             account_id: 8,
             account_name: "Robot Account".to_string(),
@@ -193,7 +193,7 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
         .settings_service
         .load_global_manager_session()
         .unwrap();
-    assert_eq!(manager.session.unwrap().account_id, 8);
+    assert!(manager.session.is_none());
 
     let sdk_document = state.sdk_config.export("computer-a").unwrap();
     assert!(sdk_document.mcp.unwrap()["servers"]["legacy-echo"].is_object());

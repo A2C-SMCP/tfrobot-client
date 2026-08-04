@@ -1,65 +1,80 @@
 import { invoke } from '@tauri-apps/api/core';
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { render, screen } from '../helpers/render';
 import { RobotConnections } from '@/components/RobotConnections';
-import { useConnectionTargetStore } from '@/stores/connectionTargetStore';
+import { useManagerStore } from '@/stores/managerStore';
+import i18n from '@/i18n';
 
 const mockedInvoke = vi.mocked(invoke);
 
-vi.mock('@/components/ManagerAccount', () => ({
-  ManagerAccount: () => <div data-testid="manager-account" />,
+vi.mock('@/components/ManagerAccount/EmployeeList', () => ({
+  EmployeeList: ({
+    showIdentityActions,
+    showIdentitySummary,
+  }: {
+    showIdentityActions?: boolean;
+    showIdentitySummary?: boolean;
+  }) => (
+    <div
+      data-testid="employee-list"
+      data-identity-actions={String(showIdentityActions)}
+      data-identity-summary={String(showIdentitySummary)}
+    />
+  ),
 }));
 
 describe('RobotConnections', () => {
   beforeEach(() => {
-    useConnectionTargetStore.setState({
-      manualTargets: [],
-      loading: false,
-      error: null,
-    });
     mockedInvoke.mockReset();
+    useManagerStore.setState(useManagerStore.getInitialState(), true);
   });
 
-  it('manages connection resources without selecting or connecting a Computer', async () => {
-    mockedInvoke.mockImplementation(async (cmd) => {
-      if (cmd === 'list_manual_smcp_targets') {
-        return [
-          {
-            id: 'manual-a',
-            name: 'Manual A',
-            url: 'https://smcp.example.com',
-            namespace: '/smcp',
-            office_id: 'office-a',
-            headers: {},
-          },
-        ];
-      }
-      return null;
+  it('guides signed-out users to the global account entry without owning login', () => {
+    render(<RobotConnections />);
+
+    expect(screen.getByText(/Sign in from the global Manager Account entry/)).toBeInTheDocument();
+    expect(screen.queryByTestId('employee-list')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+  });
+
+  it('renders the Chinese list title without the removed subtitle', async () => {
+    await i18n.changeLanguage('zh');
+    try {
+      render(<RobotConnections />);
+
+      expect(screen.getByText('机器人列表')).toBeInTheDocument();
+      expect(screen.queryByText(/Manage Robot connection resources/)).not.toBeInTheDocument();
+    } finally {
+      await i18n.changeLanguage('en');
+    }
+  });
+
+  it('shows current Context resources without page-owned logout controls', () => {
+    useManagerStore.getState().applyContext({
+      revision: 1,
+      authState: 'authenticated',
+      environment: 'staging',
+      contextKey: {
+        environment: 'staging',
+        accountId: 'account-a',
+        organizationId: 'organization-a',
+      },
+      user: { id: 'user-a', nickname: 'User A', email: '', phone: '' },
+      account: { id: 'account-a', name: 'Account A', nickname: '', avatar: '', employeeNo: '' },
+      organization: { id: 'organization-a', name: 'Organization A', organizationType: 'team' },
+      permissions: [],
     });
 
     render(<RobotConnections />);
 
-    fireEvent.click(screen.getByRole('tab', { name: /Manual SMCP/i }));
+    expect(screen.getByTestId('employee-list')).toHaveAttribute('data-identity-actions', 'false');
+    expect(screen.getByTestId('employee-list')).toHaveAttribute('data-identity-summary', 'false');
+  });
 
-    expect(await screen.findByText('Manual A')).toBeInTheDocument();
-    expect(screen.queryByText('Target Computer')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Connect/i })).not.toBeInTheDocument();
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('list_manual_smcp_targets');
-    });
-    expect(mockedInvoke).not.toHaveBeenCalledWith('list_computer_instances');
-    expect(mockedInvoke).not.toHaveBeenCalledWith('connect_connection_target', expect.anything());
-  }, 20000);
-
-  it('does not show auto connection settings in the global Manual SMCP form', async () => {
-    mockedInvoke.mockResolvedValue([]);
-
+  it('does not load or mutate Manual SMCP targets', () => {
     render(<RobotConnections />);
 
-    fireEvent.click(screen.getByRole('tab', { name: /Manual SMCP/i }));
-    fireEvent.click(await screen.findByRole('button', { name: /Add Profile/i }));
-
-    expect(screen.getAllByText('Add Profile').length).toBeGreaterThan(0);
-    expect(screen.queryByText('Auto Connect')).not.toBeInTheDocument();
-    expect(screen.queryByText('Auto Reconnect')).not.toBeInTheDocument();
-  }, 20000);
+    expect(mockedInvoke).not.toHaveBeenCalledWith('list_manual_smcp_targets');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('save_manual_smcp_target', expect.anything());
+    expect(mockedInvoke).not.toHaveBeenCalledWith('delete_manual_smcp_target', expect.anything());
+  });
 });

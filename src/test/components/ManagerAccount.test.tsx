@@ -5,24 +5,31 @@ import type {
   UserInfo,
   DigitalEmployeeBrief,
   AccountOption,
+  ManagerAccountSummary,
+  ManagerContextSnapshot,
   ManagerError,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import i18n from '@/i18n';
 
 type ManagerStoreMock = {
-  baseUrl: string;
+  environment: 'staging' | 'beta' | 'prod' | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
+  onboardingUserId: string | null;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
   restoreAttempted: boolean;
   error: ManagerError | null;
+  availableAccounts: ManagerAccountSummary[] | null;
+  accountsLoading: boolean;
   paymentRequired: { message: string; redirectUrl?: string } | null;
   online: boolean;
-  setBaseUrl: ReturnType<typeof vi.fn>;
   restoreSession: ReturnType<typeof vi.fn>;
   login: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
+  fetchAccounts: ReturnType<typeof vi.fn>;
+  switchAccount: ReturnType<typeof vi.fn>;
   fetchEmployees: ReturnType<typeof vi.fn>;
   fetchEmployeesIfStale: ReturnType<typeof vi.fn>;
   setOnline: ReturnType<typeof vi.fn>;
@@ -35,19 +42,23 @@ type ManagerStoreMock = {
 };
 
 const mockStore: ManagerStoreMock = {
-  baseUrl: '',
+  environment: null,
   session: null,
   pendingAccountSelection: null,
+  onboardingUserId: null,
   employees: [],
   loading: false,
   restoreAttempted: true,
   error: null,
+  availableAccounts: null,
+  accountsLoading: false,
   paymentRequired: null,
   online: true,
-  setBaseUrl: vi.fn(),
   restoreSession: vi.fn().mockResolvedValue(null),
   login: vi.fn().mockResolvedValue({ kind: 'authenticated' }),
   selectAccount: vi.fn().mockResolvedValue(undefined),
+  fetchAccounts: vi.fn().mockResolvedValue([]),
+  switchAccount: vi.fn().mockResolvedValue(undefined),
   fetchEmployees: vi.fn().mockResolvedValue(undefined),
   fetchEmployeesIfStale: vi.fn().mockResolvedValue(undefined),
   setOnline: vi.fn(),
@@ -76,12 +87,94 @@ import { LoginForm } from '@/components/ManagerAccount/LoginForm';
 import { AccountSelection } from '@/components/ManagerAccount/AccountSelection';
 import { EmployeeList } from '@/components/ManagerAccount/EmployeeList';
 import { ManagerAccount } from '@/components/ManagerAccount';
+import { GlobalManagerAccount } from '@/components/ManagerAccount/GlobalManagerAccount';
 
 const mockUseManagerStore = vi.mocked(useManagerStore);
 const mockedInvoke = vi.mocked(invoke);
 
+function adaptMock(store: ManagerStoreMock) {
+  let context: ManagerContextSnapshot;
+  if (store.session) {
+    const organizationId = store.session.accountId.split(':')[0] || 'organization-test';
+    context = {
+      revision: 1,
+      authState: 'authenticated',
+      environment: store.environment ?? 'staging',
+      contextKey: {
+        environment: store.environment ?? 'staging',
+        accountId: store.session.accountId,
+        organizationId,
+      },
+      user: { id: store.session.userId, nickname: 'User', email: '', phone: '' },
+      account: {
+        id: store.session.accountId,
+        name: store.session.accountName,
+        nickname: 'User',
+        avatar: '',
+        employeeNo: '',
+      },
+      organization: { id: organizationId, name: 'Organization', organizationType: 'team' },
+      permissions: [],
+    };
+  } else if (store.onboardingUserId !== null) {
+    context = {
+      revision: 1,
+      authState: 'onboarding_required',
+      environment: store.environment ?? 'staging',
+      contextKey: null,
+      user: { id: store.onboardingUserId, nickname: '', email: '', phone: '' },
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+  } else {
+    context = {
+      revision: store.pendingAccountSelection ? 1 : 0,
+      authState: store.pendingAccountSelection ? 'account_selection_required' : 'signed_out',
+      environment: store.pendingAccountSelection ? store.environment ?? 'staging' : null,
+      contextKey: null,
+      user: null,
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+  }
+  const scope = context.contextKey
+    ? JSON.stringify([
+      context.contextKey.environment,
+      context.contextKey.accountId,
+      context.contextKey.organizationId,
+      context.revision,
+    ])
+    : null;
+  return {
+    ...store,
+    context,
+    contextInitialized: true,
+    identityLoading: store.loading,
+    identityError: store.error,
+    accountDirectoryScope: scope,
+    employeeResources: scope
+      ? {
+        [scope]: {
+          scope,
+          contextKey: context.contextKey!,
+          revision: context.revision,
+          employees: store.employees,
+          loading: store.loading,
+          error: store.error,
+          paymentRequired: store.paymentRequired,
+          lastFetchAt: Date.now(),
+          selectedEmployeeId: null,
+          connectingEmployeeId: null,
+        },
+      }
+      : {},
+  };
+}
+
 function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
-  mockUseManagerStore.mockReturnValue({ ...mockStore, ...overrides } as ReturnType<
+  mockUseManagerStore.mockReturnValue(adaptMock({ ...mockStore, ...overrides }) as ReturnType<
     typeof useManagerStore
   >);
 }
@@ -100,11 +193,11 @@ describe('ManagerAccount', () => {
   });
 
   describe('LoginForm', () => {
-    it('renders the sign-in heading and baseUrl hint', () => {
+    it('renders the sign-in heading and environment hint', () => {
       render(<LoginForm />);
       expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();
       expect(
-        screen.getByText('Leave empty to use the TFRS_MANAGER_BASE_URL environment variable.'),
+        screen.getByText('The client configures the Manager address for the selected environment.'),
       ).toBeInTheDocument();
     });
 
@@ -113,10 +206,7 @@ describe('ManagerAccount', () => {
       applyMock({ login });
 
       render(<LoginForm />);
-      fireEvent.change(screen.getByLabelText('Manager Base URL'), {
-        target: { value: 'http://localhost:8090' },
-      });
-      fireEvent.change(screen.getByLabelText('Phone'), {
+      fireEvent.change(screen.getByLabelText('Phone or email'), {
         target: { value: '13800138008' },
       });
       fireEvent.change(screen.getByLabelText('Password'), {
@@ -125,11 +215,7 @@ describe('ManagerAccount', () => {
       fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
 
       await waitFor(() => {
-        expect(login).toHaveBeenCalledWith(
-          '13800138008',
-          'Test@123456',
-          'http://localhost:8090',
-        );
+        expect(login).toHaveBeenCalledWith('staging', '13800138008', 'Test@123456');
       });
     });
 
@@ -146,9 +232,130 @@ describe('ManagerAccount', () => {
       render(<LoginForm />);
       expect(
         screen.getByText(
-          'The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.',
+          'The Manager environment could not be resolved. Select an environment again.',
         ),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe('GlobalManagerAccount', () => {
+    it('opens an app-wide sign-in dialog and restores focus with Escape', async () => {
+      render(<GlobalManagerAccount />);
+      const trigger = screen.getByRole('button', { name: /Sign In/i });
+
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();
+
+      fireEvent.keyDown(dialog, { key: 'Escape' });
+      await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
+      await waitFor(() => expect(trigger).toHaveFocus());
+    });
+
+    it('shows current Context and switches only through the store transaction action', async () => {
+      const accounts: ManagerAccountSummary[] = [
+        {
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+          nickname: 'Current Account',
+          organizationId: 'org-legacy-9',
+          organizationName: 'Organization',
+          organizationType: 'enterprise',
+          role: 'owner',
+        },
+        {
+          accountId: '42',
+          accountName: 'other_account',
+          nickname: 'Other Account',
+          organizationId: '84',
+          organizationName: 'Other Organization',
+          organizationType: 'enterprise',
+          role: 'member',
+        },
+      ];
+      const fetchAccounts = vi.fn().mockResolvedValue(accounts);
+      const switchAccount = vi.fn().mockResolvedValue(undefined);
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+        },
+        availableAccounts: accounts,
+        fetchAccounts,
+        switchAccount,
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Staging')).toBeInTheDocument();
+      expect(screen.getByText('client_uat')).toBeInTheDocument();
+      expect(fetchAccounts).toHaveBeenCalledOnce();
+
+      fireEvent.click(screen.getByRole('button', { name: /Other Account/i }));
+      await waitFor(() => expect(switchAccount).toHaveBeenCalledWith('42'));
+    });
+
+    it('offers one clear sign-out action without an ineffective re-login path', async () => {
+      const logout = vi.fn().mockResolvedValue(undefined);
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: '16',
+          accountName: 'client_uat',
+        },
+        availableAccounts: [],
+        logout,
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+
+      expect(screen.queryByRole('button', { name: /Sign in again/i })).not.toBeInTheDocument();
+      const signOut = screen.getByRole('button', { name: /Sign Out/i });
+      fireEvent.click(signOut);
+      await waitFor(() => expect(logout).toHaveBeenCalledOnce());
+    });
+
+    it('surfaces pending account selection from every page entry', async () => {
+      applyMock({
+        pendingAccountSelection: [{
+          accountId: '42',
+          accountName: 'Account 42',
+          nickname: 'Account 42',
+          organizationId: '84',
+          organizationName: 'Organization 84',
+          organizationType: 'enterprise',
+        }],
+      });
+
+      render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Complete sign-in/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(screen.getByText('Choose an account')).toBeInTheDocument();
+    });
+
+    it('loads the account directory when sign-in completes while the panel stays open', async () => {
+      const fetchAccounts = vi.fn().mockResolvedValue([]);
+      const view = render(<GlobalManagerAccount />);
+      fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+      expect(fetchAccounts).not.toHaveBeenCalled();
+
+      applyMock({
+        session: {
+          userId: '9',
+          accountId: '16',
+          accountName: 'client_uat',
+        },
+        fetchAccounts,
+      });
+      view.rerender(<GlobalManagerAccount />);
+
+      await waitFor(() => expect(fetchAccounts).toHaveBeenCalledOnce());
+      expect(screen.getByText('No other accounts are available.')).toBeInTheDocument();
     });
   });
 
@@ -158,18 +365,18 @@ describe('ManagerAccount', () => {
       applyMock({
         pendingAccountSelection: [
           {
-            accountId: 2,
+            accountId: 'org-2:account-2',
             accountName: 'testuser2_enterprise',
             nickname: '测试企业主账号',
-            organizationId: 2,
+            organizationId: 'org-2',
             organizationName: '测试企业',
             organizationType: 'enterprise',
           },
           {
-            accountId: 3,
+            accountId: 'org-1:account-3',
             accountName: 'testuser2_personal',
             nickname: '个人账号',
-            organizationId: 1,
+            organizationId: 'org-1',
             organizationName: 'one-person-org-1',
             organizationType: 'personal',
           },
@@ -184,18 +391,22 @@ describe('ManagerAccount', () => {
 
       fireEvent.click(screen.getAllByRole('button', { name: 'Select' })[0]);
       await waitFor(() => {
-        expect(selectAccount).toHaveBeenCalledWith(2);
+        expect(selectAccount).toHaveBeenCalledWith('org-2:account-2');
       });
     }, 10000);
   });
 
   describe('EmployeeList', () => {
-    const user: UserInfo = { userId: 9, accountId: 16, accountName: 'client_uat' };
+    const user: UserInfo = {
+      userId: '9',
+      accountId: 'org-legacy-9:account-16',
+      accountName: 'client_uat',
+    };
     const employee: DigitalEmployeeBrief = {
       id: 11,
       name: 'bot-one',
       robotId: 'robot-a',
-      robotAccountId: 4242,
+      robotAccountId: '4242',
       templateType: 'tfrserver',
       templateDisplayName: '智能客服',
       status: 'running',
@@ -211,12 +422,55 @@ describe('ManagerAccount', () => {
       expect(screen.getByText('robot-a')).toBeInTheDocument();
     });
 
+    it('localizes employee status labels in Chinese', async () => {
+      await i18n.changeLanguage('zh');
+      try {
+        applyMock({
+          session: user,
+          employees: [employee, { ...employee, id: 12, name: 'bot-two', status: 'stop_failed' }],
+        });
+
+        render(<EmployeeList />);
+
+        expect(screen.getByText('运行中')).toBeInTheDocument();
+        expect(screen.getByText('停止失败')).toBeInTheDocument();
+        expect(screen.queryByText('running')).not.toBeInTheDocument();
+        expect(screen.queryByText('stop_failed')).not.toBeInTheDocument();
+      } finally {
+        await i18n.changeLanguage('en');
+      }
+    });
+
+    it('hides the identity summary while keeping refresh and employee content', () => {
+      applyMock({ session: user, employees: [employee] });
+
+      render(
+        <EmployeeList showIdentityActions={false} showIdentitySummary={false} />,
+      );
+
+      expect(screen.queryByText('Digital Employees')).not.toBeInTheDocument();
+      expect(screen.queryByText(`Signed in as ${user.accountName}`)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Refresh/i })).toBeInTheDocument();
+      expect(screen.getByText('bot-one')).toBeInTheDocument();
+    });
+
     it('shows empty state when no employees', async () => {
       applyMock({ session: user, employees: [] });
       render(<EmployeeList instanceId="computer-a" />);
       expect(
         screen.getByText('No digital employees are available for this account.'),
       ).toBeInTheDocument();
+    });
+
+    it('does not refetch an empty employee list when the authenticated scope is unchanged', async () => {
+      const fetchEmployeesIfStale = vi.fn().mockResolvedValue(undefined);
+      applyMock({ session: user, employees: [], fetchEmployeesIfStale });
+      const view = render(<EmployeeList instanceId="computer-a" />);
+      await waitFor(() => expect(fetchEmployeesIfStale).toHaveBeenCalledOnce());
+
+      view.rerender(<EmployeeList instanceId="computer-a" />);
+
+      await waitFor(() => expect(fetchEmployeesIfStale).toHaveBeenCalledOnce());
     });
 
     it('renders Manager robots as resources without connection actions when no Computer is scoped', () => {
@@ -290,7 +544,7 @@ describe('ManagerAccount', () => {
         id: 12,
         name: 'bot-two',
         robotId: 'robot-b',
-        robotAccountId: 4343,
+        robotAccountId: '4343',
       };
       applyMock({
         session: user,
@@ -426,7 +680,7 @@ describe('ManagerAccount', () => {
       render(<EmployeeList instanceId="computer-a" />);
 
       expect(screen.getByText(
-        'Cannot reach the Manager server. Check your connection or the Manager URL.',
+        'Cannot reach the Manager server. Check your connection or selected environment.',
       )).toBeInTheDocument();
       expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
     });
@@ -440,11 +694,23 @@ describe('ManagerAccount', () => {
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     }, 10000);
 
-    it('disables connect when robotAccountId is missing (cannot token-exchange)', async () => {
+    it('allows connect when cached robotAccountId is missing so backend can re-resolve it', async () => {
       const noAccount = { ...employee, robotAccountId: undefined };
       applyMock({ session: user, employees: [noAccount] });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnected',
+            connected: false,
+            actions: {
+              connect: { enabled: true, disabled_reason: null },
+              disconnect: { enabled: false, disabled_reason: 'not_connected' },
+            },
+          },
+        },
+      });
       render(<EmployeeList instanceId="computer-a" />);
-      expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /Connect/i })).toBeEnabled();
     }, 10000);
 
     it('renders payment_required alert with renew button when redirectUrl present', async () => {
@@ -469,10 +735,10 @@ describe('ManagerAccount', () => {
       applyMock({
         pendingAccountSelection: [
           {
-            accountId: 2,
+            accountId: 'org-2:account-2',
             accountName: 'Acct One',
             nickname: 'Acct One',
-            organizationId: 2,
+            organizationId: 'org-2',
             organizationName: 'Org',
             organizationType: 'enterprise',
           },
@@ -484,11 +750,26 @@ describe('ManagerAccount', () => {
 
     it('renders EmployeeList when session is present', async () => {
       applyMock({
-        session: { userId: 9, accountId: 16, accountName: 'client_uat' },
+        session: {
+          userId: '9',
+          accountId: 'org-legacy-9:account-16',
+          accountName: 'client_uat',
+        },
         employees: [],
       });
       render(<ManagerAccount />);
       expect(screen.getByText('Digital Employees')).toBeInTheDocument();
+    });
+
+    it('renders onboarding guidance without creating an organization in the client', () => {
+      applyMock({ onboardingUserId: '99' });
+
+      render(<ManagerAccount />);
+
+      expect(screen.getByText('No organization account yet')).toBeInTheDocument();
+      expect(
+        screen.getByText(/Complete organization setup or join an organization in TFRS FrontPortal/),
+      ).toBeInTheDocument();
     });
   });
 });

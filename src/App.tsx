@@ -18,6 +18,7 @@ import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { ComputerSettings } from './components/ComputerSettings';
+import { GlobalManagerAccount } from './components/ManagerAccount/GlobalManagerAccount';
 import {
   legacyComputerSettingsSection,
   parsePluginSettingsTarget,
@@ -25,12 +26,13 @@ import {
   toComputerSettingsSection,
 } from './components/Computer/tabs';
 import { useThemeStore } from './stores/themeStore';
-import { useManagerStore } from './stores/managerStore';
+import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
+const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -41,9 +43,8 @@ function App() {
     : selectedKey;
   const { resolved, setMode, initFromSettings } = useThemeStore();
   const {
-    session,
-    pendingAccountSelection,
-    restoreAttempted,
+    applyContext,
+    refreshContext,
     restoreSession,
     handleAuthExpired,
   } = useManagerStore();
@@ -69,16 +70,33 @@ function App() {
   // Manager authentication is app-wide state: restore it before any page-level
   // connection action can need the Manager JWT.
   useEffect(() => {
-    if (!session && !pendingAccountSelection && !restoreAttempted) {
-      restoreSession().catch(() => {
-        /* restore errors are stored in manager store */
+    refreshContext()
+      .then(() => {
+        const state = useManagerStore.getState();
+        if (state.context.authState === 'signed_out' && !state.restoreAttempted) {
+          return restoreSession();
+        }
+        return null;
+      })
+      .catch(() => {
+        /* initialization errors are stored in manager store */
       });
-    }
-  }, [pendingAccountSelection, restoreAttempted, restoreSession, session]);
+  }, [refreshContext, restoreSession]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<ManagerContextSnapshot>(CONTEXT_CHANGED_EVENT, (event) => {
+      applyContext(event.payload);
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {
+        /* noop */
+      });
+    };
+  }, [applyContext]);
 
   useEffect(() => {
     const unlistenPromise = listen<unknown>(AUTH_EXPIRED_EVENT, () => {
-      handleAuthExpired();
+      void handleAuthExpired();
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {
@@ -215,7 +233,8 @@ function App() {
         <Title level={4} className={styles.title}>
           {t('app.name')}
         </Title>
-        <Space>
+        <Space className={styles.headerActions} size="small">
+          <GlobalManagerAccount />
           <Button
             type="text"
             className={styles.headerBtn}

@@ -9,14 +9,18 @@ function errorI18nKey(err: ManagerError): string {
   return `manager.errors.${err.kind}`;
 }
 
-export function AccountSelection() {
+interface AccountSelectionProps {
+  embedded?: boolean;
+}
+
+export function AccountSelection({ embedded = false }: AccountSelectionProps) {
   const { t } = useTranslation();
-  const { pendingAccountSelection, selectAccount, loading, error, clearError, reset } =
+  const { pendingAccountSelection, selectAccount, identityLoading, identityError, clearError, logout } =
     useManagerStore();
 
   if (!pendingAccountSelection) return null;
 
-  const handleSelect = async (accountId: number) => {
+  const handleSelect = async (accountId: string) => {
     clearError();
     try {
       await selectAccount(accountId);
@@ -25,9 +29,8 @@ export function AccountSelection() {
     }
   };
 
-  return (
-    <Card>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+  const content = (
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
           <Title level={4} style={{ marginBottom: 4 }}>
             {t('managerAccount.accountSelection.title')}
@@ -35,8 +38,14 @@ export function AccountSelection() {
           <Text type="secondary">{t('managerAccount.accountSelection.description')}</Text>
         </div>
 
-        {error && (
-          <Alert type="error" showIcon message={t(errorI18nKey(error))} closable onClose={clearError} />
+        {identityError && (
+          <Alert
+            type="error"
+            showIcon
+            message={t(errorI18nKey(identityError))}
+            closable
+            onClose={clearError}
+          />
         )}
 
         <List
@@ -50,7 +59,7 @@ export function AccountSelection() {
                   key="select"
                   type="primary"
                   size="small"
-                  loading={loading}
+                  loading={identityLoading}
                   onClick={() => handleSelect(account.accountId)}
                 >
                   {t('managerAccount.accountSelection.select')}
@@ -76,10 +85,10 @@ export function AccountSelection() {
           )}
         />
 
-        <Button icon={<ArrowLeftOutlined />} onClick={reset} block>
+        <Button icon={<ArrowLeftOutlined />} onClick={() => void logout()} block>
           {t('managerAccount.accountSelection.back')}
         </Button>
-      </Space>
-    </Card>
+    </Space>
   );
+  return embedded ? content : <Card>{content}</Card>;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   App,
@@ -7,33 +7,34 @@ import {
   Descriptions,
   Empty,
   List,
-  Modal,
   Select,
   Space,
   Switch,
-  Table,
-  Tabs,
   Tag,
   Typography,
 } from 'antd';
 import {
-  ApiOutlined,
   ExportOutlined,
-  InfoCircleOutlined,
   LoginOutlined,
   RobotOutlined,
-  UserOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
-  type ComputerConnectionTargetType,
 } from '@/stores/computerStore';
-import { useConnectionTargetStore, type ManualSmcpTarget } from '@/stores/connectionTargetStore';
-import { useManagerStore, type DepartmentRef } from '@/stores/managerStore';
+import {
+  currentEmployeeResource,
+  managerContextScope,
+  managerSessionFromContext,
+  useManagerStore,
+  type DepartmentRef,
+  type DigitalEmployeeBrief,
+  type ManagerContextKey,
+} from '@/stores/managerStore';
 
 const { Text } = Typography;
+const EMPTY_MANAGER_EMPLOYEES: DigitalEmployeeBrief[] = [];
 
 interface RobotConnectionPanelProps {
   instanceId: string;
@@ -64,42 +65,45 @@ function employeeStatusTagColor(status?: string): string {
 export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnectionPanelProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const [detailTarget, setDetailTarget] = useState<ManualSmcpTarget | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
-  const hydrationAttemptedFor = useRef<string | null>(null);
   const { instances, updateConnectionPolicy } = useComputerStore();
   const {
-    session,
-    employees,
-    loading: managerLoading,
-    error: managerError,
+    context,
+    employeeResources,
+    identityLoading,
+    identityError,
     fetchEmployeesIfStale,
   } = useManagerStore();
-  const {
-    manualTargets,
-    loading: targetLoading,
-    error: targetError,
-    fetchManualTargets,
-  } = useConnectionTargetStore();
+  const session = managerSessionFromContext(context);
+  const authenticatedScope = managerContextScope(context);
+  const managerResource = currentEmployeeResource({ context, employeeResources });
+  const employees = managerResource?.employees ?? EMPTY_MANAGER_EMPLOYEES;
+  const managerLoading = identityLoading || managerResource?.loading === true;
+  const managerError = managerResource?.error ?? identityError;
+  const employeeListLoaded = managerResource?.lastFetchAt !== null
+    && managerResource?.lastFetchAt !== undefined;
   const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
 
   useEffect(() => {
-    fetchManualTargets();
-    if (session) {
+    if (authenticatedScope) {
       fetchEmployeesIfStale().catch(() => {
         /* error is rendered from manager store */
       });
     }
-  }, [fetchManualTargets, fetchEmployeesIfStale, session]);
+  }, [authenticatedScope, fetchEmployeesIfStale]);
 
   useEffect(() => {
-    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(
+      selectedInstance?.connectionPolicy.target,
+      context.contextKey,
+    ));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
     selectedInstance?.connectionPolicy.target,
+    context.contextKey,
   ]);
 
   const selectedTarget = useMemo(
@@ -107,70 +111,64 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       selectedTargetValue,
       employees,
       selectedInstance?.connectionPolicy.target,
+      context.contextKey,
     ),
-    [employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
+    [context.contextKey, employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
+  );
+  const bindingPresentation = managerBindingPresentation(
+    selectedInstance?.connectionPolicy.target,
+    selectedInstance?.robotBinding,
+    context.contextKey,
+    employees,
+    employeeListLoaded,
   );
   const targetOptions = useMemo(() => {
+    if (!context.contextKey) return [];
     const managerOptions = employees
-      .filter((employee) => (employee.status ?? 'running') === 'running' && employee.robotAccountId != null)
+      .filter((employee) => (employee.status ?? 'running') === 'running')
       .map((employee) => ({
         value: targetToValue({
           type: 'manager_robot',
-          id: String(employee.id),
-          robotAccountId: employee.robotAccountId,
+          contextKey: context.contextKey!,
+          employeeId: employee.id,
+          lastResolvedRobotAccountId: employee.robotAccountId,
         })!,
         label: formatManagerRobotOption(employee),
+        disabled: false,
       }));
-    const manualOptions = manualTargets.map((target) => ({
-      value: targetToValue({ type: 'manual_smcp', id: target.id })!,
-      label: `${target.name} (${target.office_id})`,
-    }));
+    const persistedTarget = selectedInstance?.connectionPolicy.target;
+    if (
+      persistedTarget?.type === 'manager_robot'
+      && sameContextKey(persistedTarget.contextKey, context.contextKey)
+      && !employees.some((employee) => employee.id === persistedTarget.employeeId)
+    ) {
+      managerOptions.push({
+        value: targetToValue(persistedTarget)!,
+        label: selectedInstance?.robotBinding?.robot_name
+          ?? t('computer.connectionActions.savedManagerRobot', {
+            employeeId: persistedTarget.employeeId,
+          }),
+        disabled: true,
+      });
+    }
     return [
       {
         label: t('managerAccount.employees.managerRobots'),
         options: managerOptions,
       },
-      {
-        label: t('connection.manualSmcp'),
-        options: manualOptions,
-      },
     ];
-  }, [employees, manualTargets, t]);
-
-  const manualColumns = useMemo(
-    () => [
-      {
-        title: t('connection.table.name'),
-        dataIndex: 'name',
-        key: 'name',
-        render: (name: string) => <Text strong>{name}</Text>,
-      },
-      { title: t('connection.table.url'), dataIndex: 'url', key: 'url', ellipsis: true },
-      { title: t('connection.table.office'), dataIndex: 'office_id', key: 'office_id' },
-      {
-        title: t('connection.table.actions'),
-        key: 'actions',
-        width: 120,
-        render: (_: unknown, record: ManualSmcpTarget) => (
-          <Button
-            type="link"
-            icon={<InfoCircleOutlined />}
-            onClick={() => setDetailTarget(record)}
-          >
-            {t('computer.connectionActions.openTargetDetails')}
-          </Button>
-        ),
-      },
-    ],
-    [t],
-  );
+  }, [context.contextKey, employees, selectedInstance, t]);
 
   const rollbackPolicyControls = useCallback(() => {
-    setSelectedTargetValue(targetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(
+      selectedInstance?.connectionPolicy.target,
+      context.contextKey,
+    ));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
     selectedInstance?.connectionPolicy.target,
+    context.contextKey,
   ]);
 
   const savePolicy = useCallback(async (
@@ -178,11 +176,6 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     nextAutoConnect: boolean,
     options: { showSuccess?: boolean } = {},
   ) => {
-    if (target?.type === 'manager_robot' && target.robotAccountId == null) {
-      message.error(t('managerAccount.employees.noRobotAccount'));
-      rollbackPolicyControls();
-      return;
-    }
     setSavingPolicy(true);
     try {
       await updateConnectionPolicy(instanceId, {
@@ -205,6 +198,7 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       value,
       employees,
       selectedInstance?.connectionPolicy.target,
+      context.contextKey,
     );
     setSelectedTargetValue(value);
     void savePolicy(nextTarget, autoConnect);
@@ -215,30 +209,10 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     void savePolicy(selectedTarget, checked);
   };
 
-  useEffect(() => {
-    if (
-      savingPolicy
-      || selectedTarget?.type !== 'manager_robot'
-      || selectedTarget.robotAccountId == null
-      || selectedInstance?.connectionPolicy.target?.type !== 'manager_robot'
-      || selectedInstance.connectionPolicy.target.robotAccountId != null
-      || targetToValue(selectedInstance.connectionPolicy.target) !== targetToValue(selectedTarget)
-    ) {
-      return;
-    }
-    const targetValue = targetToValue(selectedTarget);
-    if (hydrationAttemptedFor.current === targetValue) {
-      return;
-    }
-    hydrationAttemptedFor.current = targetValue ?? null;
-    void savePolicy(selectedTarget, autoConnect, { showSuccess: false });
-  }, [
-    autoConnect,
-    savePolicy,
-    savingPolicy,
-    selectedInstance?.connectionPolicy.target,
-    selectedTarget,
-  ]);
+  const handleReactivate = () => {
+    if (!selectedTarget) return;
+    void savePolicy(selectedTarget, false);
+  };
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -259,229 +233,182 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       />
 
       <Card size="small" title={t('computer.connectionActions.targetTitle')}>
-        <Space wrap>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {bindingPresentation !== 'active' && bindingPresentation !== 'unbound' && (
+            <Alert
+              type={bindingPresentation === 'permission_revoked' ? 'error' : 'warning'}
+              showIcon
+              message={t(`computer.connectionActions.binding.${bindingPresentation}.title`)}
+              description={t(
+                `computer.connectionActions.binding.${bindingPresentation}.description`,
+              )}
+              action={bindingPresentation === 'dormant' && selectedTarget ? (
+                <Button
+                  size="small"
+                  disabled={savingPolicy || !session}
+                  onClick={handleReactivate}
+                >
+                  {t('computer.connectionActions.binding.reactivate')}
+                </Button>
+              ) : undefined}
+            />
+          )}
+          <Space wrap>
           <Select
             allowClear
-            disabled={savingPolicy}
-            style={{ minWidth: 360 }}
+            disabled={savingPolicy || !session}
+            style={{ width: 'min(480px, 100%)', minWidth: 240 }}
             value={selectedTargetValue}
             placeholder={t('computer.connectionActions.selectTarget')}
             aria-label={t('computer.connectionActions.selectTarget')}
             onChange={handleTargetChange}
             options={targetOptions}
           />
-          <Button disabled={savingPolicy} onClick={() => {
-            fetchManualTargets();
-            if (session) fetchEmployeesIfStale(0);
-          }}>
+          <Button
+            disabled={savingPolicy || !session}
+            onClick={() => session && fetchEmployeesIfStale(0)}
+          >
             {t('common.refresh')}
           </Button>
           <Space>
             <Switch
               checked={autoConnect}
+              disabled={!selectedTarget || bindingPresentation !== 'active'}
               loading={savingPolicy}
               aria-label={t('connection.form.autoConnect')}
               onChange={handleAutoConnectChange}
             />
             <Text>{t('connection.form.autoConnect')}</Text>
           </Space>
+          </Space>
         </Space>
       </Card>
 
-      <Tabs
-        items={[
-          {
-            key: 'manager',
-            label: (
-              <>
-                <UserOutlined /> {t('managerAccount.employees.managerRobots')}
-              </>
-            ),
-            children: session ? (
-              <Card
-                title={t('managerAccount.employees.title')}
-                extra={
-                  <Button onClick={() => fetchEmployeesIfStale(0)} loading={managerLoading}>
-                    {t('common.refresh')}
-                  </Button>
-                }
-              >
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {managerError && (
-                    <Alert
-                      type="error"
-                      showIcon
-                      message={t(`manager.errors.${managerError.kind}`)}
-                    />
-                  )}
-                  {!managerLoading && employees.length === 0 && !managerError ? (
-                    <Empty description={t('managerAccount.employees.empty')} />
-                  ) : (
-                    <List
-                      bordered
-                      loading={managerLoading}
-                      dataSource={employees}
-                      rowKey={(employee) => employee.id}
-                      renderItem={(employee) => (
-                        <List.Item>
-                          <List.Item.Meta
-                            avatar={<RobotOutlined style={{ fontSize: 24 }} />}
-                            title={
-                              <Space size={4} wrap>
-                                <Text strong>{employee.name}</Text>
-                                {employee.status && (
-                                  <Tag color={employeeStatusTagColor(employee.status)}>
-                                    {employee.status}
-                                  </Tag>
-                                )}
-                                {employee.templateDisplayName && (
-                                  <Tag>{employee.templateDisplayName}</Tag>
-                                )}
-                                {employee.templateType && (
-                                  <Tag color="purple">{employee.templateType}</Tag>
-                                )}
-                              </Space>
-                            }
-                            description={
-                              <Descriptions size="small" column={1} colon={false}>
-                                <Descriptions.Item label={t('managerAccount.employees.department')}>
-                                  {employee.departments && employee.departments.length > 0 ? (
-                                    <Space direction="vertical" size={0}>
-                                      {employee.departments.map((dept) => (
-                                        <Text key={dept.id}>{formatDeptBreadcrumb(dept)}</Text>
-                                      ))}
-                                    </Space>
-                                  ) : (
-                                    <Text type="secondary">
-                                      {t('managerAccount.employees.noDepartment')}
-                                    </Text>
-                                  )}
-                                </Descriptions.Item>
-                                {employee.robotId && (
-                                  <Descriptions.Item
-                                    label={t('managerAccount.employees.robotId')}
-                                    contentStyle={{ fontFamily: 'monospace' }}
-                                  >
-                                    {employee.robotId}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.namespace && (
-                                  <Descriptions.Item label={t('managerAccount.employees.namespace')}>
-                                    {employee.namespace}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.clusterName && (
-                                  <Descriptions.Item label={t('managerAccount.employees.cluster')}>
-                                    {employee.clusterName}
-                                  </Descriptions.Item>
-                                )}
-                                {employee.description && (
-                                  <Descriptions.Item label={t('managerAccount.employees.description')}>
-                                    {employee.description}
-                                  </Descriptions.Item>
-                                )}
-                              </Descriptions>
-                            }
-                          />
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                </Space>
-              </Card>
+      {session ? (
+        <Card
+          title={t('managerAccount.employees.title')}
+          extra={
+            <Button onClick={() => fetchEmployeesIfStale(0)} loading={managerLoading}>
+              {t('common.refresh')}
+            </Button>
+          }
+        >
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            {managerError && (
+              <Alert type="error" showIcon message={t(`manager.errors.${managerError.kind}`)} />
+            )}
+            {!managerLoading && employees.length === 0 && !managerError ? (
+              <Empty description={t('managerAccount.employees.empty')} />
             ) : (
-              <Card>
-                <Empty
-                  description={t('computer.connectionActions.managerLoginRequired')}
-                >
-                  <Button
-                    type="primary"
-                    icon={<LoginOutlined />}
-                    onClick={() => onNavigate?.('robot-connections')}
-                  >
-                    {t('computer.connectionActions.openRobotConnections')}
-                  </Button>
-                </Empty>
-              </Card>
-            ),
-          },
-          {
-            key: 'manual',
-            label: (
-              <>
-                <ApiOutlined /> {t('connection.manualSmcp')}
-              </>
-            ),
-            children: (
-              <Card
-                title={t('computer.connectionActions.manualTargetsTitle')}
-                extra={
-                  <Space>
-                    <Button onClick={() => fetchManualTargets()} loading={targetLoading}>
-                      {t('common.refresh')}
-                    </Button>
-                    <Button
-                      icon={<ExportOutlined />}
-                      onClick={() => onNavigate?.('robot-connections')}
-                    >
-                      {t('computer.connectionActions.configureTargets')}
-                    </Button>
-                  </Space>
-                }
-              >
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {targetError && <Alert type="error" showIcon message={targetError} />}
-                  <Table
-                    rowKey="id"
-                    columns={manualColumns}
-                    dataSource={manualTargets}
-                    loading={targetLoading}
-                    pagination={false}
-                    locale={{ emptyText: t('computer.connectionActions.noManualTargets') }}
-                  />
-                </Space>
-              </Card>
-            ),
-          },
-        ]}
-      />
-
-      <Modal
-        open={Boolean(detailTarget)}
-        title={detailTarget?.name}
-        footer={null}
-        onCancel={() => setDetailTarget(null)}
-        destroyOnHidden
-      >
-        {detailTarget && (
-          <Descriptions size="small" column={1} bordered>
-            <Descriptions.Item label={t('connection.table.name')}>
-              {detailTarget.name}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.url')}>
-              {detailTarget.url}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.table.office')}>
-              {detailTarget.office_id}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.form.namespace')}>
-              {detailTarget.namespace}
-            </Descriptions.Item>
-            <Descriptions.Item label={t('connection.form.headers')}>
-              {Object.keys(detailTarget.headers).length > 0
-                ? JSON.stringify(detailTarget.headers)
-                : '-'}
-            </Descriptions.Item>
-          </Descriptions>
-        )}
-      </Modal>
+              <List
+                bordered
+                loading={managerLoading}
+                dataSource={employees}
+                rowKey={(employee) => employee.id}
+                renderItem={(employee) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      avatar={<RobotOutlined style={{ fontSize: 24 }} />}
+                      title={
+                        <Space size={4} wrap>
+                          <Text strong>{employee.name}</Text>
+                          {employee.status && (
+                            <Tag color={employeeStatusTagColor(employee.status)}>
+                              {employee.status}
+                            </Tag>
+                          )}
+                          {employee.templateDisplayName && (
+                            <Tag>{employee.templateDisplayName}</Tag>
+                          )}
+                          {employee.templateType && (
+                            <Tag color="purple">{employee.templateType}</Tag>
+                          )}
+                        </Space>
+                      }
+                      description={
+                        <Descriptions size="small" column={1} colon={false}>
+                          <Descriptions.Item label={t('managerAccount.employees.department')}>
+                            {employee.departments && employee.departments.length > 0 ? (
+                              <Space direction="vertical" size={0}>
+                                {employee.departments.map((dept) => (
+                                  <Text key={dept.id}>{formatDeptBreadcrumb(dept)}</Text>
+                                ))}
+                              </Space>
+                            ) : (
+                              <Text type="secondary">
+                                {t('managerAccount.employees.noDepartment')}
+                              </Text>
+                            )}
+                          </Descriptions.Item>
+                          {employee.robotId && (
+                            <Descriptions.Item
+                              label={t('managerAccount.employees.robotId')}
+                              contentStyle={{ fontFamily: 'monospace' }}
+                            >
+                              {employee.robotId}
+                            </Descriptions.Item>
+                          )}
+                          {employee.namespace && (
+                            <Descriptions.Item label={t('managerAccount.employees.namespace')}>
+                              {employee.namespace}
+                            </Descriptions.Item>
+                          )}
+                          {employee.clusterName && (
+                            <Descriptions.Item label={t('managerAccount.employees.cluster')}>
+                              {employee.clusterName}
+                            </Descriptions.Item>
+                          )}
+                          {employee.description && (
+                            <Descriptions.Item label={t('managerAccount.employees.description')}>
+                              {employee.description}
+                            </Descriptions.Item>
+                          )}
+                        </Descriptions>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Space>
+        </Card>
+      ) : (
+        <Card>
+          <Empty description={t('computer.connectionActions.managerLoginRequired')}>
+            <Space>
+              <LoginOutlined />
+              <Text type="secondary">
+                {t('computer.connectionActions.useGlobalManagerAccount')}
+              </Text>
+            </Space>
+          </Empty>
+        </Card>
+      )}
     </Space>
   );
 }
 
 function targetToValue(target?: ComputerConnectionTarget | null): string | undefined {
   if (!target) return undefined;
-  return `${target.type}:${target.id}`;
+  if (target.type === 'manual_smcp') return `${target.type}:${target.id}`;
+  return JSON.stringify([
+    target.type,
+    target.contextKey.environment,
+    target.contextKey.accountId,
+    target.contextKey.organizationId,
+    target.employeeId,
+  ]);
+}
+
+function managerTargetToValue(
+  target: ComputerConnectionTarget | null | undefined,
+  currentContextKey: ManagerContextKey | null,
+): string | undefined {
+  return target?.type === 'manager_robot'
+    && currentContextKey !== null
+    && sameContextKey(target.contextKey, currentContextKey)
+    ? targetToValue(target)
+    : undefined;
 }
 
 function formatManagerRobotOption(employee: {
@@ -502,29 +429,76 @@ function formatManagerRobotOption(employee: {
 
 function valueToTarget(
   value: string | undefined,
-  employees: Array<{ id: number; robotAccountId?: number }>,
+  employees: Array<{ id: number; robotAccountId?: string }>,
   currentTarget?: ComputerConnectionTarget | null,
+  currentContextKey?: ManagerContextKey | null,
 ): ComputerConnectionTarget | null {
-  if (!value) return null;
-  const [type, ...idParts] = value.split(':');
-  const id = idParts.join(':');
-  if (!id || (type !== 'manager_robot' && type !== 'manual_smcp')) return null;
-  if (type === 'manager_robot') {
-    const employee = employees.find((item) => String(item.id) === id);
-    if (currentTarget && targetToValue(currentTarget) === value) {
-      return {
-        ...currentTarget,
-        robotAccountId: employee?.robotAccountId ?? currentTarget.robotAccountId,
-      };
-    }
+  if (!value || !currentContextKey) return null;
+  if (currentTarget?.type === 'manager_robot' && targetToValue(currentTarget) === value) {
+    const employee = employees.find((item) => item.id === currentTarget.employeeId);
     return {
-      type,
-      id,
-      robotAccountId: employee?.robotAccountId,
+      ...currentTarget,
+      lastResolvedRobotAccountId:
+        employee?.robotAccountId ?? currentTarget.lastResolvedRobotAccountId,
     };
   }
-  if (currentTarget && targetToValue(currentTarget) === value) {
-    return currentTarget;
+  const employee = employees.find((item) => targetToValue({
+    type: 'manager_robot',
+    contextKey: currentContextKey,
+    employeeId: item.id,
+    lastResolvedRobotAccountId: item.robotAccountId,
+  }) === value);
+  if (!employee) return null;
+  return {
+    type: 'manager_robot',
+    contextKey: currentContextKey,
+    employeeId: employee.id,
+    lastResolvedRobotAccountId: employee.robotAccountId,
+  };
+}
+
+function sameContextKey(left: ManagerContextKey, right: ManagerContextKey): boolean {
+  return left.environment === right.environment
+    && left.accountId === right.accountId
+    && left.organizationId === right.organizationId;
+}
+
+type ManagerBindingPresentation =
+  | 'active'
+  | 'dormant'
+  | 'needs_rebind'
+  | 'permission_revoked'
+  | 'unbound';
+
+function managerBindingPresentation(
+  target: ComputerConnectionTarget | null | undefined,
+  binding: {
+    context_key?: ManagerContextKey;
+    state: 'active' | 'dormant' | 'needs_rebind';
+    employee_id: number;
+  } | null | undefined,
+  currentContext: ManagerContextKey | null,
+  employees: DigitalEmployeeBrief[],
+  employeeListLoaded: boolean,
+): ManagerBindingPresentation {
+  if (binding?.state === 'needs_rebind') return 'needs_rebind';
+  const managerTarget = target?.type === 'manager_robot' ? target : null;
+  if (!managerTarget && !binding) return 'unbound';
+  if (
+    currentContext === null
+    || managerTarget === null
+    || !sameContextKey(managerTarget.contextKey, currentContext)
+    || (binding?.context_key !== undefined
+      && !sameContextKey(binding.context_key, currentContext))
+    || binding?.state === 'dormant'
+  ) {
+    return 'dormant';
   }
-  return { type: type as ComputerConnectionTargetType, id };
+  if (
+    employeeListLoaded
+    && !employees.some((employee) => employee.id === managerTarget.employeeId)
+  ) {
+    return 'permission_revoked';
+  }
+  return 'active';
 }

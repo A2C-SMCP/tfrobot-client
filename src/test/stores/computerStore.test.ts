@@ -7,6 +7,17 @@ import { useRuntimeStore } from '@/stores/runtimeStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
+const managerContextKey = {
+  environment: 'staging' as const,
+  accountId: 'account-a',
+  organizationId: 'organization-a',
+};
+const managerTarget = (employeeId = 11, lastResolvedRobotAccountId?: string) => ({
+  type: 'manager_robot' as const,
+  contextKey: managerContextKey,
+  employeeId,
+  lastResolvedRobotAccountId,
+});
 
 const baseStatus = {
   id: 'computer-a',
@@ -621,7 +632,7 @@ describe('computerStore', () => {
     });
   });
 
-  it('duplicates a Computer with Robot binding and connection target options', async () => {
+  it('duplicates a Computer with Robot binding and skill-home options', async () => {
     mockedInvoke.mockResolvedValueOnce({ ...baseStatus, id: 'computer-copy', name: 'Computer A Copy' });
 
     await useComputerStore.getState().duplicateInstance({
@@ -629,7 +640,6 @@ describe('computerStore', () => {
       name: 'Computer A Copy',
       description: 'Copy',
       copyRobotBinding: true,
-      connectionTargetId: 'target-a',
       skillHomeMode: 'copy',
     });
 
@@ -639,7 +649,6 @@ describe('computerStore', () => {
         name: 'Computer A Copy',
         description: 'Copy',
         copyRobotBinding: true,
-        connectionTargetId: 'target-a',
         skillHomeMode: 'copy',
       },
     });
@@ -1198,25 +1207,25 @@ describe('computerStore', () => {
     mockedInvoke.mockResolvedValueOnce({
       ...baseStatus,
       connection_policy: {
-        target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
+        target: managerTarget(11, '1111'),
         auto_connect: true,
       },
     });
 
     await useComputerStore.getState().updateConnectionPolicy('computer-a', {
-      target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
+      target: managerTarget(11, '1111'),
       auto_connect: true,
     });
 
     expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
       request: {
         id: 'computer-a',
-        target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
+        target: managerTarget(11, '1111'),
         autoConnect: true,
       },
     });
     expect(useComputerStore.getState().instances[0].connectionPolicy).toEqual({
-      target: { type: 'manager_robot', id: '11', robotAccountId: 1111 },
+      target: managerTarget(11, '1111'),
       auto_connect: true,
     });
   });

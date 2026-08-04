@@ -12,6 +12,15 @@
 .title {
   color: rgba(255, 255, 255, 0.85) !important;
   margin: 0 !important;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerActions {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .headerBtn {
@@ -44,6 +53,10 @@
 }
 
 @media (max-width: 900px) {
+  .header {
+    padding: 0 12px;
+  }
+
   .content {
     padding: 12px;
   }

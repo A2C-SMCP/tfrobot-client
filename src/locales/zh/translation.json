@@ -29,10 +29,13 @@
     "config": "配置",
     "connection": "连接",
     "connectionLayer": "连接层",
-    "robotConnections": "Robot 连接",
+    "robotConnections": "数字员工",
     "development": "开发",
     "system": "系统",
     "debugPanel": "调试面板"
+  },
+  "robotConnections": {
+    "title": "机器人列表"
   },
   "computer": {
     "title": "Computer",
@@ -262,16 +265,33 @@
         "connection_unavailable": "当前运行时状态下无法执行连接操作。"
       },
       "targetTitle": "连接目标",
-      "selectTarget": "选择 Robot 或手动 SMCP 目标",
+      "selectTarget": "选择 Manager Robot",
       "requiresRunning": "需要先启动这个 Computer 才能连接。",
       "requiresTarget": "需要先选择连接目标。",
-      "missingRobotAccountId": "缺少 robotAccountId，无法连接这个 Robot。",
+      "targetUnavailable": "请先在当前 Manager 账户中选择有效的 Robot，再进行连接。",
       "robotNotRunning": "Robot 当前未运行，无法连接。",
       "manualManagedGlobally": "手动 SMCP 目标是全局资源；在上方选择一个即可绑定到当前 Computer。",
       "readOnlyTitle": "这里展示可用于当前 Computer 的连接资源。",
-      "readOnlyDescription": "连接状态、登录、配置和连接/断开操作统一在 Robot 连接页面管理。",
+      "readOnlyDescription": "这里选择 Robot 资源；Manager 身份统一通过应用顶栏的全局账号入口管理。",
       "openRobotConnections": "打开 Robot 连接",
-      "managerLoginRequired": "Manager 账号未登录。请到 Robot 连接页面登录后查看 Robot。",
+      "managerLoginRequired": "Manager 账号未登录。",
+      "useGlobalManagerAccount": "请使用应用顶栏的 Manager 账号入口登录。",
+      "savedManagerRobot": "已保存 Robot（员工 {{employeeId}}）",
+      "binding": {
+        "reactivate": "重新启用",
+        "dormant": {
+          "title": "此 Robot 绑定处于休眠状态",
+          "description": "它属于之前的 Context，或已被安全断开。请选择当前 Context 下的 Robot，或明确重新启用这个匹配的绑定。"
+        },
+        "needs_rebind": {
+          "title": "迁移后的绑定需要重新选择 Robot",
+          "description": "旧 profile 缺少账号与组织作用域。请从当前 Context 选择 Robot，以完成安全迁移。"
+        },
+        "permission_revoked": {
+          "title": "已保存的 Robot 不再可见",
+          "description": "你的权限可能已变化，或 Robot 已被移除。请选择其他可见 Robot；旧绑定不会自动连接。"
+        }
+      },
       "manualTargetsTitle": "全局 Manual SMCP 配置",
       "configureTargets": "配置",
       "openTargetDetails": "详情",
@@ -744,15 +764,17 @@
   },
   "manager": {
     "errors": {
-      "network_error": "无法连接到 Manager 服务器，请检查网络或 Manager 地址是否正确。",
+      "network_error": "无法连接到 Manager 服务器，请检查网络或所选环境。",
       "unauthorized": "登录已过期，请重新登录 Manager。",
+      "invalid_credentials": "手机号、邮箱或密码错误。",
       "forbidden": "当前账号没有访问该资源的权限。",
       "payment_required": "账号已欠费或被暂停，请前往续费页面。",
       "not_found": "未找到对应的资源。",
       "not_found_or_no_permission": "该资源已不可见或你的访问权限已变更。",
       "other": "Manager 返回了意料之外的响应。",
       "no_session": "尚未登录 Manager，请先登录。",
-      "missing_base_url": "未配置 Manager 地址，请设置环境变量 TFRS_MANAGER_BASE_URL 或在登录表单中填写。",
+      "context_changed": "请求执行期间 Manager 账号已变更，请重试。",
+      "missing_base_url": "无法确定 Manager 环境，请重新选择环境。",
       "invalid_response": "无法解析 Manager 返回的响应。",
       "keychain_error": "读取或写入安全凭据存储失败。",
       "token_exchange": "未能为该机器人换取连接凭据，请重试。",
@@ -761,13 +783,32 @@
   },
   "managerAccount": {
     "navLabel": "Manager 账号",
+    "global": {
+      "environment": "环境",
+      "organization": "组织",
+      "account": "账号",
+      "switchAccount": "切换账号或组织",
+      "loadingAccounts": "正在加载账号…",
+      "noAccounts": "没有其他可切换账号。",
+      "current": "当前",
+      "completeSignIn": "继续完成登录",
+      "setupRequired": "需要完成账号设置",
+      "sessionExpired": "登录已过期",
+      "robotConnectionsSignIn": "请从应用顶栏的全局 Manager 账号入口登录后查看 Robot。本地 Computer 与 Manual SMCP 能力仍可使用。"
+    },
     "login": {
       "title": "登录 TFRSManager",
       "description": "登录后可挑选数字员工并自动填充 SMCP 连接。",
-      "baseUrl": "Manager 地址",
-      "baseUrlHint": "留空将使用环境变量 TFRS_MANAGER_BASE_URL。",
-      "phone": "手机号",
-      "phoneRequired": "请输入手机号",
+      "environment": "环境",
+      "environmentHint": "Manager 地址由客户端根据环境自动配置。",
+      "environmentRequired": "请选择环境",
+      "environments": {
+        "staging": "Staging",
+        "beta": "Beta",
+        "prod": "正式环境"
+      },
+      "identifier": "手机号或邮箱",
+      "identifierRequired": "请输入手机号或邮箱",
       "password": "密码",
       "passwordRequired": "请输入密码",
       "submit": "登录",
@@ -780,12 +821,17 @@
       "select": "选择",
       "back": "返回登录"
     },
+    "onboarding": {
+      "title": "账号尚未加入组织",
+      "description": "请先在 TFRS FrontPortal 完成组织初始化或加入组织，然后返回客户端重新登录。",
+      "back": "返回登录"
+    },
     "employees": {
       "title": "数字员工",
       "managerRobots": "Manager Robots",
       "signedInAs": "当前登录：{{name}}",
       "empty": "当前账号下没有可用的数字员工。",
-      "robotId": "Robot ID",
+      "robotId": "机器人 ID",
       "namespace": "命名空间",
       "cluster": "集群",
       "description": "描述",
@@ -804,6 +850,15 @@
       "renew": "去续费",
       "department": "所属部门",
       "noDepartment": "未分配部门",
+      "status": {
+        "running": "运行中",
+        "suspended": "已暂停",
+        "stopped": "已停止",
+        "init_failed": "初始化失败",
+        "failed": "运行失败",
+        "stop_failed": "停止失败",
+        "unknown": "状态未知"
+      },
       "offlineBanner": "离线模式——正在展示最近一次加载的列表，恢复网络后将自动刷新。",
       "visibilityRevoked": "「{{name}}」已不可访问，已从列表中移除。"
     }

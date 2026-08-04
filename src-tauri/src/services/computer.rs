@@ -8,6 +8,7 @@ use crate::services::computer_runtime_events::{
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_resolver::RuntimeInputResolver;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
+use crate::services::manager_context::ManagerContextKey;
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
@@ -70,16 +71,58 @@ type SharedRuntimeEventSink = Arc<RwLock<Option<Arc<dyn ComputerRuntimeEventSink
 static NEXT_RUNTIME_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RobotBindingMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<ManagerContextKey>,
+    pub state: ManagerRobotBindingState,
     pub employee_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_account_id: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_resolved_robot_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagerRobotBindingState {
+    Active,
+    Dormant,
+    NeedsRebind,
+}
+
+impl RobotBindingMetadata {
+    pub fn active(context_key: ManagerContextKey, employee_id: u64) -> Self {
+        Self {
+            context_key: Some(context_key),
+            state: ManagerRobotBindingState::Active,
+            employee_id,
+            robot_id: None,
+            last_resolved_robot_account_id: None,
+            namespace: None,
+            robot_name: None,
+        }
+    }
+
+    pub fn needs_rebind(employee_id: u64, last_resolved_robot_account_id: Option<String>) -> Self {
+        Self {
+            context_key: None,
+            state: ManagerRobotBindingState::NeedsRebind,
+            employee_id,
+            robot_id: None,
+            last_resolved_robot_account_id,
+            namespace: None,
+            robot_name: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,17 +133,49 @@ pub enum ComputerConnectionTargetType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ComputerConnectionTarget {
-    #[serde(rename = "type")]
-    pub target_type: ComputerConnectionTargetType,
-    pub id: String,
-    #[serde(
-        rename = "robotAccountId",
-        alias = "robot_account_id",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub robot_account_id: Option<u64>,
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComputerConnectionTarget {
+    ManagerRobot {
+        #[serde(rename = "contextKey")]
+        context_key: ManagerContextKey,
+        #[serde(rename = "employeeId")]
+        employee_id: u64,
+        #[serde(
+            rename = "lastResolvedRobotAccountId",
+            default,
+            deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
+            skip_serializing_if = "Option::is_none"
+        )]
+        last_resolved_robot_account_id: Option<String>,
+    },
+    ManualSmcp {
+        id: String,
+    },
+}
+
+impl ComputerConnectionTarget {
+    pub fn manual_smcp(id: impl Into<String>) -> Self {
+        Self::ManualSmcp { id: id.into() }
+    }
+
+    pub fn manager_robot(
+        context_key: ManagerContextKey,
+        employee_id: u64,
+        last_resolved_robot_account_id: Option<String>,
+    ) -> Self {
+        Self::ManagerRobot {
+            context_key,
+            employee_id,
+            last_resolved_robot_account_id,
+        }
+    }
+
+    pub fn target_type(&self) -> ComputerConnectionTargetType {
+        match self {
+            Self::ManagerRobot { .. } => ComputerConnectionTargetType::ManagerRobot,
+            Self::ManualSmcp { .. } => ComputerConnectionTargetType::ManualSmcp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -202,7 +277,7 @@ pub struct ComputerInstance {
     pub robot_binding: Option<RobotBindingMetadata>,
 }
 
-pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
+pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 2;
 pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 1;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
@@ -223,44 +298,16 @@ pub struct ComputerProfile {
     #[serde(default)]
     pub connection_policy: ComputerProfileConnectionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub robot_binding: Option<ComputerProfileRobotBinding>,
+    pub robot_binding: Option<RobotBindingMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerProfileConnectionPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<ComputerProfileConnectionTarget>,
+    pub target: Option<ComputerConnectionTarget>,
     #[serde(default)]
     pub auto_connect: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ComputerProfileConnectionTarget {
-    #[serde(rename = "type")]
-    pub target_type: ComputerConnectionTargetType,
-    pub id: String,
-    #[serde(
-        rename = "robotAccountId",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub robot_account_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ComputerProfileRobotBinding {
-    pub employee_id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_account_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robot_name: Option<String>,
 }
 
 impl ComputerProfile {
@@ -284,24 +331,10 @@ impl From<&ComputerInstance> for ComputerProfile {
             name: instance.name.clone(),
             description: instance.description.clone(),
             connection_policy: ComputerProfileConnectionPolicy {
-                target: instance.connection_policy.target.as_ref().map(|target| {
-                    ComputerProfileConnectionTarget {
-                        target_type: target.target_type.clone(),
-                        id: target.id.clone(),
-                        robot_account_id: target.robot_account_id,
-                    }
-                }),
+                target: instance.connection_policy.target.clone(),
                 auto_connect: instance.connection_policy.auto_connect,
             },
-            robot_binding: instance.robot_binding.as_ref().map(|binding| {
-                ComputerProfileRobotBinding {
-                    employee_id: binding.employee_id,
-                    robot_id: binding.robot_id.clone(),
-                    robot_account_id: binding.robot_account_id,
-                    namespace: binding.namespace.clone(),
-                    robot_name: binding.robot_name.clone(),
-                }
-            }),
+            robot_binding: instance.robot_binding.clone(),
         }
     }
 }
@@ -317,23 +350,10 @@ impl From<ComputerProfile> for ComputerInstance {
             input_values: HashMap::new(),
             local_skills_root: None,
             connection_policy: ComputerConnectionPolicy {
-                target: profile
-                    .connection_policy
-                    .target
-                    .map(|target| ComputerConnectionTarget {
-                        target_type: target.target_type,
-                        id: target.id,
-                        robot_account_id: target.robot_account_id,
-                    }),
+                target: profile.connection_policy.target,
                 auto_connect: profile.connection_policy.auto_connect,
             },
-            robot_binding: profile.robot_binding.map(|binding| RobotBindingMetadata {
-                employee_id: binding.employee_id,
-                robot_id: binding.robot_id,
-                robot_account_id: binding.robot_account_id,
-                namespace: binding.namespace,
-                robot_name: binding.robot_name,
-            }),
+            robot_binding: profile.robot_binding,
         }
     }
 }
@@ -2478,6 +2498,65 @@ mod tests {
 
     fn instance(id: &str, name: &str) -> ComputerInstance {
         ComputerInstance::new(id, name)
+    }
+
+    #[test]
+    fn computer_profile_v2_preserves_opaque_numeric_robot_account_snapshots() {
+        let profile: ComputerProfile = serde_json::from_value(serde_json::json!({
+            "schema_version": COMPUTER_PROFILE_SCHEMA_VERSION,
+            "id": "computer-1",
+            "name": "Computer",
+            "connection_policy": {
+                "target": {
+                    "type": "manager_robot",
+                    "contextKey": {
+                        "environment": "staging",
+                        "accountId": "account-a",
+                        "organizationId": "org-a"
+                    },
+                    "employeeId": 11,
+                    "lastResolvedRobotAccountId": 4200
+                },
+                "auto_connect": true
+            },
+            "robot_binding": {
+                "context_key": {
+                    "environment": "staging",
+                    "accountId": "account-a",
+                    "organizationId": "org-a"
+                },
+                "state": "active",
+                "employee_id": 11,
+                "last_resolved_robot_account_id": 4200
+            }
+        }))
+        .expect("numeric opaque snapshots should remain readable");
+
+        let Some(ComputerConnectionTarget::ManagerRobot {
+            last_resolved_robot_account_id,
+            ..
+        }) = profile.connection_policy.target.as_ref()
+        else {
+            panic!("expected Manager Robot target");
+        };
+        assert_eq!(last_resolved_robot_account_id.as_deref(), Some("4200"));
+        assert_eq!(
+            profile
+                .robot_binding
+                .as_ref()
+                .and_then(|binding| binding.last_resolved_robot_account_id.as_deref()),
+            Some("4200")
+        );
+
+        let serialized = serde_json::to_value(profile).unwrap();
+        assert_eq!(
+            serialized["connection_policy"]["target"]["lastResolvedRobotAccountId"],
+            serde_json::json!("4200")
+        );
+        assert_eq!(
+            serialized["robot_binding"]["last_resolved_robot_account_id"],
+            serde_json::json!("4200")
+        );
     }
 
     fn instance_with_input(id: &str, label: &str) -> ComputerInstance {

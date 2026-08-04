@@ -42,7 +42,20 @@ const shutdownRuntime = {
 
 const disconnectedAuthority = { present: false, revision: 0, context: null };
 
+const signedOutManagerContext = {
+  revision: 0,
+  authState: 'signed_out',
+  environment: null,
+  contextKey: null,
+  user: null,
+  account: null,
+  organization: null,
+  permissions: [],
+};
+
 const mockResponses: Record<string, unknown> = {
+  manager_get_context: signedOutManagerContext,
+  manager_restore_session: null,
   enable_computer_runtime_events: [
     { instance_id: 'computer-a', snapshot: startedRuntime, connection: disconnectedAuthority },
     { instance_id: 'computer-b', snapshot: startedRuntime, connection: disconnectedAuthority },
@@ -83,13 +96,31 @@ const mockResponses: Record<string, unknown> = {
       connection_context: null,
       mcp_server_count: 1,
       robot_binding: {
+        context_key: {
+          environment: 'staging',
+          accountId: '23',
+          organizationId: '1',
+        },
+        state: 'active',
         employee_id: 1001,
         robot_id: 'robot-b',
-        robot_account_id: 2001,
+        last_resolved_robot_account_id: '2001',
         namespace: 'test',
         robot_name: 'Robot B',
       },
-      connection_policy: { target: { type: 'manager_robot', id: '1001' }, auto_connect: false },
+      connection_policy: {
+        target: {
+          type: 'manager_robot',
+          contextKey: {
+            environment: 'staging',
+            accountId: '23',
+            organizationId: '1',
+          },
+          employeeId: 1001,
+          lastResolvedRobotAccountId: '2001',
+        },
+        auto_connect: false,
+      },
       connection: null,
     },
   ],

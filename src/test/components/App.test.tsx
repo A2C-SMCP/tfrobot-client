@@ -3,8 +3,21 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import App from '@/App';
 
 const managerStoreMock = vi.hoisted(() => ({
+  context: {
+    revision: 0,
+    authState: 'signed_out' as 'signed_out' | 'onboarding_required',
+    environment: null as null | 'staging',
+    contextKey: null,
+    user: null as null | { id: string; nickname: string; email: string; phone: string },
+    account: null,
+    organization: null,
+    permissions: [] as string[],
+  },
+  restoreAttempted: false,
+  applyContext: vi.fn(),
+  refreshContext: vi.fn(),
   restoreSession: vi.fn().mockResolvedValue(null),
-  handleAuthExpired: vi.fn(),
+  handleAuthExpired: vi.fn().mockResolvedValue(undefined),
 }));
 
 const runtimeStoreMock = vi.hoisted(() => ({
@@ -26,15 +39,19 @@ vi.mock('@/stores/themeStore', () => ({
   })),
 }));
 
-vi.mock('@/stores/managerStore', () => ({
-  useManagerStore: vi.fn(() => ({
-    session: null,
-    pendingAccountSelection: null,
-    restoreAttempted: false,
+vi.mock('@/stores/managerStore', () => {
+  const current = () => ({
+    context: managerStoreMock.context,
+    restoreAttempted: managerStoreMock.restoreAttempted,
+    applyContext: managerStoreMock.applyContext,
+    refreshContext: managerStoreMock.refreshContext,
     restoreSession: managerStoreMock.restoreSession,
     handleAuthExpired: managerStoreMock.handleAuthExpired,
-  })),
-}));
+  });
+  const useManagerStore = vi.fn(current);
+  Object.assign(useManagerStore, { getState: current });
+  return { useManagerStore };
+});
 
 vi.mock('@/components/Dashboard', () => ({
   Dashboard: ({ onNavigate }: { onNavigate: (key: string) => void }) => (
@@ -70,6 +87,11 @@ vi.mock('@/components/Computer', () => ({
 vi.mock('@/components/ManagerAccount', () => ({
   ManagerAccount: () => <div>ManagerAccount</div>,
 }));
+vi.mock('@/components/ManagerAccount/GlobalManagerAccount', () => ({
+  GlobalManagerAccount: () => (
+    <button aria-label="Manager Account">Global Manager Account</button>
+  ),
+}));
 vi.mock('@/components/ComputerSettings', () => ({
   ComputerSettings: ({
     initialSection,
@@ -95,6 +117,18 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     managerStoreMock.restoreSession.mockResolvedValue(null);
+    managerStoreMock.context = {
+      revision: 0,
+      authState: 'signed_out',
+      environment: null,
+      contextKey: null,
+      user: null,
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+    managerStoreMock.restoreAttempted = false;
+    managerStoreMock.refreshContext.mockImplementation(async () => managerStoreMock.context);
     runtimeStoreMock.error = null;
     runtimeStoreMock.initialize.mockResolvedValue(undefined);
     runtimeStoreMock.dispose.mockResolvedValue(undefined);
@@ -118,6 +152,33 @@ describe('App', () => {
     await waitFor(() => {
       expect(managerStoreMock.restoreSession).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('keeps the global Manager account entry visible on every page', async () => {
+    render(<App />);
+    expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Logs'));
+    await waitFor(() => expect(screen.getByText('LogViewer')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
+  });
+
+  it('does not restore a previous session while onboarding guidance is active', async () => {
+    managerStoreMock.context = {
+      revision: 1,
+      authState: 'onboarding_required',
+      environment: 'staging',
+      contextKey: null,
+      user: { id: '99', nickname: '', email: '', phone: '' },
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+
+    render(<App />);
+
+    await waitFor(() => expect(runtimeStoreMock.initialize).toHaveBeenCalled());
+    expect(managerStoreMock.restoreSession).not.toHaveBeenCalled();
   });
 
   it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {

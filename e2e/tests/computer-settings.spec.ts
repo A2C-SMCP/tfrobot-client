@@ -65,7 +65,7 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     await expectNoRuntimeActions();
     await expect(page.getByText('Connection Target', { exact: true })).toBeVisible();
     await expect(page.getByRole('combobox', {
-      name: 'Select a Robot or Manual SMCP target',
+      name: 'Select a Manager Robot',
     })).toBeVisible();
     await expect(page.getByRole('switch', { name: 'Auto Connect' })).toBeVisible();
 

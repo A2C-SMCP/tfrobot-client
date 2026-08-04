@@ -1,9 +1,12 @@
-import { useEffect } from 'react';
-import { Form, Button, Card, Alert, Typography, Space } from 'antd';
+import { Form, Button, Card, Alert, Typography, Space, Select } from 'antd';
 import { Input } from '@/components/common/Input';
 import { LoginOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useManagerStore, type ManagerError } from '@/stores/managerStore';
+import {
+  useManagerStore,
+  type ManagerEnvironment,
+  type ManagerError,
+} from '@/stores/managerStore';
 
 const { Title, Text } = Typography;
 
@@ -13,31 +16,30 @@ function errorI18nKey(err: ManagerError): string {
 
 interface LoginFormProps {
   onSubmitted?: () => void;
+  embedded?: boolean;
 }
 
-export function LoginForm({ onSubmitted }: LoginFormProps) {
+export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm();
-  const { baseUrl, login, loading, error, clearError, setBaseUrl } = useManagerStore();
+  const { context, login, identityLoading, identityError, clearError } = useManagerStore();
 
-  useEffect(() => {
-    form.setFieldValue('baseUrl', baseUrl);
-  }, [baseUrl, form]);
-
-  const handleFinish = async (values: { baseUrl?: string; phone: string; password: string }) => {
+  const handleFinish = async (values: {
+    environment: ManagerEnvironment;
+    identifier: string;
+    password: string;
+  }) => {
     clearError();
     try {
-      if (values.baseUrl) setBaseUrl(values.baseUrl);
-      await login(values.phone, values.password, values.baseUrl);
+      await login(values.environment, values.identifier, values.password);
       onSubmitted?.();
     } catch {
       /* error already stored */
     }
   };
 
-  return (
-    <Card>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+  const content = (
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
           <Title level={4} style={{ marginBottom: 4 }}>
             {t('managerAccount.login.title')}
@@ -45,16 +47,18 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
           <Text type="secondary">{t('managerAccount.login.description')}</Text>
         </div>
 
-        {error && (
+        {identityError && (
           <Alert
             type="error"
             showIcon
-            message={t(errorI18nKey(error))}
+            message={t(errorI18nKey(identityError))}
             description={
-              error.kind === 'network_error'
-                ? error.detail
-                : error.kind === 'other'
-                ? `HTTP ${error.detail.status}: ${error.detail.body}`
+              identityError.kind === 'network_error'
+                ? identityError.detail
+                : identityError.kind === 'invalid_credentials'
+                ? identityError.detail.message
+                : identityError.kind === 'other'
+                ? `HTTP ${identityError.detail.status}: ${identityError.detail.body}`
                 : undefined
             }
             closable
@@ -62,20 +66,31 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
           />
         )}
 
-        <Form form={form} layout="vertical" onFinish={handleFinish}>
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{ environment: context.environment ?? 'staging' }}
+          onFinish={handleFinish}
+        >
           <Form.Item
-            name="baseUrl"
-            label={t('managerAccount.login.baseUrl')}
-            extra={t('managerAccount.login.baseUrlHint')}
+            name="environment"
+            label={t('managerAccount.login.environment')}
+            extra={t('managerAccount.login.environmentHint')}
+            rules={[{ required: true, message: t('managerAccount.login.environmentRequired') }]}
           >
-            <Input placeholder="https://manager.example.com" />
+            <Select
+              options={(['staging', 'beta', 'prod'] as ManagerEnvironment[]).map((value) => ({
+                value,
+                label: t(`managerAccount.login.environments.${value}`),
+              }))}
+            />
           </Form.Item>
           <Form.Item
-            name="phone"
-            label={t('managerAccount.login.phone')}
-            rules={[{ required: true, message: t('managerAccount.login.phoneRequired') }]}
+            name="identifier"
+            label={t('managerAccount.login.identifier')}
+            rules={[{ required: true, message: t('managerAccount.login.identifierRequired') }]}
           >
-            <Input autoComplete="username" inputMode="tel" />
+            <Input autoComplete="username" />
           </Form.Item>
           <Form.Item
             name="password"
@@ -85,12 +100,18 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
             <Input.Password autoComplete="current-password" />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit" icon={<LoginOutlined />} loading={loading} block>
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<LoginOutlined />}
+              loading={identityLoading}
+              block
+            >
               {t('managerAccount.login.submit')}
             </Button>
           </Form.Item>
         </Form>
-      </Space>
-    </Card>
+    </Space>
   );
+  return embedded ? content : <Card>{content}</Card>;
 }

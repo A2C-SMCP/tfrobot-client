@@ -5,11 +5,48 @@ import { Computer } from '@/components/Computer';
 import { useComputerStore } from '@/stores/computerStore';
 import { useInputStore } from '@/stores/inputStore';
 import { useRuntimeStore } from '@/stores/runtimeStore';
+import { useManagerStore } from '@/stores/managerStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockInvoke = vi.mocked(invoke);
 
 vi.setConfig({ testTimeout: 60_000 });
+
+const managerContextKey = {
+  environment: 'staging' as const,
+  accountId: 'account-a',
+  organizationId: 'organization-a',
+};
+
+const managerTarget = (employeeId: number, lastResolvedRobotAccountId?: string) => ({
+  type: 'manager_robot' as const,
+  contextKey: managerContextKey,
+  employeeId,
+  lastResolvedRobotAccountId,
+});
+
+function authenticateManagerContext() {
+  useManagerStore.getState().applyContext({
+    revision: 1,
+    authState: 'authenticated',
+    environment: managerContextKey.environment,
+    contextKey: managerContextKey,
+    user: { id: '9', nickname: 'User', email: '', phone: '' },
+    account: {
+      id: managerContextKey.accountId,
+      name: 'account-a',
+      nickname: 'User',
+      avatar: '',
+      employeeNo: '',
+    },
+    organization: {
+      id: managerContextKey.organizationId,
+      name: 'Organization A',
+      organizationType: 'enterprise',
+    },
+    permissions: [],
+  });
+}
 
 const mockComputerInstances = [
   {
@@ -25,14 +62,16 @@ const mockComputerInstances = [
     connected: true,
     mcp_server_count: 5,
     robot_binding: {
+      context_key: managerContextKey,
+      state: 'active',
       employee_id: 42,
       robot_id: 'robot-a',
-      robot_account_id: 4200,
+      last_resolved_robot_account_id: '4200',
       namespace: 'test',
       robot_name: 'Robot A',
     },
     connection_policy: {
-      target: { type: 'manager_robot', id: '42', robotAccountId: 4200 },
+      target: managerTarget(42, '4200'),
       auto_connect: false,
     },
     connection: {
@@ -108,27 +147,9 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
 vi.mock('@/components/Computer/SkillsTab', () => ({
   SkillsTab: ({ instanceId }: { instanceId: string }) => <div data-testid="skills-tab">SkillsTab:{instanceId}</div>,
 }));
-const { mockFetchManualTargets } = vi.hoisted(() => ({
-  mockFetchManualTargets: vi.fn(),
-}));
-
-vi.mock('@/stores/connectionTargetStore', () => ({
-  useConnectionTargetStore: vi.fn(() => ({
-    manualTargets: [
-      {
-        id: 'target-a',
-        name: 'Target A',
-        office_id: 'office-a',
-      },
-    ],
-    fetchManualTargets: mockFetchManualTargets,
-  })),
-}));
-
 describe('Computer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFetchManualTargets.mockReset();
     useRuntimeStore.getState().reset();
     useComputerStore.getState().reset();
     useInputStore.getState().reset();
@@ -148,7 +169,7 @@ describe('Computer', () => {
           connectionProfile: 'prod',
           robotName: 'Robot A',
           connectionPolicy: {
-            target: { type: 'manager_robot', id: '42', robotAccountId: 4200 },
+            target: managerTarget(42, '4200'),
             auto_connect: false,
           },
           mcpServerCount: 5,
@@ -298,19 +319,20 @@ describe('Computer', () => {
     expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
   }, 20000);
 
-  it('disables list connect for a Manager Robot target without robotAccountId', async () => {
+  it('does not require a persisted robotAccountId diagnostic for list connection', async () => {
+    authenticateManagerContext();
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,
       runtime: runtimeSnapshot(),
       connection: null,
-      connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+      connection_policy: { target: managerTarget(42), auto_connect: false },
     };
     mockInvoke.mockResolvedValueOnce([missingRobotAccountIdInstance]);
 
     render(<Computer />);
 
-    expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Connect' })).toBeEnabled();
   }, 20000);
 
   it('keeps Runtime action technical errors out of the ordinary Computer UI', async () => {
@@ -454,19 +476,20 @@ describe('Computer', () => {
     expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
   }, 20000);
 
-  it('disables detail connect for a Manager Robot target without robotAccountId', async () => {
+  it('does not require a persisted robotAccountId diagnostic for detail connection', async () => {
+    authenticateManagerContext();
     const missingRobotAccountIdInstance = {
       ...mockComputerInstances[0],
       connected: false,
       runtime: runtimeSnapshot(),
       connection: null,
-      connection_policy: { target: { type: 'manager_robot', id: '42' }, auto_connect: false },
+      connection_policy: { target: managerTarget(42), auto_connect: false },
     };
     mockInvoke.mockResolvedValueOnce([missingRobotAccountIdInstance]);
 
     render(<Computer initialView="detail" />);
 
-    expect((await screen.findByText('Connect')).closest('button')).toBeDisabled();
+    expect((await screen.findByText('Connect')).closest('button')).toBeEnabled();
   }, 20000);
 
   it('creates a Computer from the list page', async () => {
@@ -542,10 +565,8 @@ describe('Computer', () => {
     expect(await screen.findByText('Updated Computer')).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Duplicate' })[0]);
-    await waitFor(() => expect(mockFetchManualTargets).toHaveBeenCalled());
     expect(screen.getByLabelText('Copy Robot binding')).toBeChecked();
-    fireEvent.mouseDown(screen.getByLabelText('Connection target'));
-    fireEvent.click(await screen.findByText('Target A (office-a)'));
+    expect(screen.queryByLabelText('Connection target')).not.toBeInTheDocument();
     fireEvent.click(last(screen.getAllByText('OK')));
     expect(await screen.findByText('prod Copy')).toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith('duplicate_computer_instance', {
@@ -554,7 +575,6 @@ describe('Computer', () => {
         name: 'Updated Computer Copy',
         description: 'Updated description',
         copyRobotBinding: true,
-        connectionTargetId: 'target-a',
         skillHomeMode: 'empty',
       },
     });

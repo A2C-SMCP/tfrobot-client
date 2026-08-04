@@ -1,0 +1,134 @@
+.trigger {
+  color: rgba(255, 255, 255, 0.85) !important;
+  display: inline-flex;
+  align-items: center;
+  max-width: min(320px, 38vw);
+  min-width: 0;
+}
+
+.trigger:hover,
+.trigger:focus-visible {
+  color: #fff !important;
+}
+
+.trigger:focus-visible {
+  outline: 2px solid #91caff;
+  outline-offset: 2px;
+}
+
+.triggerText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.panel {
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(680px, calc(100vh - 88px));
+  overflow: auto;
+  padding: 4px;
+}
+
+.identityHeader,
+.section {
+  width: 100%;
+}
+
+.identityText {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.details {
+  margin-top: 16px;
+}
+
+.divider {
+  margin: 14px 0;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 56px;
+}
+
+.accountList {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.accountItem {
+  padding: 2px 0 !important;
+}
+
+.accountAction {
+  display: flex;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  text-align: left;
+}
+
+.accountActionText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  margin-right: 8px;
+}
+
+.accountName,
+.organizationName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.organizationName {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+
+.logoutArea {
+  width: 100%;
+  padding: 2px 0;
+}
+
+.logoutButton {
+  height: 40px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.logoutButton:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.error {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 720px) {
+  .trigger {
+    max-width: 44px;
+    padding-inline: 8px !important;
+  }
+
+  .triggerText,
+  .chevron {
+    display: none;
+  }
+}

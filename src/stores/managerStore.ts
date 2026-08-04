@@ -3,86 +3,129 @@ import { create } from 'zustand';
 import { info, warn, error as logError } from '@/utils/logger';
 import { useComputerStore } from './computerStore';
 
-/**
- * 登录成功后 Manager 下发的扁平 4 字段。
- * 与 Rust `services::manager_client::UserInfo` 的 serde camelCase 形态对齐。
- */
+/** Login command response. Identity authority always comes from ManagerContextSnapshot. */
 export interface UserInfo {
-  userId: number;
-  accountId: number;
+  userId: string;
+  accountId: string;
   accountName: string;
 }
 
-/** 多账户候选项——server 实测字段结构。 */
 export interface AccountOption {
-  accountId: number;
+  accountId: string;
   accountName: string;
   nickname: string;
-  organizationId: number;
+  organizationId: string;
   organizationName: string;
   organizationType: string;
 }
 
-/** 部门祖先链元素（`departments[].ancestors[]`）。根→叶有序，末元素即本部门。 */
+export interface ManagerAccountSummary {
+  accountId: string;
+  accountName: string;
+  nickname: string;
+  organizationId: string;
+  organizationName: string;
+  organizationType: string;
+  role: string;
+  avatar?: string;
+}
+
 export interface DepartmentAncestor {
-  id: number;
+  id: string;
   name: string;
 }
 
-/**
- * 部门归属（`departments[]` 元素，与 Rust `DepartmentRef` 对齐）。
- * `ancestors` 含自身、根→叶有序；按序 join `name` 即面包屑。不受可见性 flag 控制。
- */
 export interface DepartmentRef {
-  id: number;
+  id: string;
   name: string;
   path?: string;
   ancestors?: DepartmentAncestor[];
 }
 
-/** 数字员工列表项（`DigitalEmployeeBrief`，与 Rust DTO 对齐）。id 是数字主键。 */
 export interface DigitalEmployeeBrief {
   id: number;
   name: string;
   description?: string;
   robotId?: string;
-  /**
-   * 机器人自身账号 ID（TFRM-183，nullable）。token-exchange 的 audience = `robot:<robotAccountId>`。
-   * 为空表示历史/未回填实例——无法走安全连接，UI 应禁用其连接按钮。
-   * 注意与 `robotId`（SMCP 路由串）区分。
-   */
-  robotAccountId?: number;
+  robotAccountId?: string;
   status?: string;
   templateDisplayName?: string;
   templateType?: string;
   namespace?: string;
   clusterName?: string;
-  /** 部门归属（TFRM-56）。后端保证为数组（可能为空 []）。 */
   departments?: DepartmentRef[];
 }
 
 export type LoginResult =
   | { kind: 'authenticated'; user: UserInfo }
-  | { kind: 'account_selection_required'; accounts: AccountOption[] };
+  | { kind: 'account_selection_required'; accounts: AccountOption[] }
+  | { kind: 'onboarding_required'; userId: string };
+
+export type ManagerEnvironment = 'staging' | 'beta' | 'prod';
+export type ManagerAuthState =
+  | 'signed_out'
+  | 'account_selection_required'
+  | 'onboarding_required'
+  | 'authenticated';
+
+export interface ManagerContextKey {
+  environment: ManagerEnvironment;
+  accountId: string;
+  organizationId: string;
+}
+
+export interface ManagerContextUser {
+  id: string;
+  nickname: string;
+  email: string;
+  phone: string;
+}
+
+export interface ManagerContextAccount {
+  id: string;
+  name: string;
+  nickname: string;
+  avatar: string;
+  employeeNo: string;
+}
+
+export interface ManagerContextOrganization {
+  id: string;
+  name: string;
+  organizationType: string;
+}
+
+/** Redacted, revisioned identity snapshot owned by the Rust coordinator. */
+export interface ManagerContextSnapshot {
+  revision: number;
+  authState: ManagerAuthState;
+  environment: ManagerEnvironment | null;
+  contextKey: ManagerContextKey | null;
+  user: ManagerContextUser | null;
+  account: ManagerContextAccount | null;
+  organization: ManagerContextOrganization | null;
+  permissions: string[];
+}
 
 export interface RestoredManagerSession {
-  baseUrl: string;
+  environment: ManagerEnvironment;
   user: UserInfo;
 }
 
 export type ManagerError =
   | { kind: 'network_error'; detail: string }
   | { kind: 'unauthorized' }
+  | { kind: 'invalid_credentials'; detail: { message: string } }
   | { kind: 'forbidden' }
   | { kind: 'payment_required'; detail: { message: string; redirect_url?: string } }
   | { kind: 'not_found' }
   | { kind: 'not_found_or_no_permission' }
   | { kind: 'other'; detail: { status: number; body: string } }
   | { kind: 'no_session' }
+  | { kind: 'context_changed' }
   | { kind: 'missing_base_url' }
   | { kind: 'invalid_response'; detail: string }
   | { kind: 'keychain_error'; detail: string }
-  // TFRC-11 token-exchange：RFC 6749 §5.2 失败 / 签名子系统未就位。
   | { kind: 'token_exchange'; detail: { error: string; description?: string } }
   | { kind: 'signing_unavailable'; detail: { message?: string } };
 
@@ -91,66 +134,143 @@ export interface PaymentRequiredInfo {
   redirectUrl?: string;
 }
 
-interface ManagerState {
-  baseUrl: string;
-  session: UserInfo | null;
-  pendingAccountSelection: AccountOption[] | null;
+export interface ManagerEmployeeResource {
+  scope: string;
+  contextKey: ManagerContextKey;
+  revision: number;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
-  restoreAttempted: boolean;
   error: ManagerError | null;
   paymentRequired: PaymentRequiredInfo | null;
-  /** 上次成功拉取员工列表的时间戳（ms）。null = 尚未成功拉过。用于 60s staleness 兜底。 */
   lastFetchAt: number | null;
-  /** 在线状态。false 时 UI 展示离线横幅并保留最近一次成功列表（TFRM-56 离线模式）。 */
+  selectedEmployeeId: number | null;
+  connectingEmployeeId: number | null;
+}
+
+export interface ManagerState {
+  context: ManagerContextSnapshot;
+  contextInitialized: boolean;
+  pendingAccountSelection: AccountOption[] | null;
+  identityLoading: boolean;
+  restoreAttempted: boolean;
+  identityError: ManagerError | null;
+  availableAccounts: ManagerAccountSummary[] | null;
+  accountDirectoryScope: string | null;
+  accountsLoading: boolean;
+  employeeResources: Record<string, ManagerEmployeeResource>;
   online: boolean;
 
-  setBaseUrl: (url: string) => void;
+  applyContext: (snapshot: ManagerContextSnapshot) => boolean;
+  refreshContext: () => Promise<ManagerContextSnapshot>;
   restoreSession: () => Promise<RestoredManagerSession | null>;
-  login: (phone: string, password: string, baseUrl?: string) => Promise<LoginResult>;
-  selectAccount: (accountId: number) => Promise<void>;
+  login: (
+    environment: ManagerEnvironment,
+    identifier: string,
+    password: string,
+  ) => Promise<LoginResult>;
+  selectAccount: (accountId: string) => Promise<void>;
+  fetchAccounts: () => Promise<ManagerAccountSummary[]>;
+  switchAccount: (accountId: string) => Promise<void>;
   fetchEmployees: () => Promise<void>;
-  /**
-   * 进入列表页时的兜底拉取：仅当无数据、或距上次成功拉取已超过 `maxAgeMs`（默认 60s，
-   * 与后端可见集合缓存 TTL 对齐）时才真正请求；否则复用当前列表（TFRM-56）。
-   */
   fetchEmployeesIfStale: (maxAgeMs?: number) => Promise<void>;
-  /**
-   * 同步在线状态。离线 → 在线的跳变会立即触发一次校准 refetch（不受 staleness 窗口限制）。
-   */
   setOnline: (online: boolean) => void;
-  /**
-   * 选中数字员工 → 后端编排 token-exchange 全路径并连接（TFRC-11 / C1）：
-   * `connection-info → exchange_token(robotAccountId) → 短 JWT 注入 Socket.IO auth dict → 连接`，
-   * 并起后台预刷新重连。鉴权不再走静态 token / profile。
-   * 返回 `{ name }`（已连接的机器人名）或 `null`（前置校验未过）。
-   */
   selectEmployeeAndConnect: (
     instanceId: string,
     employeeId: number,
   ) => Promise<{ name: string } | null>;
   logout: () => Promise<void>;
-  handleAuthExpired: () => void;
+  handleAuthExpired: () => Promise<void>;
   dismissPaymentRequired: () => void;
   clearError: () => void;
-  reset: () => void;
 }
 
-/** 列表 staleness 窗口，与后端可见集合缓存 TTL 对齐（TFRM-167 评论：60s）。 */
 const EMPLOYEE_LIST_STALE_MS = 60_000;
 
+export const SIGNED_OUT_MANAGER_CONTEXT: ManagerContextSnapshot = {
+  revision: 0,
+  authState: 'signed_out',
+  environment: null,
+  contextKey: null,
+  user: null,
+  account: null,
+  organization: null,
+  permissions: [],
+};
+
 const initialState = {
-  baseUrl: '',
-  session: null as UserInfo | null,
+  context: SIGNED_OUT_MANAGER_CONTEXT,
+  contextInitialized: false,
   pendingAccountSelection: null as AccountOption[] | null,
-  employees: [] as DigitalEmployeeBrief[],
-  loading: false,
+  identityLoading: false,
   restoreAttempted: false,
-  error: null as ManagerError | null,
-  paymentRequired: null as PaymentRequiredInfo | null,
-  lastFetchAt: null as number | null,
+  identityError: null as ManagerError | null,
+  availableAccounts: null as ManagerAccountSummary[] | null,
+  accountDirectoryScope: null as string | null,
+  accountsLoading: false,
+  employeeResources: {} as Record<string, ManagerEmployeeResource>,
   online: true,
 };
+
+export function managerContextScope(context: ManagerContextSnapshot): string | null {
+  const key = context.contextKey;
+  if (context.authState !== 'authenticated' || key === null) return null;
+  return JSON.stringify([key.environment, key.accountId, key.organizationId, context.revision]);
+}
+
+export function managerSessionFromContext(context: ManagerContextSnapshot): UserInfo | null {
+  if (
+    context.authState !== 'authenticated'
+    || context.user === null
+    || context.account === null
+  ) {
+    return null;
+  }
+  return {
+    userId: context.user.id,
+    accountId: context.account.id,
+    accountName: context.account.name,
+  };
+}
+
+export function currentEmployeeResource(
+  state: Pick<ManagerState, 'context' | 'employeeResources'>,
+): ManagerEmployeeResource | null {
+  const scope = managerContextScope(state.context);
+  return scope === null ? null : state.employeeResources[scope] ?? null;
+}
+
+function createEmployeeResource(context: ManagerContextSnapshot): ManagerEmployeeResource | null {
+  const scope = managerContextScope(context);
+  if (scope === null || context.contextKey === null) return null;
+  return {
+    scope,
+    contextKey: context.contextKey,
+    revision: context.revision,
+    employees: [],
+    loading: false,
+    error: null,
+    paymentRequired: null,
+    lastFetchAt: null,
+    selectedEmployeeId: null,
+    connectingEmployeeId: null,
+  };
+}
+
+function contextIsValid(context: ManagerContextSnapshot): boolean {
+  if (!Number.isSafeInteger(context.revision) || context.revision < 0) return false;
+  if (context.authState !== 'authenticated') return context.contextKey === null;
+  const { contextKey, environment, user, account, organization } = context;
+  return Boolean(
+    contextKey
+      && environment
+      && user?.id.trim()
+      && account?.id.trim()
+      && organization?.id.trim()
+      && contextKey.environment === environment
+      && contextKey.accountId === account.id
+      && contextKey.organizationId === organization.id,
+  );
+}
 
 function isManagerError(e: unknown): e is ManagerError {
   return typeof e === 'object' && e !== null && typeof (e as { kind?: unknown }).kind === 'string';
@@ -161,239 +281,381 @@ function toManagerError(e: unknown): ManagerError {
   return { kind: 'other', detail: { status: 0, body: String(e) } };
 }
 
+function updateResource(
+  resources: Record<string, ManagerEmployeeResource>,
+  scope: string,
+  updater: (resource: ManagerEmployeeResource) => ManagerEmployeeResource,
+): Record<string, ManagerEmployeeResource> {
+  const resource = resources[scope];
+  if (!resource) return resources;
+  return { ...resources, [scope]: updater(resource) };
+}
+
+function requestStillCurrent(state: ManagerState, scope: string): boolean {
+  return managerContextScope(state.context) === scope;
+}
+
 export const useManagerStore = create<ManagerState>((set, get) => ({
   ...initialState,
 
-  reset: () => set(initialState),
+  applyContext: (snapshot) => {
+    if (!contextIsValid(snapshot)) {
+      set({
+        identityError: {
+          kind: 'invalid_response',
+          detail: 'Manager Context snapshot violates its identity invariants',
+        },
+      });
+      return false;
+    }
 
-  setBaseUrl: (url: string) => set({ baseUrl: url }),
+    let accepted = false;
+    set((state) => {
+      if (snapshot.revision < state.context.revision) return state;
+      if (state.contextInitialized && snapshot.revision === state.context.revision) return state;
+      accepted = true;
+      const resource = createEmployeeResource(snapshot);
+      const nextScope = managerContextScope(snapshot);
+      const preserveAccountDirectory = nextScope !== null
+        && state.accountDirectoryScope === nextScope;
+      const employeeResources = resource && !state.employeeResources[resource.scope]
+        ? { ...state.employeeResources, [resource.scope]: resource }
+        : state.employeeResources;
+      return {
+        context: snapshot,
+        contextInitialized: true,
+        pendingAccountSelection: snapshot.authState === 'account_selection_required'
+          ? state.pendingAccountSelection
+          : null,
+        availableAccounts: preserveAccountDirectory ? state.availableAccounts : null,
+        accountDirectoryScope: preserveAccountDirectory ? state.accountDirectoryScope : null,
+        accountsLoading: preserveAccountDirectory ? state.accountsLoading : false,
+        employeeResources,
+      };
+    });
+    return accepted;
+  },
 
-  clearError: () => set({ error: null }),
-  dismissPaymentRequired: () => set({ paymentRequired: null }),
+  refreshContext: async () => {
+    try {
+      const snapshot = await invoke<ManagerContextSnapshot>('manager_get_context');
+      get().applyContext(snapshot);
+      return snapshot;
+    } catch (e) {
+      const error = toManagerError(e);
+      set({ identityError: error });
+      throw error;
+    }
+  },
+
+  clearError: () => {
+    const scope = managerContextScope(get().context);
+    set((state) => ({
+      identityError: null,
+      employeeResources: scope === null
+        ? state.employeeResources
+        : updateResource(state.employeeResources, scope, (resource) => ({
+          ...resource,
+          error: null,
+        })),
+    }));
+  },
+
+  dismissPaymentRequired: () => {
+    const scope = managerContextScope(get().context);
+    if (scope === null) return;
+    set((state) => ({
+      employeeResources: updateResource(state.employeeResources, scope, (resource) => ({
+        ...resource,
+        paymentRequired: null,
+      })),
+    }));
+  },
 
   restoreSession: async () => {
-    if (get().restoreAttempted || get().session) return null;
-    set({ loading: true, error: null, restoreAttempted: true });
+    if (get().restoreAttempted || get().context.authState === 'authenticated') return null;
+    set({ identityLoading: true, identityError: null, restoreAttempted: true });
     try {
       const restored = await invoke<RestoredManagerSession | null>('manager_restore_session');
-      if (restored) {
-        info(`manager: restored session, accountId=${restored.user.accountId}`);
-        set({
-          session: restored.user,
-          pendingAccountSelection: null,
-          baseUrl: restored.baseUrl,
-          loading: false,
-        });
-      } else {
-        set({ loading: false });
-      }
+      await get().refreshContext();
+      if (restored) info(`manager: restored session, accountId=${restored.user.accountId}`);
+      set({ identityLoading: false });
       return restored;
     } catch (e) {
       const err = toManagerError(e);
       warn(`manager: restore_session failed, kind=${err.kind}`);
-      set({ error: err, loading: false });
+      set({ identityError: err, identityLoading: false });
       return null;
     }
   },
 
-  login: async (phone, password, baseUrl) => {
-    set({ loading: true, error: null, paymentRequired: null });
+  login: async (environment, identifier, password) => {
+    set({ identityLoading: true, identityError: null, pendingAccountSelection: null });
     try {
-      const effectiveBaseUrl = baseUrl ?? get().baseUrl;
       const result = await invoke<LoginResult>('manager_login', {
-        baseUrl: effectiveBaseUrl || null,
-        phone,
+        environment,
+        identifier,
         password,
       });
-      if (result.kind === 'authenticated') {
-        info(`manager: login ok, accountId=${result.user.accountId}`);
-        set({
-          session: result.user,
-          pendingAccountSelection: null,
-          baseUrl: effectiveBaseUrl,
-          loading: false,
-        });
-      } else {
-        info(`manager: login requires account selection (${result.accounts.length} options)`);
-        set({
-          session: null,
-          pendingAccountSelection: result.accounts,
-          baseUrl: effectiveBaseUrl,
-          loading: false,
-        });
+      await get().refreshContext();
+      const contextRevision = get().context.revision;
+      if (result.kind === 'account_selection_required') {
+        set((state) => state.context.revision === contextRevision
+          && state.context.authState === 'account_selection_required'
+          ? { pendingAccountSelection: result.accounts }
+          : {});
       }
+      set({ identityLoading: false });
       return result;
     } catch (e) {
       const err = toManagerError(e);
       warn(`manager: login failed, kind=${err.kind}`);
-      set({ error: err, loading: false });
+      set({ identityError: err, identityLoading: false });
       throw err;
     }
   },
 
   selectAccount: async (accountId) => {
-    set({ loading: true, error: null });
+    set({ identityLoading: true, identityError: null });
     try {
-      const user = await invoke<UserInfo>('manager_select_account', { accountId });
-      info(`manager: account selected, accountId=${user.accountId}`);
-      set({ session: user, pendingAccountSelection: null, loading: false });
+      await invoke<UserInfo>('manager_select_account', { accountId });
+      await get().refreshContext();
+      set({ identityLoading: false });
     } catch (e) {
       const err = toManagerError(e);
       warn(`manager: select_account failed, kind=${err.kind}`);
-      set({ error: err, loading: false });
+      set({ identityError: err, identityLoading: false });
       throw err;
     }
   },
 
-  fetchEmployees: async () => {
-    // Guard against concurrent invocations. React StrictMode deliberately
-    // double-fires effects in development, which otherwise produces two
-    // identical IPC calls and duplicated "fetched N digital employees" logs.
-    if (get().loading) return;
-    set({ loading: true, error: null, paymentRequired: null });
+  fetchAccounts: async () => {
+    const scope = managerContextScope(get().context);
+    if (scope === null) throw { kind: 'no_session' } satisfies ManagerError;
+    if (get().accountsLoading && get().accountDirectoryScope === scope) {
+      return get().availableAccounts ?? [];
+    }
+    set({ accountsLoading: true, accountDirectoryScope: scope });
     try {
-      const employees = await invoke<DigitalEmployeeBrief[]>('manager_list_digital_employees');
-      info(`manager: fetched ${employees.length} digital employees`);
-      set({ employees, loading: false, lastFetchAt: Date.now(), online: true });
+      const accounts = await invoke<ManagerAccountSummary[]>('manager_list_accounts');
+      if (managerContextScope(get().context) !== scope) {
+        info('manager: discarded stale account list response after Context change');
+        return [];
+      }
+      set({
+        availableAccounts: accounts,
+        accountDirectoryScope: scope,
+        accountsLoading: false,
+      });
+      return accounts;
     } catch (e) {
       const err = toManagerError(e);
-      warn(`manager: list_employees failed, kind=${err.kind}`);
-      if (err.kind === 'payment_required') {
-        set({
-          paymentRequired: { message: err.detail.message, redirectUrl: err.detail.redirect_url },
-        });
+      if (managerContextScope(get().context) !== scope) {
+        info('manager: discarded stale account list error after Context change');
+        return [];
       }
-      // 网络失败：保留最近一次成功列表（不清空 employees），标记离线供 UI 横幅展示。
-      set({
-        error: err,
-        loading: false,
-        online: err.kind === 'network_error' ? false : get().online,
-      });
+      set({ identityError: err, accountsLoading: false });
+      throw err;
+    }
+  },
+
+  switchAccount: async (accountId) => {
+    set({ identityLoading: true, identityError: null });
+    let commandError: ManagerError | null = null;
+    try {
+      await invoke('manager_switch_account', { accountId });
+    } catch (e) {
+      commandError = toManagerError(e);
+      warn(`manager: switch_account failed, kind=${commandError.kind}`);
+    }
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      if (commandError === null) commandError = toManagerError(e);
+    }
+    set({
+      identityLoading: false,
+      identityError: commandError,
+      availableAccounts: null,
+      accountDirectoryScope: null,
+      accountsLoading: false,
+    });
+    if (commandError !== null) throw commandError;
+  },
+
+  fetchEmployees: async () => {
+    const context = get().context;
+    const scope = managerContextScope(context);
+    if (scope === null) throw { kind: 'no_session' } satisfies ManagerError;
+    const resource = get().employeeResources[scope] ?? createEmployeeResource(context);
+    if (!resource || resource.loading) return;
+    set((state) => ({
+      employeeResources: {
+        ...state.employeeResources,
+        [scope]: { ...resource, loading: true, error: null, paymentRequired: null },
+      },
+    }));
+    try {
+      const employees = await invoke<DigitalEmployeeBrief[]>('manager_list_digital_employees');
+      if (!requestStillCurrent(get(), scope)) {
+        info('manager: discarded stale employee list response after Context change');
+        return;
+      }
+      info(`manager: fetched ${employees.length} digital employees`);
+      set((state) => ({
+        online: true,
+        employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+          ...current,
+          employees,
+          loading: false,
+          lastFetchAt: Date.now(),
+        })),
+      }));
+    } catch (e) {
+      const err = toManagerError(e);
+      if (!requestStillCurrent(get(), scope)) {
+        info('manager: discarded stale employee list error after Context change');
+        return;
+      }
+      warn(`manager: list_employees failed, kind=${err.kind}`);
+      set((state) => ({
+        online: err.kind === 'network_error' ? false : state.online,
+        employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+          ...current,
+          loading: false,
+          error: err,
+          paymentRequired: err.kind === 'payment_required'
+            ? { message: err.detail.message, redirectUrl: err.detail.redirect_url }
+            : current.paymentRequired,
+        })),
+      }));
       throw err;
     }
   },
 
   fetchEmployeesIfStale: async (maxAgeMs = EMPLOYEE_LIST_STALE_MS) => {
-    const { lastFetchAt, employees, loading } = get();
-    if (loading) return;
-    const fresh =
-      lastFetchAt !== null && employees.length > 0 && Date.now() - lastFetchAt < maxAgeMs;
-    if (fresh) return;
-    await get().fetchEmployees();
+    const resource = currentEmployeeResource(get());
+    if (!resource || resource.loading) return;
+    const fresh = resource.lastFetchAt !== null
+      && Date.now() - resource.lastFetchAt < maxAgeMs;
+    if (!fresh) await get().fetchEmployees();
   },
 
-  setOnline: (online: boolean) => {
+  setOnline: (online) => {
     const wasOffline = !get().online;
     set({ online });
-    // 离线 → 在线跳变：立即校准（绕过 staleness 窗口），让被剔除/新增的项即时对齐。
-    if (online && wasOffline && get().session) {
+    if (online && wasOffline && get().context.authState === 'authenticated') {
       info('manager: back online, recalibrating employee list');
-      get()
-        .fetchEmployees()
-        .catch(() => {
-          /* error stored in store */
-        });
+      void get().fetchEmployees().catch(() => {
+        /* resource error is stored */
+      });
     }
   },
 
   selectEmployeeAndConnect: async (instanceId, employeeId) => {
-    set({ loading: true, error: null, paymentRequired: null });
+    const context = get().context;
+    const scope = managerContextScope(context);
+    const resource = currentEmployeeResource(get());
+    if (scope === null || resource === null) throw { kind: 'no_session' } satisfies ManagerError;
     if (!instanceId) {
-      const err: ManagerError = {
-        kind: 'invalid_response',
-        detail: 'No Computer instance selected',
-      };
-      set({ error: err, loading: false });
+      const err: ManagerError = { kind: 'invalid_response', detail: 'No Computer instance selected' };
+      set((state) => ({
+        employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+          ...current,
+          error: err,
+        })),
+      }));
       throw err;
     }
-    const employee = get().employees.find((e) => e.id === employeeId);
-    if (!employee) {
-      const err: ManagerError = { kind: 'not_found' };
-      set({ error: err, loading: false });
-      throw err;
-    }
-    // 安全连接需要 robotAccountId 作 token-exchange audience（TFRM-183，nullable）。
-    // 历史/未回填实例无此 ID，无法换取连接凭据。
-    if (employee.robotAccountId == null) {
-      const err: ManagerError = {
-        kind: 'invalid_response',
-        detail: 'robotAccountId missing for this robot',
-      };
-      set({ error: err, loading: false });
-      throw err;
-    }
+    const employee = resource.employees.find((candidate) => candidate.id === employeeId);
+    if (!employee) throw { kind: 'not_found' } satisfies ManagerError;
+    set((state) => ({
+      employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+        ...current,
+        error: null,
+        paymentRequired: null,
+        selectedEmployeeId: employeeId,
+        connectingEmployeeId: employeeId,
+      })),
+    }));
     try {
-      // 后端编排 token-exchange 全路径：connection-info → exchange_token → 短 JWT 注入 Socket.IO
-      // auth dict → 连接，并起后台预刷新重连。鉴权不再走静态 token / profile。
       await invoke('manager_connect_smcp', {
         instanceId,
         employeeId,
-        robotAccountId: employee.robotAccountId,
-        robotId: employee.robotId ?? null,
-        robotName: employee.name,
-        namespace: employee.namespace ?? null,
         scope: null,
       });
-      info(`manager: connected via token-exchange employee=${employee.name}`);
-      // Connection status arrives through runtime events; reconcile the persisted robot binding
-      // and connection policy once after the command succeeds.
+      if (!requestStillCurrent(get(), scope)) return null;
       await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
-      set({ loading: false });
+      if (!requestStillCurrent(get(), scope)) return null;
+      info(`manager: connected via token-exchange employee=${employee.name}`);
+      set((state) => ({
+        employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+          ...current,
+          connectingEmployeeId: null,
+        })),
+      }));
       return { name: employee.name };
     } catch (e) {
       const err = toManagerError(e);
+      if (!requestStillCurrent(get(), scope)) return null;
       logError(`manager: select_employee_and_connect failed, kind=${err.kind}`);
-      if (err.kind === 'payment_required') {
-        set({
-          paymentRequired: { message: err.detail.message, redirectUrl: err.detail.redirect_url },
+      set((state) => ({
+        employeeResources: updateResource(state.employeeResources, scope, (current) => ({
+          ...current,
+          employees: err.kind === 'not_found_or_no_permission'
+            ? current.employees.filter((candidate) => candidate.id !== employeeId)
+            : current.employees,
+          connectingEmployeeId: null,
+          error: err,
+          paymentRequired: err.kind === 'payment_required'
+            ? { message: err.detail.message, redirectUrl: err.detail.redirect_url }
+            : current.paymentRequired,
+        })),
+      }));
+      if (err.kind === 'not_found_or_no_permission') {
+        void get().fetchEmployees().catch(() => {
+          /* resource error is stored */
         });
-      }
-      if (err.kind === 'not_found_or_no_permission') {
-        // 该机器人对当前 viewer 已不可见（部门可见性回收）：本地剔除该项。
-        warn(`manager: employee ${employeeId} no longer visible, removing from local list`);
-        set({ employees: get().employees.filter((e2) => e2.id !== employeeId) });
-      }
-      set({ error: err, loading: false });
-      // loading 已置 false，可安全触发校准 refetch（绕过并发 guard）。
-      if (err.kind === 'not_found_or_no_permission') {
-        get()
-          .fetchEmployees()
-          .catch(() => {
-            /* error stored in store */
-          });
       }
       throw err;
     }
   },
 
   logout: async () => {
-    set({ loading: true, error: null });
+    set({ identityLoading: true, identityError: null });
+    let commandError: ManagerError | null = null;
     try {
       await invoke('manager_logout');
-      info('manager: logout ok');
-      set({
-        session: null,
-        pendingAccountSelection: null,
-        employees: [],
-        loading: false,
-        restoreAttempted: true,
-        lastFetchAt: null,
-      });
     } catch (e) {
-      const err = toManagerError(e);
-      set({ error: err, loading: false });
-      throw err;
+      commandError = toManagerError(e);
+    }
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      if (commandError === null) commandError = toManagerError(e);
+    }
+    if (commandError === null) info('manager: logout ok');
+    set({
+      pendingAccountSelection: null,
+      identityLoading: false,
+      identityError: commandError,
+      restoreAttempted: true,
+      availableAccounts: null,
+      accountDirectoryScope: null,
+      accountsLoading: false,
+    });
+    if (commandError !== null) {
+      throw commandError;
     }
   },
 
-  handleAuthExpired: () => {
-    warn('manager: auth-expired event received; clearing session');
-    set({
-      session: null,
-      pendingAccountSelection: null,
-      employees: [],
-      lastFetchAt: null,
-      error: { kind: 'unauthorized' },
-    });
+  handleAuthExpired: async () => {
+    warn('manager: auth-expired event received; reconciling authoritative Context');
+    set({ identityError: { kind: 'unauthorized' } });
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      warn(`manager: failed to refresh Context after auth expiry: ${String(e)}`);
+    }
   },
 }));

@@ -15,6 +15,7 @@ import {
   type ComputerRuntimeSnapshot,
 } from './runtimeSnapshot';
 import type { ComputerRuntimeUserState } from './runtimeSnapshot';
+import type { ManagerContextKey } from './managerStore';
 
 export {
   isRuntimeRunning,
@@ -30,20 +31,28 @@ export type ComputerStatus = ComputerRuntimeUserState;
 export type ComputerConnectionStatus = ClientConnectionStatus;
 
 export interface RobotBindingMetadata {
+  context_key?: ManagerContextKey;
+  state: 'active' | 'dormant' | 'needs_rebind';
   employee_id: number;
   robot_id?: string;
-  robot_account_id?: number;
+  last_resolved_robot_account_id?: string;
   namespace?: string;
   robot_name?: string;
 }
 
 export type ComputerConnectionTargetType = 'manager_robot' | 'manual_smcp';
 
-export interface ComputerConnectionTarget {
-  type: ComputerConnectionTargetType;
-  id: string;
-  robotAccountId?: number;
-}
+export type ComputerConnectionTarget =
+  | {
+    type: 'manager_robot';
+    contextKey: ManagerContextKey;
+    employeeId: number;
+    lastResolvedRobotAccountId?: string;
+  }
+  | {
+    type: 'manual_smcp';
+    id: string;
+  };
 
 export interface ComputerConnectionPolicy {
   target?: ComputerConnectionTarget | null;
@@ -105,7 +114,6 @@ export type DuplicateSkillHomeMode = 'empty' | 'copy';
 export interface DuplicateComputerValues extends ComputerFormValues {
   sourceId: string;
   copyRobotBinding: boolean;
-  connectionTargetId?: string;
   skillHomeMode: DuplicateSkillHomeMode;
 }
 
@@ -554,7 +562,6 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         sourceId: values.sourceId,
         ...normalizeFormValues(values),
         copyRobotBinding: values.copyRobotBinding,
-        connectionTargetId: values.connectionTargetId || undefined,
         skillHomeMode: values.skillHomeMode,
       };
       const duplicated = await ingestStatus(

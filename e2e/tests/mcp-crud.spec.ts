@@ -48,6 +48,13 @@ test.describe('MCP Server configuration', () => {
   test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
     await page.locator('.ant-layout-sider').getByText('Computer').click();
     await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
+    const managerConnect = page.getByRole('button', { name: 'Connect', exact: true });
+    await expect(managerConnect).toBeDisabled();
+    await managerConnect.locator('..').hover();
+    await expect(page.getByText(
+      'Select an active Robot in the current Manager account before connecting.',
+      { exact: true },
+    )).toBeVisible();
     await page.getByRole('button', { name: 'Open Computer settings' }).click();
     await page
       .getByRole('menu', { name: 'Computer settings sections' })

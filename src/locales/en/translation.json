@@ -34,6 +34,9 @@
     "system": "SYSTEM",
     "debugPanel": "Debug Panel"
   },
+  "robotConnections": {
+    "title": "Robot List"
+  },
   "computer": {
     "title": "Computer",
     "create": "Create Computer",
@@ -262,16 +265,33 @@
         "connection_unavailable": "Connection is unavailable in the current runtime state."
       },
       "targetTitle": "Connection Target",
-      "selectTarget": "Select a Robot or Manual SMCP target",
+      "selectTarget": "Select a Manager Robot",
       "requiresRunning": "Start this Computer before connecting.",
       "requiresTarget": "Select a connection target first.",
-      "missingRobotAccountId": "robotAccountId is missing; this Robot cannot be connected.",
+      "targetUnavailable": "Select an active Robot in the current Manager account before connecting.",
       "robotNotRunning": "This Robot is not running and cannot be connected.",
       "manualManagedGlobally": "Manual SMCP targets are managed globally on this page; select one above to bind it to this Computer.",
       "readOnlyTitle": "This page shows connection resources available to this Computer.",
-      "readOnlyDescription": "Connection status, login, configuration, and connect/disconnect actions are managed on the Robot Connections page.",
+      "readOnlyDescription": "Robot resources are selected here. Manager identity is managed from the global account entry in the app header.",
       "openRobotConnections": "Open Robot Connections",
-      "managerLoginRequired": "No Manager account is signed in. Sign in on the Robot Connections page to view Robots.",
+      "managerLoginRequired": "No Manager account is signed in.",
+      "useGlobalManagerAccount": "Use the Manager Account entry in the app header to sign in.",
+      "savedManagerRobot": "Saved Robot (employee {{employeeId}})",
+      "binding": {
+        "reactivate": "Reactivate",
+        "dormant": {
+          "title": "This Robot binding is dormant",
+          "description": "It belongs to a previous Context or was safely disconnected. Select a Robot in the current Context, or explicitly reactivate this matching binding."
+        },
+        "needs_rebind": {
+          "title": "This migrated binding needs a Robot selection",
+          "description": "The legacy profile has no account or organization scope. Select a Robot from the current Context to finish the safe migration."
+        },
+        "permission_revoked": {
+          "title": "The saved Robot is no longer visible",
+          "description": "Your access may have changed or the Robot was removed. Select another visible Robot; the old binding will not connect automatically."
+        }
+      },
       "manualTargetsTitle": "Global Manual SMCP Configurations",
       "configureTargets": "Configure",
       "openTargetDetails": "Details",
@@ -744,15 +764,17 @@
   },
   "manager": {
     "errors": {
-      "network_error": "Cannot reach the Manager server. Check your connection or the Manager URL.",
+      "network_error": "Cannot reach the Manager server. Check your connection or selected environment.",
       "unauthorized": "Your Manager session has expired. Please sign in again.",
+      "invalid_credentials": "The phone number, email, or password is incorrect.",
       "forbidden": "You do not have permission to access this resource.",
       "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
       "not_found": "The requested resource was not found.",
       "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
-      "missing_base_url": "The Manager base URL is not configured. Set TFRS_MANAGER_BASE_URL or enter it on the sign-in form.",
+      "context_changed": "Your Manager account changed while this request was running. Please try again.",
+      "missing_base_url": "The Manager environment could not be resolved. Select an environment again.",
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
@@ -761,13 +783,32 @@
   },
   "managerAccount": {
     "navLabel": "Manager Account",
+    "global": {
+      "environment": "Environment",
+      "organization": "Organization",
+      "account": "Account",
+      "switchAccount": "Switch account or organization",
+      "loadingAccounts": "Loading accounts…",
+      "noAccounts": "No other accounts are available.",
+      "current": "Current",
+      "completeSignIn": "Complete sign-in",
+      "setupRequired": "Account setup required",
+      "sessionExpired": "Session expired",
+      "robotConnectionsSignIn": "Sign in from the global Manager Account entry in the app header to view Robots. Local Computer and Manual SMCP features remain available."
+    },
     "login": {
       "title": "Sign in to TFRSManager",
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
-      "baseUrl": "Manager Base URL",
-      "baseUrlHint": "Leave empty to use the TFRS_MANAGER_BASE_URL environment variable.",
-      "phone": "Phone",
-      "phoneRequired": "Phone is required",
+      "environment": "Environment",
+      "environmentHint": "The client configures the Manager address for the selected environment.",
+      "environmentRequired": "Environment is required",
+      "environments": {
+        "staging": "Staging",
+        "beta": "Beta",
+        "prod": "Production"
+      },
+      "identifier": "Phone or email",
+      "identifierRequired": "Phone or email is required",
       "password": "Password",
       "passwordRequired": "Password is required",
       "submit": "Sign In",
@@ -778,6 +819,11 @@
       "title": "Choose an account",
       "description": "Your credentials match multiple accounts. Pick one to continue.",
       "select": "Select",
+      "back": "Back to sign in"
+    },
+    "onboarding": {
+      "title": "No organization account yet",
+      "description": "Complete organization setup or join an organization in TFRS FrontPortal, then return here and sign in again.",
       "back": "Back to sign in"
     },
     "employees": {
@@ -804,6 +850,15 @@
       "renew": "Renew subscription",
       "department": "Department",
       "noDepartment": "Unassigned",
+      "status": {
+        "running": "Running",
+        "suspended": "Suspended",
+        "stopped": "Stopped",
+        "init_failed": "Initialization Failed",
+        "failed": "Failed",
+        "stop_failed": "Stop Failed",
+        "unknown": "Unknown Status"
+      },
       "offlineBanner": "Offline — showing the last loaded list. It will refresh automatically when the connection is restored.",
       "visibilityRevoked": "\"{{name}}\" is no longer available and was removed from the list."
     }

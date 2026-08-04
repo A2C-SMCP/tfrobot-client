@@ -4,8 +4,10 @@ use crate::services::client_computers::{
     COMPUTER_PROFILE_FILE_NAME,
 };
 use crate::services::computer::{
-    ComputerInputDefinition, ComputerInputsConfig, ComputerInstance, ComputerInstancesConfig,
-    ComputerProfile, ManagedMcpServer, SdkContextConfig, COMPUTER_INPUTS_SCHEMA_VERSION,
+    ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInputDefinition,
+    ComputerInputsConfig, ComputerInstance, ComputerInstancesConfig, ComputerProfile,
+    ComputerProfileConnectionPolicy, ManagedMcpServer, ManagerRobotBindingState,
+    RobotBindingMetadata, SdkContextConfig, COMPUTER_INPUTS_SCHEMA_VERSION,
     COMPUTER_PROFILE_SCHEMA_VERSION, SDK_CONTEXT_SCHEMA_VERSION,
 };
 use crate::services::connection_targets::{
@@ -62,6 +64,65 @@ struct ComputerDirectoryTransaction {
     schema_version: u32,
     instance_id: String,
     phase: ComputerDirectoryTransactionPhase,
+}
+
+const LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
+const LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v1.backup.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyComputerProfileV1 {
+    schema_version: u32,
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    connection_policy: LegacyComputerConnectionPolicyV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_binding: Option<LegacyRobotBindingV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+struct LegacyComputerConnectionPolicyV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<LegacyComputerConnectionTargetV1>,
+    #[serde(default)]
+    auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyComputerConnectionTargetV1 {
+    #[serde(rename = "type")]
+    target_type: ComputerConnectionTargetType,
+    id: String,
+    #[serde(
+        rename = "robotAccountId",
+        default,
+        deserialize_with = "crate::services::serde_compat::deserialize_optional_opaque_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    robot_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyRobotBindingV1 {
+    employee_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::services::serde_compat::deserialize_optional_opaque_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    robot_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +206,7 @@ impl ConfigService {
             profile.schema_version,
             COMPUTER_PROFILE_SCHEMA_VERSION,
         )?;
+        validate_computer_profile(profile)?;
         let path = self.computer_profile_path(&profile.id)?;
         save_json_file(&path, profile)
     }
@@ -157,19 +219,74 @@ impl ConfigService {
         if !path.exists() {
             return Err(ConfigError::NotFound(path.to_string_lossy().into_owned()));
         }
-        let profile: ComputerProfile = load_required_json_file(&path)?;
-        validate_schema_version(
-            "computer profile",
-            profile.schema_version,
-            COMPUTER_PROFILE_SCHEMA_VERSION,
-        )?;
+        let value: serde_json::Value = load_required_json_file(&path)?;
+        let schema_version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| ConfigError::InvalidComputerProfile {
+                profile_id: instance_directory_id.to_string(),
+                reason: "schema_version is required and must be a u32".to_string(),
+            })?;
+        let profile = match schema_version {
+            COMPUTER_PROFILE_SCHEMA_VERSION => serde_json::from_value(value)?,
+            LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION => {
+                let legacy: LegacyComputerProfileV1 = serde_json::from_value(value)?;
+                self.migrate_computer_profile_v1(&path, legacy)?
+            }
+            actual => {
+                return Err(ConfigError::UnsupportedSchemaVersion {
+                    artifact: "computer profile",
+                    expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                    actual,
+                });
+            }
+        };
         if profile.id != instance_directory_id {
             return Err(ConfigError::CorruptedComputerProfile {
                 directory_id: instance_directory_id.to_string(),
                 profile_id: profile.id,
             });
         }
+        validate_computer_profile(&profile)?;
         Ok(profile)
+    }
+
+    fn migrate_computer_profile_v1(
+        &self,
+        profile_path: &Path,
+        legacy: LegacyComputerProfileV1,
+    ) -> Result<ComputerProfile, ConfigError> {
+        if legacy.schema_version != LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                actual: legacy.schema_version,
+            });
+        }
+        let migrated = migrate_legacy_computer_profile(legacy.clone())?;
+        validate_computer_profile(&migrated)?;
+
+        let backup_path = profile_path.with_file_name(LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME);
+        if backup_path.exists() {
+            let existing: LegacyComputerProfileV1 = load_required_json_file(&backup_path)?;
+            if existing != legacy {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id: legacy.id,
+                    reason: format!(
+                        "legacy migration backup {} does not match the source profile",
+                        backup_path.display()
+                    ),
+                });
+            }
+        } else {
+            write_json_atomically(&backup_path, &legacy)?;
+        }
+
+        // Atomic replacement is the migration commit point. If serialization or persistence
+        // fails, profile.json remains the original v1 document and the backup is recoverable.
+        write_json_atomically(profile_path, &migrated)?;
+        Ok(migrated)
     }
 
     pub fn load_sdk_context(&self, instance_id: &str) -> Result<SdkContextConfig, ConfigError> {
@@ -947,6 +1064,196 @@ fn validate_schema_version(
     Ok(())
 }
 
+fn migrate_legacy_computer_profile(
+    legacy: LegacyComputerProfileV1,
+) -> Result<ComputerProfile, ConfigError> {
+    let profile_id = legacy.id.clone();
+    let legacy_target = legacy.connection_policy.target;
+    let mut binding = legacy.robot_binding.map(|binding| RobotBindingMetadata {
+        context_key: None,
+        state: ManagerRobotBindingState::NeedsRebind,
+        employee_id: binding.employee_id,
+        robot_id: binding.robot_id,
+        last_resolved_robot_account_id: binding.robot_account_id,
+        namespace: binding.namespace,
+        robot_name: binding.robot_name,
+    });
+
+    let (target, auto_connect) = match legacy_target {
+        Some(LegacyComputerConnectionTargetV1 {
+            target_type: ComputerConnectionTargetType::ManualSmcp,
+            id,
+            robot_account_id,
+        }) => {
+            if robot_account_id.is_some() {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id,
+                    reason: "legacy Manual SMCP target unexpectedly contains robotAccountId"
+                        .to_string(),
+                });
+            }
+            (
+                Some(ComputerConnectionTarget::manual_smcp(id)),
+                legacy.connection_policy.auto_connect,
+            )
+        }
+        Some(LegacyComputerConnectionTargetV1 {
+            target_type: ComputerConnectionTargetType::ManagerRobot,
+            id,
+            robot_account_id,
+        }) => {
+            let employee_id =
+                id.parse::<u64>()
+                    .map_err(|_| ConfigError::InvalidComputerProfile {
+                        profile_id: profile_id.clone(),
+                        reason: format!(
+                            "legacy Manager Robot target id '{id}' is not a numeric employee id"
+                        ),
+                    })?;
+            if let Some(existing) = binding.as_mut() {
+                if existing.employee_id != employee_id {
+                    return Err(ConfigError::InvalidComputerProfile {
+                        profile_id,
+                        reason: format!(
+                            "legacy Manager target employee {employee_id} does not match binding employee {}",
+                            existing.employee_id
+                        ),
+                    });
+                }
+                if existing.last_resolved_robot_account_id.is_none() {
+                    existing.last_resolved_robot_account_id = robot_account_id;
+                }
+            } else {
+                binding = Some(RobotBindingMetadata::needs_rebind(
+                    employee_id,
+                    robot_account_id,
+                ));
+            }
+            // An unscoped Manager target can never be made authoritative by migration. Preserve a
+            // diagnostic binding only, clear the active target, and disable auto-connect.
+            (None, false)
+        }
+        None => {
+            // Any v1 Robot binding is unscoped even without an active policy target.
+            let safe_auto_connect = legacy.connection_policy.auto_connect && binding.is_none();
+            (None, safe_auto_connect)
+        }
+    };
+
+    Ok(ComputerProfile {
+        schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+        id: legacy.id,
+        name: legacy.name,
+        description: legacy.description,
+        connection_policy: ComputerProfileConnectionPolicy {
+            target,
+            auto_connect,
+        },
+        robot_binding: binding,
+    })
+}
+
+fn validate_computer_profile(profile: &ComputerProfile) -> Result<(), ConfigError> {
+    let invalid = |reason: String| ConfigError::InvalidComputerProfile {
+        profile_id: profile.id.clone(),
+        reason,
+    };
+    if profile.id.trim().is_empty() || profile.id != profile.id.trim() {
+        return Err(invalid("id must be non-empty and trimmed".to_string()));
+    }
+    if profile.name.trim().is_empty() {
+        return Err(invalid("name must be non-empty".to_string()));
+    }
+
+    if let Some(target) = profile.connection_policy.target.as_ref() {
+        match target {
+            ComputerConnectionTarget::ManualSmcp { id } => {
+                if id.trim().is_empty() || id != id.trim() {
+                    return Err(invalid(
+                        "Manual SMCP target id must be non-empty and trimmed".to_string(),
+                    ));
+                }
+            }
+            ComputerConnectionTarget::ManagerRobot {
+                context_key,
+                employee_id: _,
+                last_resolved_robot_account_id,
+            } => {
+                validate_manager_context_key(context_key).map_err(invalid)?;
+                if last_resolved_robot_account_id
+                    .as_deref()
+                    .is_some_and(|id| id.trim().is_empty() || id != id.trim())
+                {
+                    return Err(invalid(
+                        "Manager Robot last resolved account id must be non-empty and trimmed"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(binding) = profile.robot_binding.as_ref() {
+        if matches!(
+            binding.state,
+            ManagerRobotBindingState::Active | ManagerRobotBindingState::Dormant
+        ) && binding.context_key.is_none()
+        {
+            return Err(invalid(
+                "active or dormant Manager Robot binding requires context_key".to_string(),
+            ));
+        }
+        if let Some(context_key) = binding.context_key.as_ref() {
+            validate_manager_context_key(context_key).map_err(invalid)?;
+        }
+        if binding
+            .last_resolved_robot_account_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty() || id != id.trim())
+        {
+            return Err(invalid(
+                "binding last resolved account id must be non-empty and trimmed".to_string(),
+            ));
+        }
+
+        if let Some(ComputerConnectionTarget::ManagerRobot {
+            context_key,
+            employee_id,
+            ..
+        }) = profile.connection_policy.target.as_ref()
+        {
+            if binding.state == ManagerRobotBindingState::NeedsRebind {
+                return Err(invalid(
+                    "needs-rebind binding cannot retain an active Manager Robot target".to_string(),
+                ));
+            }
+            if binding.context_key.as_ref() != Some(context_key)
+                || binding.employee_id != *employee_id
+            {
+                return Err(invalid(
+                    "Manager Robot target and binding scope/employee must match".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_manager_context_key(
+    context_key: &crate::services::manager_context::ManagerContextKey,
+) -> Result<(), String> {
+    if context_key.account_id.trim().is_empty()
+        || context_key.account_id != context_key.account_id.trim()
+        || context_key.organization_id.trim().is_empty()
+        || context_key.organization_id != context_key.organization_id.trim()
+    {
+        return Err(
+            "Manager Context account/organization ids must be non-empty and trimmed".into(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_computer_inputs_config(config: &ComputerInputsConfig) -> Result<(), ConfigError> {
     validate_schema_version(
         "Computer inputs",
@@ -1158,6 +1465,9 @@ pub enum ConfigError {
         profile_id: String,
     },
 
+    #[error("invalid Computer profile '{profile_id}': {reason}")]
+    InvalidComputerProfile { profile_id: String, reason: String },
+
     #[error("unsupported {artifact} schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion {
         artifact: &'static str,
@@ -1223,6 +1533,121 @@ mod tests {
             tmp.path()
                 .join("client_computers/instances/computer-a/profile.json")
         );
+    }
+
+    #[test]
+    fn legacy_manager_profile_migrates_to_needs_rebind_with_backup_and_no_auto_connect() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-manager").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-manager".to_string(),
+            name: "Manager Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManagerRobot,
+                    id: "42".to_string(),
+                    robot_account_id: Some("robot-account-42".to_string()),
+                }),
+                auto_connect: true,
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-manager").unwrap();
+
+        assert!(migrated.connection_policy.target.is_none());
+        assert!(!migrated.connection_policy.auto_connect);
+        let binding = migrated.robot_binding.unwrap();
+        assert_eq!(binding.context_key, None);
+        assert_eq!(binding.state, ManagerRobotBindingState::NeedsRebind);
+        assert_eq!(binding.employee_id, 42);
+        assert_eq!(
+            binding.last_resolved_robot_account_id.as_deref(),
+            Some("robot-account-42")
+        );
+        let backup_path = profile_path.with_file_name(LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME);
+        let backup: LegacyComputerProfileV1 =
+            serde_json::from_slice(&std::fs::read(backup_path).unwrap()).unwrap();
+        assert_eq!(backup, legacy);
+        let persisted: ComputerProfile =
+            serde_json::from_slice(&std::fs::read(profile_path).unwrap()).unwrap();
+        assert_eq!(persisted.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_manual_profile_preserves_target_and_auto_connect_semantics() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-manual").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-manual".to_string(),
+            name: "Manual Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManualSmcp,
+                    id: "manual-office".to_string(),
+                    robot_account_id: None,
+                }),
+                auto_connect: true,
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-manual").unwrap();
+
+        assert!(matches!(
+            migrated.connection_policy.target,
+            Some(ComputerConnectionTarget::ManualSmcp { ref id })
+                if id == "manual-office"
+        ));
+        assert!(migrated.connection_policy.auto_connect);
+        assert!(migrated.robot_binding.is_none());
+    }
+
+    #[test]
+    fn invalid_legacy_manager_profile_remains_intact_for_recovery() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-invalid").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let legacy = LegacyComputerProfileV1 {
+            schema_version: LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-invalid".to_string(),
+            name: "Invalid Computer".to_string(),
+            description: None,
+            connection_policy: LegacyComputerConnectionPolicyV1 {
+                target: Some(LegacyComputerConnectionTargetV1 {
+                    target_type: ComputerConnectionTargetType::ManagerRobot,
+                    id: "42".to_string(),
+                    robot_account_id: None,
+                }),
+                auto_connect: true,
+            },
+            robot_binding: Some(LegacyRobotBindingV1 {
+                employee_id: 84,
+                robot_id: None,
+                robot_account_id: None,
+                namespace: None,
+                robot_name: None,
+            }),
+        };
+        let original = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&profile_path, &original).unwrap();
+
+        assert!(matches!(
+            svc.load_computer_profile("computer-invalid").unwrap_err(),
+            ConfigError::InvalidComputerProfile { .. }
+        ));
+        assert_eq!(std::fs::read(&profile_path).unwrap(), original);
+        assert!(!profile_path
+            .with_file_name(LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME)
+            .exists());
     }
 
     #[test]

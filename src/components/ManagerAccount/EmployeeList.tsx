@@ -10,7 +10,6 @@ import {
   Tag,
   Empty,
   Descriptions,
-  Tooltip,
 } from 'antd';
 import {
   RobotOutlined,
@@ -23,6 +22,9 @@ import {
 import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import {
+  currentEmployeeResource,
+  managerContextScope,
+  managerSessionFromContext,
   useManagerStore,
   type DepartmentRef,
   type DigitalEmployeeBrief,
@@ -31,6 +33,7 @@ import {
 import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connectionStore';
 
 const { Title, Text } = Typography;
+const EMPTY_EMPLOYEES: DigitalEmployeeBrief[] = [];
 
 const DEFAULT_CONNECT_CAPABILITY = {
   enabled: false,
@@ -51,6 +54,8 @@ const DISCONNECTED_STATUS: ConnectionStatusInfo = {
 
 interface EmployeeListProps {
   instanceId?: string;
+  showIdentityActions?: boolean;
+  showIdentitySummary?: boolean;
 }
 
 function errorI18nKey(err: ManagerError): string {
@@ -83,15 +88,22 @@ function isConnectable(emp: DigitalEmployeeBrief): boolean {
   return (emp.status ?? 'running') === 'running';
 }
 
-export function EmployeeList({ instanceId }: EmployeeListProps) {
+function employeeStatusI18nKey(status: string): string {
+  return `managerAccount.employees.status.${status}`;
+}
+
+export function EmployeeList({
+  instanceId,
+  showIdentityActions = true,
+  showIdentitySummary = true,
+}: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
-    session,
-    employees,
-    loading,
-    error,
-    paymentRequired,
+    context,
+    employeeResources,
+    identityLoading,
+    identityError,
     online,
     fetchEmployees,
     fetchEmployeesIfStale,
@@ -101,6 +113,15 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
     clearError,
     dismissPaymentRequired,
   } = useManagerStore();
+  const session = managerSessionFromContext(context);
+  const authenticatedScope = managerContextScope(context);
+  const resource = currentEmployeeResource({ context, employeeResources });
+  const employees = resource?.employees ?? EMPTY_EMPLOYEES;
+  const loading = identityLoading
+    || resource?.loading === true
+    || resource?.connectingEmployeeId != null;
+  const error = resource?.error ?? identityError;
+  const paymentRequired = resource?.paymentRequired ?? null;
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
   const selectedConnectionStatus = useConnectionStore((s) =>
     instanceId ? s.statuses[instanceId] : undefined,
@@ -118,12 +139,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
 
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
-    if (session) {
+    if (authenticatedScope) {
       fetchEmployeesIfStale().catch(() => {
         /* error stored in store */
       });
     }
-  }, [session, fetchEmployeesIfStale]);
+  }, [authenticatedScope, fetchEmployeesIfStale]);
 
   // 在线/离线探测：离线 → 在线跳变时 store 会自动校准 refetch。
   useEffect(() => {
@@ -194,24 +215,34 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
   return (
     <Card>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div>
-            <Title level={4} style={{ marginBottom: 4 }}>
-              {t('managerAccount.employees.title')}
-            </Title>
-            {session && (
-              <Text type="secondary">
-                {t('managerAccount.employees.signedInAs', { name: session.accountName })}
-              </Text>
-            )}
-          </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: showIdentitySummary ? 'space-between' : 'flex-end',
+            alignItems: 'flex-start',
+          }}
+        >
+          {showIdentitySummary && (
+            <div>
+              <Title level={4} style={{ marginBottom: 4 }}>
+                {t('managerAccount.employees.title')}
+              </Title>
+              {session && (
+                <Text type="secondary">
+                  {t('managerAccount.employees.signedInAs', { name: session.accountName })}
+                </Text>
+              )}
+            </div>
+          )}
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => fetchEmployees()} loading={loading}>
               {t('common.refresh')}
             </Button>
-            <Button icon={<LogoutOutlined />} danger onClick={handleLogout} loading={loading}>
-              {t('managerAccount.login.logout')}
-            </Button>
+            {showIdentityActions && (
+              <Button icon={<LogoutOutlined />} danger onClick={handleLogout} loading={loading}>
+                {t('managerAccount.login.logout')}
+              </Button>
+            )}
           </Space>
         </div>
 
@@ -287,14 +318,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
               const isDisconnecting = backendConnectionStatus === 'disconnecting'
                 && isConnectionTarget;
               const isConnected = backendConnectionStatus === 'connected' && isConnectionTarget;
-              // 无 robotAccountId（历史/未回填实例）无法做 token-exchange → 禁用连接（TFRC-11 / TFRM-183）。
-              const noRobotAccount = emp.robotAccountId == null;
               const connectButton = (
                 <Button
                   key="connect"
                   type="primary"
                   icon={<LinkOutlined />}
-                  disabled={!connectable || noRobotAccount || !connectCapability.enabled}
+                  disabled={!connectable || !connectCapability.enabled}
                   loading={isConnecting}
                   onClick={() => handleConnect(emp)}
                 >
@@ -317,13 +346,6 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
                             >
                               {t('managerAccount.employees.disconnect')}
                             </Button>
-                          ) : noRobotAccount ? (
-                            <Tooltip
-                              key="connect"
-                              title={t('managerAccount.employees.noRobotAccount')}
-                            >
-                              <span>{connectButton}</span>
-                            </Tooltip>
                           ) : (
                             connectButton
                           ),
@@ -342,7 +364,11 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
                           </Tag>
                         )}
                         {emp.status && (
-                          <Tag color={employeeStatusTagColor(emp.status)}>{emp.status}</Tag>
+                          <Tag color={employeeStatusTagColor(emp.status)}>
+                            {t(employeeStatusI18nKey(emp.status), {
+                              defaultValue: t('managerAccount.employees.status.unknown'),
+                            })}
+                          </Tag>
                         )}
                         {emp.templateDisplayName && <Tag>{emp.templateDisplayName}</Tag>}
                         {emp.templateType && <Tag color="purple">{emp.templateType}</Tag>}

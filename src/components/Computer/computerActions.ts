@@ -2,7 +2,9 @@ import type {
   ComputerConnectionTarget,
   ComputerInstance,
   ComputerStatus,
+  RobotBindingMetadata,
 } from '@/stores/computerStore';
+import type { ManagerContextKey } from '@/stores/managerStore';
 
 export const computerStatusColor: Record<ComputerStatus, string> = {
   running: 'success',
@@ -19,13 +21,26 @@ export function usesStopAction(status: ComputerStatus): boolean {
 
 export function isConnectionTargetConnectable(
   target?: ComputerConnectionTarget | null,
+  binding?: RobotBindingMetadata | null,
+  currentContext?: ManagerContextKey | null,
 ): boolean {
   if (!target) return false;
-  if (target.type === 'manager_robot') return target.robotAccountId != null;
-  return true;
+  if (target.type === 'manual_smcp') return true;
+  const sameContext = (left?: ManagerContextKey | null, right?: ManagerContextKey | null) =>
+    left?.environment === right?.environment
+    && left?.accountId === right?.accountId
+    && left?.organizationId === right?.organizationId;
+  return currentContext != null
+    && sameContext(target.contextKey, currentContext)
+    && binding?.state === 'active'
+    && binding.employee_id === target.employeeId
+    && sameContext(binding.context_key, currentContext);
 }
 
-export function resolveComputerConnection(instance: ComputerInstance) {
+export function resolveComputerConnection(
+  instance: ComputerInstance,
+  currentManagerContext?: ManagerContextKey | null,
+) {
   const authority = instance.connectionState;
   const policyTarget = instance.connectionPolicy.target;
   const actions = authority?.actions ?? {
@@ -38,7 +53,11 @@ export function resolveComputerConnection(instance: ComputerInstance) {
   const operationTarget = operation ? authority?.operation_target ?? null : null;
   const targetSelected = operationTarget != null || Boolean(policyTarget);
   const targetConnectable = operationTarget != null
-    || isConnectionTargetConnectable(policyTarget);
+    || isConnectionTargetConnectable(
+      policyTarget,
+      instance.robotBinding,
+      currentManagerContext,
+    );
   const isConnecting = operation === 'connect'
     || operation === 'reconnect'
     || (operation == null && status === 'connecting');
@@ -74,7 +93,7 @@ export function connectDisabledReasonTranslationKey(
   }
   if (!connection.targetSelected) return 'computer.connectionActions.requiresTarget';
   if (!connection.targetConnectable) {
-    return 'computer.connectionActions.missingRobotAccountId';
+    return 'computer.connectionActions.targetUnavailable';
   }
   return undefined;
 }
