@@ -8,11 +8,11 @@ pub fn write_json_atomically<T: Serialize + ?Sized>(
     data: &T,
 ) -> Result<(), AtomicJsonWriteError> {
     let content = serde_json::to_vec_pretty(data)?;
-    write_atomically(path, &content)?;
+    write_bytes_atomically(path, &content)?;
     Ok(())
 }
 
-fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+pub fn write_bytes_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

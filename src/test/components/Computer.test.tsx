@@ -27,12 +27,12 @@ const mockComputerInstances = [
     robot_binding: {
       employee_id: 42,
       robot_id: 'robot-a',
-      robot_account_id: '4200',
+      robot_account_id: 'turingfocus:004200',
       namespace: 'test',
       robot_name: 'Robot A',
     },
     connection_policy: {
-      target: { type: 'manager_robot', id: '42', robotAccountId: '4200' },
+      target: { type: 'manager_robot', id: '42', robotAccountId: 'turingfocus:004200' },
       auto_connect: false,
     },
     connection: {
@@ -130,7 +130,7 @@ describe('Computer', () => {
           connectionProfile: 'prod',
           robotName: 'Robot A',
           connectionPolicy: {
-            target: { type: 'manager_robot', id: '42', robotAccountId: '4200' },
+            target: { type: 'manager_robot', id: '42', robotAccountId: 'turingfocus:004200' },
             auto_connect: false,
           },
           mcpServerCount: 5,

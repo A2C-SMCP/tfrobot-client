@@ -79,11 +79,7 @@ pub struct RobotBindingMetadata {
     pub employee_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resolved_robot_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -143,7 +139,6 @@ pub enum ComputerConnectionTarget {
         #[serde(
             rename = "lastResolvedRobotAccountId",
             default,
-            deserialize_with = "super::serde_compat::deserialize_optional_opaque_id",
             skip_serializing_if = "Option::is_none"
         )]
         last_resolved_robot_account_id: Option<String>,
@@ -277,7 +272,7 @@ pub struct ComputerInstance {
     pub robot_binding: Option<RobotBindingMetadata>,
 }
 
-pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 2;
+pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 3;
 pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 1;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
@@ -2501,8 +2496,8 @@ mod tests {
     }
 
     #[test]
-    fn computer_profile_v2_preserves_opaque_numeric_robot_account_snapshots() {
-        let profile: ComputerProfile = serde_json::from_value(serde_json::json!({
+    fn computer_profile_v3_rejects_numeric_robot_account_snapshots() {
+        let result = serde_json::from_value::<ComputerProfile>(serde_json::json!({
             "schema_version": COMPUTER_PROFILE_SCHEMA_VERSION,
             "id": "computer-1",
             "name": "Computer",
@@ -2529,34 +2524,9 @@ mod tests {
                 "employee_id": 11,
                 "last_resolved_robot_account_id": 4200
             }
-        }))
-        .expect("numeric opaque snapshots should remain readable");
+        }));
 
-        let Some(ComputerConnectionTarget::ManagerRobot {
-            last_resolved_robot_account_id,
-            ..
-        }) = profile.connection_policy.target.as_ref()
-        else {
-            panic!("expected Manager Robot target");
-        };
-        assert_eq!(last_resolved_robot_account_id.as_deref(), Some("4200"));
-        assert_eq!(
-            profile
-                .robot_binding
-                .as_ref()
-                .and_then(|binding| binding.last_resolved_robot_account_id.as_deref()),
-            Some("4200")
-        );
-
-        let serialized = serde_json::to_value(profile).unwrap();
-        assert_eq!(
-            serialized["connection_policy"]["target"]["lastResolvedRobotAccountId"],
-            serde_json::json!("4200")
-        );
-        assert_eq!(
-            serialized["robot_binding"]["last_resolved_robot_account_id"],
-            serde_json::json!("4200")
-        );
+        assert!(result.is_err(), "schema v3 must reject numeric account IDs");
     }
 
     fn instance_with_input(id: &str, label: &str) -> ComputerInstance {

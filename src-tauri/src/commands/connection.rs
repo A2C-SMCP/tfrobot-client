@@ -1842,11 +1842,11 @@ mod tests {
     #[test]
     fn validate_manager_robot_account_accepts_matching_employee() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
-            { "id": 41, "name": "old", "robotAccountId": "org-1:account-41" },
+            { "id": 41, "name": "old", "robotAccountId": "turingfocus:000041" },
             {
                 "id": 42,
                 "name": "target",
-                "robotAccountId": "org-1:account-42",
+                "robotAccountId": "turingfocus:000042",
                 "robotId": "robot-a",
                 "namespace": "tf"
             }
@@ -1854,12 +1854,12 @@ mod tests {
         .unwrap();
 
         let employee =
-            validate_manager_robot_account_from_list(&employees, 42, "org-1:account-42").unwrap();
+            validate_manager_robot_account_from_list(&employees, 42, "turingfocus:000042").unwrap();
 
         assert_eq!(employee.id, 42);
         assert_eq!(
             employee.robot_account_id.as_deref(),
-            Some("org-1:account-42")
+            Some("turingfocus:000042")
         );
         assert_eq!(employee.robot_id.as_deref(), Some("robot-a"));
     }
@@ -1867,11 +1867,11 @@ mod tests {
     #[test]
     fn validate_manager_robot_account_rejects_mismatched_account() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
-            { "id": 42, "name": "target", "robotAccountId": "org-1:account-42" }
+            { "id": 42, "name": "target", "robotAccountId": "turingfocus:000042" }
         ]))
         .unwrap();
 
-        let err = validate_manager_robot_account_from_list(&employees, 42, "org-1:account-43")
+        let err = validate_manager_robot_account_from_list(&employees, 42, "turingfocus:000043")
             .unwrap_err();
 
         assert!(

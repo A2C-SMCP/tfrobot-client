@@ -10,6 +10,7 @@ pub mod logger;
 pub mod manager_client;
 pub mod manager_context;
 pub mod manager_environment;
+pub mod public_id;
 pub mod runtime;
 pub mod sdk_config;
 pub(crate) mod serde_compat;

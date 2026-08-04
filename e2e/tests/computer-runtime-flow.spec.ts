@@ -50,7 +50,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       })).toHaveCount(0);
     }
     await expect(page.getByRole('combobox', {
-      name: 'Select a Robot or Manual SMCP target',
+      name: 'Select a Manager Robot',
     })).toHaveCount(0);
     await expect(page.getByText('Apply configuration', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Reload required', { exact: true })).toHaveCount(0);

@@ -85,7 +85,7 @@ const mockResponses: Record<string, unknown> = {
       robot_binding: {
         employee_id: 1001,
         robot_id: 'robot-b',
-        robot_account_id: '2001',
+        robot_account_id: 'turingfocus:002001',
         namespace: 'test',
         robot_name: 'Robot B',
       },

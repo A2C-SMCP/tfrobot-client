@@ -22,7 +22,7 @@ const employeeA: DigitalEmployeeBrief = {
   id: 11,
   name: 'bot-one',
   robotId: 'robot-a',
-  robotAccountId: '4242',
+  robotAccountId: 'turingfocus:004242',
   namespace: 'ns-a',
   templateType: 'tfrserver',
   status: 'running',
@@ -249,12 +249,12 @@ describe('managerStore', () => {
         robot_binding: {
           employee_id: 11,
           robot_id: 'robot-a',
-          robot_account_id: '4242',
+          robot_account_id: 'turingfocus:004242',
           namespace: 'ns-a',
           robot_name: 'bot-one',
         },
         connection_policy: {
-          target: { type: 'manager_robot', id: '11', robotAccountId: '4242' },
+          target: { type: 'manager_robot', id: '11', robotAccountId: 'turingfocus:004242' },
           auto_connect: false,
         },
       }]); // metadata-only reconciliation
@@ -265,7 +265,7 @@ describe('managerStore', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('manager_connect_smcp', {
         instanceId: 'computer-a',
         employeeId: 11,
-        robotAccountId: '4242',
+        robotAccountId: 'turingfocus:004242',
         robotId: 'robot-a',
         robotName: 'bot-one',
         namespace: 'ns-a',
@@ -280,9 +280,9 @@ describe('managerStore', () => {
       expect(useComputerStore.getState().instances[0]).toMatchObject({
         connectionStatus: 'disconnected',
         robotName: 'bot-one',
-        robotBinding: { employee_id: 11, robot_account_id: '4242' },
+        robotBinding: { employee_id: 11, robot_account_id: 'turingfocus:004242' },
         connectionPolicy: {
-          target: { type: 'manager_robot', id: '11', robotAccountId: '4242' },
+          target: { type: 'manager_robot', id: '11', robotAccountId: 'turingfocus:004242' },
           auto_connect: false,
         },
       });

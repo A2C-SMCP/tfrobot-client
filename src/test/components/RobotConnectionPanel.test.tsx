@@ -36,13 +36,13 @@ function setManagerRobots() {
         id: 24,
         name: 'Deleted Robot',
         status: 'deleted',
-        robotAccountId: '2424',
+        robotAccountId: 'turingfocus:002424',
       },
       {
         id: 25,
         name: 'Running Robot',
         status: 'running',
-        robotAccountId: '2525',
+        robotAccountId: 'turingfocus:002525',
         robotId: 'robot-25',
         templateDisplayName: 'UAT',
         templateType: 'tfrserver',
@@ -63,7 +63,7 @@ function managerPolicyResponse() {
     runtime: runtimeSnapshot(),
     robot_binding: null,
     connection_policy: {
-      target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
+      target: { type: 'manager_robot', id: '25', robotAccountId: 'turingfocus:002525' },
       auto_connect: false,
     },
     connection: null,
@@ -123,7 +123,7 @@ describe('RobotConnectionPanel', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
         request: {
           id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
+          target: { type: 'manager_robot', id: '25', robotAccountId: 'turingfocus:002525' },
           autoConnect: false,
         },
       });
@@ -163,7 +163,7 @@ describe('RobotConnectionPanel', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
         request: {
           id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
+          target: { type: 'manager_robot', id: '25', robotAccountId: 'turingfocus:002525' },
           autoConnect: false,
         },
       });

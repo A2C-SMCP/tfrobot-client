@@ -346,6 +346,54 @@ async fn live_staging_login_contract_completes_the_manager_loop() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires TFRS_LIVE_IDENTIFIER and TFRS_LIVE_PASSWORD plus a connectable Robot"]
+async fn live_staging_public_id_token_exchange_succeeds() {
+    let identifier = std::env::var("TFRS_LIVE_IDENTIFIER").expect("TFRS_LIVE_IDENTIFIER");
+    let password = std::env::var("TFRS_LIVE_PASSWORD").expect("TFRS_LIVE_PASSWORD");
+    let client = test_manager_client();
+
+    match client
+        .login(
+            Some(ManagerEnvironment::Staging.base_url().to_string()),
+            &identifier,
+            &password,
+        )
+        .await
+        .expect("staging login contract")
+    {
+        LoginResult::Authenticated { .. } => {}
+        LoginResult::AccountSelectionRequired { accounts } => {
+            let account = accounts.first().expect("at least one Manager account");
+            client
+                .select_account(&account.account_id)
+                .await
+                .expect("staging account selection contract");
+        }
+        LoginResult::OnboardingRequired { .. } => {
+            panic!("test account unexpectedly requires onboarding")
+        }
+    }
+
+    let employees = client
+        .list_digital_employees()
+        .await
+        .expect("staging employee list contract");
+    let robot_account_id = employees
+        .iter()
+        .find_map(|employee| employee.robot_account_id.as_deref())
+        .expect("live account must expose at least one robotAccountId");
+    tfrobot_client_lib::services::public_id::validate_account_public_id(robot_account_id)
+        .expect("staging robotAccountId must use public_id shape");
+
+    let token = client
+        .exchange_token(robot_account_id, None)
+        .await
+        .expect("public_id token exchange");
+    assert!(!token.access_token.is_empty());
+    assert!(token.expires_in > 0);
+}
+
 /// 标准单账户登录 data（与 UAT guide §5.1 实测字面量对齐）。
 fn single_account_login_data(token: &str) -> serde_json::Value {
     serde_json::json!({
@@ -1275,7 +1323,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
                     {"id": 11, "name": "本地联调员工", "robotId": "r-1",
                      "status": "running", "templateType": "tfrserver", "templateDisplayName": "智能客服",
                      "namespace": "tfrobotserver", "clusterName": "local-tfrobotserver",
-                     "robotAccountId": "org-legacy-18:account-24"},
+                     "robotAccountId": "turingfocus:000024"},
                     {"id": 12, "name": "robot-2"}
                 ]
             })),
@@ -1296,7 +1344,7 @@ async fn list_digital_employees_sends_bearer_and_parses_paginated_envelope() {
     assert_eq!(list[0].cluster_name.as_deref(), Some("local-tfrobotserver"));
     assert_eq!(
         list[0].robot_account_id.as_deref(),
-        Some("org-legacy-18:account-24")
+        Some("turingfocus:000024")
     );
 
     // Bearer token 应当在第二个请求（list）里
@@ -1675,7 +1723,10 @@ async fn exchange_token_posts_form_and_parses_oauth_response() {
         .await
         .unwrap();
 
-    let tok = client.exchange_token("robot-acct-1", None).await.unwrap();
+    let tok = client
+        .exchange_token("turingfocus:000042", None)
+        .await
+        .unwrap();
     assert_eq!(tok.access_token, "short-robot-jwt");
     assert_eq!(tok.token_type, "Bearer");
     assert_eq!(tok.expires_in, 300);
@@ -1714,7 +1765,7 @@ async fn exchange_token_posts_form_and_parses_oauth_response() {
         xchg.body
     );
     assert!(
-        xchg.body.contains("audience=robot%3Arobot-acct-1"),
+        xchg.body.contains("audience=robot%3Aturingfocus%3A000042"),
         "audience must be robot:<id>. body: {}",
         xchg.body
     );
@@ -1722,6 +1773,33 @@ async fn exchange_token_posts_form_and_parses_oauth_response() {
         !xchg.body.contains("scope="),
         "scope must be omitted when None. body: {}",
         xchg.body
+    );
+}
+
+#[tokio::test]
+async fn exchange_token_rejects_retired_numeric_target_before_network() {
+    let script = vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 200 OK",
+        envelope(single_account_login_data("user-jwt")),
+    )];
+    let (base, captured, _h) = spawn_mock_manager(script).await;
+
+    let client = test_manager_client();
+    client.login(Some(base), "p", "w").await.unwrap();
+    let err = client.exchange_token("42", None).await.unwrap_err();
+
+    assert!(
+        matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId '42'")),
+        "retired numeric account ID must fail loudly"
+    );
+    assert!(
+        captured
+            .lock()
+            .await
+            .iter()
+            .all(|request| !request.request_line.contains("/api/v1/oauth/token")),
+        "invalid public IDs must not reach Manager token exchange"
     );
 }
 
@@ -1744,7 +1822,10 @@ async fn exchange_token_sends_scope_when_present() {
     let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
     let _ = client
-        .exchange_token("r1", Some("smcp:connect tools:call".to_string()))
+        .exchange_token(
+            "turingfocus:000042",
+            Some("smcp:connect tools:call".to_string()),
+        )
         .await
         .unwrap();
 
@@ -1772,18 +1853,21 @@ async fn exchange_token_maps_400_to_token_exchange_error() {
         json_script(
             "/api/v1/oauth/token",
             "HTTP/1.1 400 Bad Request",
-            serde_json::json!({"error": "invalid_grant", "error_description": "subject token revoked"}),
+            serde_json::json!({"error": "invalid_target", "error_description": "unknown robot public_id"}),
         ),
     ];
     let (base, _cap, _h) = spawn_mock_manager(script).await;
 
     let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
+    let err = client
+        .exchange_token("turingfocus:000099", None)
+        .await
+        .unwrap_err();
     match err {
         ManagerError::TokenExchange { error, description } => {
-            assert_eq!(error, "invalid_grant");
-            assert_eq!(description.as_deref(), Some("subject token revoked"));
+            assert_eq!(error, "invalid_target");
+            assert_eq!(description.as_deref(), Some("unknown robot public_id"));
         }
         other => panic!("expected TokenExchange, got {other:?}"),
     }
@@ -1809,7 +1893,10 @@ async fn exchange_token_maps_503_to_signing_unavailable() {
 
     let client = test_manager_client();
     client.login(Some(base), "p", "w").await.unwrap();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
+    let err = client
+        .exchange_token("turingfocus:000042", None)
+        .await
+        .unwrap_err();
     match err {
         ManagerError::SigningUnavailable { message } => {
             assert_eq!(message.as_deref(), Some("signing keys not provisioned"));
@@ -1822,6 +1909,9 @@ async fn exchange_token_maps_503_to_signing_unavailable() {
 #[tokio::test]
 async fn exchange_token_without_login_errors_no_session() {
     let client = test_manager_client();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
+    let err = client
+        .exchange_token("turingfocus:000042", None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, ManagerError::NoSession));
 }
