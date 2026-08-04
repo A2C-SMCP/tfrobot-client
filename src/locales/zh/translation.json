@@ -753,6 +753,7 @@
       "not_found_or_no_permission": "该资源已不可见或你的访问权限已变更。",
       "other": "Manager 返回了意料之外的响应。",
       "no_session": "尚未登录 Manager，请先登录。",
+      "context_changed": "请求执行期间 Manager 账号已变更，请重试。",
       "missing_base_url": "无法确定 Manager 环境，请重新选择环境。",
       "invalid_response": "无法解析 Manager 返回的响应。",
       "keychain_error": "读取或写入安全凭据存储失败。",

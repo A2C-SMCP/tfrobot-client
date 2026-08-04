@@ -9,6 +9,7 @@ use services::config_migration::{migrate_legacy_config, MigrationError};
 use services::keychain::{SecretStore, SystemSecretStore};
 use services::logger::LogService;
 use services::manager_client::ManagerClient;
+use services::manager_context::ManagerContextCoordinator;
 use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
 use std::path::Path;
@@ -40,8 +41,8 @@ pub struct AppState {
     pub log_service: Arc<LogService>,
     /// Settings persistence service
     pub settings_service: Arc<SettingsService>,
-    /// TFRSManager HTTP client (login / list / connection-info)
-    pub manager_client: Arc<ManagerClient>,
+    /// Backend-authoritative TFRSManager identity context and HTTP coordinator.
+    pub manager_context: Arc<ManagerContextCoordinator>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +99,11 @@ impl AppState {
         let config = Arc::new(config);
         let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
         let settings_service = Arc::new(settings_service);
+        let manager_client = Arc::new(ManagerClient::new_with_secret_store(secret_store.clone()));
+        let manager_context = Arc::new(ManagerContextCoordinator::new(
+            manager_client,
+            settings_service.clone(),
+        ));
 
         migrate_legacy_config(
             config.as_ref(),
@@ -138,7 +144,7 @@ impl AppState {
             input_mutation_lock: Arc::new(Mutex::new(())),
             log_service: Arc::new(log_service),
             settings_service,
-            manager_client: Arc::new(ManagerClient::new_with_secret_store(secret_store)),
+            manager_context,
         })
     }
 
@@ -270,6 +276,9 @@ pub fn run() {
             }
 
             let state = AppState::try_new(config_service, log_service, settings_service)?;
+            tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
+                commands::manager::TauriManagerContextEventSink::new(app.handle().clone()),
+            )));
 
             // Write startup log and cleanup old entries
             let _ = state
@@ -392,6 +401,7 @@ pub fn run() {
             commands::settings::get_app_info,
             commands::settings::get_detected_path,
             // TFRSManager HTTP client (issue #23)
+            commands::manager::manager_get_context,
             commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,

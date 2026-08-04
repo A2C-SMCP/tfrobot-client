@@ -8,6 +8,7 @@ pub mod input_resolver;
 pub mod keychain;
 pub mod logger;
 pub mod manager_client;
+pub mod manager_context;
 pub mod manager_environment;
 pub mod runtime;
 pub mod sdk_config;

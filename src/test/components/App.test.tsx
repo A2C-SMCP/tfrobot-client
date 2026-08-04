@@ -5,7 +5,7 @@ import App from '@/App';
 const managerStoreMock = vi.hoisted(() => ({
   session: null as null,
   pendingAccountSelection: null as null,
-  onboardingUserId: null as number | null,
+  onboardingUserId: null as string | null,
   restoreAttempted: false,
   restoreSession: vi.fn().mockResolvedValue(null),
   handleAuthExpired: vi.fn(),
@@ -128,7 +128,7 @@ describe('App', () => {
   });
 
   it('does not restore a previous session while onboarding guidance is active', async () => {
-    managerStoreMock.onboardingUserId = 99;
+    managerStoreMock.onboardingUserId = '99';
 
     render(<App />);
 

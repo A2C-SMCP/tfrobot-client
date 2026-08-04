@@ -768,7 +768,7 @@ pub async fn disconnect_computer_connection_target(
 }
 
 async fn connect_computer_connection_target_by_policy(
-    app: Option<&AppHandle>,
+    _app: Option<&AppHandle>,
     state: &AppState,
     id: &str,
     target: &ComputerConnectionTarget,
@@ -778,9 +778,6 @@ async fn connect_computer_connection_target_by_policy(
             connect_connection_target_for_policy_core(state, id, target).await
         }
         ComputerConnectionTargetType::ManagerRobot => {
-            let app = app.ok_or_else(|| {
-                "Manager Robot auto connect requires an application handle".to_string()
-            })?;
             let employee_id = target
                 .id
                 .parse::<u64>()
@@ -790,7 +787,6 @@ async fn connect_computer_connection_target_by_policy(
                 .clone()
                 .ok_or_else(|| "Manager Robot target missing robotAccountId".to_string())?;
             connect_manager_robot_target_for_policy(
-                app,
                 state,
                 id,
                 employee_id,

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 2;
+pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -57,9 +57,59 @@ pub struct ManagerSessionConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistedManagerSession {
     pub environment: ManagerEnvironment,
-    pub user_id: u64,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_phone: Option<String>,
     pub account_id: String,
     pub account_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub employee_no: Option<String>,
+    /// Schema v2 did not persist the complete redacted identity. It is accepted only as a restore
+    /// hint; `/auth/me` must fill every optional field before schema v3 is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+}
+
+impl PersistedManagerSession {
+    pub fn has_complete_identity(&self) -> bool {
+        !self.user_id.trim().is_empty()
+            && self.user_nickname.is_some()
+            && self.user_email.is_some()
+            && self.user_phone.is_some()
+            && !self.account_id.trim().is_empty()
+            && !self.account_name.trim().is_empty()
+            && self.account_nickname.is_some()
+            && self.account_avatar.is_some()
+            && self.employee_no.is_some()
+            && self
+                .organization_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .organization_name
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .organization_type
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self.permissions.is_some()
+    }
 }
 
 impl Default for ManagerSessionConfig {
@@ -147,18 +197,23 @@ impl SettingsService {
             return Err(ManagerSessionConfigError::EmptyFile(path));
         }
         let value: serde_json::Value = serde_json::from_str(&content)?;
-        if value
+        let stored_version = value
             .get("schema_version")
-            .and_then(serde_json::Value::as_u64)
-            == Some(1)
-        {
+            .and_then(serde_json::Value::as_u64);
+        if stored_version == Some(1) {
             // Schema v1 stored an arbitrary base URL and numeric database account ID. Both are
             // incompatible with the environment-scoped, opaque-ID auth contract, so fail closed
             // and require one fresh login instead of reviving ambiguous credentials.
             return Ok(ManagerSessionConfig::default());
         }
         let config: ManagerSessionConfig = serde_json::from_value(value)?;
+        if stored_version == Some(2) {
+            // Schema v2 is not authenticated context: it has no organization identity. Preserve
+            // it only long enough for restore to validate the JWT against live `/auth/me`.
+            return Ok(config);
+        }
         validate_manager_session_schema(&config)?;
+        validate_complete_manager_session(&config)?;
         Ok(config)
     }
 
@@ -167,6 +222,7 @@ impl SettingsService {
         config: &ManagerSessionConfig,
     ) -> Result<(), ManagerSessionConfigError> {
         validate_manager_session_schema(config)?;
+        validate_complete_manager_session(config)?;
         write_json_atomically(&self.global_manager_session_path(), config)?;
         Ok(())
     }
@@ -184,11 +240,27 @@ impl SettingsService {
 fn validate_manager_session_schema(
     config: &ManagerSessionConfig,
 ) -> Result<(), ManagerSessionConfigError> {
-    if config.schema_version != MANAGER_SESSION_SCHEMA_VERSION {
+    // Schema v2 remains writable only so the startup configuration migration can preserve an
+    // existing restore hint. The Manager Context upgrades it to v3 after live `/auth/me` checks.
+    if !matches!(config.schema_version, 2 | MANAGER_SESSION_SCHEMA_VERSION) {
         return Err(ManagerSessionConfigError::UnsupportedSchemaVersion {
             expected: MANAGER_SESSION_SCHEMA_VERSION,
             actual: config.schema_version,
         });
+    }
+    Ok(())
+}
+
+fn validate_complete_manager_session(
+    config: &ManagerSessionConfig,
+) -> Result<(), ManagerSessionConfigError> {
+    if config.schema_version == MANAGER_SESSION_SCHEMA_VERSION
+        && config
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.has_complete_identity())
+    {
+        return Err(ManagerSessionConfigError::IncompleteContext);
     }
     Ok(())
 }
@@ -209,6 +281,9 @@ pub enum ManagerSessionConfigError {
 
     #[error("unsupported manager session schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion { expected: u32, actual: u32 },
+
+    #[error("Manager session metadata is missing complete user, account, organization, or permission identity")]
+    IncompleteContext,
 }
 
 #[cfg(test)]
@@ -336,9 +411,19 @@ mod tests {
             schema_version: MANAGER_SESSION_SCHEMA_VERSION,
             session: Some(PersistedManagerSession {
                 environment: ManagerEnvironment::Staging,
-                user_id: 7,
+                user_id: "7".to_string(),
+                user_nickname: Some("Ada".to_string()),
+                user_email: Some("ada@example.com".to_string()),
+                user_phone: Some(String::new()),
                 account_id: "org-legacy-1:account-7".to_string(),
                 account_name: "client_uat".to_string(),
+                account_nickname: Some("Ada".to_string()),
+                account_avatar: Some("https://example.com/avatar.png".to_string()),
+                employee_no: Some("E-7".to_string()),
+                organization_id: Some("org-legacy-1".to_string()),
+                organization_name: Some("Example Org".to_string()),
+                organization_type: Some("enterprise".to_string()),
+                permissions: Some(vec!["robot:read".to_string()]),
             }),
         };
 
@@ -369,7 +454,7 @@ mod tests {
         std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
         std::fs::write(
             svc.global_manager_session_path(),
-            r#"{"schema_version": 3, "session": null}"#,
+            r#"{"schema_version": 4, "session": null}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -400,6 +485,129 @@ mod tests {
             svc.load_global_manager_session().unwrap(),
             ManagerSessionConfig::default()
         );
+    }
+
+    #[test]
+    fn global_manager_session_v2_is_only_a_restore_hint() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 2,
+              "session": {
+                "environment": "staging",
+                "userId": 7,
+                "accountId": "org-legacy-1:account-7",
+                "accountName": "client_uat"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = svc.load_global_manager_session().unwrap();
+        assert_eq!(config.schema_version, 2);
+        let session = config.session.unwrap();
+        assert_eq!(session.user_id, "7");
+        assert!(!session.has_complete_identity());
+    }
+
+    #[test]
+    fn global_manager_session_v3_rejects_missing_organization_context() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 3,
+              "session": {
+                "environment": "staging",
+                "userId": "7",
+                "userNickname": "Ada",
+                "userEmail": "ada@example.com",
+                "userPhone": "",
+                "accountId": "org-legacy-1:account-7",
+                "accountName": "client_uat",
+                "accountNickname": "Ada",
+                "accountAvatar": "",
+                "employeeNo": "E-7",
+                "permissions": []
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_global_manager_session().unwrap_err(),
+            ManagerSessionConfigError::IncompleteContext
+        ));
+    }
+
+    #[test]
+    fn global_manager_session_v3_rejects_empty_scoped_ids() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 3,
+              "session": {
+                "environment": "staging",
+                "userId": "7",
+                "userNickname": "Ada",
+                "userEmail": "ada@example.com",
+                "userPhone": "",
+                "accountId": "  ",
+                "accountName": "client_uat",
+                "accountNickname": "Ada",
+                "accountAvatar": "",
+                "employeeNo": "E-7",
+                "organizationId": "org-legacy-1",
+                "organizationName": "Example Org",
+                "organizationType": "enterprise",
+                "permissions": []
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_global_manager_session().unwrap_err(),
+            ManagerSessionConfigError::IncompleteContext
+        ));
+    }
+
+    #[test]
+    fn global_manager_session_v3_rejects_partial_redacted_identity() {
+        let (svc, _tmp) = setup();
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{
+              "schema_version": 3,
+              "session": {
+                "environment": "staging",
+                "userId": "7",
+                "userNickname": "Ada",
+                "userEmail": "ada@example.com",
+                "userPhone": "",
+                "accountId": "org-legacy-1:account-7",
+                "accountName": "client_uat",
+                "accountNickname": "Ada",
+                "accountAvatar": "",
+                "employeeNo": "E-7",
+                "organizationId": "org-legacy-1",
+                "organizationName": "Example Org",
+                "organizationType": "enterprise"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_global_manager_session().unwrap_err(),
+            ManagerSessionConfigError::IncompleteContext
+        ));
     }
 
     #[test]

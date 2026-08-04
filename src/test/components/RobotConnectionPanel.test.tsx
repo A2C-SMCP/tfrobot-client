@@ -30,7 +30,7 @@ function setComputer(
 
 function setManagerRobots() {
   useManagerStore.setState({
-    session: { userId: 1, accountId: 'org-1:account-23', accountName: 'acct' },
+    session: { userId: '1', accountId: 'org-1:account-23', accountName: 'acct' },
     employees: [
       {
         id: 24,

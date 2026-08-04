@@ -8,7 +8,7 @@ import { useComputerStore } from './computerStore';
  * 与 Rust `services::manager_client::UserInfo` 的 serde camelCase 形态对齐。
  */
 export interface UserInfo {
-  userId: number;
+  userId: string;
   accountId: string;
   accountName: string;
 }
@@ -64,7 +64,7 @@ export interface DigitalEmployeeBrief {
 export type LoginResult =
   | { kind: 'authenticated'; user: UserInfo }
   | { kind: 'account_selection_required'; accounts: AccountOption[] }
-  | { kind: 'onboarding_required'; userId: number };
+  | { kind: 'onboarding_required'; userId: string };
 
 export type ManagerEnvironment = 'staging' | 'beta' | 'prod';
 
@@ -83,6 +83,7 @@ export type ManagerError =
   | { kind: 'not_found_or_no_permission' }
   | { kind: 'other'; detail: { status: number; body: string } }
   | { kind: 'no_session' }
+  | { kind: 'context_changed' }
   | { kind: 'missing_base_url' }
   | { kind: 'invalid_response'; detail: string }
   | { kind: 'keychain_error'; detail: string }
@@ -99,7 +100,7 @@ interface ManagerState {
   environment: ManagerEnvironment | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
-  onboardingUserId: number | null;
+  onboardingUserId: string | null;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
   restoreAttempted: boolean;
@@ -151,7 +152,7 @@ const initialState = {
   environment: null as ManagerEnvironment | null,
   session: null as UserInfo | null,
   pendingAccountSelection: null as AccountOption[] | null,
-  onboardingUserId: null as number | null,
+  onboardingUserId: null as string | null,
   employees: [] as DigitalEmployeeBrief[],
   loading: false,
   restoreAttempted: false,

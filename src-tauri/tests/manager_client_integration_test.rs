@@ -14,15 +14,21 @@
 //! 不依赖 `hyper`/`warp` 等重量级 server，用轻量 `tokio::net::TcpListener` mock。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use tfrobot_client_lib::services::keychain::{InMemorySecretStore, SecretStore};
 use tfrobot_client_lib::services::manager_client::{LoginResult, ManagerClient, ManagerError};
+use tfrobot_client_lib::services::manager_context::{
+    ManagerAuthState, ManagerContextCoordinator, ManagerContextEventSink, ManagerContextSnapshot,
+};
 use tfrobot_client_lib::services::manager_environment::ManagerEnvironment;
+use tfrobot_client_lib::services::settings::SettingsService;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Clone, Debug, Default)]
 struct CapturedRequest {
@@ -38,6 +44,7 @@ struct ScriptedResponse {
     status_line: &'static str, // 例如 "HTTP/1.1 200 OK"
     body: String,
     content_type: &'static str, // 默认 "application/json"
+    response_delay: Duration,
 }
 
 type Captured = Arc<Mutex<Vec<CapturedRequest>>>;
@@ -45,6 +52,36 @@ type Captured = Arc<Mutex<Vec<CapturedRequest>>>;
 fn test_manager_client() -> ManagerClient {
     ManagerClient::new_with_secret_store(
         tfrobot_client_lib::services::keychain::InMemorySecretStore::shared(),
+    )
+}
+
+#[derive(Default)]
+struct RecordingContextEvents {
+    snapshots: StdMutex<Vec<ManagerContextSnapshot>>,
+    auth_expired: AtomicUsize,
+}
+
+impl ManagerContextEventSink for RecordingContextEvents {
+    fn emit_context_changed(&self, snapshot: &ManagerContextSnapshot) -> Result<(), String> {
+        self.snapshots.lock().unwrap().push(snapshot.clone());
+        Ok(())
+    }
+
+    fn emit_auth_expired(&self) -> Result<(), String> {
+        self.auth_expired.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn test_context_coordinator(
+    base_url: String,
+    settings: Arc<SettingsService>,
+    secret_store: Arc<dyn SecretStore>,
+) -> ManagerContextCoordinator {
+    ManagerContextCoordinator::new_with_base_url_override(
+        Arc::new(ManagerClient::new_with_secret_store(secret_store)),
+        settings,
+        base_url,
     )
 }
 
@@ -136,13 +173,16 @@ async fn spawn_mock_manager(
                     .find(|r| request_line.contains(r.path_contains))
                     .cloned();
                 let resp = match matched {
-                    Some(r) => format!(
-                        "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        r.status_line,
-                        r.content_type,
-                        r.body.len(),
-                        r.body
-                    ),
+                    Some(r) => {
+                        tokio::time::sleep(r.response_delay).await;
+                        format!(
+                            "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            r.status_line,
+                            r.content_type,
+                            r.body.len(),
+                            r.body
+                        )
+                    }
                     None => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
                 };
                 let _ = socket.write_all(resp.as_bytes()).await;
@@ -164,6 +204,7 @@ fn json_script(
         status_line: status,
         body: body.to_string(),
         content_type: "application/json",
+        response_delay: Duration::ZERO,
     }
 }
 
@@ -178,7 +219,56 @@ fn raw_script(
         status_line: status,
         body: body.to_string(),
         content_type,
+        response_delay: Duration::ZERO,
     }
+}
+
+fn delayed_raw_script(
+    path: &'static str,
+    status: &'static str,
+    body: &str,
+    delay: Duration,
+) -> ScriptedResponse {
+    ScriptedResponse {
+        path_contains: path,
+        status_line: status,
+        body: body.to_string(),
+        content_type: "application/json",
+        response_delay: delay,
+    }
+}
+
+fn delayed_json_script(
+    path: &'static str,
+    status: &'static str,
+    body: serde_json::Value,
+    delay: Duration,
+) -> ScriptedResponse {
+    ScriptedResponse {
+        path_contains: path,
+        status_line: status,
+        body: body.to_string(),
+        content_type: "application/json",
+        response_delay: delay,
+    }
+}
+
+async fn wait_for_captured_request(captured: &Captured, path: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if captured
+                .lock()
+                .await
+                .iter()
+                .any(|request| request.request_line.contains(path))
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scripted request should reach the mock server");
 }
 
 /// 标准成功 envelope：`{code:200, message:"success", data}`。
@@ -204,6 +294,12 @@ async fn live_staging_login_contract_completes_the_manager_loop() {
 
     match login {
         LoginResult::Authenticated { .. } => {
+            let current = client
+                .get_current_user()
+                .await
+                .expect("staging /auth/me contract");
+            assert!(!current.account_id.is_empty());
+            assert!(!current.organization_id.is_empty());
             client
                 .list_digital_employees()
                 .await
@@ -232,6 +328,12 @@ async fn live_staging_login_contract_completes_the_manager_loop() {
                     .select_account(&account.account_id)
                     .await
                     .expect("staging account selection contract");
+                let current = account_client
+                    .get_current_user()
+                    .await
+                    .expect("staging selected-account /auth/me contract");
+                assert_eq!(current.account_id, account.account_id);
+                assert_eq!(current.organization_id, account.organization_id);
                 account_client
                     .list_digital_employees()
                     .await
@@ -254,6 +356,23 @@ fn single_account_login_data(token: &str) -> serde_json::Value {
     })
 }
 
+fn current_user_data() -> serde_json::Value {
+    serde_json::json!({
+        "id": 9,
+        "nickname": "Client UAT",
+        "email": "client@example.com",
+        "phone": "13800000000",
+        "accountAvatar": "https://example.com/avatar.png",
+        "accountId": "org-legacy-9:account-16",
+        "accountName": "client_uat",
+        "employeeNo": "000016",
+        "organizationId": "org-legacy-9",
+        "organizationName": "Client UAT Org",
+        "organizationType": "enterprise",
+        "permissions": ["robot:read"]
+    })
+}
+
 // ───────────────────── 用例 ─────────────────────
 
 #[tokio::test]
@@ -273,7 +392,7 @@ async fn login_success_writes_session_and_returns_authenticated() {
 
     match result {
         LoginResult::Authenticated { user } => {
-            assert_eq!(user.user_id, 9);
+            assert_eq!(user.user_id, "9");
             assert_eq!(user.account_id, "org-legacy-9:account-16");
             assert_eq!(user.account_name, "client_uat");
         }
@@ -306,6 +425,663 @@ async fn login_success_writes_session_and_returns_authenticated() {
 
     // 清理
     let _ = client.logout().await;
+}
+
+#[tokio::test]
+async fn current_user_returns_complete_redacted_context_identity() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-current-user")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let client = test_manager_client();
+    client
+        .login(Some(base), "13800000000", "secret")
+        .await
+        .unwrap();
+
+    let current = client.get_current_user().await.unwrap();
+    assert_eq!(current.id, "9");
+    assert_eq!(current.account_id, "org-legacy-9:account-16");
+    assert_eq!(current.organization_id, "org-legacy-9");
+    assert_eq!(current.organization_name, "Client UAT Org");
+    assert_eq!(current.permissions, vec!["robot:read"]);
+
+    let requests = captured.lock().await;
+    let me_request = requests
+        .iter()
+        .find(|request| request.request_line.contains("/api/v1/auth/me"))
+        .unwrap();
+    assert_eq!(
+        me_request.headers.get("authorization").map(String::as_str),
+        Some("Bearer jwt-current-user")
+    );
+}
+
+#[tokio::test]
+async fn context_login_persists_complete_server_identity_and_logout_clears_it() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-context-login")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.auth_state, ManagerAuthState::Authenticated);
+    let key = snapshot.context_key.unwrap();
+    assert_eq!(key.environment, ManagerEnvironment::Staging);
+    assert_eq!(key.account_id, "org-legacy-9:account-16");
+    assert_eq!(key.organization_id, "org-legacy-9");
+    assert_eq!(snapshot.user.unwrap().id, "9");
+    assert_eq!(snapshot.permissions, vec!["robot:read"]);
+
+    let persisted = settings.load_global_manager_session().unwrap();
+    let persisted = persisted.session.unwrap();
+    assert_eq!(persisted.account_id, "org-legacy-9:account-16");
+    assert_eq!(persisted.organization_id.as_deref(), Some("org-legacy-9"));
+    let persisted_json = serde_json::to_string(&persisted)
+        .unwrap()
+        .to_ascii_lowercase();
+    for forbidden in ["jwt", "password", "temptoken", "access_token"] {
+        assert!(!persisted_json.contains(forbidden));
+    }
+
+    coordinator.logout().await.unwrap();
+    let signed_out = coordinator.snapshot().await;
+    assert_eq!(signed_out.revision, 2);
+    assert_eq!(signed_out.auth_state, ManagerAuthState::SignedOut);
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_none());
+}
+
+#[tokio::test]
+async fn context_account_selection_is_an_atomic_revisioned_transition() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "message": "请选择要登录的账户",
+                "tempToken": "temporary-secret",
+                "expiresIn": 300,
+                "accounts": [{
+                    "accountId": "org-legacy-9:account-16",
+                    "accountName": "client_uat",
+                    "nickname": "Client UAT",
+                    "organizationId": "org-legacy-9",
+                    "organizationName": "Client UAT Org",
+                    "organizationType": "enterprise"
+                }]
+            })),
+        ),
+        json_script(
+            "/auth/select-account",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-selected")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+
+    coordinator
+        .login(ManagerEnvironment::Beta, "13800000000", "secret")
+        .await
+        .unwrap();
+    let selecting = coordinator.snapshot().await;
+    assert_eq!(selecting.revision, 1);
+    assert_eq!(
+        selecting.auth_state,
+        ManagerAuthState::AccountSelectionRequired
+    );
+    assert!(selecting.context_key.is_none());
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_none());
+
+    coordinator
+        .select_account("org-legacy-9:account-16")
+        .await
+        .unwrap();
+    let authenticated = coordinator.snapshot().await;
+    assert_eq!(authenticated.revision, 2);
+    assert_eq!(authenticated.auth_state, ManagerAuthState::Authenticated);
+    assert_eq!(
+        authenticated.context_key.unwrap().environment,
+        ManagerEnvironment::Beta
+    );
+}
+
+#[tokio::test]
+async fn context_onboarding_state_never_exposes_an_authenticated_scope() {
+    let (base, _, _handle) = spawn_mock_manager(vec![json_script(
+        "/auth/login-by-password",
+        "HTTP/1.1 200 OK",
+        envelope(serde_json::json!({
+            "token": "onboarding-only-token",
+            "userId": "user-pending",
+            "needsOnboarding": true
+        })),
+    )])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.auth_state, ManagerAuthState::OnboardingRequired);
+    assert_eq!(snapshot.user.unwrap().id, "user-pending");
+    assert!(snapshot.context_key.is_none());
+    assert!(snapshot.account.is_none());
+    assert!(snapshot.organization.is_none());
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_none());
+}
+
+#[tokio::test]
+async fn context_restore_revalidates_keychain_session_with_auth_me() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-restored")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let secrets = InMemorySecretStore::shared();
+    let first = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
+    first
+        .login(ManagerEnvironment::Prod, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    // Simulate metadata written by the previous client release. The keychain JWT remains valid,
+    // but organization identity must come from the live server before the context is authoritative.
+    std::fs::write(
+        settings.global_manager_session_path(),
+        r#"{
+          "schema_version": 2,
+          "session": {
+            "environment": "prod",
+            "userId": 9,
+            "accountId": "stale-account-hint",
+            "accountName": "stale-name"
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let restored = test_context_coordinator(base, settings.clone(), secrets)
+        .restore_session()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.environment, ManagerEnvironment::Prod);
+    assert_eq!(restored.user.user_id, "9");
+    assert_eq!(restored.user.account_id, "org-legacy-9:account-16");
+    let upgraded = settings.load_global_manager_session().unwrap();
+    assert_eq!(upgraded.schema_version, 3);
+    let upgraded = upgraded.session.unwrap();
+    assert_eq!(upgraded.user_id, "9");
+    assert_eq!(upgraded.user_nickname.as_deref(), Some("Client UAT"));
+    assert_eq!(upgraded.user_email.as_deref(), Some("client@example.com"));
+    assert_eq!(upgraded.user_phone.as_deref(), Some("13800000000"));
+    assert_eq!(upgraded.account_id, "org-legacy-9:account-16");
+    assert_eq!(upgraded.account_name, "client_uat");
+    assert_eq!(upgraded.account_nickname.as_deref(), Some("Client UAT"));
+    assert_eq!(
+        upgraded.account_avatar.as_deref(),
+        Some("https://example.com/avatar.png")
+    );
+    assert_eq!(upgraded.employee_no.as_deref(), Some("000016"));
+    assert_eq!(upgraded.organization_id.as_deref(), Some("org-legacy-9"));
+    assert_eq!(
+        upgraded.organization_name.as_deref(),
+        Some("Client UAT Org")
+    );
+    assert_eq!(upgraded.organization_type.as_deref(), Some("enterprise"));
+    assert_eq!(
+        upgraded.permissions.as_deref(),
+        Some(["robot:read".to_string()].as_slice())
+    );
+    assert!(upgraded.has_complete_identity());
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.request_line.contains("/api/v1/auth/me"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn transient_restore_validation_failure_preserves_retryable_credentials() {
+    let (base, _, server) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-retryable-restore")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let secrets = InMemorySecretStore::shared();
+    test_context_coordinator(base.clone(), settings.clone(), secrets.clone())
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    server.abort();
+
+    let first_error = test_context_coordinator(base.clone(), settings.clone(), secrets.clone())
+        .restore_session()
+        .await
+        .unwrap_err();
+    assert!(matches!(first_error, ManagerError::NetworkError(_)));
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_some());
+
+    let retry_error = test_context_coordinator(base, settings, secrets)
+        .restore_session()
+        .await
+        .unwrap_err();
+    assert!(matches!(retry_error, ManagerError::NetworkError(_)));
+}
+
+#[tokio::test]
+async fn context_unauthorized_clears_identity_and_emits_expiry_once() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-expiring-context")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        raw_script(
+            "/api/v1/digital-employees",
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"code":401,"message":"expired","data":null}"#,
+            "application/json",
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator =
+        test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
+    let events = Arc::new(RecordingContextEvents::default());
+    coordinator.set_event_sink(events.clone()).await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let error = coordinator.list_digital_employees().await.unwrap_err();
+    assert!(matches!(error, ManagerError::Unauthorized));
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.auth_state, ManagerAuthState::SignedOut);
+    assert!(snapshot.context_key.is_none());
+    assert_eq!(events.auth_expired.load(Ordering::SeqCst), 1);
+    let emitted = events.snapshots.lock().unwrap();
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(emitted[1], snapshot);
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_none());
+}
+
+#[tokio::test]
+async fn stale_unauthorized_after_relogin_cannot_clear_the_new_context() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-new-generation")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        delayed_raw_script(
+            "/api/v1/digital-employees",
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"code":401,"message":"old request expired","data":null}"#,
+            Duration::from_millis(200),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    let events = Arc::new(RecordingContextEvents::default());
+    coordinator.set_event_sink(events.clone()).await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let stale_request = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.list_digital_employees().await }
+    });
+    wait_for_captured_request(&captured, "/api/v1/digital-employees").await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    assert!(matches!(
+        stale_request.await.unwrap().unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.auth_state, ManagerAuthState::Authenticated);
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(events.auth_expired.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stale_unauthorized_after_explicit_logout_does_not_emit_auth_expired() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-logged-out")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        delayed_raw_script(
+            "/api/v1/digital-employees",
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"code":401,"message":"old request expired","data":null}"#,
+            Duration::from_millis(200),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    let events = Arc::new(RecordingContextEvents::default());
+    coordinator.set_event_sink(events.clone()).await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let stale_request = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.list_digital_employees().await }
+    });
+    wait_for_captured_request(&captured, "/api/v1/digital-employees").await;
+    coordinator.logout().await.unwrap();
+    assert!(matches!(
+        stale_request.await.unwrap().unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+
+    let snapshot = coordinator.snapshot().await;
+    assert_eq!(snapshot.auth_state, ManagerAuthState::SignedOut);
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(events.auth_expired.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stale_success_after_relogin_is_rejected_before_reaching_the_caller() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-current")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        delayed_json_script(
+            "/api/v1/digital-employees",
+            "HTTP/1.1 200 OK",
+            envelope(serde_json::json!({
+                "total": 1,
+                "page": 1,
+                "pageSize": 20,
+                "items": [{"id": 99, "name": "old-account-employee"}]
+            })),
+            Duration::from_millis(200),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    let stale_request = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.list_digital_employees().await }
+    });
+    wait_for_captured_request(&captured, "/api/v1/digital-employees").await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        stale_request.await.unwrap().unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+    assert_eq!(
+        coordinator.snapshot().await.auth_state,
+        ManagerAuthState::Authenticated
+    );
+}
+
+#[tokio::test]
+async fn pinned_composite_generation_rejects_an_account_change_between_steps() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-composite")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = test_context_coordinator(base, settings, InMemorySecretStore::shared());
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let pinned_generation = coordinator
+        .capture_authenticated_generation()
+        .await
+        .unwrap();
+
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        coordinator
+            .ensure_authenticated_generation(pinned_generation)
+            .await
+            .unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+    assert!(matches!(
+        coordinator
+            .list_digital_employees_for_generation(pinned_generation)
+            .await
+            .unwrap_err(),
+        ManagerError::ContextChanged
+    ));
+}
+
+#[tokio::test]
+async fn generation_guarded_commit_excludes_logout_until_local_side_effect_finishes() {
+    let (base, _, _handle) = spawn_mock_manager(vec![
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-guarded-commit")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let generation = coordinator
+        .capture_authenticated_generation()
+        .await
+        .unwrap();
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let commit = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        async move {
+            coordinator
+                .commit_for_authenticated_generation(generation, || async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+                .await
+        }
+    });
+    entered.notified().await;
+
+    let logout = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.logout().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!logout.is_finished());
+    assert_eq!(
+        coordinator.snapshot().await.auth_state,
+        ManagerAuthState::Authenticated
+    );
+
+    release.notify_one();
+    commit.await.unwrap().unwrap();
+    logout.await.unwrap().unwrap();
+    assert_eq!(
+        coordinator.snapshot().await.auth_state,
+        ManagerAuthState::SignedOut
+    );
 }
 
 #[tokio::test]
@@ -382,7 +1158,7 @@ async fn login_without_an_account_returns_onboarding_required() {
 
     assert!(matches!(
         result,
-        LoginResult::OnboardingRequired { user_id: 99 }
+        LoginResult::OnboardingRequired { ref user_id } if user_id == "99"
     ));
     assert!(!client.has_session().await);
 }
@@ -613,7 +1389,7 @@ async fn connection_info_returns_full_dto() {
 }
 
 #[tokio::test]
-async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized() {
+async fn transport_unauthorized_does_not_mutate_session_before_coordinator_settlement() {
     let script = vec![
         json_script(
             "/auth/login-by-password",
@@ -638,8 +1414,9 @@ async fn unauthorized_on_authed_request_clears_session_and_returns_unauthorized(
 
     let err = client.list_digital_employees().await.unwrap_err();
     assert!(matches!(err, ManagerError::Unauthorized));
-    // 401 后内存 session 必须被清理
-    assert!(!client.has_session().await);
+    // Simulates cancellation after the response is classified but before coordinator settlement:
+    // transport classification must not create a half-transition in session/keychain state.
+    assert!(client.has_session().await);
 }
 
 #[tokio::test]
@@ -801,7 +1578,7 @@ async fn forbidden_mapped_from_403() {
 }
 
 #[tokio::test]
-async fn other_status_bucket_captures_body() {
+async fn other_status_bucket_redacts_the_upstream_body() {
     let script = vec![raw_script(
         "/auth/login-by-password",
         "HTTP/1.1 500 Internal Server Error",
@@ -815,7 +1592,7 @@ async fn other_status_bucket_captures_body() {
     match err {
         ManagerError::Other { status, body } => {
             assert_eq!(status, 500);
-            assert_eq!(body, "db down");
+            assert_eq!(body, "Unexpected Manager response");
         }
         other => panic!("expected Other, got {other:?}"),
     }

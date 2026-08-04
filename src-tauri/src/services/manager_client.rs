@@ -1,13 +1,16 @@
 //! TFRSManager HTTP 客户端。
 //!
 //! 封装桌面端与 TFRSManager 的 3 条核心 REST 调用（登录 / 列表 / connection-info），
-//! 负责 JWT 生命周期（keychain 持久化 + 401 清理）与错误分类。
+//! 负责 JWT/keychain transport 生命周期与 HTTP 错误分类；401 状态提交由
+//! `ManagerContextCoordinator` 统一线性化。
 //!
-//! 本模块不依赖 Tauri 运行时，便于单元测试。上层命令负责在 `ManagerError::Unauthorized`
-//! 时向前端 emit 事件。
+//! 本模块不依赖 Tauri 运行时，便于单元测试。生产调用必须经过 Manager Context coordinator。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use reqwest::{header, StatusCode};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -41,7 +44,7 @@ pub enum ManagerError {
     #[error("Network error: {0}")]
     NetworkError(String),
 
-    /// 401：JWT 过期或无效。客户端侧已自动清理 keychain 中对应条目。
+    /// 401：JWT 过期或无效。此层只分类；coordinator 负责清理和发布状态事件。
     #[error("Unauthorized: Manager JWT expired or invalid")]
     Unauthorized,
 
@@ -90,6 +93,10 @@ pub enum ManagerError {
     /// 未登录即调用了需要 session 的命令（list / connection-info / select-account）。
     #[error("No active Manager session; call manager_login first")]
     NoSession,
+
+    /// 请求使用的 Manager Context 已被登录、选账户、恢复或登出操作替换。
+    #[error("Manager context changed while the request was in flight")]
+    ContextChanged,
 
     /// 内部调用未提供 Manager 地址。生产命令必须由环境枚举映射出地址。
     #[error("Manager base URL was not resolved from an environment")]
@@ -165,12 +172,42 @@ struct SelectAccountRequestBody<'a> {
 
 /// 登录成功后 Manager 下发的用户/账户信息（扁平 4 字段，**无嵌套 user 对象**）。
 /// 结构与 select-account 成功响应一致。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
-    pub user_id: u64,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub user_id: String,
     pub account_id: String,
     pub account_name: String,
+}
+
+/// `GET /api/v1/auth/me` 的脱敏身份响应。
+///
+/// JWT 与其他凭据不会进入此 DTO，因此它可以安全地用于 Manager Context 快照与事件。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerCurrentUser {
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub id: String,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub phone: String,
+    #[serde(default)]
+    pub account_avatar: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub account_id: String,
+    pub account_name: String,
+    #[serde(default)]
+    pub employee_no: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub organization_id: String,
+    pub organization_name: String,
+    pub organization_type: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
 }
 
 /// 单账户登录 / select-account 的成功响应 data 体（含 token，未暴露给前端）。
@@ -218,7 +255,8 @@ struct MultiAccountPayload {
 struct OnboardingPayload {
     #[allow(dead_code)]
     token: String,
-    user_id: u64,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    user_id: String,
     needs_onboarding: bool,
 }
 
@@ -242,7 +280,7 @@ pub enum LoginResult {
     /// 用户身份有效，但尚未创建或加入任何组织账户。
     OnboardingRequired {
         #[serde(rename = "userId")]
-        user_id: u64,
+        user_id: String,
     },
 }
 
@@ -439,6 +477,7 @@ struct PaymentRequiredAny {
 /// JWT 落在按 canonical environment URL 隔离的 keychain 条目；JSON 只持久化环境与非敏感用户元数据。
 #[derive(Debug, Clone)]
 struct Session {
+    generation: u64,
     base_url: String,
     environment: Option<ManagerEnvironment>,
     jwt: String,
@@ -446,11 +485,17 @@ struct Session {
     pending_session_token: Option<String>,
 }
 
+pub(crate) struct ManagerRequestOutcome<T> {
+    pub generation: u64,
+    pub result: Result<T, ManagerError>,
+}
+
 // ───────────────────────── 客户端 ─────────────────────────
 
 pub struct ManagerClient {
     http: reqwest::Client,
     session: Arc<RwLock<Option<Session>>>,
+    session_generation: AtomicU64,
     secret_store: Arc<dyn SecretStore>,
 }
 
@@ -490,6 +535,7 @@ impl ManagerClient {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            session_generation: AtomicU64::new(0),
             secret_store,
         }
     }
@@ -509,6 +555,7 @@ impl ManagerClient {
         Self {
             http,
             session: Arc::new(RwLock::new(None)),
+            session_generation: AtomicU64::new(0),
             secret_store,
         }
     }
@@ -529,13 +576,72 @@ impl ManagerClient {
         format!("{KEYCHAIN_KEY_PREFIX}{}", &hex[..16])
     }
 
-    fn save_manager_jwt_best_effort(&self, base_url: &str, token: &str) {
+    fn save_manager_jwt(&self, base_url: &str, token: &str) -> Result<(), ManagerError> {
         let key = Self::keychain_key(base_url);
-        if let Err(error) = self.secret_store.set_secret(&key, token) {
-            log::warn!(
-                "manager: failed to persist JWT in keychain; continuing with in-memory session: {error}"
-            );
+        self.secret_store.set_secret(&key, token)?;
+        Ok(())
+    }
+
+    fn delete_manager_jwt(&self, base_url: &str) -> Result<(), ManagerError> {
+        let key = Self::keychain_key(base_url);
+        self.secret_store.delete_secret(&key)?;
+        Ok(())
+    }
+
+    async fn commit_authenticated_session(
+        &self,
+        base_url: String,
+        environment: Option<ManagerEnvironment>,
+        token: String,
+    ) -> Result<(), ManagerError> {
+        let mut guard = self.session.write().await;
+        let previous_base_url = guard.as_ref().map(|session| session.base_url.clone());
+
+        // Keychain write and session publication share the session lock. A same-generation 401
+        // cannot clear the new session between these two side effects, and an old-generation 401
+        // cannot delete the new environment key after publication.
+        self.save_manager_jwt(&base_url, &token)?;
+        if let Some(previous) = previous_base_url.filter(|previous| previous != &base_url) {
+            if let Err(error) = self.delete_manager_jwt(&previous) {
+                self.secret_store
+                    .delete_secret_best_effort(&Self::keychain_key(&base_url));
+                return Err(error);
+            }
         }
+
+        let generation = self.session_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *guard = Some(Session {
+            generation,
+            base_url,
+            environment,
+            jwt: token,
+            pending_session_token: None,
+        });
+        Ok(())
+    }
+
+    async fn commit_non_authenticated_session(
+        &self,
+        base_url: String,
+        environment: Option<ManagerEnvironment>,
+        pending_session_token: Option<String>,
+    ) -> Result<(), ManagerError> {
+        let mut guard = self.session.write().await;
+        let previous_base_url = guard.as_ref().map(|session| session.base_url.clone());
+        self.delete_manager_jwt(&base_url)?;
+        if let Some(previous) = previous_base_url.filter(|previous| previous != &base_url) {
+            self.delete_manager_jwt(&previous)?;
+        }
+
+        let generation = self.session_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *guard = pending_session_token.map(|pending_session_token| Session {
+            generation,
+            base_url,
+            environment,
+            jwt: String::new(),
+            pending_session_token: Some(pending_session_token),
+        });
+        Ok(())
     }
 
     async fn require_session(&self) -> Result<Session, ManagerError> {
@@ -557,23 +663,36 @@ impl ManagerClient {
     pub async fn restore_session(
         &self,
         environment: ManagerEnvironment,
-        user: UserInfo,
-    ) -> Result<Option<UserInfo>, ManagerError> {
-        let normalized_base_url = environment.base_url().to_string();
+    ) -> Result<bool, ManagerError> {
+        self.restore_session_from_base_url(environment, environment.base_url().to_string())
+            .await
+    }
+
+    pub(crate) async fn restore_session_from_base_url(
+        &self,
+        environment: ManagerEnvironment,
+        normalized_base_url: String,
+    ) -> Result<bool, ManagerError> {
+        // Hold the session write lock across keychain read and generation publication. Otherwise
+        // a late 401 could clear the old session and delete this JWT after it was read but before
+        // the restored generation became visible.
+        let mut session = self.session.write().await;
         let key = Self::keychain_key(&normalized_base_url);
         let Some(jwt) = self.secret_store.get_secret(&key)? else {
-            return Ok(None);
+            return Ok(false);
         };
         if jwt.trim().is_empty() {
-            return Ok(None);
+            return Ok(false);
         }
-        *self.session.write().await = Some(Session {
+        let generation = self.session_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *session = Some(Session {
+            generation,
             base_url: normalized_base_url,
             environment: Some(environment),
             jwt,
             pending_session_token: None,
         });
-        Ok(Some(user))
+        Ok(true)
     }
 
     /// 用当前 session 的 JWT 构造鉴权 header。
@@ -586,11 +705,9 @@ impl ManagerClient {
     async fn classify_error(&self, resp: reqwest::Response) -> ManagerError {
         let status = resp.status();
         match status {
-            StatusCode::UNAUTHORIZED => {
-                // 401 → 清理 keychain 与内存 session
-                self.clear_session_on_auth_failure().await;
-                ManagerError::Unauthorized
-            }
+            // Transport only classifies the response. The Manager Context coordinator owns the
+            // generation check and the atomic session/keychain/metadata/context transition.
+            StatusCode::UNAUTHORIZED => ManagerError::Unauthorized,
             StatusCode::FORBIDDEN => ManagerError::Forbidden,
             StatusCode::NOT_FOUND => {
                 // 普通 404 与「不可见/权限回收」404 同状态码，靠响应体顶层 `errorCode` 区分。
@@ -610,25 +727,36 @@ impl ManagerClient {
                 }
             }
             s => {
-                let body = resp.text().await.unwrap_or_default();
                 ManagerError::Other {
                     status: s.as_u16(),
-                    body,
+                    // Do not serialize arbitrary upstream bodies across Tauri IPC. Error payloads
+                    // can echo credentials or tokens even when the expected API contract never
+                    // does; status + a stable summary are sufficient for the frontend.
+                    body: "Unexpected Manager response".to_string(),
                 }
             }
         }
     }
 
-    async fn clear_session_on_auth_failure(&self) {
-        let base_url = {
-            let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.base_url.clone())
-        };
-        if let Some(url) = base_url {
-            let key = Self::keychain_key(&url);
+    pub(crate) async fn clear_session_for_generation(&self, expected_generation: u64) -> bool {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard
+            .as_ref()
+            .filter(|session| session.generation == expected_generation)
+        {
+            // The session and its environment-scoped keychain entry form one transition. Keep
+            // the lock until both are cleared so a new generation cannot publish a JWT between
+            // the generation check and this deletion.
+            let key = Self::keychain_key(&session.base_url);
             self.secret_store.delete_secret_best_effort(&key);
+            *guard = None;
+            return true;
         }
-        *self.session.write().await = None;
+        false
+    }
+
+    pub(crate) fn current_session_generation(&self) -> u64 {
+        self.session_generation.load(Ordering::Acquire)
     }
 
     // ───────── 公共 API ─────────
@@ -683,30 +811,22 @@ impl ManagerClient {
 
         match envelope.data {
             LoginData::SingleAccount(payload) => {
-                // keychain 持久化是 best-effort：系统凭据库异常不能阻断当前登录会话。
-                self.save_manager_jwt_best_effort(&base, &payload.token);
-                *self.session.write().await = Some(Session {
-                    base_url: base,
-                    environment,
-                    jwt: payload.token,
-                    pending_session_token: None,
-                });
-                Ok(LoginResult::Authenticated { user: payload.user })
+                let AuthenticatedPayload { token, user } = payload;
+                self.commit_authenticated_session(base, environment, token)
+                    .await?;
+                Ok(LoginResult::Authenticated { user })
             }
             LoginData::MultiAccount(payload) => {
-                // 多账户：记住 environment URL + pending token；JWT 尚未产生，不写 keychain
-                *self.session.write().await = Some(Session {
-                    base_url: base,
-                    environment,
-                    jwt: String::new(),
-                    pending_session_token: Some(payload.temp_token),
-                });
+                // 多账户：旧 JWT 不能在崩溃恢复时绕过当前账户选择。
+                self.commit_non_authenticated_session(base, environment, Some(payload.temp_token))
+                    .await?;
                 Ok(LoginResult::AccountSelectionRequired {
                     accounts: payload.accounts,
                 })
             }
             LoginData::Onboarding(payload) if payload.needs_onboarding => {
-                *self.session.write().await = None;
+                self.commit_non_authenticated_session(base, environment, None)
+                    .await?;
                 Ok(LoginResult::OnboardingRequired {
                     user_id: payload.user_id,
                 })
@@ -749,42 +869,84 @@ impl ManagerClient {
             .await
             .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
 
-        self.save_manager_jwt_best_effort(&session.base_url, &envelope.data.token);
-        *self.session.write().await = Some(Session {
-            base_url: session.base_url,
-            environment: session.environment,
-            jwt: envelope.data.token,
-            pending_session_token: None,
-        });
-        Ok(envelope.data.user)
+        let AuthenticatedPayload { token, user } = envelope.data;
+        self.commit_authenticated_session(session.base_url, session.environment, token)
+            .await?;
+        Ok(user)
+    }
+
+    /// `GET {base}/api/v1/auth/me` — 获取 JWT 所属的完整用户、账户与组织身份。
+    pub async fn get_current_user(&self) -> Result<ManagerCurrentUser, ManagerError> {
+        self.get_current_user_outcome().await?.result
+    }
+
+    pub(crate) async fn get_current_user_outcome(
+        &self,
+    ) -> Result<ManagerRequestOutcome<ManagerCurrentUser>, ManagerError> {
+        let session = self.require_session().await?;
+        let generation = session.generation;
+        let result = async {
+            if session.jwt.is_empty() {
+                return Err(ManagerError::NoSession);
+            }
+            let url = format!("{}/api/v1/auth/me", session.base_url);
+            let resp = self
+                .http
+                .get(&url)
+                .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
+                .send()
+                .await
+                .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
+            if !resp.status().is_success() {
+                return Err(self.classify_error(resp).await);
+            }
+            let envelope: ApiEnvelope<ManagerCurrentUser> = resp
+                .json()
+                .await
+                .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+            Ok(envelope.data)
+        }
+        .await;
+        Ok(ManagerRequestOutcome { generation, result })
     }
 
     /// `GET {base}/api/v1/digital-employees` — 当前账号的数字员工列表。
     ///
     /// 响应走标准分页 envelope：`{code, message, data: {total, page, pageSize, items}}`。
     pub async fn list_digital_employees(&self) -> Result<Vec<DigitalEmployeeBrief>, ManagerError> {
+        self.list_digital_employees_outcome().await?.result
+    }
+
+    pub(crate) async fn list_digital_employees_outcome(
+        &self,
+    ) -> Result<ManagerRequestOutcome<Vec<DigitalEmployeeBrief>>, ManagerError> {
         let session = self.require_session().await?;
-        if session.jwt.is_empty() {
-            return Err(ManagerError::NoSession);
-        }
-        let url = format!("{}/api/v1/digital-employees", session.base_url);
+        let generation = session.generation;
+        let result = async {
+            if session.jwt.is_empty() {
+                return Err(ManagerError::NoSession);
+            }
+            let url = format!("{}/api/v1/digital-employees", session.base_url);
 
-        let resp = self
-            .http
-            .get(&url)
-            .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
-            .send()
-            .await
-            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
+            let resp = self
+                .http
+                .get(&url)
+                .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
+                .send()
+                .await
+                .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
-        if !resp.status().is_success() {
-            return Err(self.classify_error(resp).await);
+            if !resp.status().is_success() {
+                return Err(self.classify_error(resp).await);
+            }
+            let envelope: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> = resp
+                .json()
+                .await
+                .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+            Ok(envelope.data.items)
         }
-        let envelope: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> = resp
-            .json()
-            .await
-            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
-        Ok(envelope.data.items)
+        .await;
+        Ok(ManagerRequestOutcome { generation, result })
     }
 
     /// `GET {base}/api/v1/digital-employees/{id}/connection-info` — 拿 SMCP 握手参数。
@@ -793,31 +955,43 @@ impl ManagerClient {
         &self,
         id: u64,
     ) -> Result<ConnectionInfoResponse, ManagerError> {
+        self.get_connection_info_outcome(id).await?.result
+    }
+
+    pub(crate) async fn get_connection_info_outcome(
+        &self,
+        id: u64,
+    ) -> Result<ManagerRequestOutcome<ConnectionInfoResponse>, ManagerError> {
         let session = self.require_session().await?;
-        if session.jwt.is_empty() {
-            return Err(ManagerError::NoSession);
-        }
-        let url = format!(
-            "{}/api/v1/digital-employees/{id}/connection-info",
-            session.base_url
-        );
+        let generation = session.generation;
+        let result = async {
+            if session.jwt.is_empty() {
+                return Err(ManagerError::NoSession);
+            }
+            let url = format!(
+                "{}/api/v1/digital-employees/{id}/connection-info",
+                session.base_url
+            );
 
-        let resp = self
-            .http
-            .get(&url)
-            .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
-            .send()
-            .await
-            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
+            let resp = self
+                .http
+                .get(&url)
+                .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
+                .send()
+                .await
+                .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
-        if !resp.status().is_success() {
-            return Err(self.classify_error(resp).await);
+            if !resp.status().is_success() {
+                return Err(self.classify_error(resp).await);
+            }
+            let envelope: ApiEnvelope<ConnectionInfoResponse> = resp
+                .json()
+                .await
+                .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+            Ok(envelope.data)
         }
-        let envelope: ApiEnvelope<ConnectionInfoResponse> = resp
-            .json()
-            .await
-            .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
-        Ok(envelope.data)
+        .await;
+        Ok(ManagerRequestOutcome { generation, result })
     }
 
     /// `POST {base}/api/v1/oauth/token` — RFC 8693 token-exchange（C1 / TFRM-153）。
@@ -831,84 +1005,105 @@ impl ManagerClient {
     ///
     /// 错误归类：400 → [`ManagerError::TokenExchange`]（RFC 6749 §5.2）；503 →
     /// [`ManagerError::SigningUnavailable`]（签名未就位，可重试）；401/402/404 等沿用通用归一化
-    /// （401 会清 session）。
+    /// （401 只在此层归类；session/context 清理由 Manager Context coordinator 事务提交）。
     pub async fn exchange_token(
         &self,
         robot_account_id: &str,
         scope: Option<String>,
     ) -> Result<ExchangedToken, ManagerError> {
+        self.exchange_token_outcome(robot_account_id, scope)
+            .await?
+            .result
+    }
+
+    pub(crate) async fn exchange_token_outcome(
+        &self,
+        robot_account_id: &str,
+        scope: Option<String>,
+    ) -> Result<ManagerRequestOutcome<ExchangedToken>, ManagerError> {
         let session = self.require_session().await?;
-        if session.jwt.is_empty() {
-            return Err(ManagerError::NoSession);
-        }
-        let url = format!("{}/api/v1/oauth/token", session.base_url);
+        let generation = session.generation;
+        let result = async {
+            if session.jwt.is_empty() {
+                return Err(ManagerError::NoSession);
+            }
+            let url = format!("{}/api/v1/oauth/token", session.base_url);
 
-        let form = TokenExchangeRequest {
-            grant_type: GRANT_TYPE_TOKEN_EXCHANGE,
-            subject_token: &session.jwt,
-            subject_token_type: SUBJECT_TOKEN_TYPE_JWT,
-            audience: format!("robot:{robot_account_id}"),
-            scope,
-        };
+            let form = TokenExchangeRequest {
+                grant_type: GRANT_TYPE_TOKEN_EXCHANGE,
+                subject_token: &session.jwt,
+                subject_token_type: SUBJECT_TOKEN_TYPE_JWT,
+                audience: format!("robot:{robot_account_id}"),
+                scope,
+            };
 
-        let resp = self
-            .http
-            .post(&url)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
-
-        let status = resp.status();
-        if status.is_success() {
-            let body: TokenExchangeResponse = resp
-                .json()
+            let resp = self
+                .http
+                .post(&url)
+                .form(&form)
+                .send()
                 .await
-                .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
-            return Ok(ExchangedToken {
-                access_token: body.access_token,
-                token_type: body.token_type,
-                expires_in: body.expires_in,
-                scope: body.scope,
-            });
-        }
+                .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
-        // 错误分流：400 = RFC 6749 §5.2 OAuth 错误体；503 = 签名子系统未就位；其余沿用通用归一化
-        // （401 清 session、402 欠费、404 等）。
-        match status {
-            StatusCode::BAD_REQUEST => {
-                let body = resp.text().await.unwrap_or_default();
-                let (error, description) = parse_oauth_error(&body);
-                Err(ManagerError::TokenExchange { error, description })
+            let status = resp.status();
+            if status.is_success() {
+                let body: TokenExchangeResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
+                return Ok(ExchangedToken {
+                    access_token: body.access_token,
+                    token_type: body.token_type,
+                    expires_in: body.expires_in,
+                    scope: body.scope,
+                });
             }
-            StatusCode::SERVICE_UNAVAILABLE => {
-                let body = resp.text().await.unwrap_or_default();
-                let (_error, description) = parse_oauth_error(&body);
-                Err(ManagerError::SigningUnavailable {
-                    message: description,
-                })
+
+            // 错误分流：400 = RFC 6749 §5.2 OAuth 错误体；503 = 签名子系统未就位；其余沿用通用归一化
+            // （401 交 coordinator 清 session、402 欠费、404 等）。
+            match status {
+                StatusCode::BAD_REQUEST => {
+                    let body = resp.text().await.unwrap_or_default();
+                    let (error, description) = parse_oauth_error(&body);
+                    Err(ManagerError::TokenExchange { error, description })
+                }
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    let body = resp.text().await.unwrap_or_default();
+                    let (_error, description) = parse_oauth_error(&body);
+                    Err(ManagerError::SigningUnavailable {
+                        message: description,
+                    })
+                }
+                _ => Err(self.classify_error(resp).await),
             }
-            _ => Err(self.classify_error(resp).await),
         }
+        .await;
+        Ok(ManagerRequestOutcome { generation, result })
     }
 
     /// 本地登出：清 keychain + 内存 session。无服务端 logout API。
     pub async fn logout(&self) -> Result<(), ManagerError> {
-        let base_url = {
-            let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.base_url.clone())
-        };
-        if let Some(url) = base_url {
-            let key = Self::keychain_key(&url);
-            self.secret_store.delete_secret_best_effort(&key);
-        }
-        *self.session.write().await = None;
-        Ok(())
+        let mut guard = self.session.write().await;
+        self.session_generation.fetch_add(1, Ordering::AcqRel);
+        let delete_result = guard
+            .as_ref()
+            .map(|session| self.delete_manager_jwt(&session.base_url))
+            .transpose();
+        *guard = None;
+        delete_result.map(|_| ())
     }
 
     /// 测试/自检用：当前是否已有 session。
     pub async fn has_session(&self) -> bool {
         self.session.read().await.is_some()
+    }
+
+    /// Drops only the in-memory projection after a transient restore validation failure. The
+    /// keychain JWT remains available for a later retry and is still revalidated by `/auth/me`.
+    pub(crate) async fn suspend_restored_session(&self) {
+        let mut guard = self.session.write().await;
+        self.session_generation.fetch_add(1, Ordering::AcqRel);
+        *guard = None;
     }
 }
 
@@ -997,6 +1192,73 @@ fn parse_payment_required(body: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::keychain::KeychainError;
+    use std::sync::{Condvar, Mutex as StdMutex};
+
+    #[derive(Default)]
+    struct BlockingDeleteState {
+        secrets: HashMap<String, String>,
+        block_next_delete: bool,
+        delete_entered: bool,
+        release_delete: bool,
+    }
+
+    #[derive(Default)]
+    struct BlockingDeleteSecretStore {
+        state: StdMutex<BlockingDeleteState>,
+        changed: Condvar,
+    }
+
+    impl BlockingDeleteSecretStore {
+        fn arm_delete(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.block_next_delete = true;
+            state.delete_entered = false;
+            state.release_delete = false;
+        }
+
+        fn wait_until_delete_entered(&self) {
+            let mut state = self.state.lock().unwrap();
+            while !state.delete_entered {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+
+        fn release_delete(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.release_delete = true;
+            self.changed.notify_all();
+        }
+    }
+
+    impl SecretStore for BlockingDeleteSecretStore {
+        fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+            self.state
+                .lock()
+                .unwrap()
+                .secrets
+                .insert(key.to_string(), secret.to_string());
+            Ok(())
+        }
+
+        fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+            Ok(self.state.lock().unwrap().secrets.get(key).cloned())
+        }
+
+        fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+            let mut state = self.state.lock().unwrap();
+            if state.block_next_delete {
+                state.block_next_delete = false;
+                state.delete_entered = true;
+                self.changed.notify_all();
+                while !state.release_delete {
+                    state = self.changed.wait(state).unwrap();
+                }
+            }
+            state.secrets.remove(key);
+            Ok(())
+        }
+    }
 
     fn test_manager_client() -> ManagerClient {
         ManagerClient::new_with_secret_store(
@@ -1050,7 +1312,7 @@ mod tests {
         match env.data {
             LoginData::SingleAccount(payload) => {
                 assert_eq!(payload.token, "jwt-abc");
-                assert_eq!(payload.user.user_id, 9);
+                assert_eq!(payload.user.user_id, "9");
                 assert_eq!(payload.user.account_id, "org-legacy-9:account-16");
                 assert_eq!(payload.user.account_name, "client_uat");
             }
@@ -1091,9 +1353,12 @@ mod tests {
 
     #[test]
     fn onboarding_login_result_uses_the_camel_case_ipc_contract() {
-        let value = serde_json::to_value(LoginResult::OnboardingRequired { user_id: 99 }).unwrap();
+        let value = serde_json::to_value(LoginResult::OnboardingRequired {
+            user_id: "99".to_string(),
+        })
+        .unwrap();
         assert_eq!(value["kind"], "onboarding_required");
-        assert_eq!(value["userId"], 99);
+        assert_eq!(value["userId"], "99");
         assert!(value.get("user_id").is_none());
     }
 
@@ -1512,17 +1777,8 @@ mod tests {
     #[tokio::test]
     async fn restore_session_returns_none_without_persisted_jwt() {
         let c = test_manager_client();
-        let user = UserInfo {
-            user_id: 7,
-            account_id: "org-legacy-7:account-42".to_string(),
-            account_name: "client_uat".to_string(),
-        };
-
-        let restored = c
-            .restore_session(ManagerEnvironment::Beta, user)
-            .await
-            .unwrap();
-        assert!(restored.is_none());
+        let restored = c.restore_session(ManagerEnvironment::Beta).await.unwrap();
+        assert!(!restored);
         assert!(!c.has_session().await);
     }
 
@@ -1531,6 +1787,7 @@ mod tests {
         let c = test_manager_client();
         assert!(!c.has_session().await);
         *c.session.write().await = Some(Session {
+            generation: 1,
             base_url: "https://x".into(),
             environment: None,
             jwt: "j".into(),
@@ -1540,6 +1797,75 @@ mod tests {
         // logout() 应清理内存 session（keychain 条目不存在时 delete 会成功 noop）
         c.logout().await.unwrap();
         assert!(!c.has_session().await);
+    }
+
+    #[tokio::test]
+    async fn stale_unauthorized_response_does_not_clear_a_newer_session() {
+        let c = test_manager_client();
+        *c.session.write().await = Some(Session {
+            generation: 2,
+            base_url: "https://new.example.com".into(),
+            environment: Some(ManagerEnvironment::Prod),
+            jwt: "new-jwt".into(),
+            pending_session_token: None,
+        });
+
+        assert!(!c.clear_session_for_generation(1).await);
+
+        let session = c.require_session().await.unwrap();
+        assert_eq!(session.generation, 2);
+        assert_eq!(session.jwt, "new-jwt");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_failure_keychain_delete_is_linearized_before_new_session_publish() {
+        let store = Arc::new(BlockingDeleteSecretStore::default());
+        let client = Arc::new(ManagerClient::new_with_secret_store(store.clone()));
+        let base_url = "https://same-environment.example.com".to_string();
+        let key = ManagerClient::keychain_key(&base_url);
+        store.set_secret(&key, "old-jwt").unwrap();
+        client.session_generation.store(1, Ordering::Release);
+        *client.session.write().await = Some(Session {
+            generation: 1,
+            base_url: base_url.clone(),
+            environment: Some(ManagerEnvironment::Staging),
+            jwt: "old-jwt".into(),
+            pending_session_token: None,
+        });
+        store.arm_delete();
+
+        let clear = tokio::spawn({
+            let client = client.clone();
+            async move { client.clear_session_for_generation(1).await }
+        });
+        tokio::task::spawn_blocking({
+            let store = store.clone();
+            move || store.wait_until_delete_entered()
+        })
+        .await
+        .unwrap();
+
+        let publish = tokio::spawn({
+            let client = client.clone();
+            let base_url = base_url.clone();
+            async move {
+                client
+                    .commit_authenticated_session(
+                        base_url,
+                        Some(ManagerEnvironment::Staging),
+                        "new-jwt".into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        tokio::task::yield_now().await;
+        store.release_delete();
+        clear.await.unwrap();
+        publish.await.unwrap();
+
+        assert_eq!(store.get_secret(&key).unwrap().as_deref(), Some("new-jwt"));
+        assert_eq!(client.require_session().await.unwrap().generation, 2);
     }
 
     #[test]

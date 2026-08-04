@@ -13,7 +13,7 @@ import { resetAllStores, runtimeSnapshot } from '../helpers/store';
 const mockedInvoke = vi.mocked(invoke);
 
 const user: UserInfo = {
-  userId: 9,
+  userId: '9',
   accountId: 'org-legacy-9:account-16',
   accountName: 'client_uat',
 };
@@ -131,7 +131,7 @@ describe('managerStore', () => {
     });
 
     it('routes an account without an organization to onboarding guidance', async () => {
-      const result: LoginResult = { kind: 'onboarding_required', userId: 99 };
+      const result: LoginResult = { kind: 'onboarding_required', userId: '99' };
       mockedInvoke.mockResolvedValueOnce(result);
 
       await useManagerStore.getState().login('prod', 'user@example.com', 'Test@123456');
@@ -140,7 +140,7 @@ describe('managerStore', () => {
         environment: 'prod',
         session: null,
         pendingAccountSelection: null,
-        onboardingUserId: 99,
+        onboardingUserId: '99',
       });
     });
   });

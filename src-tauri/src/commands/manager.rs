@@ -1,154 +1,88 @@
-//! TFRSManager Tauri 命令（前端 IPC 端点）。
+//! TFRSManager Tauri commands.
 //!
-//! 本层只做两件事：
-//! 1. 透传调用到 `services::manager_client::ManagerClient`；
-//! 2. 在 `ManagerError::Unauthorized` 时向前端 emit `manager:auth-expired` 事件，让 UI 跳回登录页。
-//!
-//! 事件契约（前端侧文档）：
-//! - `manager:auth-expired` — payload 为空字符串；收到即应清理本地 Manager 登录态并引导重新登录。
+//! Authentication and authenticated requests are delegated to the backend-owned
+//! [`ManagerContextCoordinator`]. Commands never construct identity context in the webview.
 
 use tauri::{AppHandle, Emitter, State};
 
 use crate::services::manager_client::{DigitalEmployeeBrief, LoginResult, ManagerError, UserInfo};
-use crate::services::manager_environment::ManagerEnvironment;
-use crate::services::settings::{
-    ManagerSessionConfig, PersistedManagerSession, MANAGER_SESSION_SCHEMA_VERSION,
+use crate::services::manager_context::{
+    ManagerContextEventSink, ManagerContextSnapshot, RestoredManagerSession,
+    MANAGER_AUTH_EXPIRED_EVENT, MANAGER_CONTEXT_CHANGED_EVENT,
 };
+use crate::services::manager_environment::ManagerEnvironment;
 use crate::AppState;
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoredManagerSession {
-    pub environment: ManagerEnvironment,
-    pub user: UserInfo,
+pub(crate) struct TauriManagerContextEventSink {
+    app: AppHandle,
 }
 
-/// 401 事件名。导出为 pub const 便于前端在单一来源引用（通过 get_app_info 之类的常量桥，后续 UI 可接）。
-pub const AUTH_EXPIRED_EVENT: &str = "manager:auth-expired";
-
-/// 对外：如果错误是 `Unauthorized`，顺手 emit 一次事件给前端。
-fn maybe_emit_auth_expired(app: &AppHandle, err: &ManagerError) {
-    if matches!(err, ManagerError::Unauthorized) {
-        if let Err(e) = app.emit(AUTH_EXPIRED_EVENT, "") {
-            log::warn!("failed to emit {AUTH_EXPIRED_EVENT}: {e}");
-        }
+impl TauriManagerContextEventSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
     }
+}
+
+impl ManagerContextEventSink for TauriManagerContextEventSink {
+    fn emit_context_changed(&self, snapshot: &ManagerContextSnapshot) -> Result<(), String> {
+        self.app
+            .emit(MANAGER_CONTEXT_CHANGED_EVENT, snapshot)
+            .map_err(|error| error.to_string())
+    }
+
+    fn emit_auth_expired(&self) -> Result<(), String> {
+        self.app
+            .emit(MANAGER_AUTH_EXPIRED_EVENT, ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn manager_get_context(
+    state: State<'_, AppState>,
+) -> Result<ManagerContextSnapshot, ManagerError> {
+    Ok(state.manager_context.snapshot().await)
 }
 
 #[tauri::command]
 pub async fn manager_login(
     state: State<'_, AppState>,
-    app: AppHandle,
     environment: ManagerEnvironment,
     identifier: String,
     password: String,
 ) -> Result<LoginResult, ManagerError> {
     log::info!("manager_login: environment={environment:?}");
-    let result = state
-        .manager_client
-        .login(
-            Some(environment.base_url().to_string()),
-            &identifier,
-            &password,
-        )
+    state
+        .manager_context
+        .login(environment, &identifier, &password)
         .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
-    if let LoginResult::Authenticated { user } = &result {
-        persist_manager_session(state.inner(), user).await;
-    }
-    Ok(result)
 }
 
 #[tauri::command]
 pub async fn manager_select_account(
     state: State<'_, AppState>,
-    app: AppHandle,
     account_id: String,
 ) -> Result<UserInfo, ManagerError> {
-    log::info!("manager_select_account: account_id={}", account_id);
-    let user = state
-        .manager_client
-        .select_account(&account_id)
-        .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
-    persist_manager_session(state.inner(), &user).await;
-    Ok(user)
+    log::info!("manager_select_account: account_id={account_id}");
+    state.manager_context.select_account(&account_id).await
 }
 
 #[tauri::command]
 pub async fn manager_restore_session(
     state: State<'_, AppState>,
-    app: AppHandle,
 ) -> Result<Option<RestoredManagerSession>, ManagerError> {
-    let saved_config = state
-        .settings_service
-        .load_global_manager_session()
-        .map_err(|error| ManagerError::Other {
-            status: 0,
-            body: format!("failed to load Manager session metadata: {error}"),
-        })?;
-    let Some(saved) = saved_config.session else {
-        return Ok(None);
-    };
-    let user = UserInfo {
-        user_id: saved.user_id,
-        account_id: saved.account_id,
-        account_name: saved.account_name,
-    };
-    let restored = state
-        .manager_client
-        .restore_session(saved.environment, user)
-        .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))?;
-    Ok(restored.map(|user| RestoredManagerSession {
-        environment: saved.environment,
-        user,
-    }))
+    state.manager_context.restore_session().await
 }
 
 #[tauri::command]
 pub async fn manager_list_digital_employees(
     state: State<'_, AppState>,
-    app: AppHandle,
 ) -> Result<Vec<DigitalEmployeeBrief>, ManagerError> {
-    state
-        .manager_client
-        .list_digital_employees()
-        .await
-        .inspect_err(|e| maybe_emit_auth_expired(&app, e))
+    state.manager_context.list_digital_employees().await
 }
-
-// 注：原 `manager_get_connection_info` Tauri 命令已移除——切到后端编排（`manager_connect_smcp`）后
-// 前端不再直接拉 connection-info（避免短 JWT/密钥流入 JS 层）。`ManagerClient::get_connection_info`
-// 方法仍由 `manager_connect_smcp` 内部使用。
 
 #[tauri::command]
 pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerError> {
     log::info!("manager_logout");
-    state.manager_client.logout().await?;
-    if let Err(error) = state
-        .settings_service
-        .save_global_manager_session(&ManagerSessionConfig::default())
-    {
-        log::warn!("manager: failed to clear persisted session metadata: {error}");
-    }
-    Ok(())
-}
-
-async fn persist_manager_session(state: &AppState, user: &UserInfo) {
-    let Some(environment) = state.manager_client.current_environment().await else {
-        return;
-    };
-    let config = ManagerSessionConfig {
-        schema_version: MANAGER_SESSION_SCHEMA_VERSION,
-        session: Some(PersistedManagerSession {
-            environment,
-            user_id: user.user_id,
-            account_id: user.account_id.clone(),
-            account_name: user.account_name.clone(),
-        }),
-    };
-    if let Err(error) = state.settings_service.save_global_manager_session(&config) {
-        log::warn!("manager: failed to persist session metadata: {error}");
-    }
+    state.manager_context.logout().await
 }

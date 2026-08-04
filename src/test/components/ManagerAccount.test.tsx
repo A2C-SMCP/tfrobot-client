@@ -13,7 +13,7 @@ type ManagerStoreMock = {
   environment: 'staging' | 'beta' | 'prod' | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
-  onboardingUserId: number | null;
+  onboardingUserId: string | null;
   employees: DigitalEmployeeBrief[];
   loading: boolean;
   restoreAttempted: boolean;
@@ -184,7 +184,7 @@ describe('ManagerAccount', () => {
 
   describe('EmployeeList', () => {
     const user: UserInfo = {
-      userId: 9,
+      userId: '9',
       accountId: 'org-legacy-9:account-16',
       accountName: 'client_uat',
     };
@@ -482,7 +482,7 @@ describe('ManagerAccount', () => {
     it('renders EmployeeList when session is present', async () => {
       applyMock({
         session: {
-          userId: 9,
+          userId: '9',
           accountId: 'org-legacy-9:account-16',
           accountName: 'client_uat',
         },
@@ -493,7 +493,7 @@ describe('ManagerAccount', () => {
     });
 
     it('renders onboarding guidance without creating an organization in the client', () => {
-      applyMock({ onboardingUserId: 99 });
+      applyMock({ onboardingUserId: '99' });
 
       render(<ManagerAccount />);
 

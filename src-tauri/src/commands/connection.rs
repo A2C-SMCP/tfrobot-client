@@ -8,15 +8,14 @@ use crate::services::computer::{
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
-use crate::services::manager_client::{
-    DigitalEmployeeBrief, ExchangedToken, ManagerClient, ManagerError,
-};
+use crate::services::manager_client::{DigitalEmployeeBrief, ExchangedToken, ManagerError};
+use crate::services::manager_context::ManagerContextCoordinator;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::State;
 use tokio::time::{timeout, Duration};
 
 const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,6 +55,11 @@ pub struct ManagerConnectionParams {
     pub scope: Option<String>,
     /// Persisted Robot binding metadata for the target ComputerInstance.
     pub robot_binding: RobotBindingMetadata,
+}
+
+struct ManagerConnectionAuthority {
+    manager_generation: u64,
+    params: ManagerConnectionParams,
 }
 
 /// 预刷新换连接的结果：要么当前 business snapshot 仍属本代并已刷新时间戳，
@@ -742,7 +746,6 @@ pub async fn get_connection_status(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn manager_connect_smcp(
-    app: AppHandle,
     state: State<'_, AppState>,
     instance_id: String,
     employee_id: u64,
@@ -761,8 +764,17 @@ pub async fn manager_connect_smcp(
         "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
     );
     let result = async {
-        let employee =
-            validate_manager_robot_account(state.inner(), employee_id, &robot_account_id).await?;
+        let manager_generation = state
+            .manager_context
+            .capture_authenticated_generation()
+            .await?;
+        let employee = validate_manager_robot_account(
+            state.inner(),
+            manager_generation,
+            employee_id,
+            &robot_account_id,
+        )
+        .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -770,8 +782,8 @@ pub async fn manager_connect_smcp(
 
         // 1) 握手参数
         let info = state
-            .manager_client
-            .get_connection_info(employee_id)
+            .manager_context
+            .get_connection_info_for_generation(manager_generation, employee_id)
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
@@ -814,21 +826,31 @@ pub async fn manager_connect_smcp(
 
         // 2) 换短 JWT
         let token = state
-            .manager_client
-            .exchange_token(&robot_account_id, params.scope.clone())
+            .manager_context
+            .exchange_token_for_generation(
+                manager_generation,
+                &robot_account_id,
+                params.scope.clone(),
+            )
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
+        state
+            .manager_context
+            .ensure_authenticated_generation(manager_generation)
+            .await?;
 
         // 3) 连接 + 入库 + 起预刷新任务
         establish_manager_connection(
-            &app,
             state.inner(),
             &runtime,
             operation_token,
-            params,
+            ManagerConnectionAuthority {
+                manager_generation,
+                params,
+            },
             token,
             &profile_snapshot,
         )
@@ -839,7 +861,6 @@ pub async fn manager_connect_smcp(
 }
 
 pub(crate) async fn connect_manager_robot_target_for_policy(
-    app: &AppHandle,
     state: &AppState,
     instance_id: &str,
     employee_id: u64,
@@ -854,28 +875,41 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     )
     .await?;
     let result = async {
-        let employee =
-            validate_manager_robot_account(state, employee_id, &robot_account_id).await?;
+        let manager_generation = state
+            .manager_context
+            .capture_authenticated_generation()
+            .await?;
+        let employee = validate_manager_robot_account(
+            state,
+            manager_generation,
+            employee_id,
+            &robot_account_id,
+        )
+        .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
         let token = state
-            .manager_client
-            .exchange_token(&robot_account_id, None)
+            .manager_context
+            .exchange_token_for_generation(manager_generation, &robot_account_id, None)
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
         let info = state
-            .manager_client
-            .get_connection_info(employee_id)
+            .manager_context
+            .get_connection_info_for_generation(manager_generation, employee_id)
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
+        state
+            .manager_context
+            .ensure_authenticated_generation(manager_generation)
+            .await?;
         let url = info.socket_base_url.clone();
         if url.trim().is_empty() {
             return Err(ManagerError::InvalidResponse(
@@ -908,11 +942,13 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
         };
 
         establish_manager_connection(
-            app,
             state,
             &runtime,
             operation_token,
-            params,
+            ManagerConnectionAuthority {
+                manager_generation,
+                params,
+            },
             token,
             &profile_snapshot,
         )
@@ -1009,10 +1045,14 @@ async fn finish_manager_connect(
 
 async fn validate_manager_robot_account(
     state: &AppState,
+    manager_generation: u64,
     employee_id: u64,
     robot_account_id: &str,
 ) -> Result<DigitalEmployeeBrief, ManagerError> {
-    let employees = state.manager_client.list_digital_employees().await?;
+    let employees = state
+        .manager_context
+        .list_digital_employees_for_generation(manager_generation)
+        .await?;
     validate_manager_robot_account_from_list(&employees, employee_id, robot_account_id)
 }
 
@@ -1080,14 +1120,17 @@ async fn build_and_join(
 
 /// 首连：构建连接、替换 AppState、起预刷新任务、emit 状态变更事件。
 async fn establish_manager_connection(
-    app: &AppHandle,
     state: &AppState,
     runtime: &ComputerInstanceRuntime,
     operation_token: ClientConnectionOperationToken,
-    params: ManagerConnectionParams,
+    authority: ManagerConnectionAuthority,
     token: ExchangedToken,
     expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), ManagerError> {
+    let ManagerConnectionAuthority {
+        manager_generation,
+        params,
+    } = authority;
     let instance_id = runtime.instance.id.as_str();
     let _reservation = reserve_connection_target(
         state,
@@ -1097,70 +1140,76 @@ async fn establish_manager_connection(
     )
     .map_err(ManagerError::InvalidResponse)?;
     let result = async {
-        if matches!(
-            check_connection_target_allowed(
-                state,
-                instance_id,
-                &manager_target_id(params.employee_id),
-                &params.office_id,
-            )
-            .await?,
-            ManagerConnectionDecision::AlreadyConnected
-        ) {
-            commit_robot_binding(
-                state,
-                runtime,
-                operation_token,
-                instance_id,
-                &params.robot_binding,
-                expected_profile,
-            )
-            .await?;
-            return Ok(());
-        }
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
-        // First connection work runs under the instance lifecycle coordinator. The reservation
-        // above prevents only the same Robot/Office identity from being claimed concurrently.
         let generation = next_generation();
-        build_and_join(
-            runtime,
-            operation_token,
-            &params,
-            &token.access_token,
-            generation,
-        )
-        .await
-        .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
+        state
+            .manager_context
+            .commit_for_authenticated_generation(manager_generation, || async {
+                if matches!(
+                    check_connection_target_allowed(
+                        state,
+                        instance_id,
+                        &manager_target_id(params.employee_id),
+                        &params.office_id,
+                    )
+                    .await?,
+                    ManagerConnectionDecision::AlreadyConnected
+                ) {
+                    commit_robot_binding(
+                        state,
+                        runtime,
+                        operation_token,
+                        instance_id,
+                        &params.robot_binding,
+                        expected_profile,
+                    )
+                    .await?;
+                    return Ok(());
+                }
 
-        commit_robot_binding(
-            state,
-            runtime,
-            operation_token,
-            instance_id,
-            &params.robot_binding,
-            expected_profile,
-        )
-        .await?;
-        runtime
-            .ensure_connection_operation(operation_token)
+                // The SDK currently combines Socket.IO construction and runtime installation.
+                // Keep that indivisible operation, the durable binding, and refresh-task install
+                // behind the Manager generation commit boundary so account switch/logout cannot
+                // interleave after validation.
+                build_and_join(
+                    runtime,
+                    operation_token,
+                    &params,
+                    &token.access_token,
+                    generation,
+                )
+                .await
+                .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
+                commit_robot_binding(
+                    state,
+                    runtime,
+                    operation_token,
+                    instance_id,
+                    &params.robot_binding,
+                    expected_profile,
+                )
+                .await?;
+                runtime
+                    .ensure_connection_operation(operation_token)
+                    .await
+                    .map_err(ManagerError::InvalidResponse)?;
+                let refresh_task = spawn_refresh_task(
+                    state,
+                    runtime.clone(),
+                    params.clone(),
+                    instance_id.to_string(),
+                    generation,
+                    token.expires_in,
+                );
+                runtime
+                    .set_refresh_task_for_generation(generation, refresh_task)
+                    .await
+                    .map_err(ManagerError::InvalidResponse)
+            })
             .await
-            .map_err(ManagerError::InvalidResponse)?;
-        let refresh_task = spawn_refresh_task(
-            app,
-            state,
-            runtime.clone(),
-            params.clone(),
-            instance_id.to_string(),
-            generation,
-            token.expires_in,
-        );
-        runtime
-            .set_refresh_task_for_generation(generation, refresh_task)
-            .await
-            .map_err(ManagerError::InvalidResponse)
     }
     .await;
     if result.is_err() {
@@ -1328,9 +1377,7 @@ fn reserve_connection_target_in(
 /// SMCP 长连接 token 不能热刷新（握手时绑定一次），只能 teardown+reconnect。任务整段生命周期由
 /// [`ComputerInstanceRuntime`] 持有，连接被关闭/替换时 abort。换连接前用 `generation` 确认「仍是我
 /// 这条连接」，避免与用户期间手动断开/改连竞态时误覆盖。
-#[allow(clippy::too_many_arguments)]
 fn spawn_refresh_task(
-    app: &AppHandle,
     state: &AppState,
     runtime: ComputerInstanceRuntime,
     params: ManagerConnectionParams,
@@ -1338,9 +1385,8 @@ fn spawn_refresh_task(
     generation: u64,
     initial_expires_in: i64,
 ) -> tokio::task::JoinHandle<()> {
-    let manager_client = state.manager_client.clone();
+    let manager_context = state.manager_context.clone();
     let log_service = state.log_service.clone();
-    let app = app.clone();
 
     tokio::spawn(async move {
         let mut expires_in = initial_expires_in;
@@ -1359,7 +1405,7 @@ fn spawn_refresh_task(
                 return;
             }
 
-            match refresh_cycle(&manager_client, &runtime, &params, generation).await {
+            match refresh_cycle(&manager_context, &runtime, &params, generation).await {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
                     if !runtime.complete_reconnect_for_generation(generation).await {
@@ -1385,7 +1431,6 @@ fn spawn_refresh_task(
                         RefreshTerminalOutcome::Unauthorized,
                     )
                     .await;
-                    let _ = app.emit("manager:auth-expired", ());
                     return;
                 }
                 // 连接已被替换/断开，或永久错误 → 本任务退场。
@@ -1503,20 +1548,34 @@ pub enum RefreshOutcome {
     Gone,
     /// 不可恢复（永久错误），停止刷新。
     Stop,
-    /// session 失效——调用方应 emit `manager:auth-expired` 并停止刷新。
+    /// session 失效——Manager Context 已统一发布 `manager:auth-expired`，刷新任务停止。
     Unauthorized,
 }
 
 /// 执行一次预刷新：exchange → [`reconnect_with_token`]。
 /// 只做决策、不做 emit/log 副作用（交调用方按 [`RefreshOutcome`] 处理），便于无 AppHandle 环境测试。
 async fn refresh_cycle(
-    manager_client: &Arc<ManagerClient>,
+    manager_context: &Arc<ManagerContextCoordinator>,
     runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
 ) -> RefreshOutcome {
-    let token = match manager_client
-        .exchange_token(&params.robot_account_id, params.scope.clone())
+    let manager_generation = match manager_context.capture_authenticated_generation().await {
+        Ok(generation) => generation,
+        Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
+            return RefreshOutcome::Unauthorized;
+        }
+        Err(error) => {
+            log::error!("Token pre-refresh could not capture Manager context: {error}");
+            return RefreshOutcome::Stop;
+        }
+    };
+    let token = match manager_context
+        .exchange_token_for_generation(
+            manager_generation,
+            &params.robot_account_id,
+            params.scope.clone(),
+        )
         .await
     {
         Ok(t) => t,
@@ -1531,12 +1590,23 @@ async fn refresh_cycle(
             return RefreshOutcome::Stop;
         }
     };
-    reconnect_with_token(runtime, params, generation, &token).await
+    match manager_context
+        .commit_for_authenticated_generation(manager_generation, || async {
+            Ok(reconnect_with_token(runtime, params, generation, &token).await)
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("Token pre-refresh context changed before reconnect commit: {error}");
+            RefreshOutcome::Stop
+        }
+    }
 }
 
 /// 用已拿到的短 JWT 重建连接：runtime lifecycle lock 内断开旧 SDK Socket.IO → 重连 → 成功刷新快照。
 ///
-/// **不依赖 AppHandle / ManagerClient**（emit/log 留给调用方），便于集成测试 build 失败路径。
+/// **不依赖 AppHandle / Manager Context**（emit/log 留给调用方），便于集成测试 build 失败路径。
 /// 顺序 **disconnect-first**：同机器人重连必须先释放 room，否则 server 拒绝重复实例
 /// （同 `(office_id, connection.computer_name)`）。build 失败返回 Retry；SDK lifecycle 回到 Started，
 /// client runtime diagnostic 则保留失败原因，避免业务层把已断开的 socket 误判为健康连接。

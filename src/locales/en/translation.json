@@ -753,6 +753,7 @@
       "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
+      "context_changed": "Your Manager account changed while this request was running. Please try again.",
       "missing_base_url": "The Manager environment could not be resolved. Select an environment again.",
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
