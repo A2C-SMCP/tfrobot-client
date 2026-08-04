@@ -11,7 +11,7 @@ function errorI18nKey(err: ManagerError): string {
 
 export function AccountSelection() {
   const { t } = useTranslation();
-  const { pendingAccountSelection, selectAccount, loading, error, clearError, reset } =
+  const { pendingAccountSelection, selectAccount, identityLoading, identityError, clearError, logout } =
     useManagerStore();
 
   if (!pendingAccountSelection) return null;
@@ -35,8 +35,14 @@ export function AccountSelection() {
           <Text type="secondary">{t('managerAccount.accountSelection.description')}</Text>
         </div>
 
-        {error && (
-          <Alert type="error" showIcon message={t(errorI18nKey(error))} closable onClose={clearError} />
+        {identityError && (
+          <Alert
+            type="error"
+            showIcon
+            message={t(errorI18nKey(identityError))}
+            closable
+            onClose={clearError}
+          />
         )}
 
         <List
@@ -50,7 +56,7 @@ export function AccountSelection() {
                   key="select"
                   type="primary"
                   size="small"
-                  loading={loading}
+                  loading={identityLoading}
                   onClick={() => handleSelect(account.accountId)}
                 >
                   {t('managerAccount.accountSelection.select')}
@@ -76,7 +82,7 @@ export function AccountSelection() {
           )}
         />
 
-        <Button icon={<ArrowLeftOutlined />} onClick={reset} block>
+        <Button icon={<ArrowLeftOutlined />} onClick={() => void logout()} block>
           {t('managerAccount.accountSelection.back')}
         </Button>
       </Space>

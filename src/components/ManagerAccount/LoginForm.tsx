@@ -21,7 +21,7 @@ interface LoginFormProps {
 export function LoginForm({ onSubmitted }: LoginFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm();
-  const { environment, login, loading, error, clearError } = useManagerStore();
+  const { context, login, identityLoading, identityError, clearError } = useManagerStore();
 
   const handleFinish = async (values: {
     environment: ManagerEnvironment;
@@ -47,18 +47,18 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
           <Text type="secondary">{t('managerAccount.login.description')}</Text>
         </div>
 
-        {error && (
+        {identityError && (
           <Alert
             type="error"
             showIcon
-            message={t(errorI18nKey(error))}
+            message={t(errorI18nKey(identityError))}
             description={
-              error.kind === 'network_error'
-                ? error.detail
-                : error.kind === 'invalid_credentials'
-                ? error.detail.message
-                : error.kind === 'other'
-                ? `HTTP ${error.detail.status}: ${error.detail.body}`
+              identityError.kind === 'network_error'
+                ? identityError.detail
+                : identityError.kind === 'invalid_credentials'
+                ? identityError.detail.message
+                : identityError.kind === 'other'
+                ? `HTTP ${identityError.detail.status}: ${identityError.detail.body}`
                 : undefined
             }
             closable
@@ -69,7 +69,7 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
         <Form
           form={form}
           layout="vertical"
-          initialValues={{ environment: environment ?? 'staging' }}
+          initialValues={{ environment: context.environment ?? 'staging' }}
           onFinish={handleFinish}
         >
           <Form.Item
@@ -100,7 +100,13 @@ export function LoginForm({ onSubmitted }: LoginFormProps) {
             <Input.Password autoComplete="current-password" />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit" icon={<LoginOutlined />} loading={loading} block>
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<LoginOutlined />}
+              loading={identityLoading}
+              block
+            >
               {t('managerAccount.login.submit')}
             </Button>
           </Form.Item>

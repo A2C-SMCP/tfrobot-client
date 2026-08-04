@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   App,
@@ -23,9 +23,17 @@ import {
   useComputerStore,
   type ComputerConnectionTarget,
 } from '@/stores/computerStore';
-import { useManagerStore, type DepartmentRef } from '@/stores/managerStore';
+import {
+  currentEmployeeResource,
+  managerSessionFromContext,
+  useManagerStore,
+  type DepartmentRef,
+  type DigitalEmployeeBrief,
+  type ManagerContextKey,
+} from '@/stores/managerStore';
 
 const { Text } = Typography;
+const EMPTY_MANAGER_EMPLOYEES: DigitalEmployeeBrief[] = [];
 
 interface RobotConnectionPanelProps {
   instanceId: string;
@@ -57,15 +65,19 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [savingPolicy, setSavingPolicy] = useState(false);
-  const hydrationAttemptedFor = useRef<string | null>(null);
   const { instances, updateConnectionPolicy } = useComputerStore();
   const {
-    session,
-    employees,
-    loading: managerLoading,
-    error: managerError,
+    context,
+    employeeResources,
+    identityLoading,
+    identityError,
     fetchEmployeesIfStale,
   } = useManagerStore();
+  const session = managerSessionFromContext(context);
+  const managerResource = currentEmployeeResource({ context, employeeResources });
+  const employees = managerResource?.employees ?? EMPTY_MANAGER_EMPLOYEES;
+  const managerLoading = identityLoading || managerResource?.loading === true;
+  const managerError = managerResource?.error ?? identityError;
   const [selectedTargetValue, setSelectedTargetValue] = useState<string>();
   const [autoConnect, setAutoConnect] = useState(false);
   const selectedInstance = instances.find((instance) => instance.id === instanceId);
@@ -79,11 +91,15 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
   }, [fetchEmployeesIfStale, session]);
 
   useEffect(() => {
-    setSelectedTargetValue(managerTargetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(
+      selectedInstance?.connectionPolicy.target,
+      context.contextKey,
+    ));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
     selectedInstance?.connectionPolicy.target,
+    context.contextKey,
   ]);
 
   const selectedTarget = useMemo(
@@ -91,17 +107,20 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       selectedTargetValue,
       employees,
       selectedInstance?.connectionPolicy.target,
+      context.contextKey,
     ),
-    [employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
+    [context.contextKey, employees, selectedInstance?.connectionPolicy.target, selectedTargetValue],
   );
   const targetOptions = useMemo(() => {
+    if (!context.contextKey) return [];
     const managerOptions = employees
-      .filter((employee) => (employee.status ?? 'running') === 'running' && employee.robotAccountId != null)
+      .filter((employee) => (employee.status ?? 'running') === 'running')
       .map((employee) => ({
         value: targetToValue({
           type: 'manager_robot',
-          id: String(employee.id),
-          robotAccountId: employee.robotAccountId,
+          contextKey: context.contextKey!,
+          employeeId: employee.id,
+          lastResolvedRobotAccountId: employee.robotAccountId,
         })!,
         label: formatManagerRobotOption(employee),
       }));
@@ -111,14 +130,18 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
         options: managerOptions,
       },
     ];
-  }, [employees, t]);
+  }, [context.contextKey, employees, t]);
 
   const rollbackPolicyControls = useCallback(() => {
-    setSelectedTargetValue(managerTargetToValue(selectedInstance?.connectionPolicy.target));
+    setSelectedTargetValue(managerTargetToValue(
+      selectedInstance?.connectionPolicy.target,
+      context.contextKey,
+    ));
     setAutoConnect(selectedInstance?.connectionPolicy.auto_connect ?? false);
   }, [
     selectedInstance?.connectionPolicy.auto_connect,
     selectedInstance?.connectionPolicy.target,
+    context.contextKey,
   ]);
 
   const savePolicy = useCallback(async (
@@ -126,11 +149,6 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     nextAutoConnect: boolean,
     options: { showSuccess?: boolean } = {},
   ) => {
-    if (target?.type === 'manager_robot' && target.robotAccountId == null) {
-      message.error(t('managerAccount.employees.noRobotAccount'));
-      rollbackPolicyControls();
-      return;
-    }
     setSavingPolicy(true);
     try {
       await updateConnectionPolicy(instanceId, {
@@ -153,6 +171,7 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
       value,
       employees,
       selectedInstance?.connectionPolicy.target,
+      context.contextKey,
     );
     setSelectedTargetValue(value);
     void savePolicy(nextTarget, autoConnect);
@@ -162,31 +181,6 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
     setAutoConnect(checked);
     void savePolicy(selectedTarget, checked);
   };
-
-  useEffect(() => {
-    if (
-      savingPolicy
-      || selectedTarget?.type !== 'manager_robot'
-      || selectedTarget.robotAccountId == null
-      || selectedInstance?.connectionPolicy.target?.type !== 'manager_robot'
-      || selectedInstance.connectionPolicy.target.robotAccountId != null
-      || targetToValue(selectedInstance.connectionPolicy.target) !== targetToValue(selectedTarget)
-    ) {
-      return;
-    }
-    const targetValue = targetToValue(selectedTarget);
-    if (hydrationAttemptedFor.current === targetValue) {
-      return;
-    }
-    hydrationAttemptedFor.current = targetValue ?? null;
-    void savePolicy(selectedTarget, autoConnect, { showSuccess: false });
-  }, [
-    autoConnect,
-    savePolicy,
-    savingPolicy,
-    selectedInstance?.connectionPolicy.target,
-    selectedTarget,
-  ]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -344,11 +338,25 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
 
 function targetToValue(target?: ComputerConnectionTarget | null): string | undefined {
   if (!target) return undefined;
-  return `${target.type}:${target.id}`;
+  if (target.type === 'manual_smcp') return `${target.type}:${target.id}`;
+  return JSON.stringify([
+    target.type,
+    target.contextKey.environment,
+    target.contextKey.accountId,
+    target.contextKey.organizationId,
+    target.employeeId,
+  ]);
 }
 
-function managerTargetToValue(target?: ComputerConnectionTarget | null): string | undefined {
-  return target?.type === 'manager_robot' ? targetToValue(target) : undefined;
+function managerTargetToValue(
+  target: ComputerConnectionTarget | null | undefined,
+  currentContextKey: ManagerContextKey | null,
+): string | undefined {
+  return target?.type === 'manager_robot'
+    && currentContextKey !== null
+    && sameContextKey(target.contextKey, currentContextKey)
+    ? targetToValue(target)
+    : undefined;
 }
 
 function formatManagerRobotOption(employee: {
@@ -371,21 +379,34 @@ function valueToTarget(
   value: string | undefined,
   employees: Array<{ id: number; robotAccountId?: string }>,
   currentTarget?: ComputerConnectionTarget | null,
+  currentContextKey?: ManagerContextKey | null,
 ): ComputerConnectionTarget | null {
-  if (!value) return null;
-  const [type, ...idParts] = value.split(':');
-  const id = idParts.join(':');
-  if (!id || type !== 'manager_robot') return null;
-  const employee = employees.find((item) => String(item.id) === id);
+  if (!value || !currentContextKey) return null;
   if (currentTarget?.type === 'manager_robot' && targetToValue(currentTarget) === value) {
+    const employee = employees.find((item) => item.id === currentTarget.employeeId);
     return {
       ...currentTarget,
-      robotAccountId: employee?.robotAccountId ?? currentTarget.robotAccountId,
+      lastResolvedRobotAccountId:
+        employee?.robotAccountId ?? currentTarget.lastResolvedRobotAccountId,
     };
   }
+  const employee = employees.find((item) => targetToValue({
+    type: 'manager_robot',
+    contextKey: currentContextKey,
+    employeeId: item.id,
+    lastResolvedRobotAccountId: item.robotAccountId,
+  }) === value);
+  if (!employee) return null;
   return {
-    type,
-    id,
-    robotAccountId: employee?.robotAccountId,
+    type: 'manager_robot',
+    contextKey: currentContextKey,
+    employeeId: employee.id,
+    lastResolvedRobotAccountId: employee.robotAccountId,
   };
+}
+
+function sameContextKey(left: ManagerContextKey, right: ManagerContextKey): boolean {
+  return left.environment === right.environment
+    && left.accountId === right.accountId
+    && left.organizationId === right.organizationId;
 }

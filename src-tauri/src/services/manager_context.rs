@@ -5,14 +5,21 @@
 //! redacted snapshot, and serializes identity-changing transactions so a late response cannot
 //! overwrite a newer account context.
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::services::manager_client::{
-    ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, LoginResult, ManagerClient,
-    ManagerCurrentUser, ManagerError, ManagerRequestOutcome, UserInfo,
+    ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, LoginResult,
+    ManagerAccountSummary, ManagerClient, ManagerCurrentUser, ManagerError, ManagerRequestOutcome,
+    SwitchedManagerAccount, UserInfo,
 };
 use crate::services::manager_environment::ManagerEnvironment;
 use crate::services::settings::{
@@ -107,12 +114,36 @@ pub trait ManagerContextEventSink: Send + Sync {
     fn emit_auth_expired(&self) -> Result<(), String>;
 }
 
+#[async_trait::async_trait]
+pub trait ManagerContextLifecycleSink: Send + Sync {
+    /// Returns diagnostic cleanup errors. Local authority must already be cleared for every item.
+    async fn cleanup_manager_context(
+        &self,
+        departing_context: Option<&ManagerContextKey>,
+    ) -> Vec<String>;
+}
+
+struct ManagerContextTransitionGuard<'a> {
+    transitioning: &'a AtomicBool,
+    owns_transition: bool,
+}
+
+impl Drop for ManagerContextTransitionGuard<'_> {
+    fn drop(&mut self) {
+        if self.owns_transition {
+            self.transitioning.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub struct ManagerContextCoordinator {
     client: Arc<ManagerClient>,
     settings: Arc<SettingsService>,
     snapshot: RwLock<ManagerContextSnapshot>,
     transaction_lock: Mutex<()>,
+    transitioning: AtomicBool,
     event_sink: RwLock<Option<Arc<dyn ManagerContextEventSink>>>,
+    lifecycle_sink: RwLock<Option<Arc<dyn ManagerContextLifecycleSink>>>,
     base_url_override: Option<String>,
 }
 
@@ -123,7 +154,9 @@ impl ManagerContextCoordinator {
             settings,
             snapshot: RwLock::new(ManagerContextSnapshot::default()),
             transaction_lock: Mutex::new(()),
+            transitioning: AtomicBool::new(false),
             event_sink: RwLock::new(None),
+            lifecycle_sink: RwLock::new(None),
             base_url_override: None,
         }
     }
@@ -141,13 +174,19 @@ impl ManagerContextCoordinator {
             settings,
             snapshot: RwLock::new(ManagerContextSnapshot::default()),
             transaction_lock: Mutex::new(()),
+            transitioning: AtomicBool::new(false),
             event_sink: RwLock::new(None),
+            lifecycle_sink: RwLock::new(None),
             base_url_override: Some(base_url),
         }
     }
 
     pub async fn set_event_sink(&self, sink: Arc<dyn ManagerContextEventSink>) {
         *self.event_sink.write().await = Some(sink);
+    }
+
+    pub async fn set_lifecycle_sink(&self, sink: Arc<dyn ManagerContextLifecycleSink>) {
+        *self.lifecycle_sink.write().await = Some(sink);
     }
 
     pub async fn snapshot(&self) -> ManagerContextSnapshot {

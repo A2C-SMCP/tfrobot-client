@@ -5,6 +5,7 @@ import type {
   UserInfo,
   DigitalEmployeeBrief,
   AccountOption,
+  ManagerContextSnapshot,
   ManagerError,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
@@ -80,8 +81,88 @@ import { ManagerAccount } from '@/components/ManagerAccount';
 const mockUseManagerStore = vi.mocked(useManagerStore);
 const mockedInvoke = vi.mocked(invoke);
 
+function adaptMock(store: ManagerStoreMock) {
+  let context: ManagerContextSnapshot;
+  if (store.session) {
+    const organizationId = store.session.accountId.split(':')[0] || 'organization-test';
+    context = {
+      revision: 1,
+      authState: 'authenticated',
+      environment: store.environment ?? 'staging',
+      contextKey: {
+        environment: store.environment ?? 'staging',
+        accountId: store.session.accountId,
+        organizationId,
+      },
+      user: { id: store.session.userId, nickname: 'User', email: '', phone: '' },
+      account: {
+        id: store.session.accountId,
+        name: store.session.accountName,
+        nickname: 'User',
+        avatar: '',
+        employeeNo: '',
+      },
+      organization: { id: organizationId, name: 'Organization', organizationType: 'team' },
+      permissions: [],
+    };
+  } else if (store.onboardingUserId !== null) {
+    context = {
+      revision: 1,
+      authState: 'onboarding_required',
+      environment: store.environment ?? 'staging',
+      contextKey: null,
+      user: { id: store.onboardingUserId, nickname: '', email: '', phone: '' },
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+  } else {
+    context = {
+      revision: store.pendingAccountSelection ? 1 : 0,
+      authState: store.pendingAccountSelection ? 'account_selection_required' : 'signed_out',
+      environment: store.pendingAccountSelection ? store.environment ?? 'staging' : null,
+      contextKey: null,
+      user: null,
+      account: null,
+      organization: null,
+      permissions: [],
+    };
+  }
+  const scope = context.contextKey
+    ? JSON.stringify([
+      context.contextKey.environment,
+      context.contextKey.accountId,
+      context.contextKey.organizationId,
+      context.revision,
+    ])
+    : null;
+  return {
+    ...store,
+    context,
+    contextInitialized: true,
+    identityLoading: store.loading,
+    identityError: store.error,
+    employeeResources: scope
+      ? {
+        [scope]: {
+          scope,
+          contextKey: context.contextKey!,
+          revision: context.revision,
+          employees: store.employees,
+          loading: store.loading,
+          error: store.error,
+          paymentRequired: store.paymentRequired,
+          lastFetchAt: Date.now(),
+          selectedEmployeeId: null,
+          connectingEmployeeId: null,
+        },
+      }
+      : {},
+  };
+}
+
 function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
-  mockUseManagerStore.mockReturnValue({ ...mockStore, ...overrides } as ReturnType<
+  mockUseManagerStore.mockReturnValue(adaptMock({ ...mockStore, ...overrides }) as ReturnType<
     typeof useManagerStore
   >);
 }
@@ -437,11 +518,23 @@ describe('ManagerAccount', () => {
       expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
     }, 10000);
 
-    it('disables connect when robotAccountId is missing (cannot token-exchange)', async () => {
+    it('allows connect when cached robotAccountId is missing so backend can re-resolve it', async () => {
       const noAccount = { ...employee, robotAccountId: undefined };
       applyMock({ session: user, employees: [noAccount] });
+      useConnectionStore.setState({
+        statuses: {
+          'computer-a': {
+            status: 'disconnected',
+            connected: false,
+            actions: {
+              connect: { enabled: true, disabled_reason: null },
+              disconnect: { enabled: false, disabled_reason: 'not_connected' },
+            },
+          },
+        },
+      });
       render(<EmployeeList instanceId="computer-a" />);
-      expect(screen.getByRole('button', { name: /Connect/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /Connect/i })).toBeEnabled();
     }, 10000);
 
     it('renders payment_required alert with renew button when redirectUrl present', async () => {

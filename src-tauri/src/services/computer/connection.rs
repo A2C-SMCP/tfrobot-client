@@ -368,6 +368,84 @@ impl ComputerInstanceRuntime {
         Ok(true)
     }
 
+    /// Clears only a Manager-owned connection/operation during an identity transaction.
+    ///
+    /// Remote teardown is best-effort: even when the SDK reports an error, the refresh task,
+    /// socket handle and client-owned connection authority are removed locally so credentials
+    /// from the departing Context cannot remain usable. Manual SMCP state is never touched.
+    pub async fn clear_manager_connection_for_context_transaction(
+        &self,
+    ) -> Result<bool, String> {
+        const MANAGER_SOURCE: &str = "manager_robot";
+        let _guard = self.lifecycle_lock.lock().await;
+        let connection_is_manager = self
+            .connection
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|connection| connection.source_type == MANAGER_SOURCE);
+        let operation_is_manager = self
+            .connection_operation
+            .read()
+            .await
+            .operation_target
+            .as_ref()
+            .is_some_and(|target| target.source_type == MANAGER_SOURCE);
+        if !connection_is_manager && !operation_is_manager {
+            return Ok(false);
+        }
+
+        self.abort_refresh_task().await;
+        let teardown_error = if self.has_smcp_transport().await {
+            self.disconnect_smcp_socketio_bounded_inner().await.err()
+        } else {
+            None
+        };
+        // A failed SDK disconnect must not retain a credential-bearing client handle locally.
+        let socketio_ref = self.computer.read().await.get_socketio_client();
+        socketio_ref.write().await.take();
+
+        let mut connection = self.connection.write().await;
+        let mut operation = self.connection_operation.write().await;
+        let connection_changed = connection
+            .as_ref()
+            .is_some_and(|current| current.source_type == MANAGER_SOURCE);
+        if connection_changed {
+            connection.take();
+        }
+        let operation_changed = connection_changed
+            || operation
+                .operation_target
+                .as_ref()
+                .is_some_and(|target| target.source_type == MANAGER_SOURCE);
+        if operation_changed {
+            operation.operation = None;
+            operation.operation_target = None;
+            operation.generation = None;
+        }
+        if let Some(error) = teardown_error.as_ref() {
+            ClientConnectionOperationError::replace_current(
+                &mut operation.last_error,
+                ClientConnectionOperation::Disconnect,
+                format!("Manager Context cleanup could not confirm remote disconnect: {error}"),
+                true,
+            );
+        }
+        if connection_changed || operation_changed || teardown_error.is_some() {
+            self.advance_connection_revision();
+        }
+        drop(operation);
+        drop(connection);
+        if connection_changed || operation_changed || teardown_error.is_some() {
+            self.publish_connection_state().await;
+        }
+
+        match teardown_error {
+            Some(error) => Err(error),
+            None => Ok(true),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn reconnect_smcp_socketio_for_generation(
         &self,
@@ -471,7 +549,13 @@ impl ComputerInstanceRuntime {
 
     pub async fn abort_refresh_task(&self) {
         if let Some(task) = self.refresh_task.lock().await.take() {
-            task.abort();
+            // A refresh-triggered 401 enters the same Context cleanup transaction from inside
+            // this task. Aborting itself would cancel that transaction at its next await before
+            // the signed-out Context is committed; detach instead and let its Unauthorized path
+            // return normally.
+            if tokio::task::try_id() != Some(task.id()) {
+                task.abort();
+            }
         }
     }
 

@@ -1,14 +1,30 @@
 import { invoke } from '@tauri-apps/api/core';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
-import { useComputerStore } from '@/stores/computerStore';
-import { useManagerStore } from '@/stores/managerStore';
+import { useComputerStore, type ComputerConnectionTarget } from '@/stores/computerStore';
+import { managerContextScope, useManagerStore, type ManagerContextSnapshot } from '@/stores/managerStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
+const managerContextKey = {
+  environment: 'staging' as const,
+  accountId: 'org-1:account-23',
+  organizationId: 'org-1',
+};
+
+const managerTarget = (
+  employeeId: number,
+  lastResolvedRobotAccountId?: string,
+  contextKey = managerContextKey,
+) => ({
+  type: 'manager_robot' as const,
+  contextKey,
+  employeeId,
+  lastResolvedRobotAccountId,
+});
 
 function setComputer(
-  target: { type: 'manager_robot' | 'manual_smcp'; id: string; robotAccountId?: string } | null = null,
+  target: ComputerConnectionTarget | null = null,
 ) {
   useComputerStore.setState({
     instances: [
@@ -28,10 +44,31 @@ function setComputer(
   });
 }
 
-function setManagerRobots() {
-  useManagerStore.setState({
-    session: { userId: '1', accountId: 'org-1:account-23', accountName: 'acct' },
-    employees: [
+function setManagerRobots(contextKey = managerContextKey) {
+  const context: ManagerContextSnapshot = {
+    revision: 1,
+    authState: 'authenticated',
+    environment: 'staging',
+    contextKey,
+    user: { id: '1', nickname: 'User', email: '', phone: '' },
+    account: {
+      id: contextKey.accountId,
+      name: 'acct',
+      nickname: 'User',
+      avatar: '',
+      employeeNo: '',
+    },
+    organization: { id: contextKey.organizationId, name: 'Org', organizationType: 'team' },
+    permissions: [],
+  };
+  useManagerStore.getState().applyContext(context);
+  const scope = managerContextScope(context)!;
+  useManagerStore.setState((state) => ({
+    employeeResources: {
+      ...state.employeeResources,
+      [scope]: {
+        ...state.employeeResources[scope],
+        employees: [
       {
         id: 24,
         name: 'Deleted Robot',
@@ -48,9 +85,11 @@ function setManagerRobots() {
         templateType: 'tfrserver',
         namespace: 'org-a',
       },
-    ],
-    lastFetchAt: Date.now(),
-  });
+        ],
+        lastFetchAt: Date.now(),
+      },
+    },
+  }));
 }
 
 function managerPolicyResponse() {
@@ -63,7 +102,7 @@ function managerPolicyResponse() {
     runtime: runtimeSnapshot(),
     robot_binding: null,
     connection_policy: {
-      target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
+      target: managerTarget(25, '2525'),
       auto_connect: false,
     },
     connection: null,
@@ -72,7 +111,7 @@ function managerPolicyResponse() {
 
 describe('RobotConnectionPanel', () => {
   beforeEach(() => {
-    useManagerStore.getState().reset();
+    useManagerStore.setState(useManagerStore.getInitialState(), true);
     setComputer();
     mockedInvoke.mockReset();
   });
@@ -123,7 +162,7 @@ describe('RobotConnectionPanel', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
         request: {
           id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
+          target: managerTarget(25, '2525'),
           autoConnect: false,
         },
       });
@@ -149,8 +188,8 @@ describe('RobotConnectionPanel', () => {
     expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
   });
 
-  it('hydrates a saved Manager Robot policy with its opaque connection account metadata', async () => {
-    setComputer({ type: 'manager_robot', id: '25' });
+  it('does not persist diagnostic metadata merely because the resource list loaded', async () => {
+    setComputer(managerTarget(25));
     setManagerRobots();
     mockedInvoke.mockImplementation(async (cmd) => {
       if (cmd === 'update_computer_connection_policy') return managerPolicyResponse();
@@ -159,14 +198,29 @@ describe('RobotConnectionPanel', () => {
 
     render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('update_computer_connection_policy', {
-        request: {
-          id: 'computer-a',
-          target: { type: 'manager_robot', id: '25', robotAccountId: '2525' },
-          autoConnect: false,
-        },
-      });
+    await screen.findByText('Running Robot');
+    expect(mockedInvoke).not.toHaveBeenCalledWith(
+      'update_computer_connection_policy',
+      expect.anything(),
+    );
+  });
+
+  it('does not present a target from another Context as selected or connectable', async () => {
+    setComputer(managerTarget(25, 'old-diagnostic'));
+    setManagerRobots({
+      environment: 'staging',
+      accountId: 'org-2:account-99',
+      organizationId: 'org-2',
     });
+
+    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+
+    expect(await screen.findByText('Running Robot')).toBeInTheDocument();
+    expect(screen.getByText('Select a Manager Robot')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
+    expect(mockedInvoke).not.toHaveBeenCalledWith(
+      'update_computer_connection_policy',
+      expect.anything(),
+    );
   });
 });

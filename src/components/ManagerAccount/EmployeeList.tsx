@@ -10,7 +10,6 @@ import {
   Tag,
   Empty,
   Descriptions,
-  Tooltip,
 } from 'antd';
 import {
   RobotOutlined,
@@ -23,6 +22,8 @@ import {
 import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import {
+  currentEmployeeResource,
+  managerSessionFromContext,
   useManagerStore,
   type DepartmentRef,
   type DigitalEmployeeBrief,
@@ -31,6 +32,7 @@ import {
 import { useConnectionStore, type ConnectionStatusInfo } from '@/stores/connectionStore';
 
 const { Title, Text } = Typography;
+const EMPTY_EMPLOYEES: DigitalEmployeeBrief[] = [];
 
 const DEFAULT_CONNECT_CAPABILITY = {
   enabled: false,
@@ -87,11 +89,10 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
-    session,
-    employees,
-    loading,
-    error,
-    paymentRequired,
+    context,
+    employeeResources,
+    identityLoading,
+    identityError,
     online,
     fetchEmployees,
     fetchEmployeesIfStale,
@@ -101,6 +102,14 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
     clearError,
     dismissPaymentRequired,
   } = useManagerStore();
+  const session = managerSessionFromContext(context);
+  const resource = currentEmployeeResource({ context, employeeResources });
+  const employees = resource?.employees ?? EMPTY_EMPLOYEES;
+  const loading = identityLoading
+    || resource?.loading === true
+    || resource?.connectingEmployeeId != null;
+  const error = resource?.error ?? identityError;
+  const paymentRequired = resource?.paymentRequired ?? null;
   const disconnectSmcp = useConnectionStore((s) => s.disconnect);
   const selectedConnectionStatus = useConnectionStore((s) =>
     instanceId ? s.statuses[instanceId] : undefined,
@@ -287,14 +296,12 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
               const isDisconnecting = backendConnectionStatus === 'disconnecting'
                 && isConnectionTarget;
               const isConnected = backendConnectionStatus === 'connected' && isConnectionTarget;
-              // 无 robotAccountId（历史/未回填实例）无法做 token-exchange → 禁用连接（TFRC-11 / TFRM-183）。
-              const noRobotAccount = emp.robotAccountId == null;
               const connectButton = (
                 <Button
                   key="connect"
                   type="primary"
                   icon={<LinkOutlined />}
-                  disabled={!connectable || noRobotAccount || !connectCapability.enabled}
+                  disabled={!connectable || !connectCapability.enabled}
                   loading={isConnecting}
                   onClick={() => handleConnect(emp)}
                 >
@@ -317,13 +324,6 @@ export function EmployeeList({ instanceId }: EmployeeListProps) {
                             >
                               {t('managerAccount.employees.disconnect')}
                             </Button>
-                          ) : noRobotAccount ? (
-                            <Tooltip
-                              key="connect"
-                              title={t('managerAccount.employees.noRobotAccount')}
-                            >
-                              <span>{connectButton}</span>
-                            </Tooltip>
                           ) : (
                             connectButton
                           ),

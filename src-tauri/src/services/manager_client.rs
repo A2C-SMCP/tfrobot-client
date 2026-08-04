@@ -170,6 +170,12 @@ struct SelectAccountRequestBody<'a> {
     account_id: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchAccountRequestBody {
+    account_id: u64,
+}
+
 /// 登录成功后 Manager 下发的用户/账户信息（扁平 4 字段，**无嵌套 user 对象**）。
 /// 结构与 select-account 成功响应一致。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -233,6 +239,57 @@ pub struct AccountOption {
     pub organization_name: String,
     #[serde(default)]
     pub organization_type: String,
+}
+
+/// Account available to the currently authenticated user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerAccountSummary {
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub account_id: String,
+    pub account_name: String,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub organization_id: String,
+    pub organization_name: String,
+    #[serde(default)]
+    pub organization_type: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagerAccountListPayload {
+    #[serde(default)]
+    accounts: Vec<ManagerAccountSummary>,
+}
+
+/// Redacted identity returned by passwordless account switching. The token is consumed internally.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchedManagerAccount {
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub user_id: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub account_id: String,
+    pub account_name: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
+    pub organization_id: String,
+    pub organization_name: String,
+    #[serde(default)]
+    pub organization_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchAccountPayload {
+    token: String,
+    #[serde(flatten)]
+    identity: SwitchedManagerAccount,
 }
 
 /// 多账户登录响应 data 体。
@@ -908,6 +965,83 @@ impl ManagerClient {
         }
         .await;
         Ok(ManagerRequestOutcome { generation, result })
+    }
+
+    /// `GET {base}/api/v1/accounts/my` — list accounts available to the current user.
+    pub(crate) async fn list_accounts_outcome(
+        &self,
+    ) -> Result<ManagerRequestOutcome<Vec<ManagerAccountSummary>>, ManagerError> {
+        let session = self.require_session().await?;
+        let generation = session.generation;
+        let result = async {
+            if session.jwt.is_empty() {
+                return Err(ManagerError::NoSession);
+            }
+            let url = format!("{}/api/v1/accounts/my", session.base_url);
+            let response = self
+                .http
+                .get(url)
+                .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
+                .send()
+                .await
+                .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
+            if !response.status().is_success() {
+                return Err(self.classify_error(response).await);
+            }
+            let envelope: ApiEnvelope<ManagerAccountListPayload> = response
+                .json()
+                .await
+                .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+            Ok(envelope.data.accounts)
+        }
+        .await;
+        Ok(ManagerRequestOutcome { generation, result })
+    }
+
+    /// `POST {base}/api/v1/auth/switch-account` — switch using the current JWT, without password.
+    pub(crate) async fn switch_account(
+        &self,
+        account_id: &str,
+    ) -> Result<SwitchedManagerAccount, ManagerError> {
+        let account_id = account_id.parse::<u64>().map_err(|_| {
+            ManagerError::InvalidResponse(
+                "switch-account requires a positive numeric accountId".to_string(),
+            )
+        })?;
+        if account_id == 0 {
+            return Err(ManagerError::InvalidResponse(
+                "switch-account requires a positive numeric accountId".to_string(),
+            ));
+        }
+        let session = self.require_session().await?;
+        if session.jwt.is_empty() {
+            return Err(ManagerError::NoSession);
+        }
+        let url = format!("{}/api/v1/auth/switch-account", session.base_url);
+        let response = self
+            .http
+            .post(url)
+            .header(header::AUTHORIZATION, Self::bearer(&session.jwt))
+            .json(&SwitchAccountRequestBody { account_id })
+            .send()
+            .await
+            .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
+        if !response.status().is_success() {
+            return Err(self.classify_error(response).await);
+        }
+        let envelope: ApiEnvelope<SwitchAccountPayload> = response
+            .json()
+            .await
+            .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+        let SwitchAccountPayload { token, identity } = envelope.data;
+        if identity.account_id != account_id.to_string() {
+            return Err(ManagerError::InvalidResponse(
+                "switch-account response accountId does not match the request".to_string(),
+            ));
+        }
+        self.commit_authenticated_session(session.base_url, session.environment, token)
+            .await?;
+        Ok(identity)
     }
 
     /// `GET {base}/api/v1/digital-employees` — 当前账号的数字员工列表。

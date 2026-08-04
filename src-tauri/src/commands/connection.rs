@@ -7,7 +7,9 @@ use crate::services::computer::{
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
-use crate::services::manager_client::{DigitalEmployeeBrief, ExchangedToken, ManagerError};
+use crate::services::manager_client::{
+    ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
+};
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -741,18 +743,13 @@ pub async fn get_connection_status(
 /// → 连接`。连接面鉴权**唯一**走 auth dict（字段名 `token`，smcp-computer #86）；`routingHeaders`
 /// 仅作 HTTP 路由（X-TF-*，非鉴权）。成功后后台起预刷新任务（`expires_in - 60s` teardown+重连）。
 ///
-/// `robot_account_id` 取自 digital-employee 列表的 `robotAccountId`（TFRM-183，nullable —— 前端
-/// 应对 null 项禁用连接）。错误沿用 [`ManagerError`]（前端按 `kind` 分支）。
+/// 前端只提交 employee 主键。robotAccountId、路由和连接地址必须在捕获的 Manager Context
+/// generation 下重新解析，前端缓存与 profile 中的最近快照都不具备授权语义。
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn manager_connect_smcp(
     state: State<'_, AppState>,
     instance_id: String,
     employee_id: u64,
-    robot_account_id: String,
-    robot_id: Option<String>,
-    robot_name: Option<String>,
-    namespace: Option<String>,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
     let instance_id = require_instance_id(&instance_id)
@@ -760,9 +757,6 @@ pub async fn manager_connect_smcp(
         .to_string();
     let (runtime, operation_token, profile_snapshot) =
         begin_manager_connect(state.inner(), &instance_id, employee_id, None).await?;
-    log::info!(
-        "manager_connect_smcp: employee_id={employee_id} robot_account_id={robot_account_id}"
-    );
     let result = async {
         let manager_generation = state
             .manager_context
@@ -772,70 +766,29 @@ pub async fn manager_connect_smcp(
             .manager_context
             .context_key_for_generation(manager_generation)
             .await?;
-        let employee = validate_manager_robot_account(
-            state.inner(),
+        let params = resolve_manager_connection_params(
+            &state.manager_context,
             manager_generation,
+            &context_key,
             employee_id,
-            &robot_account_id,
+            scope,
         )
         .await?;
+        log::info!(
+            "manager_connect_smcp: employee_id={employee_id} resolved_robot_account_id={}",
+            params.robot_account_id
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
 
-        // 1) 握手参数
-        let info = state
-            .manager_context
-            .get_connection_info_for_generation(manager_generation, employee_id)
-            .await?;
-        runtime
-            .ensure_connection_operation(operation_token)
-            .await
-            .map_err(ManagerError::InvalidResponse)?;
-        let url = info.socket_base_url.clone();
-        if url.trim().is_empty() {
-            return Err(ManagerError::InvalidResponse(
-                "connection-info missing socketBaseURL".into(),
-            ));
-        }
-        let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-            ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
-        })?;
-        let params = ManagerConnectionParams {
-            url,
-            office_id: office_id.clone(),
-            // routingHeaders 为纯路由头（X-TF-*），verbatim 注入 HTTP header。连接面鉴权唯一走
-            // Socket.IO auth dict（字段 `token`，#86），凭据不进网关可读的 header（TFRC-20）。
-            routing_headers: info.routing_headers.clone(),
-            employee_id,
-            robot_account_id: robot_account_id.clone(),
-            scope,
-            robot_binding: RobotBindingMetadata {
-                context_key: Some(context_key),
-                state: ManagerRobotBindingState::Active,
-                employee_id,
-                robot_id: robot_id
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| employee.robot_id.clone())
-                    .or_else(|| Some(office_id.clone())),
-                last_resolved_robot_account_id: Some(robot_account_id.clone()),
-                namespace: namespace
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| employee.namespace.clone())
-                    .or_else(|| info.namespace.clone()),
-                robot_name: robot_name
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| Some(employee.name.clone())),
-            },
-        };
-
-        // 2) 换短 JWT
+        // 换短 JWT时只使用同一 generation 下刚解析出的 robotAccountId。
         let token = state
             .manager_context
             .exchange_token_for_generation(
                 manager_generation,
-                &robot_account_id,
+                &params.robot_account_id,
                 params.scope.clone(),
             )
             .await?;
@@ -848,7 +801,7 @@ pub async fn manager_connect_smcp(
             .ensure_authenticated_generation(manager_generation)
             .await?;
 
-        // 3) 连接 + 入库 + 起预刷新任务
+        // 连接 + 入库 + 起预刷新任务均位于 generation commit boundary 内。
         establish_manager_connection(
             state.inner(),
             &runtime,
@@ -881,34 +834,63 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     )
     .await?;
     let result = async {
-        let manager_generation = state
+        let manager_generation = match state
             .manager_context
             .capture_authenticated_generation()
-            .await?;
+            .await
+        {
+            Ok(generation) => generation,
+            Err(error @ (ManagerError::NoSession | ManagerError::Unauthorized)) => {
+                mark_manager_binding_dormant(
+                    state,
+                    &runtime,
+                    operation_token,
+                    instance_id,
+                    required_policy_target,
+                    expected_context_key,
+                    employee_id,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let current_context_key = state
             .manager_context
             .context_key_for_generation(manager_generation)
             .await?;
         if &current_context_key != expected_context_key {
+            mark_manager_binding_dormant(
+                state,
+                &runtime,
+                operation_token,
+                instance_id,
+                required_policy_target,
+                expected_context_key,
+                employee_id,
+            )
+            .await?;
             return Err(ManagerError::ContextChanged);
         }
-        let (employee, robot_account_id) =
-            resolve_manager_robot_account(state, manager_generation, employee_id).await?;
+        let params = resolve_manager_connection_params(
+            &state.manager_context,
+            manager_generation,
+            expected_context_key,
+            employee_id,
+            None,
+        )
+        .await?;
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
         let token = state
             .manager_context
-            .exchange_token_for_generation(manager_generation, &robot_account_id, None)
-            .await?;
-        runtime
-            .ensure_connection_operation(operation_token)
-            .await
-            .map_err(ManagerError::InvalidResponse)?;
-        let info = state
-            .manager_context
-            .get_connection_info_for_generation(manager_generation, employee_id)
+            .exchange_token_for_generation(
+                manager_generation,
+                &params.robot_account_id,
+                params.scope.clone(),
+            )
             .await?;
         runtime
             .ensure_connection_operation(operation_token)
@@ -918,38 +900,6 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             .manager_context
             .ensure_authenticated_generation(manager_generation)
             .await?;
-        let url = info.socket_base_url.clone();
-        if url.trim().is_empty() {
-            return Err(ManagerError::InvalidResponse(
-                "connection-info missing socketBaseURL".into(),
-            ));
-        }
-        let office_id = info.rid.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-            ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
-        })?;
-        let params = ManagerConnectionParams {
-            url,
-            office_id: office_id.clone(),
-            routing_headers: info.routing_headers.clone(),
-            employee_id,
-            robot_account_id: robot_account_id.clone(),
-            scope: None,
-            robot_binding: RobotBindingMetadata {
-                context_key: Some(current_context_key),
-                state: ManagerRobotBindingState::Active,
-                employee_id,
-                robot_id: employee
-                    .robot_id
-                    .clone()
-                    .or_else(|| Some(office_id.clone())),
-                last_resolved_robot_account_id: Some(robot_account_id.clone()),
-                namespace: employee
-                    .namespace
-                    .clone()
-                    .or_else(|| info.namespace.clone()),
-                robot_name: Some(employee.name.clone()),
-            },
-        };
 
         establish_manager_connection(
             state,
@@ -1053,28 +1003,127 @@ async fn finish_manager_connect(
     }
 }
 
-async fn validate_manager_robot_account(
+async fn mark_manager_binding_dormant(
     state: &AppState,
-    manager_generation: u64,
+    runtime: &ComputerInstanceRuntime,
+    operation_token: ClientConnectionOperationToken,
+    instance_id: &str,
+    required_policy_target: &ComputerConnectionTarget,
+    expected_context_key: &ManagerContextKey,
     employee_id: u64,
-    robot_account_id: &str,
-) -> Result<DigitalEmployeeBrief, ManagerError> {
-    let employees = state
-        .manager_context
-        .list_digital_employees_for_generation(manager_generation)
-        .await?;
-    validate_manager_robot_account_from_list(&employees, employee_id, robot_account_id)
+) -> Result<(), ManagerError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    runtime
+        .ensure_connection_operation(operation_token)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    state
+        .computer_registry
+        .ensure_current_runtime(runtime)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    if previous.connection_policy.target.as_ref() != Some(required_policy_target) {
+        return Ok(());
+    }
+    let updated = state
+        .config
+        .update_computer_instance(instance_id, |instance| {
+            make_manager_binding_dormant(
+                instance,
+                required_policy_target,
+                expected_context_key,
+                employee_id,
+            );
+        })
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    apply_updated_computer_instance(state, previous, updated)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    Ok(())
 }
 
-async fn resolve_manager_robot_account(
-    state: &AppState,
-    manager_generation: u64,
+fn make_manager_binding_dormant(
+    instance: &mut ComputerInstance,
+    required_policy_target: &ComputerConnectionTarget,
+    expected_context_key: &ManagerContextKey,
     employee_id: u64,
-) -> Result<(DigitalEmployeeBrief, String), ManagerError> {
-    let employees = state
-        .manager_context
+) -> bool {
+    let last_resolved_robot_account_id = match required_policy_target {
+        ComputerConnectionTarget::ManagerRobot {
+            context_key,
+            employee_id: target_employee_id,
+            last_resolved_robot_account_id,
+        } if context_key == expected_context_key && *target_employee_id == employee_id => {
+            last_resolved_robot_account_id.clone()
+        }
+        _ => return false,
+    };
+    if instance.connection_policy.target.as_ref() != Some(required_policy_target) {
+        return false;
+    }
+    let mut binding = instance
+        .robot_binding
+        .clone()
+        .filter(|binding| {
+            binding.context_key.as_ref() == Some(expected_context_key)
+                && binding.employee_id == employee_id
+        })
+        .unwrap_or_else(|| RobotBindingMetadata {
+            context_key: Some(expected_context_key.clone()),
+            state: ManagerRobotBindingState::Dormant,
+            employee_id,
+            robot_id: None,
+            last_resolved_robot_account_id,
+            namespace: None,
+            robot_name: None,
+        });
+    binding.state = ManagerRobotBindingState::Dormant;
+    instance.robot_binding = Some(binding);
+    instance.connection_policy.auto_connect = false;
+    true
+}
+
+async fn resolve_manager_connection_params(
+    manager_context: &ManagerContextCoordinator,
+    manager_generation: u64,
+    expected_context_key: &ManagerContextKey,
+    employee_id: u64,
+    scope: Option<String>,
+) -> Result<ManagerConnectionParams, ManagerError> {
+    let current_context_key = manager_context
+        .context_key_for_generation(manager_generation)
+        .await?;
+    if &current_context_key != expected_context_key {
+        return Err(ManagerError::ContextChanged);
+    }
+    let employees = manager_context
         .list_digital_employees_for_generation(manager_generation)
         .await?;
+    let (employee, robot_account_id) =
+        resolve_manager_robot_account_from_list(employees, employee_id)?;
+    let connection_info = manager_context
+        .get_connection_info_for_generation(manager_generation, employee_id)
+        .await?;
+    manager_context
+        .ensure_authenticated_generation(manager_generation)
+        .await?;
+    manager_connection_params_from_resolved(
+        expected_context_key.clone(),
+        employee,
+        robot_account_id,
+        connection_info,
+        scope,
+    )
+}
+
+fn resolve_manager_robot_account_from_list(
+    employees: Vec<DigitalEmployeeBrief>,
+    employee_id: u64,
+) -> Result<(DigitalEmployeeBrief, String), ManagerError> {
     let employee = employees
         .into_iter()
         .find(|item| item.id == employee_id)
@@ -1091,31 +1140,42 @@ async fn resolve_manager_robot_account(
     Ok((employee, robot_account_id))
 }
 
-fn validate_manager_robot_account_from_list(
-    employees: &[DigitalEmployeeBrief],
-    employee_id: u64,
-    robot_account_id: &str,
-) -> Result<DigitalEmployeeBrief, ManagerError> {
-    let employee = employees
-        .iter()
-        .find(|item| item.id == employee_id)
-        .cloned()
-        .ok_or_else(|| {
-            ManagerError::InvalidResponse(format!(
-                "Manager Robot target employee {employee_id} is not visible"
-            ))
-        })?;
-    let actual_robot_account_id = employee.robot_account_id.as_deref().ok_or_else(|| {
-        ManagerError::InvalidResponse(format!(
-            "robotAccountId missing for Manager Robot target employee {employee_id}"
-        ))
-    })?;
-    if actual_robot_account_id != robot_account_id {
-        return Err(ManagerError::InvalidResponse(format!(
-            "robotAccountId mismatch for Manager Robot target employee {employee_id}"
-        )));
+fn manager_connection_params_from_resolved(
+    context_key: ManagerContextKey,
+    employee: DigitalEmployeeBrief,
+    robot_account_id: String,
+    connection_info: ConnectionInfoResponse,
+    scope: Option<String>,
+) -> Result<ManagerConnectionParams, ManagerError> {
+    let url = connection_info.socket_base_url.trim().to_string();
+    if url.is_empty() {
+        return Err(ManagerError::InvalidResponse(
+            "connection-info missing socketBaseURL".into(),
+        ));
     }
-    Ok(employee)
+    let office_id = connection_info
+        .rid
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ManagerError::InvalidResponse("connection-info missing rid (office_id)".into())
+        })?;
+    Ok(ManagerConnectionParams {
+        url,
+        office_id: office_id.clone(),
+        routing_headers: connection_info.routing_headers,
+        employee_id: employee.id,
+        robot_account_id: robot_account_id.clone(),
+        scope,
+        robot_binding: RobotBindingMetadata {
+            context_key: Some(context_key),
+            state: ManagerRobotBindingState::Active,
+            employee_id: employee.id,
+            robot_id: employee.robot_id.or_else(|| Some(office_id)),
+            last_resolved_robot_account_id: Some(robot_account_id),
+            namespace: employee.namespace.or(connection_info.namespace),
+            robot_name: Some(employee.name),
+        },
+    })
 }
 
 /// 用给定参数 + 短 JWT 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
@@ -1323,6 +1383,65 @@ async fn commit_robot_binding(
     Ok(())
 }
 
+async fn commit_refreshed_robot_binding(
+    state: &AppState,
+    runtime: &ComputerInstanceRuntime,
+    connection_generation: u64,
+    params: &ManagerConnectionParams,
+) -> Result<(), ManagerError> {
+    let context_key = params.robot_binding.context_key.clone().ok_or_else(|| {
+        ManagerError::InvalidResponse(
+            "refreshed Manager Robot binding is missing its Context key".to_string(),
+        )
+    })?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    state
+        .computer_registry
+        .ensure_current_runtime(runtime)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    let connection = runtime
+        .connection_state_snapshot()
+        .await
+        .ok_or_else(|| ManagerError::ContextChanged)?;
+    if connection.generation != connection_generation
+        || connection.source_type != SOURCE_MANAGER_ROBOT
+        || connection.employee_id != Some(params.employee_id)
+    {
+        return Err(ManagerError::ContextChanged);
+    }
+    let instance_id = runtime.instance.id.as_str();
+    let previous = state
+        .config
+        .get_computer_instance(instance_id)
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    match previous.connection_policy.target.as_ref() {
+        Some(ComputerConnectionTarget::ManagerRobot {
+            context_key: target_context_key,
+            employee_id,
+            ..
+        }) if target_context_key == &context_key && *employee_id == params.employee_id => {}
+        _ => return Err(ManagerError::ContextChanged),
+    }
+    let refreshed_binding = params.robot_binding.clone();
+    let refreshed_account_id = refreshed_binding.last_resolved_robot_account_id.clone();
+    let updated = state
+        .config
+        .update_computer_instance(instance_id, |instance| {
+            instance.robot_binding = Some(refreshed_binding.clone());
+            instance.connection_policy.target = Some(ComputerConnectionTarget::manager_robot(
+                context_key.clone(),
+                params.employee_id,
+                refreshed_account_id.clone(),
+            ));
+        })
+        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
+    apply_updated_computer_instance(state, previous, updated)
+        .await
+        .map_err(ManagerError::InvalidResponse)?;
+    Ok(())
+}
+
 fn manager_connection_decision(
     target_instance_id: &str,
     connected_instance_id: &str,
@@ -1430,10 +1549,11 @@ fn spawn_refresh_task(
     generation: u64,
     initial_expires_in: i64,
 ) -> tokio::task::JoinHandle<()> {
-    let manager_context = state.manager_context.clone();
+    let task_state = state.clone();
     let log_service = state.log_service.clone();
 
     tokio::spawn(async move {
+        let mut params = params;
         let mut expires_in = initial_expires_in;
         let mut next_wait = refresh_wait_secs(expires_in);
         let mut retry_attempt = 0;
@@ -1450,11 +1570,16 @@ fn spawn_refresh_task(
                 return;
             }
 
-            match refresh_cycle(&manager_context, &runtime, &params, generation).await {
+            let (outcome, refreshed_params) =
+                refresh_cycle(&task_state, &runtime, &params, generation).await;
+            match outcome {
                 // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
                 RefreshOutcome::Renewed(new_ttl) => {
                     if !runtime.complete_reconnect_for_generation(generation).await {
                         return;
+                    }
+                    if let Some(refreshed_params) = refreshed_params {
+                        params = refreshed_params;
                     }
                     let _ = log_service.write_for_instance(
                         "info",
@@ -1600,44 +1725,77 @@ pub enum RefreshOutcome {
 /// 执行一次预刷新：exchange → [`reconnect_with_token`]。
 /// 只做决策、不做 emit/log 副作用（交调用方按 [`RefreshOutcome`] 处理），便于无 AppHandle 环境测试。
 async fn refresh_cycle(
-    manager_context: &Arc<ManagerContextCoordinator>,
+    state: &AppState,
     runtime: &ComputerInstanceRuntime,
     params: &ManagerConnectionParams,
     generation: u64,
-) -> RefreshOutcome {
+) -> (RefreshOutcome, Option<ManagerConnectionParams>) {
+    let manager_context = &state.manager_context;
     let manager_generation = match manager_context.capture_authenticated_generation().await {
         Ok(generation) => generation,
         Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
-            return RefreshOutcome::Unauthorized;
+            return (RefreshOutcome::Unauthorized, None);
         }
         Err(error) => {
             log::error!("Token pre-refresh could not capture Manager context: {error}");
-            return RefreshOutcome::Stop;
+            return (RefreshOutcome::Stop, None);
+        }
+    };
+    let Some(expected_context_key) = params.robot_binding.context_key.as_ref() else {
+        log::error!("Token pre-refresh stopped: Manager binding has no Context key");
+        return (RefreshOutcome::Stop, None);
+    };
+    let refreshed_params = match resolve_manager_connection_params(
+        manager_context,
+        manager_generation,
+        expected_context_key,
+        params.employee_id,
+        params.scope.clone(),
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
+            return (RefreshOutcome::Unauthorized, None);
+        }
+        Err(ManagerError::NetworkError(error)) => {
+            log::warn!("Token pre-refresh discovery retryable error: {error}");
+            return (RefreshOutcome::Retry, None);
+        }
+        Err(error) => {
+            log::warn!("Token pre-refresh discovery stopped: {error}");
+            return (RefreshOutcome::Stop, None);
         }
     };
     let token = match manager_context
         .exchange_token_for_generation(
             manager_generation,
-            &params.robot_account_id,
-            params.scope.clone(),
+            &refreshed_params.robot_account_id,
+            refreshed_params.scope.clone(),
         )
         .await
     {
         Ok(t) => t,
-        Err(ManagerError::Unauthorized) => return RefreshOutcome::Unauthorized,
+        Err(ManagerError::Unauthorized) => return (RefreshOutcome::Unauthorized, None),
         Err(e @ ManagerError::SigningUnavailable { .. })
         | Err(e @ ManagerError::NetworkError(_)) => {
             log::warn!("Token pre-refresh retryable error: {e}");
-            return RefreshOutcome::Retry;
+            return (RefreshOutcome::Retry, None);
         }
         Err(e) => {
             log::error!("Token pre-refresh failed permanently: {e}; stopping refresh");
-            return RefreshOutcome::Stop;
+            return (RefreshOutcome::Stop, None);
         }
     };
-    match manager_context
+    let outcome = match manager_context
         .commit_for_authenticated_generation(manager_generation, || async {
-            Ok(reconnect_with_token(runtime, params, generation, &token).await)
+            let outcome =
+                reconnect_with_token(runtime, &refreshed_params, generation, &token).await;
+            if matches!(outcome, RefreshOutcome::Renewed(_)) {
+                commit_refreshed_robot_binding(state, runtime, generation, &refreshed_params)
+                    .await?;
+            }
+            Ok(outcome)
         })
         .await
     {
@@ -1646,6 +1804,11 @@ async fn refresh_cycle(
             log::warn!("Token pre-refresh context changed before reconnect commit: {error}");
             RefreshOutcome::Stop
         }
+    };
+    if matches!(outcome, RefreshOutcome::Renewed(_)) {
+        (outcome, Some(refreshed_params))
+    } else {
+        (outcome, None)
     }
 }
 
@@ -1840,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_manager_robot_account_accepts_matching_employee() {
+    fn manager_robot_resolution_uses_the_latest_visible_account() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
             { "id": 41, "name": "old", "robotAccountId": "org-1:account-41" },
             {
@@ -1853,8 +2016,8 @@ mod tests {
         ]))
         .unwrap();
 
-        let employee =
-            validate_manager_robot_account_from_list(&employees, 42, "org-1:account-42").unwrap();
+        let (employee, robot_account_id) =
+            resolve_manager_robot_account_from_list(employees, 42).unwrap();
 
         assert_eq!(employee.id, 42);
         assert_eq!(
@@ -1862,31 +2025,124 @@ mod tests {
             Some("org-1:account-42")
         );
         assert_eq!(employee.robot_id.as_deref(), Some("robot-a"));
+        assert_eq!(robot_account_id, "org-1:account-42");
     }
 
     #[test]
-    fn validate_manager_robot_account_rejects_mismatched_account() {
+    fn manager_connection_params_use_fresh_discovery_instead_of_profile_diagnostics() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
-            { "id": 42, "name": "target", "robotAccountId": "org-1:account-42" }
+            {
+                "id": 42,
+                "name": "renamed-target",
+                "robotAccountId": "new-robot-account",
+                "robotId": "new-robot-id",
+                "namespace": "new-namespace"
+            }
         ]))
         .unwrap();
+        let (employee, robot_account_id) =
+            resolve_manager_robot_account_from_list(employees, 42).unwrap();
+        let connection_info: ConnectionInfoResponse = serde_json::from_value(serde_json::json!({
+            "socketBaseURL": "https://new-smcp.example.com",
+            "rid": "new-office",
+            "namespace": "connection-namespace",
+            "routingHeaders": { "X-TF-Route": "new-route" }
+        }))
+        .unwrap();
+        let context_key = ManagerContextKey {
+            environment: crate::services::manager_environment::ManagerEnvironment::Staging,
+            account_id: "account-a".to_string(),
+            organization_id: "organization-a".to_string(),
+        };
 
-        let err = validate_manager_robot_account_from_list(&employees, 42, "org-1:account-43")
-            .unwrap_err();
+        let params = manager_connection_params_from_resolved(
+            context_key.clone(),
+            employee,
+            robot_account_id,
+            connection_info,
+            None,
+        )
+        .unwrap();
 
-        assert!(
-            matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId mismatch"))
+        assert_eq!(params.url, "https://new-smcp.example.com");
+        assert_eq!(params.office_id, "new-office");
+        assert_eq!(params.robot_account_id, "new-robot-account");
+        assert_eq!(
+            params.routing_headers.get("X-TF-Route").map(String::as_str),
+            Some("new-route")
+        );
+        assert_eq!(params.robot_binding.context_key, Some(context_key));
+        assert_eq!(
+            params
+                .robot_binding
+                .last_resolved_robot_account_id
+                .as_deref(),
+            Some("new-robot-account")
+        );
+        assert_eq!(
+            params.robot_binding.robot_id.as_deref(),
+            Some("new-robot-id")
+        );
+        assert_eq!(
+            params.robot_binding.namespace.as_deref(),
+            Some("new-namespace")
         );
     }
 
     #[test]
-    fn validate_manager_robot_account_rejects_missing_account() {
+    fn mismatched_context_makes_the_scoped_binding_dormant_and_disables_auto_connect() {
+        let context_key = ManagerContextKey {
+            environment: crate::services::manager_environment::ManagerEnvironment::Staging,
+            account_id: "account-a".to_string(),
+            organization_id: "organization-a".to_string(),
+        };
+        let target = ComputerConnectionTarget::manager_robot(
+            context_key.clone(),
+            42,
+            Some("diagnostic-only".to_string()),
+        );
+        let mut instance = ComputerInstance::new("computer-a", "Computer A");
+        instance.connection_policy.target = Some(target.clone());
+        instance.connection_policy.auto_connect = true;
+        instance.robot_binding = Some(RobotBindingMetadata {
+            context_key: Some(context_key.clone()),
+            state: ManagerRobotBindingState::Active,
+            employee_id: 42,
+            robot_id: Some("robot-a".to_string()),
+            last_resolved_robot_account_id: Some("old-account".to_string()),
+            namespace: None,
+            robot_name: Some("Robot A".to_string()),
+        });
+
+        assert!(make_manager_binding_dormant(
+            &mut instance,
+            &target,
+            &context_key,
+            42,
+        ));
+
+        assert!(!instance.connection_policy.auto_connect);
+        assert_eq!(
+            instance.robot_binding.as_ref().map(|binding| binding.state),
+            Some(ManagerRobotBindingState::Dormant)
+        );
+        assert_eq!(
+            instance
+                .robot_binding
+                .as_ref()
+                .and_then(|binding| binding.last_resolved_robot_account_id.as_deref()),
+            Some("old-account")
+        );
+    }
+
+    #[test]
+    fn manager_robot_resolution_rejects_missing_account() {
         let employees: Vec<DigitalEmployeeBrief> = serde_json::from_value(serde_json::json!([
             { "id": 42, "name": "target", "robotAccountId": null }
         ]))
         .unwrap();
 
-        let err = validate_manager_robot_account_from_list(&employees, 42, "4200").unwrap_err();
+        let err = resolve_manager_robot_account_from_list(employees, 42).unwrap_err();
 
         assert!(
             matches!(err, ManagerError::InvalidResponse(message) if message.contains("robotAccountId missing"))

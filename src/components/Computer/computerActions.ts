@@ -21,7 +21,6 @@ export function isConnectionTargetConnectable(
   target?: ComputerConnectionTarget | null,
 ): boolean {
   if (!target) return false;
-  if (target.type === 'manager_robot') return target.robotAccountId != null;
   return true;
 }
 

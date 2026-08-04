@@ -19,6 +19,7 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 use tokio::sync::Mutex;
 
 /// Application state shared across all Tauri commands
+#[derive(Clone)]
 pub struct AppState {
     /// Configuration persistence service
     pub config: Arc<ConfigService>,
