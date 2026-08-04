@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod client_control;
 pub mod computer;
 pub mod computer_runtime;
 pub mod config_io;

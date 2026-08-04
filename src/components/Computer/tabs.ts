@@ -36,6 +36,7 @@ export const COMPUTER_SETTINGS_SECTIONS = [
   'mcp',
   'inputs',
   'connection',
+  'remote-control',
 ] as const;
 
 export type ComputerSettingsSection = (typeof COMPUTER_SETTINGS_SECTIONS)[number];

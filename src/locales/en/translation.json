@@ -104,7 +104,35 @@
         "connection": {
           "title": "Connection Policy",
           "description": "Choose the saved connection target and automatic connection policy."
+        },
+        "remote-control": {
+          "title": "Robot Control",
+          "description": "Control which client capabilities this Computer may use through its built-in Robot control provider."
         }
+      }
+    },
+    "remoteControl": {
+      "enabled": "Enable Robot control",
+      "enabledDescription": "Disabled by default. Changes rebuild this Computer's internal provider without creating an MCP declaration.",
+      "securityTitle": "This grants client-level control",
+      "securityDescription": "Enable only the tools and target Computers this Robot needs. Secret values remain write-only and all calls are audited.",
+      "toolScope": "Allowed tools",
+      "allTools": "All 55 tools",
+      "customTools": "Custom selection",
+      "targetScope": "Allowed Computer targets",
+      "selfOnly": "This Computer only",
+      "allComputers": "All Computers",
+      "customComputers": "Custom selection",
+      "selfProtection": "A Robot can never stop, restart, delete, or disconnect its own source Computer, even when all targets are allowed.",
+      "saved": "Robot control policy saved",
+      "groups": {
+        "computer_fleet": "Computer fleet",
+        "computer_connection": "Connection and configuration",
+        "mcp_server": "MCP servers",
+        "mcp_inputs": "Inputs and values",
+        "skills": "User Skills",
+        "marketplace_plugins": "Marketplace and Plugins",
+        "debug_resources": "Debug and resources"
       }
     },
     "workbench": {

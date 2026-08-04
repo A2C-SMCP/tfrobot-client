@@ -104,7 +104,35 @@
         "connection": {
           "title": "连接策略",
           "description": "选择保存的连接目标与自动连接策略。"
+        },
+        "remote-control": {
+          "title": "Robot 控制",
+          "description": "管理当前 Computer 可通过内置 Robot 控制 provider 使用的 Client 能力。"
         }
+      }
+    },
+    "remoteControl": {
+      "enabled": "启用 Robot 控制",
+      "enabledDescription": "默认关闭。保存后会重建当前 Computer 的内置 provider，不会创建 MCP 声明。",
+      "securityTitle": "此功能会授予 Client 级控制能力",
+      "securityDescription": "仅开放 Robot 必需的工具与目标 Computer。Secret 始终只写不回显，所有调用都会审计。",
+      "toolScope": "允许的工具",
+      "allTools": "全部 55 个工具",
+      "customTools": "自定义选择",
+      "targetScope": "允许的 Computer 目标",
+      "selfOnly": "仅当前 Computer",
+      "allComputers": "全部 Computer",
+      "customComputers": "自定义选择",
+      "selfProtection": "即使允许全部目标，Robot 也永远不能停止、重启、删除或断开自己的来源 Computer。",
+      "saved": "Robot 控制策略已保存",
+      "groups": {
+        "computer_fleet": "Computer 管理",
+        "computer_connection": "连接与配置",
+        "mcp_server": "MCP 服务器",
+        "mcp_inputs": "输入定义与值",
+        "skills": "User Skills",
+        "marketplace_plugins": "Marketplace 与 Plugins",
+        "debug_resources": "调试与资源"
       }
     },
     "workbench": {

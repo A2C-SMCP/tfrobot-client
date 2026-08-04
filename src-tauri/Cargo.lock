@@ -7365,6 +7365,7 @@ dependencies = [
  "a2c-smcp",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "criterion",
  "dirs",
@@ -7401,6 +7402,7 @@ dependencies = [
  "url",
  "uuid",
  "which",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

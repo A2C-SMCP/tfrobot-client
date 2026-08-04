@@ -1,4 +1,5 @@
 use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::computer::{
     ComputerRuntimeAction, ComputerRuntimeActionUnavailable, McpServerManagedBy,
 };
@@ -95,6 +96,9 @@ pub async fn get_mcp_servers_core(
             continue;
         }
         let bundle_id = resolve_bundle_id(&server.config);
+        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+            continue;
+        }
         metadata
             .entry(bundle_id)
             .or_insert(McpServerRuntimeMetadata {

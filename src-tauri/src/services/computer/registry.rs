@@ -6,6 +6,7 @@ pub struct ComputerRegistry {
     skill_home_base: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     runtime_event_sink: SharedRuntimeEventSink,
+    client_control_binding: ClientControlBinding,
 }
 
 /// A two-phase runtime removal. Creating the transaction closes activity admission, drains
@@ -86,6 +87,7 @@ impl ComputerRegistry {
         config.normalize();
         let mut runtimes = HashMap::new();
         let runtime_event_sink: SharedRuntimeEventSink = Arc::new(RwLock::new(None));
+        let client_control_binding = ClientControlBinding::default();
 
         for instance in config.instances {
             let instance_id = instance.id.clone();
@@ -94,6 +96,7 @@ impl ComputerRegistry {
                 skill_home_base.clone(),
                 secret_store.clone(),
                 runtime_event_sink.clone(),
+                client_control_binding.clone(),
             );
             runtimes.insert(instance_id, runtime);
         }
@@ -105,6 +108,7 @@ impl ComputerRegistry {
             skill_home_base,
             secret_store,
             runtime_event_sink,
+            client_control_binding,
         };
 
         (registry, initial_runtime)
@@ -127,6 +131,13 @@ impl ComputerRegistry {
         for runtime in self.list_runtimes().await {
             runtime.start_runtime_event_relay().await;
         }
+    }
+
+    pub fn bind_client_control(
+        &self,
+        plane: &Arc<crate::services::client_control::ClientControlPlane>,
+    ) {
+        self.client_control_binding.bind(plane);
     }
 
     pub async fn runtime_observations(
@@ -210,6 +221,7 @@ impl ComputerRegistry {
             self.skill_home_base.clone(),
             self.secret_store.clone(),
             self.runtime_event_sink.clone(),
+            self.client_control_binding.clone(),
         );
         {
             let mut runtimes = self.runtimes.write().await;
@@ -249,10 +261,18 @@ impl ComputerRegistry {
                 "Computer runtime does not exist for instance {instance_id}"
             ))
         })?;
+        let remote_control_policy_changed =
+            existing.instance.remote_control != instance.remote_control;
         let runtime = existing.with_instance(instance);
-        if let Err(error) = runtime.sync_runtime().await {
+        if let Err(error) = runtime
+            .sync_runtime_for_policy_change(remote_control_policy_changed)
+            .await
+        {
             let restore_runtime = existing.with_instance(existing.instance.clone());
-            if let Err(restore_error) = restore_runtime.sync_runtime().await {
+            if let Err(restore_error) = restore_runtime
+                .sync_runtime_for_policy_change(remote_control_policy_changed)
+                .await
+            {
                 return Err(error.append_context(format!(
                     "additionally failed to restore previous runtime: {restore_error}"
                 )));

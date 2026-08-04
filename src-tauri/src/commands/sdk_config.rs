@@ -1,4 +1,5 @@
 use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::env_var_name;
@@ -122,6 +123,9 @@ impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
                     .mcp
                     .servers
                     .into_iter()
+                    .filter(|server| {
+                        resolve_bundle_id(&server.config).as_str() != CLIENT_CONTROL_BUNDLE_ID
+                    })
                     .map(|server| {
                         let origin = server.origin;
                         let bundle_id = resolve_bundle_id(&server.config).into_string();
@@ -253,6 +257,11 @@ pub async fn upsert_computer_mcp_config_core(
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
     let config = normalize_mcp_input_references(config).map_err(RuntimeActionError::runtime)?;
+    if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        return Err(RuntimeActionError::runtime(
+            "bundleId 'client_control' is reserved for the built-in Client Control provider",
+        ));
+    }
     let defined_inputs = state
         .config
         .load_inputs_for_instance(instance_id)

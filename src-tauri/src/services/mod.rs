@@ -1,4 +1,5 @@
 pub mod client_computers;
+pub mod client_control;
 pub mod computer;
 pub mod computer_runtime_events;
 pub mod config;

@@ -4,6 +4,7 @@ use crate::commands::connection::{
 };
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
+use crate::services::client_control::RemoteControlPolicy;
 use crate::services::computer::{
     ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
     ComputerConnectionTarget, ComputerInstance, ComputerInstanceId, ComputerRuntimeAction,
@@ -41,6 +42,7 @@ pub struct ComputerInstanceStatus {
     pub mcp_server_count: usize,
     pub robot_binding: Option<RobotBindingMetadata>,
     pub connection_policy: ComputerConnectionPolicy,
+    pub remote_control: RemoteControlPolicy,
     pub connection: Option<ConnectionStateSummary>,
 }
 
@@ -195,6 +197,7 @@ pub async fn create_computer_instance_core(
         input_values: Default::default(),
         local_skills_root: None,
         connection_policy: ComputerConnectionPolicy::default(),
+        remote_control: RemoteControlPolicy::default(),
         robot_binding: None,
     };
 
@@ -281,6 +284,7 @@ pub async fn duplicate_computer_instance_core(
     instance.name = name;
     instance.description = normalize_optional_text(request.description);
     instance.local_skills_root = None;
+    instance.remote_control = RemoteControlPolicy::default();
     let destination_skill_root = state.config.default_local_skills_root(&instance.id);
     let destination_storage_root = state.config.computer_instance_storage_root(&instance.id);
     if !request.copy_robot_binding {
@@ -451,6 +455,11 @@ pub async fn delete_computer_instance_core(
         }
     }
     cleanup_quarantined_computer_storage(quarantined_storage).await;
+    if let Err(error) = state.config.load_computer_instances() {
+        log::warn!(
+            "Computer '{id}' was deleted, but stale Client Control target cleanup failed: {error}"
+        );
+    }
 
     Ok(())
 }
@@ -907,6 +916,7 @@ async fn status_from_instance(
         mcp_server_count,
         robot_binding: instance.robot_binding.clone(),
         connection_policy: instance.connection_policy.clone(),
+        remote_control: instance.remote_control.clone(),
         connection: connected.then_some(connection_context).flatten(),
     }
 }

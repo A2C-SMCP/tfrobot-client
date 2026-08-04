@@ -16,6 +16,7 @@ import {
   FormOutlined,
   ReadOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { InputVariables } from '@/components/InputVariables';
@@ -31,6 +32,7 @@ import {
 } from '@/components/Computer/tabs';
 import { GeneralSettings } from './GeneralSettings';
 import { SkillsSettings } from './SkillsSettings';
+import { RemoteControlSettings } from './RemoteControlSettings';
 import styles from './ComputerSettings.module.css';
 
 const { Paragraph, Text, Title } = Typography;
@@ -78,6 +80,7 @@ export function ComputerSettings({
     { key: 'mcp', icon: <ApiOutlined /> },
     { key: 'inputs', icon: <FormOutlined /> },
     { key: 'connection', icon: <RobotOutlined /> },
+    { key: 'remote-control', icon: <SafetyCertificateOutlined /> },
   ] satisfies Array<{ key: ComputerSettingsSection; icon: React.ReactNode }>, []);
 
   const menuItems = sections.map(({ key, icon }) => ({
@@ -130,6 +133,8 @@ export function ComputerSettings({
             onNavigate={onNavigate}
           />
         );
+      case 'remote-control':
+        return <RemoteControlSettings instance={selectedInstance} />;
       default:
         return null;
     }

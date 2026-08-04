@@ -148,6 +148,10 @@ pub struct ConnectionStatusInfo {
 pub async fn list_manual_smcp_targets(
     state: State<'_, AppState>,
 ) -> Result<Vec<ManualSmcpTarget>, String> {
+    list_manual_smcp_targets_core(&state)
+}
+
+pub fn list_manual_smcp_targets_core(state: &AppState) -> Result<Vec<ManualSmcpTarget>, String> {
     state
         .config
         .list_manual_smcp_targets()
@@ -157,6 +161,14 @@ pub async fn list_manual_smcp_targets(
 #[tauri::command]
 pub async fn save_manual_smcp_target(
     state: State<'_, AppState>,
+    target: ManualSmcpTarget,
+    api_key_action: Option<ManualSmcpApiKeyAction>,
+) -> Result<ManualSmcpTarget, String> {
+    save_manual_smcp_target_core(&state, target, api_key_action).await
+}
+
+pub async fn save_manual_smcp_target_core(
+    state: &AppState,
     target: ManualSmcpTarget,
     api_key_action: Option<ManualSmcpApiKeyAction>,
 ) -> Result<ManualSmcpTarget, String> {
@@ -729,7 +741,14 @@ pub async fn get_connection_status(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<ConnectionStatusInfo, String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    get_connection_status_core(&state, &instance_id).await
+}
+
+pub async fn get_connection_status_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<ConnectionStatusInfo, String> {
+    let instance_id = require_instance_id(instance_id)?;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -769,11 +788,20 @@ pub async fn manager_connect_smcp(
     employee_id: u64,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
-    let instance_id = require_instance_id(&instance_id)
+    manager_connect_smcp_core(&state, &instance_id, employee_id, scope).await
+}
+
+pub async fn manager_connect_smcp_core(
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+    scope: Option<String>,
+) -> Result<(), ManagerError> {
+    let instance_id = require_instance_id(instance_id)
         .map_err(ManagerError::InvalidResponse)?
         .to_string();
     let (runtime, operation_token, profile_snapshot) =
-        begin_manager_connect(state.inner(), &instance_id, employee_id, None).await?;
+        begin_manager_connect(state, &instance_id, employee_id, None).await?;
     let result = async {
         let manager_generation = state
             .manager_context
@@ -820,7 +848,7 @@ pub async fn manager_connect_smcp(
 
         // 连接 + 入库 + 起预刷新任务均位于 generation commit boundary 内。
         establish_manager_connection(
-            state.inner(),
+            state,
             &runtime,
             operation_token,
             ManagerConnectionAuthority {

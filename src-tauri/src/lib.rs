@@ -1,8 +1,13 @@
+#![recursion_limit = "512"]
+
 pub mod commands;
 pub mod services;
 pub mod tray;
 
 use services::client_computers::ClientComputersPaths;
+use services::client_control::{
+    ClientControlHost, ClientControlPlane, ObservabilityControlAuditSink,
+};
 use services::computer::{ComputerInstance, ComputerInstancesConfig, ComputerRegistry};
 use services::config::ConfigService;
 use services::config_migration::{migrate_legacy_config, MigrationError};
@@ -30,6 +35,8 @@ pub struct AppState {
     pub sdk_config: Arc<SdkConfigService>,
     /// Runtime registry for all configured Computer instances
     pub computer_registry: Arc<ComputerRegistry>,
+    /// Protocol-neutral domain boundary shared by Tauri and the embedded Robot adapter.
+    pub client_control: Arc<ClientControlPlane>,
     /// Secret persistence backend. Production uses the OS keychain; tests can inject memory.
     pub secret_store: Arc<dyn SecretStore>,
     /// Short-lived cross-Computer reservations for Robot/Office identities. Network connection
@@ -61,6 +68,8 @@ pub enum AppStateInitError {
     Keychain(#[from] services::keychain::KeychainError),
     #[error("failed to recover an interrupted configuration import: {0}")]
     ConfigImportRecovery(String),
+    #[error("failed to recover an interrupted Client Control Skill transaction: {0}")]
+    SkillPackageRecovery(String),
 }
 
 impl AppState {
@@ -134,23 +143,55 @@ impl AppState {
         // hydrated from the recovered storage state rather than the pre-recovery discovery copy.
         let stored_instances = config.load_computer_instances()?;
         let instances = hydrate_computer_instances(stored_instances, secret_store.as_ref())?;
-        let computer_registry = ComputerRegistry::from_config_with_skill_home_base_and_secret_store(
-            instances,
-            config.computer_skill_home_base(),
-            secret_store.clone(),
+        let skill_home_base = config.computer_skill_home_base();
+        let skill_packages = services::client_control::SkillPackageService::new();
+        for instance in &instances.instances {
+            let skill_home =
+                services::computer::configured_skill_home_for_instance(instance, &skill_home_base);
+            skill_packages
+                .recover_home(&skill_home, &skill_home)
+                .map_err(|error| AppStateInitError::SkillPackageRecovery(error.to_string()))?;
+        }
+        let computer_registry = Arc::new(
+            ComputerRegistry::from_config_with_skill_home_base_and_secret_store(
+                instances,
+                skill_home_base,
+                secret_store.clone(),
+            ),
         );
+        let observability = Arc::new(observability);
+        let connection_target_reservations =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let computer_lifecycle_lock = Arc::new(Mutex::new(()));
+        let input_mutation_lock = Arc::new(Mutex::new(()));
+        let client_control = Arc::new(ClientControlPlane::new_with_host(
+            config.clone(),
+            computer_registry.clone(),
+            Arc::new(ObservabilityControlAuditSink::new(observability.clone())),
+            ClientControlHost {
+                sdk_config: sdk_config.clone(),
+                secret_store: secret_store.clone(),
+                connection_target_reservations: connection_target_reservations.clone(),
+                computer_lifecycle_lock: computer_lifecycle_lock.clone(),
+                input_mutation_lock: input_mutation_lock.clone(),
+                observability: observability.clone(),
+                diagnostics: diagnostics.clone(),
+                settings_service: settings_service.clone(),
+                manager_context: manager_context.clone(),
+            },
+        ));
+        computer_registry.bind_client_control(&client_control);
 
         Ok(Self {
             config,
             sdk_config,
-            computer_registry: Arc::new(computer_registry),
+            computer_registry,
+            client_control,
             secret_store: secret_store.clone(),
-            connection_target_reservations: Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            computer_lifecycle_lock: Arc::new(Mutex::new(())),
-            input_mutation_lock: Arc::new(Mutex::new(())),
-            observability: Arc::new(observability),
+            connection_target_reservations,
+            computer_lifecycle_lock,
+            input_mutation_lock,
+            observability,
             diagnostics,
             settings_service,
             manager_context,
@@ -407,6 +448,9 @@ pub fn run() {
             commands::computer::update_computer_skill_home,
             commands::computer::connect_computer_connection_target,
             commands::computer::disconnect_computer_connection_target,
+            commands::client_control::get_client_control_catalog,
+            commands::client_control::get_remote_control_policy,
+            commands::client_control::update_remote_control_policy,
             commands::computer_runtime::enable_computer_runtime_events,
             commands::computer_runtime::get_computer_runtime_snapshots,
             // Config import/export
@@ -562,5 +606,52 @@ mod tests {
         let runtime = state.computer_registry.runtime("one").await.unwrap();
 
         assert!(!runtime.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn app_state_recovers_skill_transaction_before_runtime_discovery() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
+            .unwrap();
+        let skill_home = config
+            .computer_skill_home_base()
+            .join("one")
+            .join("skill_home");
+        let transaction = skill_home
+            .join(".client_control_transactions")
+            .join("interrupted-update");
+        let previous = transaction.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(
+            transaction.join("transaction.json"),
+            r#"{"name":"recovered-skill","operation":"update"}"#,
+        )
+        .unwrap();
+        fs::write(
+            previous.join("SKILL.md"),
+            "---\nname: recovered-skill\ndescription: recovered at startup\n---\nBody\n",
+        )
+        .unwrap();
+
+        let state = AppState::new(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+        );
+        assert!(skill_home.join("user/recovered-skill/SKILL.md").is_file());
+        assert!(!transaction.exists());
+
+        let runtime = state.computer_registry.runtime("one").await.unwrap();
+        runtime.start().await.unwrap();
+        let reader = runtime.sdk_skill_reader().unwrap();
+        assert!(reader
+            .skills()
+            .await
+            .iter()
+            .any(|skill| skill.name == "recovered-skill"));
+        drop(reader);
+        runtime.shutdown().await;
     }
 }

@@ -325,6 +325,13 @@ pub async fn list_input_values(
     list_input_values_core(&state, require_instance_id(&instance_id)?)
 }
 
+pub fn list_input_values_for_control_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<std::collections::HashMap<String, InputValueView>, String> {
+    list_input_values_core(state, require_instance_id(instance_id)?)
+}
+
 /// Get a single cached input value
 #[tauri::command]
 pub async fn get_input_value(
@@ -332,8 +339,16 @@ pub async fn get_input_value(
     instance_id: String,
     id: String,
 ) -> Result<Option<InputValueView>, String> {
-    let instance_id = require_instance_id(&instance_id)?;
-    require_existing_instance(&state, instance_id)?;
+    get_input_value_core(&state, &instance_id, &id)
+}
+
+pub fn get_input_value_core(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
+) -> Result<Option<InputValueView>, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    require_existing_instance(state, instance_id)?;
     let definition = state
         .config
         .load_inputs_for_instance(instance_id)

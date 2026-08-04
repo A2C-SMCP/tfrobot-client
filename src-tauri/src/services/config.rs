@@ -3,6 +3,7 @@ use crate::services::client_computers::{
     ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_INPUTS_FILE_NAME,
     COMPUTER_PROFILE_FILE_NAME,
 };
+use crate::services::client_control::RemoteControlPolicy;
 use crate::services::computer::{
     ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInputDefinition,
     ComputerInputsConfig, ComputerInstance, ComputerInstancesConfig, ComputerProfile,
@@ -68,6 +69,8 @@ struct ComputerDirectoryTransaction {
 
 const LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
 const LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v1.backup.json";
+const PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 2;
+const PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v2.backup.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +84,20 @@ struct LegacyComputerProfileV1 {
     connection_policy: LegacyComputerConnectionPolicyV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     robot_binding: Option<LegacyRobotBindingV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PreviousComputerProfileV2 {
+    schema_version: u32,
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_binding: Option<RobotBindingMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -228,8 +245,12 @@ impl ConfigService {
                 profile_id: instance_directory_id.to_string(),
                 reason: "schema_version is required and must be a u32".to_string(),
             })?;
-        let profile = match schema_version {
+        let mut profile = match schema_version {
             COMPUTER_PROFILE_SCHEMA_VERSION => serde_json::from_value(value)?,
+            PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION => {
+                let previous: PreviousComputerProfileV2 = serde_json::from_value(value)?;
+                self.migrate_computer_profile_v2(&path, previous)?
+            }
             LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION => {
                 let legacy: LegacyComputerProfileV1 = serde_json::from_value(value)?;
                 self.migrate_computer_profile_v1(&path, legacy)?
@@ -242,6 +263,9 @@ impl ConfigService {
                 });
             }
         };
+        if profile.remote_control.sanitize_tools() {
+            write_json_atomically(&path, &profile)?;
+        }
         if profile.id != instance_directory_id {
             return Err(ConfigError::CorruptedComputerProfile {
                 directory_id: instance_directory_id.to_string(),
@@ -285,6 +309,48 @@ impl ConfigService {
 
         // Atomic replacement is the migration commit point. If serialization or persistence
         // fails, profile.json remains the original v1 document and the backup is recoverable.
+        write_json_atomically(profile_path, &migrated)?;
+        Ok(migrated)
+    }
+
+    fn migrate_computer_profile_v2(
+        &self,
+        profile_path: &Path,
+        previous: PreviousComputerProfileV2,
+    ) -> Result<ComputerProfile, ConfigError> {
+        if previous.schema_version != PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                actual: previous.schema_version,
+            });
+        }
+        let migrated = ComputerProfile {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: previous.id.clone(),
+            name: previous.name.clone(),
+            description: previous.description.clone(),
+            connection_policy: previous.connection_policy.clone(),
+            remote_control: RemoteControlPolicy::default(),
+            robot_binding: previous.robot_binding.clone(),
+        };
+        validate_computer_profile(&migrated)?;
+
+        let backup_path = profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME);
+        if backup_path.exists() {
+            let existing: PreviousComputerProfileV2 = load_required_json_file(&backup_path)?;
+            if existing != previous {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id: previous.id,
+                    reason: format!(
+                        "profile v2 migration backup {} does not match the source profile",
+                        backup_path.display()
+                    ),
+                });
+            }
+        } else {
+            write_json_atomically(&backup_path, &previous)?;
+        }
         write_json_atomically(profile_path, &migrated)?;
         Ok(migrated)
     }
@@ -521,6 +587,15 @@ impl ConfigService {
             }
         }
         instances.sort_by(|left, right| left.id.cmp(&right.id));
+        let known_targets = instances
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect::<HashSet<_>>();
+        for instance in &mut instances {
+            if instance.remote_control.sanitize(&known_targets) {
+                self.save_computer_profile(&ComputerProfile::from(&*instance))?;
+            }
+        }
         Ok(ComputerProfileDiscovery {
             config: ComputerInstancesConfig {
                 schema_version: 1,
@@ -1149,6 +1224,7 @@ fn migrate_legacy_computer_profile(
             target,
             auto_connect,
         },
+        remote_control: RemoteControlPolicy::default(),
         robot_binding: binding,
     })
 }
@@ -1164,6 +1240,7 @@ fn validate_computer_profile(profile: &ComputerProfile) -> Result<(), ConfigErro
     if profile.name.trim().is_empty() {
         return Err(invalid("name must be non-empty".to_string()));
     }
+    profile.remote_control.validate().map_err(invalid)?;
 
     if let Some(target) = profile.connection_policy.target.as_ref() {
         match target {
@@ -1536,6 +1613,35 @@ mod tests {
     }
 
     #[test]
+    fn profile_v2_migrates_to_disabled_remote_control_with_backup() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-v2").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let previous = PreviousComputerProfileV2 {
+            schema_version: PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-v2".to_string(),
+            name: "Previous Computer".to_string(),
+            description: Some("preserved".to_string()),
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-v2").unwrap();
+
+        assert_eq!(migrated.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+        assert_eq!(migrated.description.as_deref(), Some("preserved"));
+        assert_eq!(migrated.remote_control, RemoteControlPolicy::default());
+        assert!(!migrated.remote_control.enabled);
+        let backup: PreviousComputerProfileV2 = serde_json::from_slice(
+            &std::fs::read(profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup, previous);
+    }
+
+    #[test]
     fn legacy_manager_profile_migrates_to_needs_rebind_with_backup_and_no_auto_connect() {
         let (svc, _tmp) = setup_empty();
         let profile_path = svc.computer_profile_path("computer-manager").unwrap();
@@ -1672,10 +1778,16 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["connection_policy", "id", "name", "schema_version"]
-                .into_iter()
-                .map(str::to_string)
-                .collect()
+            [
+                "connection_policy",
+                "id",
+                "name",
+                "remote_control",
+                "schema_version",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
         );
         assert!(!serialized.to_string().contains("secret-value"));
         assert!(!object.contains_key("inputs"));

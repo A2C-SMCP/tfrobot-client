@@ -130,7 +130,16 @@ pub async fn get_debug_resources(
     bundle_id: BundleId,
     cursor: Option<String>,
 ) -> Result<DebugResourcesResponse, String> {
-    let instance_id = require_instance_id(&instance_id)?.to_string();
+    get_debug_resources_core(&state, &instance_id, &bundle_id, cursor).await
+}
+
+pub async fn get_debug_resources_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    cursor: Option<String>,
+) -> Result<DebugResourcesResponse, String> {
+    let instance_id = require_instance_id(instance_id)?.to_string();
 
     let runtime = state
         .computer_registry
@@ -138,11 +147,11 @@ pub async fn get_debug_resources(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     let server_name = runtime
-        .mcp_server_display_name(&bundle_id)
+        .mcp_server_display_name(bundle_id)
         .await
         .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
-    let (resources, next_cursor) = runtime.resources(&bundle_id, cursor).await?;
+    let (resources, next_cursor) = runtime.resources(bundle_id, cursor).await?;
 
     Ok(DebugResourcesResponse {
         resources: resources
