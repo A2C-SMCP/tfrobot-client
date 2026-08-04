@@ -5,13 +5,32 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_diagnostic_retention_days() -> u32 {
+    7
+}
+
+fn default_activity_retention_days() -> u32 {
+    30
+}
+
+fn default_tool_history_retention_days() -> u32 {
+    90
+}
+
 pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: ThemeMode,
     pub language: String,
-    pub log_retention_days: u32,
+    #[serde(default)]
+    pub diagnostic_log_level: crate::services::observability::DiagnosticLevel,
+    #[serde(default = "default_diagnostic_retention_days")]
+    pub diagnostic_retention_days: u32,
+    #[serde(default = "default_activity_retention_days")]
+    pub activity_retention_days: u32,
+    #[serde(default = "default_tool_history_retention_days")]
+    pub tool_history_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
     #[serde(default, skip_serializing)]
     pub manager_session: Option<ManagerSessionSettings>,
@@ -126,11 +145,22 @@ impl Default for AppSettings {
         Self {
             theme: ThemeMode::System,
             language: "en".to_string(),
-            log_retention_days: 30,
+            diagnostic_log_level: crate::services::observability::DiagnosticLevel::Info,
+            diagnostic_retention_days: default_diagnostic_retention_days(),
+            activity_retention_days: default_activity_retention_days(),
+            tool_history_retention_days: default_tool_history_retention_days(),
             custom_runtime_paths: CustomRuntimePaths::default(),
             manager_session: None,
             custom_path: None,
         }
+    }
+}
+
+impl AppSettings {
+    pub fn normalize(&mut self) {
+        self.diagnostic_retention_days = self.diagnostic_retention_days.max(1);
+        self.activity_retention_days = self.activity_retention_days.max(1);
+        self.tool_history_retention_days = self.tool_history_retention_days.max(1);
     }
 }
 
@@ -159,9 +189,28 @@ impl SettingsService {
         if !self.settings_file.exists() {
             return AppSettings::default();
         }
-        let mut settings: AppSettings = fs::read_to_string(&self.settings_file)
+        let mut settings = fs::read_to_string(&self.settings_file)
             .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| {
+                let legacy_retention = value
+                    .get("log_retention_days")
+                    .and_then(|value| value.as_u64());
+                let has_activity_retention = value.get("activity_retention_days").is_some();
+                serde_json::from_value::<AppSettings>(value)
+                    .ok()
+                    .map(|mut settings| {
+                        if !has_activity_retention {
+                            if let Some(days) =
+                                legacy_retention.and_then(|days| u32::try_from(days).ok())
+                            {
+                                settings.activity_retention_days = days.max(1);
+                            }
+                        }
+                        settings.normalize();
+                        settings
+                    })
+            })
             .unwrap_or_default();
         // Legacy Manager metadata is migration-only and is never an active settings source.
         settings.manager_session = None;
@@ -313,7 +362,7 @@ mod tests {
         let (svc, _tmp) = setup();
         let settings = svc.load();
         assert_eq!(settings.language, "en");
-        assert_eq!(settings.log_retention_days, 30);
+        assert_eq!(settings.activity_retention_days, 30);
         assert!(matches!(settings.theme, ThemeMode::System));
     }
 
@@ -322,13 +371,13 @@ mod tests {
         let (svc, _tmp) = setup();
         let mut settings = svc.load();
         settings.language = "zh".to_string();
-        settings.log_retention_days = 7;
+        settings.activity_retention_days = 7;
         settings.theme = ThemeMode::Dark;
         svc.save(&settings).unwrap();
 
         let loaded = svc.load();
         assert_eq!(loaded.language, "zh");
-        assert_eq!(loaded.log_retention_days, 7);
+        assert_eq!(loaded.activity_retention_days, 7);
         assert!(matches!(loaded.theme, ThemeMode::Dark));
     }
 
@@ -346,6 +395,33 @@ mod tests {
         let settings = svc.load();
         // Should fall back to defaults
         assert_eq!(settings.language, "en");
+    }
+
+    #[test]
+    fn migrates_legacy_log_retention_to_activity_retention() {
+        let (svc, tmp) = setup();
+        fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"theme":"system","language":"en","log_retention_days":7,"custom_runtime_paths":{}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(svc.load().activity_retention_days, 7);
+    }
+
+    #[test]
+    fn clamps_zero_retention_from_persisted_settings() {
+        let (svc, tmp) = setup();
+        fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"theme":"system","language":"en","diagnostic_retention_days":0,"activity_retention_days":0,"tool_history_retention_days":0,"custom_runtime_paths":{}}"#,
+        )
+        .unwrap();
+
+        let settings = svc.load();
+        assert_eq!(settings.diagnostic_retention_days, 1);
+        assert_eq!(settings.activity_retention_days, 1);
+        assert_eq!(settings.tool_history_retention_days, 1);
     }
 
     #[test]

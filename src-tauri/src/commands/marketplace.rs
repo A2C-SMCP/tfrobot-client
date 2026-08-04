@@ -1131,7 +1131,7 @@ mod tests {
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
     use crate::services::keychain::InMemorySecretStore;
-    use crate::services::logger::LogService;
+    use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
@@ -1142,7 +1142,7 @@ mod tests {
 
     fn test_state_without_runtime(path: &std::path::Path) -> AppState {
         let config = ConfigService::new(path.to_path_buf()).unwrap();
-        let log_service = LogService::new(path).unwrap();
+        let log_service = ObservabilityService::new(path).unwrap();
         let settings_service = SettingsService::new(path.to_path_buf());
         let state = AppState::new_with_secret_store(
             config,

@@ -711,7 +711,7 @@
     "loadMoreResources": "加载更多"
   },
   "logs": {
-    "title": "日志",
+    "title": "活动记录",
     "export": "导出",
     "clear": "清除",
     "time": "时间",
@@ -722,7 +722,7 @@
     "filterCategory": "按分类筛选",
     "searchKeyword": "搜索关键词...",
     "allTime": "全部",
-    "confirmClear": "确定清除所有日志？"
+    "confirmClear": "确定清除所选活动记录？工具调用历史会保留。"
   },
   "settings": {
     "title": "设置",

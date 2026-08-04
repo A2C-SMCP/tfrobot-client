@@ -106,8 +106,8 @@ vi.mock('@/components/ComputerSettings', () => ({
     </div>
   ),
 }));
-vi.mock('@/components/LogViewer', () => ({
-  LogViewer: () => <div>LogViewer</div>,
+vi.mock('@/components/ActivityViewer', () => ({
+  ActivityViewer: () => <div>ActivityViewer</div>,
 }));
 vi.mock('@/components/Settings', () => ({
   Settings: () => <div>Settings</div>,
@@ -158,8 +158,8 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Logs'));
-    await waitFor(() => expect(screen.getByText('LogViewer')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Activity'));
+    await waitFor(() => expect(screen.getByText('ActivityViewer')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
   });
 

@@ -112,8 +112,8 @@ vi.mock('@/components/DesktopResources', () => ({
 vi.mock('@/components/DebugPanel', () => ({
   DebugPanel: ({ instanceId }: { instanceId: string }) => <div data-testid="debug-panel">DebugPanel:{instanceId}</div>,
 }));
-vi.mock('@/components/LogViewer', () => ({
-  LogViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">LogViewer:{instanceId}</div>,
+vi.mock('@/components/ActivityViewer', () => ({
+  ActivityViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">ActivityViewer:{instanceId}</div>,
 }));
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
@@ -210,7 +210,7 @@ describe('Computer', () => {
     expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByText('Debug Panel')).toBeInTheDocument();
-    expect(screen.getByText('Logs')).toBeInTheDocument();
+    expect(screen.getByText('Activity')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-a');
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-a');

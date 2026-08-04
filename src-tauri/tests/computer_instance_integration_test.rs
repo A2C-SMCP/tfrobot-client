@@ -23,7 +23,7 @@ use tfrobot_client_lib::services::computer::{
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
-use tfrobot_client_lib::services::logger::LogService;
+use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 
@@ -85,7 +85,7 @@ fn create_state_with_toggle_secret_store(
     let secrets = Arc::new(ToggleReadFailureSecretStore::default());
     let state = AppState::new_with_secret_store(
         ConfigService::new(path.to_path_buf()).unwrap(),
-        LogService::new(path).unwrap(),
+        ObservabilityService::new(path).unwrap(),
         SettingsService::new(path.to_path_buf()),
         secrets.clone(),
     );

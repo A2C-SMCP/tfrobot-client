@@ -24,9 +24,9 @@ vi.mock('@/stores/themeStore', () => ({
   })),
 }));
 
-vi.mock('@/stores/logStore', () => ({
-  useLogStore: vi.fn(() => ({
-    clearLogs: vi.fn(),
+vi.mock('@/stores/activityStore', () => ({
+  useActivityStore: vi.fn(() => ({
+    clearActivity: vi.fn(),
   })),
 }));
 

@@ -1085,7 +1085,7 @@ describe('computerStore', () => {
           mcp_server_count: 1,
           runtime: runtimeSnapshot({ lifecycle: 'started', snapshot_revision: 1 }),
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });

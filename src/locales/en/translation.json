@@ -711,7 +711,7 @@
     "loadMoreResources": "Load more"
   },
   "logs": {
-    "title": "Logs",
+    "title": "Activity",
     "export": "Export",
     "clear": "Clear",
     "time": "Time",
@@ -722,7 +722,7 @@
     "filterCategory": "Filter by category",
     "searchKeyword": "Search keyword...",
     "allTime": "All",
-    "confirmClear": "Clear all logs?"
+    "confirmClear": "Clear the selected activity? Tool call history is retained."
   },
   "settings": {
     "title": "Settings",

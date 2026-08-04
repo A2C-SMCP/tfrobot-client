@@ -11,6 +11,7 @@ use crate::services::manager_client::{
     ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
 };
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
+use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -382,13 +383,21 @@ async fn connect_connection_target_with_policy(
             "Connection operation was superseded by a runtime lifecycle change".to_string(),
         );
     }
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        &format!("Connected to manual SMCP target {}", target.name),
-        None,
-        Some(&instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            &instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "connect_manual",
+            ActivityOutcome::Succeeded,
+            format!("Connected to manual SMCP target {}", target.name),
+        ))
+        .await
+    {
+        log::error!("failed to persist connection activity: {error}");
+    }
     Ok(())
 }
 
@@ -666,13 +675,21 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
         );
     }
 
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        "Disconnected from SMCP server",
-        None,
-        Some(&instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            &instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "disconnect",
+            ActivityOutcome::Succeeded,
+            "Disconnected from SMCP server",
+        ))
+        .await
+    {
+        log::error!("failed to persist disconnection activity: {error}");
+    }
     Ok(())
 }
 
@@ -1318,16 +1335,24 @@ async fn establish_manager_connection(
         .await
         .map_err(ManagerError::InvalidResponse)?;
 
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        &format!(
-            "Connected to {} (robot {})",
-            params.url, params.robot_account_id
-        ),
-        None,
-        Some(instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "connect_manager",
+            ActivityOutcome::Succeeded,
+            format!(
+                "Connected to {} (robot {})",
+                params.url, params.robot_account_id
+            ),
+        ))
+        .await
+    {
+        log::error!("failed to persist manager connection activity: {error}");
+    }
     Ok(())
 }
 
@@ -1550,7 +1575,7 @@ fn spawn_refresh_task(
     initial_expires_in: i64,
 ) -> tokio::task::JoinHandle<()> {
     let task_state = state.clone();
-    let log_service = state.log_service.clone();
+    let observability = state.observability.clone();
 
     tokio::spawn(async move {
         let mut params = params;
@@ -1581,13 +1606,20 @@ fn spawn_refresh_task(
                     if let Some(refreshed_params) = refreshed_params {
                         params = refreshed_params;
                     }
-                    let _ = log_service.write_for_instance(
-                        "info",
-                        "connection",
-                        "Pre-refreshed SMCP token and reconnected",
-                        None,
-                        Some(&instance_id),
-                    );
+                    if let Err(error) = observability
+                        .record_activity_async(ActivityEventDraft::computer(
+                            &instance_id,
+                            ActivityLevel::Info,
+                            "connection",
+                            "smcp_token_refresh",
+                            "reconnect",
+                            ActivityOutcome::Succeeded,
+                            "Pre-refreshed SMCP token and reconnected",
+                        ))
+                        .await
+                    {
+                        log::error!("failed to persist token refresh activity: {error}");
+                    }
                     expires_in = new_ttl;
                     next_wait = refresh_wait_secs(expires_in);
                     retry_attempt = 0;

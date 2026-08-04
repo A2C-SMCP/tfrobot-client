@@ -2232,7 +2232,8 @@ fn test_startup_rejects_an_unrecoverable_config_import_transaction() {
 
     let config =
         tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
-    let log_service = tfrobot_client_lib::services::logger::LogService::new(tmp.path()).unwrap();
+    let log_service =
+        tfrobot_client_lib::services::observability::ObservabilityService::new(tmp.path()).unwrap();
     let settings_service =
         tfrobot_client_lib::services::settings::SettingsService::new(tmp.path().to_path_buf());
     let result = AppState::try_new_with_secret_store(
@@ -2303,7 +2304,8 @@ fn test_startup_recovery_preflights_sdk_target_before_replaying_inputs() {
 
     let config =
         tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
-    let log_service = tfrobot_client_lib::services::logger::LogService::new(tmp.path()).unwrap();
+    let log_service =
+        tfrobot_client_lib::services::observability::ObservabilityService::new(tmp.path()).unwrap();
     let settings_service =
         tfrobot_client_lib::services::settings::SettingsService::new(tmp.path().to_path_buf());
     let result = AppState::try_new_with_secret_store(
@@ -3495,41 +3497,71 @@ async fn test_claude_desktop_format_detection() {
     assert!(value2.get("servers").is_some());
 }
 
-// ── Logs integration ──
+// ── Activity integration ──
 
 #[tokio::test]
-async fn test_log_write_query_export_clear() {
+async fn test_activity_write_query_export_clear() {
+    use tfrobot_client_lib::services::observability::{
+        ActivityEventDraft, ActivityLevel, ActivityOutcome, ActivityQuery, ActivityScopeFilter,
+    };
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
     // Write
     state
-        .log_service
-        .write("info", "system", "App started", None)
+        .observability
+        .record_activity(&ActivityEventDraft::client(
+            ActivityLevel::Info,
+            "system",
+            "lifecycle",
+            "start",
+            ActivityOutcome::Succeeded,
+            "App started",
+        ))
         .unwrap();
-    state
-        .log_service
-        .write("error", "mcp", "Server crashed", Some("stack trace"))
-        .unwrap();
+    let mut failed = ActivityEventDraft::computer(
+        "computer-a",
+        ActivityLevel::Error,
+        "mcp",
+        "server",
+        "start",
+        ActivityOutcome::Failed,
+        "Server crashed",
+    );
+    failed.fields = Some(serde_json::json!({"summary": "stack trace"}));
+    state.observability.record_activity(&failed).unwrap();
 
     // Query
-    let logs = state.log_service.query(&Default::default()).unwrap();
-    assert_eq!(logs.len(), 2);
+    let page = state
+        .observability
+        .query_activity(&ActivityQuery::default())
+        .unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.total, 2);
 
     // Export
-    let json = state.log_service.export(&Default::default()).unwrap();
+    let json = state
+        .observability
+        .export_activity(&ActivityQuery::default())
+        .unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.len(), 2);
 
     // Export to file
-    let export_path = tmp.path().join("logs.json");
+    let export_path = tmp.path().join("activity.json");
     std::fs::write(&export_path, &json).unwrap();
     assert!(export_path.exists());
 
     // Clear
-    state.log_service.clear_all().unwrap();
-    let after = state.log_service.query(&Default::default()).unwrap();
-    assert!(after.is_empty());
+    state
+        .observability
+        .clear_activity(&ActivityScopeFilter::All)
+        .unwrap();
+    let after = state
+        .observability
+        .query_activity(&ActivityQuery::default())
+        .unwrap();
+    assert!(after.items.is_empty());
 }
 
 // ── Settings integration ──
@@ -3541,14 +3573,14 @@ async fn test_settings_persist_and_reload() {
 
     let mut settings = state.settings_service.load();
     settings.language = "zh".to_string();
-    settings.log_retention_days = 7;
+    settings.activity_retention_days = 7;
     state.settings_service.save(&settings).unwrap();
 
     // Create new state pointing to same dir (simulates app restart)
     let state2 = create_mcp_test_app_state(tmp.path()).await;
     let reloaded = state2.settings_service.load();
     assert_eq!(reloaded.language, "zh");
-    assert_eq!(reloaded.log_retention_days, 7);
+    assert_eq!(reloaded.activity_retention_days, 7);
 }
 
 // ── Input definitions integration ──

@@ -948,7 +948,7 @@ mod tests {
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
     use crate::services::keychain::{self, InMemorySecretStore, KeychainError, SecretStore};
-    use crate::services::logger::LogService;
+    use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -963,7 +963,7 @@ mod tests {
         let store = Arc::new(InMemorySecretStore::default());
         let state = AppState::new_with_secret_store(
             config,
-            LogService::new(dir.path()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
             SettingsService::new(dir.path().to_path_buf()),
             store.clone(),
         );
@@ -1302,7 +1302,7 @@ mod tests {
         let store = Arc::new(FailOnceDeleteSecretStore::default());
         let state = AppState::new_with_secret_store(
             config,
-            LogService::new(dir.path()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
             SettingsService::new(dir.path().to_path_buf()),
             store.clone(),
         );

@@ -18,7 +18,10 @@ export interface CustomRuntimePaths {
 export interface AppSettings {
   theme: string;
   language: string;
-  log_retention_days: number;
+  diagnostic_log_level: 'error' | 'warn' | 'info' | 'debug' | 'trace';
+  diagnostic_retention_days: number;
+  activity_retention_days: number;
+  tool_history_retention_days: number;
   custom_runtime_paths: CustomRuntimePaths;
   manager_session?: {
     baseUrl: string;

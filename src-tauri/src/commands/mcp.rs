@@ -2,6 +2,7 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::{
     ComputerRuntimeAction, ComputerRuntimeActionUnavailable, McpServerManagedBy,
 };
+use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
@@ -179,16 +180,21 @@ pub async fn start_mcp_server_core(
         instance_id,
         bundle_id
     );
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "mcp",
-        &format!(
-            "Server started for instance {}: {}",
-            instance_id, server_name
-        ),
-        None,
-        Some(instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            instance_id,
+            ActivityLevel::Info,
+            "mcp",
+            "mcp_server_lifecycle",
+            "start",
+            ActivityOutcome::Succeeded,
+            format!("Server started: {server_name}"),
+        ))
+        .await
+    {
+        log::error!("failed to persist MCP start activity: {error}");
+    }
     Ok(())
 }
 
@@ -233,16 +239,21 @@ pub async fn stop_mcp_server_core(
         bundle_id,
         stopped
     );
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "mcp",
-        &format!(
-            "Server stopped for instance {}: {}",
-            instance_id, server_name
-        ),
-        None,
-        Some(instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            instance_id,
+            ActivityLevel::Info,
+            "mcp",
+            "mcp_server_lifecycle",
+            "stop",
+            ActivityOutcome::Succeeded,
+            format!("Server stopped: {server_name}"),
+        ))
+        .await
+    {
+        log::error!("failed to persist MCP stop activity: {error}");
+    }
     Ok(())
 }
 
