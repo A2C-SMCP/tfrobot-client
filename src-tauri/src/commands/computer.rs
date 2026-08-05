@@ -1323,6 +1323,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn computer_status_excludes_internal_client_control_from_mcp_counts() {
+        let (state, _dir) = test_state();
+        state
+            .config
+            .update_computer_instance("computer-a", |instance| {
+                instance.remote_control.enabled = true;
+            })
+            .unwrap();
+
+        let stopped = get_computer_instance_status_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(stopped.mcp_server_count, 0);
+        assert_eq!(stopped.runtime.mcp_servers, 0);
+        assert_eq!(stopped.runtime.active_mcp_servers, 0);
+
+        let started = start_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(started.mcp_server_count, 0);
+        assert_eq!(started.runtime.mcp_servers, 0);
+        assert_eq!(started.runtime.active_mcp_servers, 0);
+
+        state
+            .sdk_config
+            .update(
+                "computer-a",
+                &[ConfigEdit::new(
+                    ConfigEntity::McpServer("snapshot-only".to_string()),
+                    EditIntent::Upsert(serde_json::json!({
+                        "type": "stdio",
+                        "server_parameters": {"command": "node"},
+                        "disabled": true
+                    })),
+                )],
+            )
+            .unwrap();
+        let restarted = restart_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(restarted.mcp_server_count, 1);
+        assert_eq!(restarted.runtime.mcp_servers, 1);
+    }
+
+    #[tokio::test]
     async fn start_command_rejects_an_already_running_runtime() {
         let (state, _dir) = test_state();
         let started = start_computer_instance_core(None, &state, "computer-a".to_string())

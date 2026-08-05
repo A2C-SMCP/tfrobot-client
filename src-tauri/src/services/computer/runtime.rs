@@ -99,7 +99,7 @@ impl ComputerInstanceRuntime {
         loop {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
             let generation = self.runtime_generation();
-            let snapshot = self.computer.read().await.status().await;
+            let snapshot = user_visible_sdk_status_snapshot(&self.computer).await;
             if generation == self.runtime_generation() {
                 let snapshot_revision = self
                     .runtime_snapshot_revision
@@ -216,7 +216,7 @@ impl ComputerInstanceRuntime {
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
-                    let snapshot = computer.read().await.status().await;
+                    let snapshot = user_visible_sdk_status_snapshot(&computer).await;
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
@@ -489,6 +489,31 @@ impl ComputerInstanceRuntime {
             Ok(guard)
         }
     }
+}
+
+/// Projects the SDK's complete runtime inventory into the client-facing capability view.
+/// Internal providers remain mounted in the SDK but must not appear as user-manageable MCP
+/// servers in snapshots consumed by the UI.
+async fn user_visible_sdk_status_snapshot(
+    computer: &RwLock<Computer<InstanceSession>>,
+) -> ComputerStatusSnapshot {
+    let computer = computer.read().await;
+    let mut snapshot = computer.status().await;
+    snapshot.mcp_servers = computer
+        .list_mcp_servers()
+        .await
+        .iter()
+        .filter(|config| resolve_bundle_id(config).as_str() != CLIENT_CONTROL_BUNDLE_ID)
+        .count();
+    snapshot.active_mcp_servers = computer
+        .get_server_status()
+        .await
+        .iter()
+        .filter(|(bundle_id, _, running, _)| {
+            bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID && *running
+        })
+        .count();
+    snapshot
 }
 
 async fn collect_runtime_problems(

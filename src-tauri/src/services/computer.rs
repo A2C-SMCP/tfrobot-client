@@ -38,7 +38,7 @@ use a2c_smcp::smcp_computer::skills::{
 use a2c_smcp::smcp_computer::{
     inputs::{load_plugin_inputs, InputKind, InputResolutionError},
     inventory::{McpOwnership, McpServerWithMetadata},
-    LifecycleState,
+    ComputerStatusSnapshot, LifecycleState,
 };
 use a2c_smcp::A2CSkillRef;
 use async_trait::async_trait;
