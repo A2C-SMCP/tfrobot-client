@@ -196,6 +196,7 @@ describe('SkillsTab', () => {
           loadingSkills: false,
           loadingSkill: false,
           loadingMarketplace: false,
+          marketplaceOperation: null,
           error: null,
           skillError: null,
           marketplaceError: null,

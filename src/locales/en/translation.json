@@ -420,6 +420,18 @@
       "disablePlugin": "Disable Plugin",
       "uninstallPlugin": "Uninstall Plugin"
     },
+    "operations": {
+      "add": "Cloning Marketplace {{target}}…",
+      "update": "Updating and cloning Marketplace {{target}}…",
+      "refresh": "Refreshing Marketplace {{target}}…",
+      "remove": "Removing Marketplace {{target}}…",
+      "install": "Installing Plugin {{target}}…",
+      "enable": "Enabling Plugin {{target}}…",
+      "disable": "Disabling Plugin {{target}}…",
+      "uninstall": "Uninstalling Plugin {{target}}…",
+      "cloneDescription": "Large repositories or slow networks may take several minutes. The list will refresh automatically when cloning finishes.",
+      "defaultDescription": "The list will refresh automatically when the operation finishes."
+    },
     "messages": {
       "added": "Marketplace added",
       "refreshed": "Marketplace refreshed",

@@ -1,12 +1,22 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useCallback, useState } from 'react';
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { StrictMode, useCallback, useState } from 'react';
+import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
 import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
 
 vi.setConfig({ testTimeout: 30_000 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 const supportedCapabilities = {
   computerLifecycleApiAvailable: true,
@@ -417,7 +427,8 @@ describe('MarketplaceTab', () => {
     );
   });
 
-  it('adds a marketplace directly without secondary trust confirmation', async () => {
+  it('closes the form and shows clone status while adding a marketplace in the background', async () => {
+    const addMarketplace = deferred<void>();
     mockedInvoke
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
@@ -425,7 +436,18 @@ describe('MarketplaceTab', () => {
         plugins: [],
       })
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(addMarketplace.promise as never)
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
@@ -435,7 +457,11 @@ describe('MarketplaceTab', () => {
       })
       .mockResolvedValueOnce([]);
 
-    render(<MarketplaceTab instanceId="computer-a" />);
+    render(
+      <StrictMode>
+        <MarketplaceTab instanceId="computer-a" />
+      </StrictMode>,
+    );
 
     expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Add').closest('button')!);
@@ -454,8 +480,70 @@ describe('MarketplaceTab', () => {
         },
       });
     });
+    await waitFor(() => {
+      expect(screen.getByText('Add Marketplace').closest('.ant-modal'))
+        .toHaveClass('ant-zoom-leave');
+    });
+    expect(screen.getByText('Cloning Marketplace tf-market…')).toBeInTheDocument();
     expect(screen.queryByText(/trust/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/confirm/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      await useSkillStore.getState().fetchMarketplaceGovernance('computer-a');
+    });
+    expect(screen.getByText('Refresh').closest('button')).toBeDisabled();
+    expect(screen.getAllByText('Add')[0].closest('button')).toBeDisabled();
+
+    addMarketplace.resolve();
+
+    expect(await screen.findByText('Marketplace added')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('Cloning Marketplace tf-market…')).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not show completion from a previous computer after switching instances', async () => {
+    const addMarketplace = deferred<void>();
+    mockedInvoke.mockImplementation((command, args) => {
+      if (command === 'add_marketplace' && (args as { instanceId: string }).instanceId === 'computer-a') {
+        return addMarketplace.promise as never;
+      }
+      if (command === 'get_marketplace_governance') {
+        return Promise.resolve({
+          capabilities: supportedCapabilities,
+          marketplaces: [],
+          plugins: [],
+        }) as never;
+      }
+      if (command === 'list_skills') return Promise.resolve([]) as never;
+      return Promise.resolve() as never;
+    });
+
+    const view = render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add').closest('button')!);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'tf-market' } });
+    fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/tf.git' } });
+    const addButtons = screen.getAllByText('Add');
+    fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
+    expect(await screen.findByText('Cloning Marketplace tf-market…')).toBeInTheDocument();
+
+    view.rerender(<MarketplaceTab instanceId="computer-b" />);
+    await waitFor(() => {
+      expect(useSkillStore.getState().activeInstanceId).toBe('computer-b');
+    });
+
+    await act(async () => {
+      addMarketplace.resolve();
+      await addMarketplace.promise;
+    });
+    await waitFor(() => {
+      expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceOperation)
+        .toBeNull();
+    });
+
+    expect(screen.queryByText('Marketplace added')).not.toBeInTheDocument();
   });
 
   it('enables only operations exposed by SDK capabilities', async () => {
@@ -702,6 +790,7 @@ describe('MarketplaceTab', () => {
           loadingSkills: false,
           loadingSkill: false,
           loadingMarketplace: false,
+          marketplaceOperation: null,
           error: null,
           skillError: null,
           marketplaceError: null,

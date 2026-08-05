@@ -76,6 +76,22 @@ export interface PluginLifecycleRequest {
   plugin: string;
 }
 
+export type MarketplaceOperationKind =
+  | 'add'
+  | 'update'
+  | 'refresh'
+  | 'remove'
+  | 'install'
+  | 'enable'
+  | 'disable'
+  | 'uninstall';
+
+export interface MarketplaceOperation {
+  id: number;
+  kind: MarketplaceOperationKind;
+  target: string;
+}
+
 interface InstanceSkillRecord {
   skills: SkillRef[];
   selectedSkillName: string | null;
@@ -84,6 +100,7 @@ interface InstanceSkillRecord {
   loadingSkills: boolean;
   loadingSkill: boolean;
   loadingMarketplace: boolean;
+  marketplaceOperation: MarketplaceOperation | null;
   error: string | null;
   skillError: string | null;
   marketplaceError: string | null;
@@ -125,6 +142,7 @@ const emptyRecord: InstanceSkillRecord = {
   loadingSkills: false,
   loadingSkill: false,
   loadingMarketplace: false,
+  marketplaceOperation: null,
   error: null,
   skillError: null,
   marketplaceError: null,
@@ -165,6 +183,7 @@ function viewFromRecord(
   | 'loadingSkills'
   | 'loadingSkill'
   | 'loadingMarketplace'
+  | 'marketplaceOperation'
   | 'error'
   | 'skillError'
   | 'marketplaceError'
@@ -184,6 +203,7 @@ function viewFromRecord(
     loadingSkills: record.loadingSkills,
     loadingSkill: record.loadingSkill,
     loadingMarketplace: record.loadingMarketplace,
+    marketplaceOperation: record.marketplaceOperation,
     error: record.error,
     skillError: record.skillError,
     marketplaceError: record.marketplaceError,
@@ -197,6 +217,7 @@ function setInstanceRecord(
   set: (partial: Partial<SkillState> | ((state: SkillState) => Partial<SkillState>)) => void,
   instanceId: string,
   updater: (record: InstanceSkillRecord) => InstanceSkillRecord,
+  projectActiveView = true,
 ) {
   set((state) => {
     const current = state.recordsByInstanceId[instanceId] ?? cloneEmptyRecord();
@@ -206,7 +227,7 @@ function setInstanceRecord(
         ...state.recordsByInstanceId,
         [instanceId]: record,
       },
-      ...viewFromRecord(instanceId, record),
+      ...(projectActiveView ? viewFromRecord(instanceId, record) : {}),
     };
   });
 }
@@ -372,35 +393,83 @@ export const useSkillStore = create<SkillState>((set, get) => ({
   },
 
   addMarketplace: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('add_marketplace', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'add', target: request.name },
+      () => invokeMarketplace('add_marketplace', instanceId, { request }),
+    );
   },
 
   updateMarketplace: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('update_marketplace', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'update', target: request.name },
+      () => invokeMarketplace('update_marketplace', instanceId, { request }),
+    );
   },
 
   refreshMarketplace: async (instanceId, marketplace) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('refresh_marketplace', instanceId, { marketplace }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'refresh', target: marketplace },
+      () => invokeMarketplace('refresh_marketplace', instanceId, { marketplace }),
+    );
   },
 
   removeMarketplace: async (instanceId, marketplace) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('remove_marketplace', instanceId, { marketplace }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'remove', target: marketplace },
+      () => invokeMarketplace('remove_marketplace', instanceId, { marketplace }),
+    );
   },
 
   installPlugin: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('install_plugin', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'install', target: request.plugin },
+      () => invokeMarketplace('install_plugin', instanceId, { request }),
+    );
   },
 
   enablePlugin: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('enable_plugin', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'enable', target: request.plugin },
+      () => invokeMarketplace('enable_plugin', instanceId, { request }),
+    );
   },
 
   disablePlugin: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('disable_plugin', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'disable', target: request.plugin },
+      () => invokeMarketplace('disable_plugin', instanceId, { request }),
+    );
   },
 
   uninstallPlugin: async (instanceId, request) => {
-    await runMarketplaceLifecycle(set, get, instanceId, () => invokeMarketplace('uninstall_plugin', instanceId, { request }));
+    await runMarketplaceLifecycle(
+      set,
+      get,
+      instanceId,
+      { kind: 'uninstall', target: request.plugin },
+      () => invokeMarketplace('uninstall_plugin', instanceId, { request }),
+    );
   },
 
   reset: () => set(initialState),
@@ -410,29 +479,59 @@ async function runMarketplaceLifecycle(
   set: (partial: Partial<SkillState> | ((state: SkillState) => Partial<SkillState>)) => void,
   get: () => SkillState,
   instanceId: string,
+  operation: Omit<MarketplaceOperation, 'id'>,
   action: () => Promise<unknown>,
 ) {
+  const existingOperation = get().recordsByInstanceId[instanceId]?.marketplaceOperation;
+  if (existingOperation) {
+    throw new Error(
+      `Marketplace operation already in progress: ${existingOperation.kind} ${existingOperation.target}`,
+    );
+  }
   const requestId = (get().recordsByInstanceId[instanceId]?.marketplaceRequestId ?? 0) + 1;
+  const activeOperation: MarketplaceOperation = { id: requestId, ...operation };
   setInstanceRecord(set, instanceId, (record) => ({
     ...record,
     marketplaceRequestId: requestId,
     loadingMarketplace: true,
+    marketplaceOperation: activeOperation,
     marketplaceError: null,
   }));
   try {
     await action();
-    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) return;
-    await get().fetchMarketplaceGovernance(instanceId);
+    if (!isCurrentMarketplaceOperation(get(), instanceId, requestId)) return;
     if (get().activeInstanceId === instanceId) {
+      await get().fetchMarketplaceGovernance(instanceId);
+    }
+    if (
+      isCurrentMarketplaceOperation(get(), instanceId, requestId)
+      && get().activeInstanceId === instanceId
+    ) {
       await get().fetchSkills(instanceId);
     }
   } catch (e) {
-    if (!isCurrentRequest(get(), instanceId, requestId, 'marketplaceRequestId')) throw e;
-    setInstanceRecord(set, instanceId, (record) => ({
-      ...record,
-      marketplaceError: isMissingRuntimeInputError(e) ? null : formatInvokeError(e),
-      loadingMarketplace: false,
-    }));
+    if (isCurrentMarketplaceOperation(get(), instanceId, requestId)) {
+      setInstanceRecord(set, instanceId, (record) => ({
+        ...record,
+        marketplaceError: isMissingRuntimeInputError(e) ? null : formatInvokeError(e),
+      }), get().activeInstanceId === instanceId);
+    }
     throw e;
+  } finally {
+    if (isCurrentMarketplaceOperation(get(), instanceId, requestId)) {
+      setInstanceRecord(set, instanceId, (record) => ({
+        ...record,
+        loadingMarketplace: false,
+        marketplaceOperation: null,
+      }), get().activeInstanceId === instanceId);
+    }
   }
+}
+
+function isCurrentMarketplaceOperation(
+  state: SkillState,
+  instanceId: string,
+  operationId: number,
+) {
+  return state.recordsByInstanceId[instanceId]?.marketplaceOperation?.id === operationId;
 }

@@ -162,6 +162,57 @@ describe('skillStore', () => {
     });
   });
 
+  it('describes a pending marketplace clone until its lifecycle refresh completes', async () => {
+    const addMarketplace = deferred<void>();
+    mockedInvoke.mockImplementation((command) => {
+      if (command === 'add_marketplace') return addMarketplace.promise as any;
+      if (command === 'get_marketplace_governance') {
+        return Promise.resolve({
+          capabilities: {
+            computerLifecycleApiAvailable: true,
+            supportedOperations: ['add_marketplace'],
+            requiredSdkApis: [],
+            reason: 'supported',
+          },
+          marketplaces: [],
+          plugins: [],
+        });
+      }
+      if (command === 'list_skills') return Promise.resolve([]);
+      return Promise.resolve();
+    });
+
+    const pendingAdd = useSkillStore.getState().addMarketplace('computer-a', {
+      name: 'tf',
+      gitUrl: 'https://example.com/tf.git',
+    });
+
+    expect(useSkillStore.getState().marketplaceOperation).toMatchObject({
+      kind: 'add',
+      target: 'tf',
+    });
+    expect(useSkillStore.getState().loadingMarketplace).toBe(true);
+
+    await useSkillStore.getState().fetchMarketplaceGovernance('computer-a');
+    expect(useSkillStore.getState().loadingMarketplace).toBe(false);
+    expect(useSkillStore.getState().marketplaceOperation).toMatchObject({
+      kind: 'add',
+      target: 'tf',
+    });
+    await expect(useSkillStore.getState().refreshMarketplace('computer-a', 'tf'))
+      .rejects.toThrow('Marketplace operation already in progress: add tf');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('refresh_marketplace', {
+      instanceId: 'computer-a',
+      marketplace: 'tf',
+    });
+
+    addMarketplace.resolve();
+    await pendingAdd;
+
+    expect(useSkillStore.getState().marketplaceOperation).toBeNull();
+    expect(useSkillStore.getState().loadingMarketplace).toBe(false);
+  });
+
   it('stores readable marketplace lifecycle errors from structured backend failures', async () => {
     mockedInvoke.mockRejectedValueOnce({
       message: "MCP server 'audit-mcp' already exists as a user-managed MCP server",
@@ -241,9 +292,13 @@ describe('skillStore', () => {
     expect(mockedInvoke).not.toHaveBeenCalledWith('list_skills', {
       instanceId: 'computer-a',
     });
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceOperation)
+      .toBeNull();
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].loadingMarketplace)
+      .toBe(false);
   });
 
-  it('propagates a stale marketplace lifecycle failure to its original caller', async () => {
+  it('propagates an inactive marketplace lifecycle failure to its original caller', async () => {
     const firstEnable = deferred<void>();
     let enableCalls = 0;
     mockedInvoke.mockImplementation((command) => {
@@ -273,14 +328,15 @@ describe('skillStore', () => {
       code: 'missing_secret',
       input_id: 'audit@acme/api_token',
     });
-    await useSkillStore.getState().enablePlugin('computer-a', request);
+    await useSkillStore.getState().enablePlugin('computer-b', request);
     firstEnable.reject({
       code: 'missing_secret',
       input_id: 'audit@acme/api_token',
     });
 
     await staleFailure;
-    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceError).toBeNull();
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].marketplaceError)
+      .toBe('{"code":"missing_secret","input_id":"audit@acme/api_token"}');
   });
 
   it('keeps instance records isolated when switching back to a previous instance', async () => {

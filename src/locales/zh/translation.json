@@ -420,6 +420,18 @@
       "disablePlugin": "禁用 Plugin",
       "uninstallPlugin": "卸载 Plugin"
     },
+    "operations": {
+      "add": "正在克隆 Marketplace {{target}}…",
+      "update": "正在更新并克隆 Marketplace {{target}}…",
+      "refresh": "正在刷新 Marketplace {{target}}…",
+      "remove": "正在删除 Marketplace {{target}}…",
+      "install": "正在安装 Plugin {{target}}…",
+      "enable": "正在启用 Plugin {{target}}…",
+      "disable": "正在禁用 Plugin {{target}}…",
+      "uninstall": "正在卸载 Plugin {{target}}…",
+      "cloneDescription": "大型仓库或网络较慢时可能需要几分钟；克隆完成后列表会自动刷新。",
+      "defaultDescription": "操作完成后列表会自动刷新。"
+    },
     "messages": {
       "added": "Marketplace 已添加",
       "refreshed": "Marketplace 已刷新",
