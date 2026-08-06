@@ -1,0 +1,47 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.pageHeader {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.selector {
+  min-width: min(420px, 100%);
+}
+
+.workspaceCard :global(.ant-card-body) {
+  padding: 0;
+}
+
+.workspace {
+  height: calc(100vh - 250px);
+  min-height: 340px;
+  min-width: 0;
+}
+
+.centered {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 900px) {
+  .selector {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workspace {
+    height: calc(100vh - 280px);
+    min-height: 300px;
+  }
+}
