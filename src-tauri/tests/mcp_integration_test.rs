@@ -8,7 +8,7 @@ use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
-    create_test_app_state, echo_server_config, mcp, multi_tool_server_config,
+    create_test_app_state, echo_server_config, echo_server_path, mcp, multi_tool_server_config,
     slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::{BodyExt, Full};
@@ -1705,6 +1705,12 @@ async fn test_config_io_import_export_are_instance_scoped() {
     let second_configs = state.sdk_config.load("second").mcp.servers;
     let second_runtime = state.computer_registry.runtime("second").await.unwrap();
     let second_sdk_servers = second_runtime.synced_sdk_servers().await;
+    let default_runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let default_sdk_servers = default_runtime.synced_sdk_servers().await;
     let exported: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&export_path).unwrap()).unwrap();
 
@@ -1717,10 +1723,8 @@ async fn test_config_io_import_export_are_instance_scoped() {
     assert!(second_configs
         .iter()
         .any(|server| server.name == "exported-second"));
-    assert!(
-        !second_sdk_servers.contains_key(&bundle_id("imported-second")),
-        "config import must not perform runtime reload or availability checks"
-    );
+    assert!(second_sdk_servers.contains_key(&bundle_id("imported-second")));
+    assert!(!default_sdk_servers.contains_key(&bundle_id("imported-second")));
     let exported_names: std::collections::HashSet<_> = exported["servers"]
         .as_array()
         .unwrap()
@@ -3826,6 +3830,124 @@ async fn test_sdk_computer_invalid_command_fails() {
 }
 
 // ── Config IO integration ──
+
+#[tokio::test]
+async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let path = tmp.path().join("atlassian.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "atlassian": {
+                    "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = config_io::import_config_core(
+        &state,
+        path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.servers_imported, 1);
+    let imported = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "atlassian")
+        .expect("Atlassian server must be persisted");
+    let MCPServerConfig::Http(http) = imported.config else {
+        panic!("official URL config must import as Streamable HTTP");
+    };
+    assert_eq!(
+        http.server_parameters.url,
+        "https://mcp.atlassian.com/v1/mcp/authv2"
+    );
+    let oauth = http.oauth.expect("remote URL must default to OAuth");
+    assert!(oauth.resource.is_none());
+    assert!(oauth.scopes.is_empty());
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("atlassian")));
+    assert!(runtime
+        .mcp_server_statuses()
+        .await
+        .iter()
+        .any(|(id, _, running, _)| id.as_str() == "atlassian" && !*running));
+}
+
+#[tokio::test]
+async fn test_import_stdio_server_updates_an_active_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let path = tmp.path().join("active-runtime-import.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "runtime-import": {
+                    "command": "node",
+                    "args": [echo_server_path().to_string_lossy().to_string()],
+                    "env": {}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    config_io::import_config_core(
+        &state,
+        path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        Some(config_io::ConfigFormat::ClaudeDesktop),
+    )
+    .await
+    .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("runtime-import")));
+    assert!(runtime
+        .mcp_server_statuses()
+        .await
+        .iter()
+        .any(|(id, _, running, _)| id.as_str() == "runtime-import" && *running));
+}
 
 #[tokio::test]
 async fn test_export_and_reimport_config() {

@@ -1271,6 +1271,22 @@ impl ComputerInstanceRuntime {
             return Ok(true);
         }
 
+        let interactive_oauth = matches!(
+            &server,
+            MCPServerConfig::Http(config)
+                if matches!(
+                    config.oauth.as_ref().map(|oauth| &oauth.mode),
+                    Some(a2c_smcp::smcp_computer::oauth::OAuthClientMode::AuthorizationCode { .. })
+                )
+        );
+        if interactive_oauth {
+            // Persisting and mounting configuration is complete. Interactive authorization is a
+            // separate lifecycle: the OAuth callback starts the server after credentials commit,
+            // so an expected Unauthorized response must never become a configuration error.
+            self.clear_mcp_start_diagnostic(&bundle_id).await;
+            return Ok(true);
+        }
+
         if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
             log::warn!(
                 "Saved MCP config for instance {}, but server failed to start for {}: {}",
@@ -1278,7 +1294,10 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
-            return Err(error);
+            // The declaration is already persisted and mounted. Startability is runtime state,
+            // not configuration validity; keep the failure in the per-server diagnostic without
+            // turning a successful configuration operation into an error.
+            return Ok(true);
         }
         Ok(true)
     }
