@@ -6,19 +6,20 @@ use crate::services::client_control::{
 };
 use crate::services::computer_runtime_events::{
     ComputerRuntimeEventCause, ComputerRuntimeEventSink, ComputerRuntimeProblem,
-    ComputerRuntimeSnapshot, ComputerRuntimeStatusEvent, RuntimeDiagnosticRecord,
-    SdkProblemObservations,
+    ComputerRuntimeSnapshot, ComputerRuntimeStatusEvent, PublicOAuthStatus,
+    RuntimeDiagnosticRecord, SdkProblemObservations,
 };
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_resolver::RuntimeInputResolver;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
+use crate::services::oauth_credential_store::KeychainOAuthCredentialStore;
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
 use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
-use a2c_smcp::smcp_computer::mcp_clients::manager::ClientFactory;
+use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
     BundleId, CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
     ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
@@ -51,6 +52,7 @@ use tokio::sync::{Mutex, Notify, OwnedMutexGuard, RwLock};
 use tokio::task::JoinHandle;
 
 mod connection;
+mod oauth;
 mod registry;
 mod runtime;
 pub mod runtime_lifecycle;
@@ -703,6 +705,22 @@ struct RuntimeActivityGuard {
     activity_changed: Arc<Notify>,
 }
 
+struct OAuthAdmissionGuard(Arc<AtomicBool>);
+
+impl Drop for OAuthAdmissionGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+pub(crate) struct OAuthServerChangeAdmissionGuard(Arc<AtomicUsize>);
+
+impl Drop for OAuthServerChangeAdmissionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Keeps a runtime admitted for the complete multi-step SDK Skill read transaction. Deletion
 /// drains these sessions before quarantining Skill Home storage or shutting down the SDK.
 pub(crate) struct SdkSkillReadSession<'a> {
@@ -776,6 +794,12 @@ pub struct ComputerInstanceRuntime {
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
+    oauth_credential_store: Arc<KeychainOAuthCredentialStore>,
+    oauth_flows: Arc<Mutex<HashMap<BundleId, oauth::ActiveOAuthFlow>>>,
+    oauth_required_scopes: Arc<RwLock<oauth::OAuthRequiredScopeCache>>,
+    oauth_server_lifecycle_lock: Arc<Mutex<()>>,
+    oauth_admission_open: Arc<AtomicBool>,
+    oauth_server_change_admission_blocks: Arc<AtomicUsize>,
     skill_home_base: PathBuf,
     sdk_servers: Arc<RwLock<HashMap<BundleId, ServerName>>>,
     // Tracks only whether this client materialized a Marketplace dependency. Plugin ownership
@@ -845,12 +869,17 @@ impl ComputerInstanceRuntime {
     ) -> Self {
         let inputs = input_definitions_to_mcp_map(&instance.inputs);
         let session = InstanceSession::new(instance.id.clone());
+        let oauth_credential_store = Arc::new(KeychainOAuthCredentialStore::new(
+            instance.id.clone(),
+            secret_store.clone(),
+        ));
         let input_resolver = Arc::new(RuntimeInputResolver::new(instance.id.clone(), secret_store));
         let (computer, sdk_servers) = build_sdk_computer(
             &instance,
             &inputs,
             session.clone(),
             input_resolver.clone(),
+            oauth_credential_store.clone(),
             &skill_home_base,
             client_control_binding.clone(),
         );
@@ -861,6 +890,12 @@ impl ComputerInstanceRuntime {
             computer: Arc::new(RwLock::new(computer)),
             session,
             input_resolver,
+            oauth_credential_store,
+            oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+            oauth_required_scopes: Arc::new(RwLock::new(oauth::OAuthRequiredScopeCache::default())),
+            oauth_server_lifecycle_lock: Arc::new(Mutex::new(())),
+            oauth_admission_open: Arc::new(AtomicBool::new(true)),
+            oauth_server_change_admission_blocks: Arc::new(AtomicUsize::new(0)),
             skill_home_base,
             sdk_servers: Arc::new(RwLock::new(sdk_servers)),
             plugin_mounted_server_ids: Arc::new(RwLock::new(HashSet::new())),
@@ -903,6 +938,12 @@ impl ComputerInstanceRuntime {
             computer: self.computer.clone(),
             session: self.session.clone(),
             input_resolver: self.input_resolver.clone(),
+            oauth_credential_store: self.oauth_credential_store.clone(),
+            oauth_flows: self.oauth_flows.clone(),
+            oauth_required_scopes: self.oauth_required_scopes.clone(),
+            oauth_server_lifecycle_lock: self.oauth_server_lifecycle_lock.clone(),
+            oauth_admission_open: self.oauth_admission_open.clone(),
+            oauth_server_change_admission_blocks: self.oauth_server_change_admission_blocks.clone(),
             skill_home_base: self.skill_home_base.clone(),
             sdk_servers: self.sdk_servers.clone(),
             plugin_mounted_server_ids: self.plugin_mounted_server_ids.clone(),
@@ -1058,6 +1099,7 @@ impl ComputerInstanceRuntime {
 
     pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
         let name = server.name().to_string();
         let bundle_id = resolve_bundle_id(&server);
@@ -1066,6 +1108,8 @@ impl ComputerInstanceRuntime {
                 "Plugins cannot use the reserved Client Control bundleId".to_string(),
             ));
         }
+        self.cancel_oauth_before_server_lifecycle_change(&bundle_id)
+            .await?;
         self.computer
             .read()
             .await
@@ -1132,6 +1176,7 @@ impl ComputerInstanceRuntime {
         preserve_plugin_runtime: bool,
     ) -> ComputerResult<bool> {
         let _guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
         let bundle_id = resolve_bundle_id(&server);
         if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
@@ -1168,6 +1213,9 @@ impl ComputerInstanceRuntime {
             }
             return Ok(true);
         }
+
+        self.cancel_oauth_before_server_lifecycle_change(&bundle_id)
+            .await?;
 
         if computer_running {
             if let Err(error) = self.computer.read().await.stop_mcp_client(&bundle_id).await {
@@ -1315,7 +1363,9 @@ impl ComputerInstanceRuntime {
 
     pub async fn remove_user_mcp_server_config(&self, bundle_id: &BundleId) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
+        let oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active()?;
+        self.clear_oauth_authorization(bundle_id).await?;
         let computer_running = self.is_running().await;
         if computer_running {
             self.computer
@@ -1334,6 +1384,10 @@ impl ComputerInstanceRuntime {
         self.sdk_servers.write().await.remove(bundle_id);
         self.clear_mcp_start_diagnostic(bundle_id).await;
         self.clear_mcp_config_apply_diagnostic(bundle_id).await;
+        // The old SDK server no longer exists. Reconciliation hooks fence each subsequent
+        // server-local mount/unmount independently, so do not retain this non-reentrant guard
+        // while invoking them.
+        drop(oauth_server_guard);
 
         self.reconcile_sdk_governance_inner()
             .await
@@ -1347,7 +1401,11 @@ impl ComputerInstanceRuntime {
 
     pub async fn remove_plugin_server(&self, bundle_id: &BundleId) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active()?;
+        self.cancel_oauth_before_server_lifecycle_change(bundle_id)
+            .await
+            .map_err(|error| error.to_string())?;
         remove_tracked_plugin_server(
             bundle_id,
             &self.sdk_servers,
@@ -1956,6 +2014,11 @@ impl ComputerInstanceRuntime {
     }
 
     async fn reconcile_sdk_governance_inner(&self) -> ComputerResult<Vec<String>> {
+        // Fence the complete SDK reconciliation before it can acquire SDK-internal state. Hooks
+        // run synchronously inside this call and must not reacquire this non-reentrant lock; this
+        // keeps the global order oauth-server fence -> SDK state identical to direct mutations and
+        // OAuth flow creation.
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         let config_context = instance_config_context(&self.instance, &self.skill_home_base);
         let declared = resolve_instance_settings(&config_context);
         let existing_servers = self.sdk_servers.read().await.clone();
@@ -2012,10 +2075,17 @@ impl ComputerInstanceRuntime {
             &inputs,
             self.session.clone(),
             self.input_resolver.clone(),
+            self.oauth_credential_store.clone(),
             &self.skill_home_base,
             self.client_control_binding.clone(),
         );
 
+        let oauth_admission = self.oauth_admission_open.clone();
+        // Serialize the admission fence with flow reservation so replacement cannot miss a flow
+        // that observed the old handle immediately before the fence closed.
+        self.close_oauth_admission().await;
+        let _oauth_admission_guard = OAuthAdmissionGuard(oauth_admission);
+        self.cancel_all_oauth_authorizations().await;
         if self.has_smcp_transport().await {
             self.clear_smcp_connection_inner().await.map_err(|error| {
                 ComputerRuntimeStartError::Client(format!(
@@ -2033,6 +2103,9 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(ComputerRuntimeStartError::Client)?;
         self.stop_runtime_event_relay().await;
+        // The old relay may have consumed a queued status after cancellation began. Clear once
+        // more after joining it so no scope observation crosses the SDK handle generation.
+        self.oauth_required_scopes.write().await.clear();
         {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
             // Problem cleanup is part of the committed handle replacement. Until shutdown
@@ -2101,6 +2174,7 @@ fn build_sdk_computer(
     inputs: &HashMap<String, MCPServerInput>,
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
+    oauth_credential_store: Arc<KeychainOAuthCredentialStore>,
     skill_home_base: &Path,
     client_control_binding: ClientControlBinding,
 ) -> (Computer<InstanceSession>, HashMap<BundleId, ServerName>) {
@@ -2164,6 +2238,7 @@ fn build_sdk_computer(
     let computer = computer
         .with_input_resolver(input_resolver.clone())
         .with_secret_resolver(input_resolver)
+        .with_oauth_credential_store(oauth_credential_store)
         .with_skill_home(skill_home)
         .with_config_dir(config_context.project_anchor())
         .with_config_env(config_context.env().clone())
@@ -2172,6 +2247,7 @@ fn build_sdk_computer(
 }
 
 struct RuntimeMcpHooks {
+    runtime: ComputerInstanceRuntime,
     computer: Arc<RwLock<Computer<InstanceSession>>>,
     inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
     plugin_runtime_inputs: Arc<RwLock<HashMap<String, MCPServerInput>>>,
@@ -2238,6 +2314,7 @@ impl RuntimeMcpHooks {
             })
             .collect();
         Ok(Self {
+            runtime: runtime.clone(),
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
             plugin_runtime_inputs: runtime.plugin_runtime_inputs.clone(),
@@ -2307,6 +2384,10 @@ impl McpInstallHooks for RuntimeMcpHooks {
         } else {
             cfg
         };
+        self.runtime
+            .cancel_oauth_before_server_lifecycle_change(&bundle_id)
+            .await
+            .map_err(|error| McpHookError(error.to_string()))?;
         let mount_result = self
             .computer
             .read()
@@ -2351,6 +2432,10 @@ impl McpInstallHooks for RuntimeMcpHooks {
             return Ok(());
         }
         drop(preserved);
+        self.runtime
+            .cancel_oauth_before_server_lifecycle_change(bundle_id)
+            .await
+            .map_err(|error| McpHookError(error.to_string()))?;
         remove_tracked_plugin_server(
             bundle_id,
             &self.sdk_servers,
@@ -2886,6 +2971,7 @@ mod tests {
         );
 
         let hooks = RuntimeMcpHooks {
+            runtime: runtime.clone(),
             computer: runtime.computer.clone(),
             inputs: runtime.inputs.clone(),
             plugin_runtime_inputs: runtime.plugin_runtime_inputs.clone(),
@@ -4178,6 +4264,16 @@ mod tests {
         let runtime = registry.runtime("one").await.unwrap();
         runtime.start().await.unwrap();
         let first_generation = runtime.runtime_generation();
+        runtime
+            .oauth_required_scopes
+            .write()
+            .await
+            .apply_public_status(
+                &BundleId::try_from("protected").unwrap(),
+                &PublicOAuthStatus::ReauthorizationRequired {
+                    required_scope: "tools.write".to_string(),
+                },
+            );
 
         let snapshot_guard = runtime.runtime_snapshot_lock.lock().await;
         let restart_runtime = runtime.clone();
@@ -4199,6 +4295,7 @@ mod tests {
         drop(snapshot_guard);
         restart_task.await.unwrap().unwrap();
         assert_eq!(runtime.runtime_generation(), first_generation + 1);
+        assert!(runtime.oauth_required_scopes.read().await.is_empty());
         assert!(runtime.is_running().await);
         runtime.shutdown().await;
     }

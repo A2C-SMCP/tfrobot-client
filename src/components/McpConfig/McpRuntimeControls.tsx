@@ -56,6 +56,9 @@ export function McpRuntimeControls({
     stopServer,
     startAll,
     stopAll,
+    authorizeServer,
+    cancelAuthorization,
+    clearAuthorization,
   } = useMcpStore();
 
   useEffect(() => {
@@ -105,6 +108,20 @@ export function McpRuntimeControls({
     } catch {
       if (activeInstanceRef.current !== actionInstanceId) return;
       message.error(t('mcp.messages.operationFailed'));
+    }
+  };
+
+  const runAuthorizationAction = async (
+    action: (instanceId: string, bundleId: string) => Promise<void>,
+    bundleId: string,
+  ) => {
+    const actionInstanceId = instanceId;
+    try {
+      await action(actionInstanceId, bundleId);
+    } catch {
+      if (activeInstanceRef.current === actionInstanceId) {
+        message.error(t('mcp.messages.operationFailed'));
+      }
     }
   };
 
@@ -227,6 +244,9 @@ export function McpRuntimeControls({
         actionsDisabledReason={disabledReason}
         loading={loading}
         onOpenPlugin={onOpenPlugin}
+        onAuthorize={(bundleId) => runAuthorizationAction(authorizeServer, bundleId)}
+        onCancelAuthorization={(bundleId) => runAuthorizationAction(cancelAuthorization, bundleId)}
+        onClearAuthorization={(bundleId) => runAuthorizationAction(clearAuthorization, bundleId)}
         onStop={(bundleId, name) => handleStopServer(bundleId, name)}
         onStart={(bundleId) => {
           const server = servers.find((candidate) => candidate.bundleId === bundleId);

@@ -1,5 +1,6 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
+use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
 use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::env_var_name;
@@ -269,21 +270,38 @@ pub async fn upsert_computer_mcp_config_core(
     let missing_input_id = referenced_input_ids(&config)?
         .into_iter()
         .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
-    let previous_bundle_id = state
+    let previous_config = state
         .sdk_config
         .load(instance_id)
         .mcp
         .servers
         .into_iter()
         .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
-        .map(|server| resolve_bundle_id(&server.config));
+        .map(|server| server.config);
     let next_bundle_id = resolve_bundle_id(&config);
+    let runtime = state.computer_registry.runtime(instance_id).await;
+    let oauth_identity_change = previous_config
+        .as_ref()
+        .filter(|previous| oauth_credential_identity_changed(previous, &config));
+    let _oauth_admission_guard = if oauth_identity_change.is_some() {
+        match runtime.as_ref() {
+            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(previous) = oauth_identity_change {
+        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, previous.clone())
+            .await
+            .map_err(RuntimeActionError::runtime)?;
+    }
     state
         .sdk_config
         .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
-        if let Some(previous_bundle_id) = previous_bundle_id {
+    if let Some(runtime) = runtime {
+        if let Some(previous_bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
             if previous_bundle_id != next_bundle_id {
                 if let Err(error) = runtime
                     .remove_user_mcp_server_config(&previous_bundle_id)
@@ -314,6 +332,48 @@ pub async fn upsert_computer_mcp_config_core(
         return Err(missing_input_definition_error(input_id));
     }
     Ok(())
+}
+
+fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServerConfig) -> bool {
+    let MCPServerConfig::Http(previous) = previous else {
+        return false;
+    };
+    let Some(previous_oauth) = previous.oauth.as_ref() else {
+        return false;
+    };
+    let MCPServerConfig::Http(next) = next else {
+        return true;
+    };
+    let Some(next_oauth) = next.oauth.as_ref() else {
+        return true;
+    };
+    let previous_resource = previous_oauth
+        .resource
+        .as_deref()
+        .unwrap_or(&previous.server_parameters.url);
+    let next_resource = next_oauth
+        .resource
+        .as_deref()
+        .unwrap_or(&next.server_parameters.url);
+    resolve_bundle_id(&MCPServerConfig::Http(previous.clone()))
+        != resolve_bundle_id(&MCPServerConfig::Http(next.clone()))
+        || previous_resource != next_resource
+        || previous_oauth.mode != next_oauth.mode
+        || previous_oauth.scopes != next_oauth.scopes
+        || previous_oauth.client_name != next_oauth.client_name
+}
+
+async fn clear_oauth_before_config_change(
+    state: &AppState,
+    runtime: Option<&crate::services::computer::ComputerInstanceRuntime>,
+    instance_id: &str,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    if let Some(runtime) = runtime {
+        runtime.clear_oauth_for_server_config(config).await
+    } else {
+        clear_oauth_credentials_for_config(instance_id, state.secret_store.clone(), config).await
+    }
 }
 
 fn missing_input_definition_error(input_id: String) -> RuntimeActionError {
@@ -386,20 +446,28 @@ pub async fn remove_computer_mcp_config_core(
     if name.is_empty() {
         return Err("name is required".to_string());
     }
-    let bundle_id = state
+    let previous_config = state
         .sdk_config
         .load(instance_id)
         .mcp
         .servers
         .into_iter()
         .find(|server| server.origin != ProvenanceScope::Plugin && server.name == name)
-        .map(|server| resolve_bundle_id(&server.config));
+        .map(|server| server.config);
+    let runtime = state.computer_registry.runtime(instance_id).await;
+    let _oauth_admission_guard = match (previous_config.as_ref(), runtime.as_ref()) {
+        (Some(_), Some(runtime)) => Some(runtime.block_oauth_admission_for_server_change().await),
+        _ => None,
+    };
+    if let Some(config) = previous_config.clone() {
+        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
+    }
     state
         .sdk_config
         .remove_mcp_config(instance_id, name)
         .map_err(|error| error.to_string())?;
-    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
-        if let Some(bundle_id) = bundle_id {
+    if let Some(runtime) = runtime {
+        if let Some(bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
             if let Err(error) = runtime.remove_user_mcp_server_config(&bundle_id).await {
                 runtime
                     .record_mcp_config_apply_diagnostic(
@@ -449,6 +517,52 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+
+    fn oauth_http_config(resource: Option<&str>, disabled: bool) -> MCPServerConfig {
+        serde_json::from_value(json!({
+            "type": "streamable",
+            "name": "protected",
+            "bundle_id": "protected",
+            "disabled": disabled,
+            "oauth": {
+                "resource": resource,
+                "scopes": [],
+                "clientName": "TFRobot",
+                "mode": {
+                    "type": "authorizationCode",
+                    "registration": "dynamic"
+                }
+            },
+            "server_parameters": { "url": "https://mcp.example.com/mcp" }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn oauth_identity_change_ignores_disable_but_detects_resource_or_oauth_removal() {
+        let enabled = oauth_http_config(None, false);
+        let disabled = oauth_http_config(None, true);
+        let different_resource = oauth_http_config(Some("https://resource.example.com"), false);
+        let mut different_implicit_resource = enabled.clone();
+        if let MCPServerConfig::Http(http) = &mut different_implicit_resource {
+            http.server_parameters.url = "https://new-mcp.example.com/mcp".to_string();
+        }
+        let mut oauth_off = enabled.clone();
+        if let MCPServerConfig::Http(http) = &mut oauth_off {
+            http.oauth = None;
+        }
+
+        assert!(!oauth_credential_identity_changed(&enabled, &disabled));
+        assert!(oauth_credential_identity_changed(
+            &enabled,
+            &different_resource
+        ));
+        assert!(oauth_credential_identity_changed(
+            &enabled,
+            &different_implicit_resource
+        ));
+        assert!(oauth_credential_identity_changed(&enabled, &oauth_off));
+    }
 
     #[test]
     fn client_snapshot_excludes_sdk_input_definitions() {

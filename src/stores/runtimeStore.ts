@@ -44,6 +44,11 @@ export type ComputerRuntimeEventCause =
       operation: string;
       has_error: boolean;
     }
+  | {
+      kind: 'oauth_status_changed';
+      bundle_id: string;
+      status: import('./mcpStore').SdkOAuthStatus;
+    }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
   | { kind: 'resync'; skipped_events: number };
@@ -222,6 +227,20 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       };
     });
     applySnapshotToConsumers(event.instance_id, event.snapshot);
+    if (event.cause.kind === 'oauth_status_changed') {
+      useMcpStore.getState().applyOAuthStatusEvent(
+        event.instance_id,
+        event.cause.bundle_id,
+        event.cause.status,
+      );
+    } else if (
+      event.cause.kind === 'resync'
+      && useMcpStore.getState().activeInstanceId === event.instance_id
+    ) {
+      // OAuth state is intentionally absent from the compact runtime snapshot. A lag marker is
+      // therefore the event-driven signal to rehydrate MCP rows after one or more dropped events.
+      void useMcpStore.getState().rehydrateServers(event.instance_id);
+    }
     refreshRevisionConsumers(event.instance_id, previous, event.snapshot);
   },
 

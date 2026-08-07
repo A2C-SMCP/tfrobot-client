@@ -201,6 +201,7 @@
         "connectionAbsent": "不存在",
         "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
         "mcpDiagnosticChanged": "MCP {{bundleId}} 的 {{operation}} 诊断状态：{{status}}",
+        "oauthStatusChanged": "MCP {{bundleId}} 授权状态：{{status}}",
         "diagnosticFailed": "失败",
         "diagnosticCleared": "已清除",
         "handleReplaced": "运行时句柄已替换：{{reason}}",
@@ -503,6 +504,7 @@
       "enabled": "启用",
       "status": "状态",
       "message": "消息",
+      "authorization": "授权",
       "actions": "操作"
     },
     "source": {
@@ -532,6 +534,17 @@
       "remove": "删除",
       "toggleEnabled": "切换服务器 {{name}} 的启用状态"
     },
+    "authorization": {
+      "authorize": "授权",
+      "reauthorize": "重新授权",
+      "cancel": "取消",
+      "authorized": "已授权",
+      "unauthorized": "未授权",
+      "pending": "授权进行中",
+      "error": "授权错误",
+      "requiredScope": "需要额外权限：{{scope}}",
+      "clear": "清除授权"
+    },
     "form": {
       "type": "服务器类型",
       "name": "服务器名称",
@@ -552,6 +565,12 @@
       "urlRequired": "请输入 URL",
       "headers": "HTTP 请求头",
       "addHeader": "添加请求头",
+      "oauthTitle": "OAuth",
+      "oauthEnabled": "启用 OAuth",
+      "oauthHint": "使用带 PKCE 的授权码流程和动态客户端注册，无需填写 client ID、secret 或 scopes。",
+      "oauthResource": "OAuth Resource",
+      "oauthResourceHint": "默认使用 MCP URL；编辑导入配置时会保留原有注册信息。",
+      "oauthAuthorizationConflict": "OAuth 不能与静态 Authorization 请求头同时使用。",
       "advancedSettings": "高级设置",
       "disabled": "禁用",
       "forbiddenTools": "禁用工具",

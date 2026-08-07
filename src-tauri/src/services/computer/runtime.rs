@@ -1,8 +1,48 @@
 use super::*;
+#[cfg(test)]
+use a2c_smcp::smcp_computer::oauth::OAuthStatus;
+use a2c_smcp::smcp_computer::ComputerEvent;
+use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::timeout;
 
 const SDK_COMPUTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn coalesce_oauth_events(events: Vec<ComputerEvent>) -> Vec<ComputerEvent> {
+    let mut seen_oauth_bundles = HashSet::new();
+    let mut retained = Vec::with_capacity(events.len());
+    for event in events.into_iter().rev() {
+        if let ComputerEvent::OAuthStatusChanged { bundle_id, .. } = &event {
+            if !seen_oauth_bundles.insert(bundle_id.clone()) {
+                continue;
+            }
+        }
+        retained.push(event);
+    }
+    retained.reverse();
+    retained
+}
+
+struct PendingRuntimeCause {
+    cause: ComputerRuntimeEventCause,
+    terminal: bool,
+}
+
+async fn project_oauth_required_scope(
+    required_scopes: &RwLock<oauth::OAuthRequiredScopeCache>,
+    cause: &ComputerRuntimeEventCause,
+) {
+    let mut required_scopes = required_scopes.write().await;
+    match cause {
+        ComputerRuntimeEventCause::OAuthStatusChanged { bundle_id, status } => {
+            if let Ok(bundle_id) = BundleId::try_from(bundle_id.as_str()) {
+                required_scopes.apply_public_status(&bundle_id, status);
+            }
+        }
+        ComputerRuntimeEventCause::Resync { .. } => required_scopes.clear(),
+        _ => {}
+    }
+}
 
 impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
@@ -169,6 +209,7 @@ impl ComputerInstanceRuntime {
         let mcp_start_diagnostics = self.mcp_start_diagnostics.clone();
         let mcp_config_apply_diagnostics = self.mcp_config_apply_diagnostics.clone();
         let sdk_servers = self.sdk_servers.clone();
+        let oauth_required_scopes = self.oauth_required_scopes.clone();
         let connection = self.connection.clone();
         let connection_operation = self.connection_operation.clone();
         let connection_authority_revision = self.connection_authority_revision.clone();
@@ -191,26 +232,62 @@ impl ComputerInstanceRuntime {
             stale.task.abort();
         }
         let relay_task = tokio::spawn(async move {
+            let mut pending = VecDeque::<PendingRuntimeCause>::new();
             loop {
-                let (cause, terminal) = match receiver.recv().await {
-                    Ok(event) => {
-                        let terminal = matches!(
-                            event,
-                            a2c_smcp::smcp_computer::ComputerEvent::LifecycleChanged {
-                                state: LifecycleState::Shutdown
+                if pending.is_empty() {
+                    let first = match receiver.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped_events)) => {
+                            pending.push_back(PendingRuntimeCause {
+                                cause: ComputerRuntimeEventCause::Resync { skipped_events },
+                                terminal: false,
+                            });
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    let mut events = vec![first];
+                    let mut lagged = None;
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(event) => events.push(event),
+                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                                lagged = Some(skipped);
+                                break;
                             }
-                        );
-                        (ComputerRuntimeEventCause::from(event), terminal)
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped_events)) => {
-                        (ComputerRuntimeEventCause::Resync { skipped_events }, false)
+                    if let Some(skipped_events) = lagged {
+                        pending.push_back(PendingRuntimeCause {
+                            cause: ComputerRuntimeEventCause::Resync { skipped_events },
+                            terminal: false,
+                        });
+                    } else {
+                        pending.extend(coalesce_oauth_events(events).into_iter().map(|event| {
+                            let terminal = matches!(
+                                &event,
+                                ComputerEvent::LifecycleChanged {
+                                    state: LifecycleState::Shutdown
+                                }
+                            );
+                            PendingRuntimeCause {
+                                cause: ComputerRuntimeEventCause::from(event),
+                                terminal,
+                            }
+                        }));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
+                }
+
+                let PendingRuntimeCause { cause, terminal } = pending
+                    .pop_front()
+                    .expect("a relay batch always yields one pending cause");
 
                 if current_generation.load(Ordering::Acquire) != generation {
                     break;
                 }
+                project_oauth_required_scope(&oauth_required_scopes, &cause).await;
                 let runtime_snapshot = {
                     let _snapshot_guard = snapshot_lock.lock().await;
                     if current_generation.load(Ordering::Acquire) != generation {
@@ -321,6 +398,10 @@ impl ComputerInstanceRuntime {
     /// Crosses the shutdown commit point. Callers must run the non-mutating preflight first.
     pub(super) async fn shutdown_after_preflight_inner(&self) -> Vec<String> {
         let mut cleanup_errors = Vec::new();
+        // Shutdown is a terminal OAuth admission boundary. Unlike handle replacement, it remains
+        // closed after cleanup; a later runtime start installs a fresh SDK handle first.
+        self.close_oauth_admission().await;
+        self.cancel_all_oauth_authorizations().await;
         if let Err(error) = self.prepare_sdk_shutdown_inner().await {
             cleanup_errors.push(error);
         }
@@ -633,5 +714,87 @@ fn earliest_runtime_occurrence(left: &str, right: &str) -> String {
         (Ok(_), Ok(_)) => left.to_string(),
         _ if right < left => right.to_string(),
         _ => left.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sdk_event_projection_tracks_and_invalidates_required_scope() {
+        let scopes = RwLock::new(oauth::OAuthRequiredScopeCache::default());
+        let bundle_id = BundleId::try_from("protected").unwrap();
+
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::OAuthStatusChanged {
+                bundle_id: bundle_id.to_string(),
+                status: PublicOAuthStatus::ReauthorizationRequired {
+                    required_scope: "tools.write".to_string(),
+                },
+            },
+        )
+        .await;
+        assert_eq!(
+            scopes.read().await.required_scope(&bundle_id).as_deref(),
+            Some("tools.write")
+        );
+
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::OAuthStatusChanged {
+                bundle_id: bundle_id.to_string(),
+                status: PublicOAuthStatus::Authorized {
+                    scopes: vec!["tools.write".to_string()],
+                },
+            },
+        )
+        .await;
+        assert!(scopes.read().await.required_scope(&bundle_id).is_none());
+
+        scopes.write().await.apply_public_status(
+            &bundle_id,
+            &PublicOAuthStatus::ReauthorizationRequired {
+                required_scope: "tools.admin".to_string(),
+            },
+        );
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::Resync { skipped_events: 1 },
+        )
+        .await;
+        assert!(scopes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_oauth_events_keep_latest_status_per_bundle_in_batch() {
+        let bundle_id = BundleId::try_from("protected").unwrap();
+        let events = coalesce_oauth_events(vec![
+            ComputerEvent::OAuthStatusChanged {
+                bundle_id: bundle_id.clone(),
+                status: OAuthStatus::Unauthorized,
+            },
+            ComputerEvent::CapabilityRevisionBumped { revision: 7 },
+            ComputerEvent::OAuthStatusChanged {
+                bundle_id: bundle_id.clone(),
+                status: OAuthStatus::ReauthorizationRequired {
+                    required_scope: "tools.write".to_string(),
+                },
+            },
+        ]);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ComputerEvent::CapabilityRevisionBumped { revision: 7 }
+        ));
+        assert!(matches!(
+            &events[1],
+            ComputerEvent::OAuthStatusChanged {
+                status: OAuthStatus::ReauthorizationRequired { required_scope },
+                ..
+            } if required_scope == "tools.write"
+        ));
     }
 }

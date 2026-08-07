@@ -3,13 +3,23 @@ use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::computer::{
     ComputerRuntimeAction, ComputerRuntimeActionUnavailable, McpServerManagedBy,
 };
+use crate::services::computer_runtime_events::PublicOAuthStatus;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthInteraction {
+    None,
+    Interactive,
+    Machine,
+}
 
 /// Server status returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +32,8 @@ pub struct McpServerStatus {
     pub disabled: bool,
     #[serde(rename = "managedBy")]
     pub managed_by: McpServerManagedBy,
+    pub oauth_status: PublicOAuthStatus,
+    pub oauth_interaction: McpOAuthInteraction,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -131,9 +143,30 @@ pub async fn get_mcp_servers_core(
                 running,
                 status_message,
                 managed_by: metadata.managed_by,
+                oauth_status: PublicOAuthStatus::NotApplicable,
+                oauth_interaction: McpOAuthInteraction::None,
             }
         })
         .collect();
+    for status in &mut statuses {
+        status.oauth_status = if let Some(interactive) = runtime
+            .mcp_server_oauth_is_interactive(&status.bundle_id)
+            .await
+        {
+            status.oauth_interaction = if interactive {
+                McpOAuthInteraction::Interactive
+            } else {
+                McpOAuthInteraction::Machine
+            };
+            match runtime.oauth_status(&status.bundle_id).await {
+                Ok(Some(oauth_status)) => oauth_status.into(),
+                Ok(None) => PublicOAuthStatus::Unauthorized,
+                Err(_) => PublicOAuthStatus::Error,
+            }
+        } else {
+            PublicOAuthStatus::NotApplicable
+        };
+    }
     statuses.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -141,6 +174,53 @@ pub async fn get_mcp_servers_core(
     });
 
     Ok(statuses)
+}
+
+#[tauri::command]
+pub async fn authorize_mcp_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    let runtime = require_runtime(&state, instance_id).await?;
+    let authorization_url = runtime.begin_oauth_authorization(&bundle_id).await?;
+    if app
+        .opener()
+        .open_url(authorization_url, None::<&str>)
+        .is_err()
+    {
+        runtime.cancel_oauth_authorization(&bundle_id).await?;
+        return Err("Unable to open the system browser for MCP authorization".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_mcp_authorization(
+    state: State<'_, AppState>,
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    require_runtime(&state, instance_id)
+        .await?
+        .cancel_oauth_authorization(&bundle_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn clear_mcp_authorization(
+    state: State<'_, AppState>,
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    require_runtime(&state, instance_id)
+        .await?
+        .clear_oauth_authorization(&bundle_id)
+        .await
 }
 
 #[tauri::command]
@@ -521,6 +601,50 @@ mod tests {
     use a2c_smcp::smcp_computer::errors::ComputerError;
     use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+    use a2c_smcp::smcp_computer::oauth::OAuthStatus;
+
+    #[test]
+    fn oauth_status_projection_is_non_sensitive_and_uses_six_ui_states() {
+        let projected = vec![
+            PublicOAuthStatus::NotApplicable,
+            OAuthStatus::Unauthorized.into(),
+            OAuthStatus::AuthorizationPending.into(),
+            OAuthStatus::Authorized {
+                scopes: vec!["tools.read".to_string()],
+            }
+            .into(),
+            OAuthStatus::ReauthorizationRequired {
+                required_scope: "tools.write".to_string(),
+            }
+            .into(),
+            OAuthStatus::Error {
+                message: "provider detail must not cross the UI boundary".to_string(),
+            }
+            .into(),
+        ];
+        let values: Vec<_> = projected
+            .into_iter()
+            .map(|status| serde_json::to_value(status).unwrap())
+            .collect();
+        let states: Vec<_> = values
+            .iter()
+            .map(|value| value["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            states,
+            [
+                "not_applicable",
+                "unauthorized",
+                "authorization_pending",
+                "authorized",
+                "reauthorization_required",
+                "error",
+            ]
+        );
+        assert!(values
+            .iter()
+            .all(|value| !value.to_string().contains("provider detail")));
+    }
 
     #[test]
     fn test_stdio_config_from_frontend_json() {

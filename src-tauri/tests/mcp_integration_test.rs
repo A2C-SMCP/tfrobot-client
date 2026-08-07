@@ -33,9 +33,13 @@ use tfrobot_client_lib::services::computer_runtime_events::{
     ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
     ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
 };
+use tfrobot_client_lib::services::config::ConfigService;
+use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
+use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tower::service_fn;
 use tower::Layer;
 
@@ -76,6 +80,66 @@ fn unavailable_server_config(name: &str) -> MCPServerConfig {
     value["server_parameters"]["command"] =
         serde_json::Value::String("tfrobot-command-that-does-not-exist".to_string());
     serde_json::from_value(value).unwrap()
+}
+
+fn oauth_http_server_config(name: &str, resource: Option<&str>) -> MCPServerConfig {
+    serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": name,
+        "bundle_id": name,
+        "oauth": {
+            "resource": resource,
+            "scopes": [],
+            "mode": { "type": "authorizationCode", "registration": "dynamic" }
+        },
+        "server_parameters": { "url": "https://mcp.example.invalid/mcp" }
+    }))
+    .unwrap()
+}
+
+fn delayed_oauth_server_config(url: &str, disabled: bool) -> MCPServerConfig {
+    serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "oauth-delayed-discovery",
+        "bundle_id": "oauth-delayed-discovery",
+        "disabled": disabled,
+        "oauth": {
+            "resource": format!("{url}/mcp"),
+            "scopes": ["tools.read"],
+            "mode": { "type": "authorizationCode", "registration": "dynamic" }
+        },
+        "server_parameters": {
+            "url": format!("{url}/mcp"),
+            "headers": {}
+        }
+    }))
+    .unwrap()
+}
+
+struct FailingOAuthDeleteStore;
+
+impl SecretStore for FailingOAuthDeleteStore {
+    fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
+        Ok(())
+    }
+
+    fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+        Ok(None)
+    }
+
+    fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
+        Err(KeychainError::Store("delete unavailable".to_string()))
+    }
+}
+
+fn create_config_only_state_with_store(
+    path: &Path,
+    secret_store: Arc<dyn SecretStore>,
+) -> AppState {
+    let config = ConfigService::new(path.to_path_buf()).unwrap();
+    let observability = ObservabilityService::new(path).unwrap();
+    let settings = SettingsService::new(path.to_path_buf());
+    AppState::new_with_secret_store(config, observability, settings, secret_store)
 }
 
 async fn create_mcp_test_app_state(path: &std::path::Path) -> AppState {
@@ -342,6 +406,70 @@ async fn start_oauth_rejecting_mcp_server() -> String {
     });
 
     url
+}
+
+async fn start_delayed_oauth_discovery_server() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    let discovery_requests = Arc::new(AtomicUsize::new(0));
+    let server_url = url.clone();
+    let server_discovery_requests = Arc::clone(&discovery_requests);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request_url = server_url.clone();
+            let request_count = Arc::clone(&server_discovery_requests);
+            tokio::spawn(async move {
+                let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                    let request_url = request_url.clone();
+                    let request_count = Arc::clone(&request_count);
+                    async move {
+                        if request.method() == hyper::Method::GET
+                            && request
+                                .uri()
+                                .path()
+                                .starts_with("/.well-known/oauth-protected-resource")
+                        {
+                            request_count.fetch_add(1, Ordering::SeqCst);
+                            sleep(Duration::from_secs(5)).await;
+                            let payload = serde_json::json!({
+                                "resource": format!("{request_url}/mcp"),
+                                "authorization_servers": [&request_url],
+                                "scopes_supported": ["tools.read"]
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize discovery response"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::NOT_FOUND)
+                                .body(Full::<Bytes>::from("not found"))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .await;
+            });
+        }
+    });
+
+    (url, discovery_requests)
 }
 
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
@@ -2982,6 +3110,71 @@ async fn test_sdk_config_crud_does_not_require_or_reload_runtime() {
 }
 
 #[tokio::test]
+async fn oauth_delete_failure_keeps_the_durable_user_config_retryable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_config_only_state_with_store(tmp.path(), Arc::new(FailingOAuthDeleteStore));
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME))
+        .unwrap();
+    state
+        .sdk_config
+        .upsert_mcp_configs(
+            TEST_INSTANCE_ID,
+            &[oauth_http_server_config("protected", None)],
+        )
+        .unwrap();
+
+    assert!(
+        sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "protected",)
+            .await
+            .is_err()
+    );
+
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "protected"));
+}
+
+#[tokio::test]
+async fn oauth_identity_cleanup_failure_does_not_overwrite_the_old_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_config_only_state_with_store(tmp.path(), Arc::new(FailingOAuthDeleteStore));
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME))
+        .unwrap();
+    let original = oauth_http_server_config("protected", None);
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, std::slice::from_ref(&original))
+        .unwrap();
+    let replacement =
+        oauth_http_server_config("protected", Some("https://different-resource.example/mcp"));
+
+    assert!(
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, replacement,)
+            .await
+            .is_err()
+    );
+
+    let persisted = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "protected")
+        .unwrap()
+        .config;
+    assert_eq!(persisted, original);
+}
+
+#[tokio::test]
 async fn test_config_io_export_rejects_unknown_selected_servers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -3302,6 +3495,213 @@ async fn test_real_http_oauth_401_returns_structured_tool_result() {
     let result = serde_json::to_value(response.result.expect("structured result")).unwrap();
     assert_eq!(result["isError"], true);
     assert_eq!(result["_meta"]["error_code"], 4006);
+}
+
+#[tokio::test]
+async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("test runtime");
+    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
+    let config = delayed_oauth_server_config(&url, true);
+    let oauth_bundle_id = resolve_bundle_id(&config);
+    runtime
+        .apply_user_mcp_server_config(config)
+        .await
+        .expect("mount OAuth server");
+
+    let begin_runtime = runtime.clone();
+    let begin_bundle_id = oauth_bundle_id.clone();
+    let begin = tokio::spawn(async move {
+        begin_runtime
+            .begin_oauth_authorization(&begin_bundle_id)
+            .await
+    });
+
+    timeout(Duration::from_secs(1), async {
+        while discovery_requests.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("OAuth discovery request must start");
+
+    let started = Instant::now();
+    timeout(
+        Duration::from_secs(1),
+        runtime.cancel_oauth_authorization(&oauth_bundle_id),
+    )
+    .await
+    .expect("client cancellation must not wait for provider discovery")
+    .expect("client cancellation succeeds");
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let begin_error = timeout(Duration::from_secs(1), begin)
+        .await
+        .expect("begin task must observe cancellation")
+        .expect("begin task joins")
+        .expect_err("cancelled begin must not return an authorization URL");
+    assert!(
+        begin_error.to_ascii_lowercase().contains("cancel"),
+        "unexpected begin error: {begin_error}"
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("test runtime");
+    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
+    let enabled = delayed_oauth_server_config(&url, false);
+    let oauth_bundle_id = resolve_bundle_id(&enabled);
+    runtime
+        .apply_user_mcp_server_config(enabled)
+        .await
+        .expect("mount OAuth server");
+
+    let first_runtime = runtime.clone();
+    let first_bundle_id = oauth_bundle_id.clone();
+    let first_begin = tokio::spawn(async move {
+        first_runtime
+            .begin_oauth_authorization(&first_bundle_id)
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        while discovery_requests.load(Ordering::SeqCst) < 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first OAuth discovery request must start");
+
+    timeout(
+        Duration::from_secs(1),
+        runtime.apply_user_mcp_server_config(delayed_oauth_server_config(&url, true)),
+    )
+    .await
+    .expect("server replacement must not wait for delayed discovery")
+    .expect("replace OAuth server");
+    let first_error = timeout(Duration::from_secs(1), first_begin)
+        .await
+        .expect("replaced flow must finish")
+        .expect("first begin task joins")
+        .expect_err("server replacement must cancel the first flow");
+    assert!(first_error.to_ascii_lowercase().contains("cancel"));
+
+    let second_runtime = runtime.clone();
+    let second_bundle_id = oauth_bundle_id.clone();
+    let second_begin = tokio::spawn(async move {
+        second_runtime
+            .begin_oauth_authorization(&second_bundle_id)
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        while discovery_requests.load(Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement must admit a new OAuth flow immediately");
+    timeout(
+        Duration::from_secs(1),
+        runtime.cancel_oauth_authorization(&oauth_bundle_id),
+    )
+    .await
+    .expect("replacement flow cancellation must be prompt")
+    .expect("cancel replacement flow");
+    timeout(Duration::from_secs(1), second_begin)
+        .await
+        .expect("replacement begin task must finish")
+        .expect("replacement begin task joins")
+        .expect_err("replacement flow was cancelled");
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .expect("test runtime");
+    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
+    let config = delayed_oauth_server_config(&url, true);
+    let oauth_bundle_id = resolve_bundle_id(&config);
+    runtime
+        .add_or_update_plugin_server(config.clone())
+        .await
+        .expect("mount plugin OAuth server");
+
+    let begin_runtime = runtime.clone();
+    let begin_bundle_id = oauth_bundle_id.clone();
+    let begin = tokio::spawn(async move {
+        begin_runtime
+            .begin_oauth_authorization(&begin_bundle_id)
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        while discovery_requests.load(Ordering::SeqCst) < 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("plugin OAuth discovery request must start");
+
+    timeout(
+        Duration::from_secs(1),
+        runtime.remove_plugin_server(&oauth_bundle_id),
+    )
+    .await
+    .expect("plugin unmount must not wait for delayed discovery")
+    .expect("unmount plugin OAuth server");
+    timeout(Duration::from_secs(1), begin)
+        .await
+        .expect("unmounted flow must finish")
+        .expect("begin task joins")
+        .expect_err("plugin unmount must cancel the flow");
+
+    runtime
+        .add_or_update_plugin_server(config)
+        .await
+        .expect("remount plugin OAuth server");
+    let replacement_runtime = runtime.clone();
+    let replacement_bundle_id = oauth_bundle_id.clone();
+    let replacement = tokio::spawn(async move {
+        replacement_runtime
+            .begin_oauth_authorization(&replacement_bundle_id)
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        while discovery_requests.load(Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("remounted server must admit a new OAuth flow immediately");
+    runtime
+        .cancel_oauth_authorization(&oauth_bundle_id)
+        .await
+        .expect("cancel remounted flow");
+    timeout(Duration::from_secs(1), replacement)
+        .await
+        .expect("remounted begin task must finish")
+        .expect("remounted begin task joins")
+        .expect_err("remounted flow was cancelled");
+
+    runtime.shutdown().await;
 }
 
 #[tokio::test]

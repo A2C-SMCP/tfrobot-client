@@ -10,6 +10,7 @@ use a2c_smcp::smcp_computer::settings::{
     AddMarketplaceParams, DisableOptions, EnableOptions, EnvMap, InstallOptions, McpHookError,
     McpInstallHooks, RemoveMarketplaceParams, UninstallOptions,
 };
+use a2c_smcp::smcp_computer::skills::manifest::load_bundled_servers;
 use a2c_smcp::smcp_computer::skills::{MCP_INPUTS_FILENAME, MCP_SERVERS_SUBDIR};
 use a2c_smcp::smcp_computer::{GovernanceDiagnostic, MarketplaceStatus, PluginStatus};
 use async_trait::async_trait;
@@ -492,6 +493,15 @@ pub async fn uninstall_plugin_core(
         UserMcpConflictPolicy::Reject,
     )
     .await?;
+    let oauth_cleanup_configs = hooks.oauth_cleanup_configs(&runtime).await?;
+    let _oauth_admission_guard = if oauth_cleanup_configs.is_empty() {
+        None
+    } else {
+        Some(runtime.block_oauth_admission_for_server_change().await)
+    };
+    for config in oauth_cleanup_configs {
+        runtime.clear_oauth_for_server_config(config).await?;
+    }
     runtime
         .sdk_uninstall_plugin(
             &plugin_id,
@@ -818,6 +828,50 @@ impl MarketplaceMcpHooks {
             deferred_restore_server_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             first_runtime_action_error: Arc::new(tokio::sync::Mutex::new(None)),
         })
+    }
+
+    async fn oauth_cleanup_configs(
+        &self,
+        runtime: &crate::services::computer::ComputerInstanceRuntime,
+    ) -> Result<Vec<MCPServerConfig>, String> {
+        let snapshot = runtime.sdk_governance_snapshot().await?;
+        let Some(current_plugin) = snapshot.plugins.iter().find(|plugin| {
+            plugin.installed
+                && plugin.marketplace == self.marketplace
+                && plugin.plugin == self.plugin
+        }) else {
+            return Ok(Vec::new());
+        };
+        let Some(install_path) = current_plugin.install_path.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let shared_bundle_ids = snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.installed
+                    && !(plugin.marketplace == self.marketplace && plugin.plugin == self.plugin)
+            })
+            .flat_map(|plugin| plugin.bundled_mcp_servers.iter())
+            .filter_map(|bundle_id| BundleId::try_from(bundle_id.as_str()).ok())
+            .collect::<HashSet<_>>();
+        load_bundled_servers(Path::new(install_path))
+            .map_err(|error| {
+                format!("Failed to load Plugin MCP configuration for OAuth cleanup: {error}")
+            })
+            .map(|configs| {
+                configs
+                    .into_iter()
+                    .filter(|config| {
+                        let bundle_id = resolve_bundle_id(config);
+                        !self.independent_server_ids.contains(&bundle_id)
+                            && !shared_bundle_ids.contains(&bundle_id)
+                    })
+                    .filter(|config| {
+                        matches!(config, MCPServerConfig::Http(http) if http.oauth.is_some())
+                    })
+                    .collect()
+            })
     }
 
     async fn registered_server_ids(&self) -> Vec<BundleId> {

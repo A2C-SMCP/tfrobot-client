@@ -2,10 +2,38 @@ use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationError, ClientConnectionStateSnapshot,
     ClientConnectionStatus, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
 };
+use a2c_smcp::smcp_computer::oauth::OAuthStatus;
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
 
 pub const COMPUTER_RUNTIME_STATUS_EVENT: &str = "computer-runtime-status";
+
+/// OAuth state safe to expose through client IPC. SDK diagnostic messages stay in backend logs
+/// and must never be retained in frontend runtime-event history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PublicOAuthStatus {
+    NotApplicable,
+    Unauthorized,
+    AuthorizationPending,
+    Authorized { scopes: Vec<String> },
+    ReauthorizationRequired { required_scope: String },
+    Error,
+}
+
+impl From<OAuthStatus> for PublicOAuthStatus {
+    fn from(status: OAuthStatus) -> Self {
+        match status {
+            OAuthStatus::Unauthorized => Self::Unauthorized,
+            OAuthStatus::AuthorizationPending => Self::AuthorizationPending,
+            OAuthStatus::Authorized { scopes } => Self::Authorized { scopes },
+            OAuthStatus::ReauthorizationRequired { required_scope } => {
+                Self::ReauthorizationRequired { required_scope }
+            }
+            OAuthStatus::Error { .. } => Self::Error,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -391,6 +419,11 @@ pub enum ComputerRuntimeEventCause {
     CapabilityRevisionBumped {
         revision: u64,
     },
+    #[serde(rename = "oauth_status_changed")]
+    OAuthStatusChanged {
+        bundle_id: String,
+        status: PublicOAuthStatus,
+    },
     ClientConnectionStateChanged {
         revision: u64,
         status: ClientConnectionStatus,
@@ -423,6 +456,10 @@ impl From<ComputerEvent> for ComputerRuntimeEventCause {
             ComputerEvent::CapabilityRevisionBumped { revision } => {
                 Self::CapabilityRevisionBumped { revision }
             }
+            ComputerEvent::OAuthStatusChanged { bundle_id, status } => Self::OAuthStatusChanged {
+                bundle_id: bundle_id.into_string(),
+                status: status.into(),
+            },
         }
     }
 }
@@ -439,6 +476,7 @@ impl ComputerRuntimeEventCause {
             Self::CapabilityRevisionBumped { revision } => {
                 snapshot.capability_revision == *revision
             }
+            Self::OAuthStatusChanged { .. } => true,
             Self::ClientConnectionStateChanged { revision, status } => {
                 connection.revision == *revision && connection.status == *status
             }
@@ -600,6 +638,28 @@ mod tests {
 
         assert_eq!(snapshot.last_error.as_deref(), Some("runtime_error"));
         assert!(snapshot.problems.is_empty());
+    }
+
+    #[test]
+    fn oauth_error_event_projection_drops_sdk_diagnostic_message() {
+        let cause = ComputerRuntimeEventCause::from(ComputerEvent::OAuthStatusChanged {
+            bundle_id: a2c_smcp::smcp_computer::mcp_clients::model::BundleId::try_from("protected")
+                .unwrap(),
+            status: OAuthStatus::Error {
+                message: "sensitive-provider-diagnostic".to_string(),
+            },
+        });
+        let value = serde_json::to_value(cause).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "oauth_status_changed",
+                "bundle_id": "protected",
+                "status": { "state": "error" }
+            })
+        );
+        assert!(!value.to_string().contains("sensitive-provider-diagnostic"));
     }
 
     #[test]

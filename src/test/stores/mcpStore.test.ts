@@ -11,6 +11,9 @@ function resetStore() {
     error: null,
     activeInstanceId: null,
     serversRequestId: 0,
+    oauthEventEpoch: 0,
+    oauthEventEpochByBundle: {},
+    latestOAuthStatusByBundle: {},
   });
 }
 
@@ -135,6 +138,35 @@ describe('mcpStore', () => {
       expect(useMcpStore.getState().servers).toEqual(serversB);
       expect(useMcpStore.getState().activeInstanceId).toBe('computer-b');
       expect(useMcpStore.getState().loading).toBe(false);
+    });
+
+    it('does not overwrite a newer OAuth event with an older fetch response', async () => {
+      const response = deferred<any[]>();
+      mockedInvoke.mockReturnValueOnce(response.promise);
+      useMcpStore.setState({ activeInstanceId: instanceId });
+
+      const fetch = useMcpStore.getState().fetchServers(instanceId);
+      useMcpStore.getState().applyOAuthStatusEvent(
+        instanceId,
+        'protected',
+        { state: 'authorized', scopes: ['tools.read'] },
+      );
+      response.resolve([{
+        bundleId: 'protected',
+        name: 'protected',
+        running: false,
+        status_message: 'stopped',
+        disabled: false,
+        managedBy: { type: 'user' },
+        oauth_status: { state: 'unauthorized' },
+        oauth_interaction: 'interactive',
+      }]);
+      await fetch;
+
+      expect(useMcpStore.getState().servers[0].oauth_status).toEqual({
+        state: 'authorized',
+        scopes: ['tools.read'],
+      });
     });
   });
 
@@ -428,5 +460,72 @@ describe('McpServerConfig JSON contract', () => {
     expect(json.type).toBe('Sse');
     expect(json.server_parameters.url).toBe('https://sse.example.com');
     expect(json.Sse).toBeUndefined();
+  });
+});
+
+describe('MCP OAuth event actions', () => {
+  beforeEach(() => {
+    resetStore();
+    mockedInvoke.mockReset();
+    useMcpStore.setState({
+      activeInstanceId: 'computer-a',
+      servers: [{
+        bundleId: 'protected',
+        name: 'protected',
+        running: false,
+        status_message: 'stopped',
+        disabled: false,
+        managedBy: { type: 'user' },
+        oauth_status: { state: 'unauthorized' },
+      }],
+    });
+  });
+
+  it('applies events only to the active Computer instance without polling', () => {
+    const store = useMcpStore.getState();
+    store.applyOAuthStatusEvent('computer-b', 'protected', {
+      state: 'authorization_pending',
+    });
+    expect(useMcpStore.getState().servers[0].oauth_status).toEqual({ state: 'unauthorized' });
+
+    store.applyOAuthStatusEvent('computer-a', 'protected', {
+      state: 'reauthorization_required',
+      required_scope: 'tools.write',
+    });
+    expect(useMcpStore.getState().servers[0].oauth_status).toEqual({
+      state: 'reauthorization_required',
+      required_scope: 'tools.write',
+    });
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('invokes authorize, cancel, and clear commands without status polling', async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    const store = useMcpStore.getState();
+    await store.authorizeServer('computer-a', 'protected');
+    await store.cancelAuthorization('computer-a', 'protected');
+    await store.clearAuthorization('computer-a', 'protected');
+
+    expect(mockedInvoke.mock.calls).toEqual([
+      ['authorize_mcp_server', { instanceId: 'computer-a', bundleId: 'protected' }],
+      ['cancel_mcp_authorization', { instanceId: 'computer-a', bundleId: 'protected' }],
+      ['clear_mcp_authorization', { instanceId: 'computer-a', bundleId: 'protected' }],
+    ]);
+  });
+
+  it('does not send the event-projected required scope back across the IPC boundary', async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    const store = useMcpStore.getState();
+    store.applyOAuthStatusEvent('computer-a', 'protected', {
+      state: 'reauthorization_required',
+      required_scope: 'tools.write',
+    });
+
+    await useMcpStore.getState().authorizeServer('computer-a', 'protected');
+
+    expect(mockedInvoke).toHaveBeenCalledWith('authorize_mcp_server', {
+      instanceId: 'computer-a',
+      bundleId: 'protected',
+    });
   });
 });

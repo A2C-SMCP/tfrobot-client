@@ -1,0 +1,176 @@
+diff --git a/crates/smcp-computer/tests/mock_server_integration.rs b/crates/smcp-computer/tests/mock_server_integration.rs
+index 631689c..26a20b7 100644
+--- a/crates/smcp-computer/tests/mock_server_integration.rs
++++ b/crates/smcp-computer/tests/mock_server_integration.rs
+@@ -398,6 +398,7 @@ struct OAuthMockState {
+     mcp_response_sse: bool,
+     token_expires_in: u64,
+     token_response_delay_ms: AtomicU64,
++    metadata_response_delay_ms: AtomicU64,
+     total_requests: AtomicUsize,
+     token_requests: AtomicUsize,
+     registration_requests: AtomicUsize,
+@@ -450,4 +451,8 @@ async fn oauth_http_mock_handler(
+     if method == Method::GET && path == "/.well-known/oauth-protected-resource/mcp" {
++        let metadata_delay_ms = state.metadata_response_delay_ms.load(Ordering::SeqCst);
++        if metadata_delay_ms > 0 {
++            tokio::time::sleep(Duration::from_millis(metadata_delay_ms)).await;
++        }
+         return Ok(Response::builder()
+             .header("Content-Type", "application/json")
+             .body(full_body(
+@@ -792,6 +797,7 @@ async fn spawn_oauth_http_mock_with_options(
+         mcp_response_sse,
+         token_expires_in,
+         token_response_delay_ms: AtomicU64::new(0),
++        metadata_response_delay_ms: AtomicU64::new(0),
+         total_requests: AtomicUsize::new(0),
+         token_requests: AtomicUsize::new(0),
+         registration_requests: AtomicUsize::new(0),
+@@ -3417,3 +3423,146 @@ async fn test_sse_post_non_success_status_returns_error() {
+         elapsed
+     );
+ }
++
++#[tokio::test]
++async fn experiment_delayed_begin_requires_caller_abort_before_state_exists() {
++    let (manager, bundle_id, state) =
++        authorization_code_manager(OAuthFixtureMode::Dynamic, false).await;
++    state
++        .metadata_response_delay_ms
++        .store(500, Ordering::SeqCst);
++    let manager = Arc::new(manager);
++    let task_manager = Arc::clone(&manager);
++    let task_bundle = bundle_id.clone();
++    let begin_task = tokio::spawn(async move {
++        task_manager
++            .begin_oauth(
++                &task_bundle,
++                OAuthBeginRequest {
++                    redirect_uri: "http://127.0.0.1:9876/callback".to_string(),
++                    required_scope: None,
++                },
++            )
++            .await
++    });
++
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while state.total_requests.load(Ordering::SeqCst) < 2 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("delayed protected-resource discovery must start");
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    assert!(
++        !begin_task.is_finished(),
++        "begin_oauth unexpectedly completed inside the cancellation budget"
++    );
++
++    // cancel_oauth cannot be called here: its public input requires the state which begin_oauth
++    // has not returned. The only bounded host operation is aborting the caller future.
++    begin_task.abort();
++    assert!(begin_task.await.unwrap_err().is_cancelled());
++    state
++        .metadata_response_delay_ms
++        .store(0, Ordering::SeqCst);
++    let status = tokio::time::timeout(Duration::from_millis(200), manager.oauth_status(&bundle_id))
++        .await
++        .expect("aborting begin must release the manager lifecycle lock")
++        .unwrap();
++    assert_eq!(status, OAuthStatus::Unauthorized);
++    println!(
++        "EXPERIMENT delayed_begin_requires_caller_abort=true cancel_api_has_no_state=true"
++    );
++    manager.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn experiment_cancel_waits_for_exchange_and_clear_deletes_step_up_credentials() {
++    let (manager, bundle_id, state) =
++        authorization_code_manager(OAuthFixtureMode::PreregisteredPublic, false).await;
++    authorize_manager(&manager, &bundle_id, &state, None).await;
++    assert!(matches!(
++        manager.oauth_status(&bundle_id).await.unwrap(),
++        OAuthStatus::Authorized { .. }
++    ));
++
++    state.token_response_delay_ms.store(500, Ordering::SeqCst);
++    let launch = manager
++        .begin_oauth(
++            &bundle_id,
++            OAuthBeginRequest {
++                redirect_uri: "http://127.0.0.1:9876/callback".to_string(),
++                required_scope: Some("tools.write".to_string()),
++            },
++        )
++        .await
++        .unwrap();
++    let manager = Arc::new(manager);
++    let complete_manager = Arc::clone(&manager);
++    let complete_bundle = bundle_id.clone();
++    let issuer = state.base_url.clone();
++    let callback_state = launch.state.clone();
++    let complete_task = tokio::spawn(async move {
++        complete_manager
++            .complete_oauth(
++                &complete_bundle,
++                OAuthCallback {
++                    code: "authorization-code".to_string(),
++                    state: callback_state,
++                    issuer: Some(issuer),
++                },
++            )
++            .await
++    });
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while state.token_requests.load(Ordering::SeqCst) < 2 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("step-up token exchange must start");
++
++    let cancel_manager = Arc::clone(&manager);
++    let cancel_bundle = bundle_id.clone();
++    let mut cancel_task = tokio::spawn(async move {
++        cancel_manager
++            .cancel_oauth(
++                &cancel_bundle,
++                OAuthCancellation {
++                    state: launch.state,
++                    issuer: None,
++                    reason: OAuthCancellationReason::Cancelled,
++                },
++            )
++            .await
++    });
++    let cancel_waited_for_exchange =
++        tokio::time::timeout(Duration::from_millis(100), &mut cancel_task)
++            .await
++            .is_err();
++    assert!(
++        cancel_waited_for_exchange,
++        "cancel_oauth unexpectedly preempted the in-flight token exchange"
++    );
++    let exchange_succeeded = complete_task.await.unwrap().is_ok();
++    let cancel_rejected_after_exchange = cancel_task.await.unwrap().is_err();
++    assert!(exchange_succeeded && cancel_rejected_after_exchange);
++    assert!(matches!(
++        manager.oauth_status(&bundle_id).await.unwrap(),
++        OAuthStatus::Authorized { .. }
++    ));
++
++    // This is the only compensation currently available to tfrobot-client after the exchange
++    // wins. It clears the newly committed token and cannot restore the pre-step-up credential.
++    manager.clear_oauth(&bundle_id).await.unwrap();
++    let clear_deleted_credentials =
++        manager.oauth_status(&bundle_id).await.unwrap() == OAuthStatus::Unauthorized;
++    assert!(clear_deleted_credentials);
++    println!(
++        "EXPERIMENT cancel_waited_for_exchange={cancel_waited_for_exchange} \
++exchange_won_cancel_race={} clear_deleted_credentials={clear_deleted_credentials}",
++        exchange_succeeded && cancel_rejected_after_exchange
++    );
++    manager.close().await.unwrap();
++}

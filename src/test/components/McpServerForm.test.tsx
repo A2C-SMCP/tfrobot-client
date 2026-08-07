@@ -1,11 +1,14 @@
-import { fireEvent, render, screen } from '../helpers/render';
+import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi } from 'vitest';
 import {
   McpServerForm,
+  buildHttpOAuthOptions,
+  hasStaticAuthorizationHeader,
   normalizeToolMeta,
   normalizeToolMetaMap,
   parseToolMetaJson,
 } from '@/components/McpConfig/McpServerForm';
+import type { HttpServerConfig, OAuthClientMode } from '@/stores/mcpStore';
 
 const { fetchInputs } = vi.hoisted(() => ({
   fetchInputs: vi.fn().mockResolvedValue(undefined),
@@ -93,6 +96,230 @@ describe('normalizeToolMeta', () => {
       echo: { tags: ['debug'] },
       ping: { alias: 'pong' },
     });
+  });
+});
+
+describe('HTTP OAuth configuration', () => {
+  it('creates dynamic Authorization Code configuration without client credentials or scopes', () => {
+    expect(buildHttpOAuthOptions(true, undefined, 'https://mcp.example/api'))
+      .toEqual({
+        resource: undefined,
+        scopes: [],
+        mode: { type: 'authorizationCode', registration: 'dynamic' },
+      });
+  });
+
+  it('preserves imported preregistered and client metadata configuration verbatim', () => {
+    const modes: OAuthClientMode[] = [
+      { type: 'authorizationCode', registration: 'preregistered', clientId: 'client', clientSecretInput: 'secret' },
+      { type: 'authorizationCode', registration: 'clientMetadataDocument', url: 'https://client.example/metadata.json' },
+    ];
+    for (const mode of modes) {
+      const initial: HttpServerConfig = {
+        type: 'Http',
+        name: 'protected',
+        disabled: false,
+        forbidden_tools: [],
+        tool_meta: {},
+        oauth: { resource: undefined, scopes: ['tools.read'], clientName: 'Imported', mode },
+        server_parameters: { url: 'https://mcp.example/api', headers: {} },
+      };
+      expect(buildHttpOAuthOptions(true, initial.server_parameters.url, initial.server_parameters.url, initial))
+        .toBe(initial.oauth);
+    }
+  });
+
+  it('preserves implicit resource semantics when only the server URL is edited', () => {
+    const initial: HttpServerConfig = {
+      type: 'Http',
+      name: 'protected',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      oauth: {
+        resource: undefined,
+        scopes: [],
+        mode: { type: 'authorizationCode', registration: 'dynamic' },
+      },
+      server_parameters: { url: 'https://old.example/mcp', headers: {} },
+    };
+
+    expect(buildHttpOAuthOptions(
+      true,
+      'https://old.example/mcp',
+      'https://new.example/mcp',
+      initial,
+    )).toEqual(initial.oauth);
+  });
+
+  it('pins an implicit displayed resource only after the resource field is explicitly edited', () => {
+    const initial: HttpServerConfig = {
+      type: 'Http',
+      name: 'protected',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      oauth: {
+        resource: undefined,
+        scopes: [],
+        mode: { type: 'authorizationCode', registration: 'dynamic' },
+      },
+      server_parameters: { url: 'https://old.example/mcp', headers: {} },
+    };
+
+    expect(buildHttpOAuthOptions(
+      true,
+      'https://old.example/mcp',
+      'https://new.example/mcp',
+      initial,
+      true,
+    )).toEqual({
+      ...initial.oauth,
+      resource: 'https://old.example/mcp',
+    });
+  });
+
+  it('keeps a new resource implicit until the user explicitly edits it', () => {
+    expect(buildHttpOAuthOptions(
+      true,
+      'https://old.example/mcp',
+      'https://new.example/mcp',
+      undefined,
+      false,
+    )).toEqual({
+      resource: undefined,
+      scopes: [],
+      mode: { type: 'authorizationCode', registration: 'dynamic' },
+    });
+
+    expect(buildHttpOAuthOptions(
+      true,
+      'https://resource.example/mcp',
+      'https://new.example/mcp',
+      undefined,
+      true,
+    )).toEqual({
+      resource: 'https://resource.example/mcp',
+      scopes: [],
+      mode: { type: 'authorizationCode', registration: 'dynamic' },
+    });
+
+    expect(buildHttpOAuthOptions(
+      true,
+      'https://new.example/mcp',
+      'https://new.example/mcp',
+      undefined,
+      true,
+    )).toEqual({
+      resource: 'https://new.example/mcp',
+      scopes: [],
+      mode: { type: 'authorizationCode', registration: 'dynamic' },
+    });
+  });
+
+  it('restores implicit resource semantics when an explicit Resource is cleared', () => {
+    const initial: HttpServerConfig = {
+      type: 'Http',
+      name: 'protected',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      oauth: {
+        resource: 'https://resource.example/mcp',
+        scopes: [],
+        mode: { type: 'authorizationCode', registration: 'dynamic' },
+      },
+      server_parameters: { url: 'https://old.example/mcp', headers: {} },
+    };
+
+    expect(buildHttpOAuthOptions(
+      true,
+      undefined,
+      'https://new.example/mcp',
+      initial,
+      true,
+    )).toEqual({
+      ...initial.oauth,
+      resource: undefined,
+    });
+  });
+
+  it('submits the latest URL as the implicit resource after OAuth is enabled', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Server Type' }));
+    fireEvent.click(await screen.findByText('HTTP'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
+      target: { value: 'Protected MCP' },
+    });
+    const url = screen.getByRole('textbox', { name: 'URL' });
+    fireEvent.change(url, { target: { value: 'https://old.example/mcp' } });
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable OAuth' }));
+    expect(screen.getByRole('textbox', { name: 'OAuth Resource' }))
+      .toHaveAttribute('placeholder', 'https://old.example/mcp');
+
+    fireEvent.change(url, { target: { value: 'https://new.example/mcp' } });
+    expect(screen.getByRole('textbox', { name: 'OAuth Resource' }))
+      .toHaveAttribute('placeholder', 'https://new.example/mcp');
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      type: 'Http',
+      oauth: { resource: undefined },
+      server_parameters: { url: 'https://new.example/mcp' },
+    });
+  }, 10_000);
+
+  it('keeps an explicitly entered Resource fixed when it equals the current URL', async () => {
+    const create = vi.fn().mockResolvedValue(undefined);
+    const created = render(
+      <McpServerForm instanceId="computer-a" onSubmit={create} onCancel={() => {}} />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Server Type' }));
+    fireEvent.click(await screen.findByText('HTTP'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
+      target: { value: 'Pinned Resource MCP' },
+    });
+    const url = screen.getByRole('textbox', { name: 'URL' });
+    fireEvent.change(url, { target: { value: 'https://resource.example/mcp' } });
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable OAuth' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'OAuth Resource' }), {
+      target: { value: 'https://resource.example/mcp' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const createdConfig = create.mock.calls[0][0] as HttpServerConfig;
+    expect(createdConfig.oauth?.resource).toBe('https://resource.example/mcp');
+
+    created.unmount();
+    const update = vi.fn().mockResolvedValue(undefined);
+    render(
+      <McpServerForm
+        instanceId="computer-a"
+        initialValues={createdConfig}
+        onSubmit={update}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'URL' }), {
+      target: { value: 'https://new.example/mcp' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][0]).toMatchObject({
+      oauth: { resource: 'https://resource.example/mcp' },
+      server_parameters: { url: 'https://new.example/mcp' },
+    });
+  }, 15_000);
+
+  it('detects Authorization headers case-insensitively', () => {
+    expect(hasStaticAuthorizationHeader({ authorization: 'Bearer static' })).toBe(true);
+    expect(hasStaticAuthorizationHeader({ 'X-Test': 'value' })).toBe(false);
   });
 });
 

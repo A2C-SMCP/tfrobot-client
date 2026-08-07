@@ -5,7 +5,7 @@ use crate::services::observability::{
 };
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    BundleId, CallToolResult, Content, RawContent, Resource, ServerName, Tool,
+    BundleId, CallToolResult, Content, Resource, ServerName, Tool,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -165,10 +165,10 @@ pub async fn get_debug_resources_core(
 fn resource_to_debug_info(server: &str, resource: Resource) -> DebugResourceInfo {
     DebugResourceInfo {
         server: server.to_string(),
-        uri: resource.raw.uri,
-        name: resource.raw.name,
-        description: resource.raw.description,
-        mime_type: resource.raw.mime_type,
+        uri: resource.uri,
+        name: resource.name,
+        description: resource.description,
+        mime_type: resource.mime_type,
     }
 }
 
@@ -336,7 +336,7 @@ fn redact_tool_call_result_for_display(result: &CallToolResult) -> CallToolResul
 }
 
 fn redact_tool_content_for_display(mut content: Content) -> Content {
-    if let RawContent::Text(text) = &mut content.raw {
+    if let Content::Text(text) = &mut content {
         text.text = redact_sensitive_text(&text.text);
     }
     content

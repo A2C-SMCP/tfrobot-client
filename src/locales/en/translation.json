@@ -201,6 +201,7 @@
         "connectionAbsent": "absent",
         "clientDiagnosticChanged": "{{operation}} diagnostic {{status}}",
         "mcpDiagnosticChanged": "MCP {{bundleId}} {{operation}} diagnostic {{status}}",
+        "oauthStatusChanged": "MCP {{bundleId}} authorization status: {{status}}",
         "diagnosticFailed": "failed",
         "diagnosticCleared": "cleared",
         "handleReplaced": "Runtime handle replaced: {{reason}}",
@@ -503,6 +504,7 @@
       "enabled": "Enabled",
       "status": "Status",
       "message": "Message",
+      "authorization": "Authorization",
       "actions": "Actions"
     },
     "source": {
@@ -532,6 +534,17 @@
       "remove": "Remove",
       "toggleEnabled": "Toggle server {{name}} enabled state"
     },
+    "authorization": {
+      "authorize": "Authorize",
+      "reauthorize": "Reauthorize",
+      "cancel": "Cancel",
+      "authorized": "Authorized",
+      "unauthorized": "Not authorized",
+      "pending": "Authorization pending",
+      "error": "Authorization error",
+      "requiredScope": "Additional scope required: {{scope}}",
+      "clear": "Clear authorization"
+    },
     "form": {
       "type": "Server Type",
       "name": "Server Name",
@@ -552,6 +565,12 @@
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
       "addHeader": "Add Header",
+      "oauthTitle": "OAuth",
+      "oauthEnabled": "Enable OAuth",
+      "oauthHint": "Uses Authorization Code with PKCE and dynamic client registration. No client ID, secret, or scopes are required.",
+      "oauthResource": "OAuth Resource",
+      "oauthResourceHint": "Defaults to the MCP URL. Imported registration details are preserved when editing.",
+      "oauthAuthorizationConflict": "OAuth cannot be used with a static Authorization header.",
       "advancedSettings": "Advanced Settings",
       "disabled": "Disabled",
       "forbiddenTools": "Forbidden Tools",

@@ -1,0 +1,164 @@
+use crate::services::keychain::{oauth_credential_key, SecretStore};
+use a2c_smcp::smcp_computer::mcp_clients::{
+    bundle_id::resolve_bundle_id, manager::MCPServerManager, MCPServerConfig,
+};
+use a2c_smcp::smcp_computer::oauth::{
+    OAuthCredentialKey, OAuthCredentialStore, OAuthCredentialStoreError,
+};
+use async_trait::async_trait;
+use std::sync::Arc;
+
+/// Persists SDK-owned OAuth credential envelopes in the client-owned OS keychain namespace.
+///
+/// The adapter binds a trusted Computer instance ID at construction time. OAuth callback input
+/// and serialized MCP configuration therefore cannot select another Computer's credential slot.
+#[derive(Clone)]
+pub struct KeychainOAuthCredentialStore {
+    instance_id: Arc<str>,
+    store: Arc<dyn SecretStore>,
+}
+
+impl KeychainOAuthCredentialStore {
+    pub fn new(instance_id: impl Into<Arc<str>>, store: Arc<dyn SecretStore>) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            store,
+        }
+    }
+
+    fn storage_key(&self, key: &OAuthCredentialKey) -> String {
+        oauth_credential_key(self.instance_id.as_ref(), &key.stable_id())
+    }
+}
+
+#[async_trait]
+impl OAuthCredentialStore for KeychainOAuthCredentialStore {
+    async fn load(
+        &self,
+        key: &OAuthCredentialKey,
+    ) -> Result<Option<String>, OAuthCredentialStoreError> {
+        let store = self.store.clone();
+        let storage_key = self.storage_key(key);
+        tokio::task::spawn_blocking(move || store.get_secret(&storage_key))
+            .await
+            .map_err(|_| OAuthCredentialStoreError::Unavailable)?
+            .map_err(|_| OAuthCredentialStoreError::OperationFailed)
+    }
+
+    async fn save(
+        &self,
+        key: &OAuthCredentialKey,
+        value: &str,
+    ) -> Result<(), OAuthCredentialStoreError> {
+        let store = self.store.clone();
+        let storage_key = self.storage_key(key);
+        let value = value.to_string();
+        tokio::task::spawn_blocking(move || store.set_secret(&storage_key, &value))
+            .await
+            .map_err(|_| OAuthCredentialStoreError::Unavailable)?
+            .map_err(|_| OAuthCredentialStoreError::OperationFailed)
+    }
+
+    async fn delete(&self, key: &OAuthCredentialKey) -> Result<(), OAuthCredentialStoreError> {
+        let store = self.store.clone();
+        let storage_key = self.storage_key(key);
+        tokio::task::spawn_blocking(move || store.delete_secret(&storage_key))
+            .await
+            .map_err(|_| OAuthCredentialStoreError::Unavailable)?
+            .map_err(|_| OAuthCredentialStoreError::OperationFailed)
+    }
+}
+
+pub async fn clear_oauth_credentials_for_config(
+    instance_id: &str,
+    secret_store: Arc<dyn SecretStore>,
+    config: MCPServerConfig,
+) -> Result<(), String> {
+    if !matches!(&config, MCPServerConfig::Http(http) if http.oauth.is_some()) {
+        return Ok(());
+    }
+    let bundle_id = resolve_bundle_id(&config);
+    let manager = MCPServerManager::with_oauth_credential_store(Arc::new(
+        KeychainOAuthCredentialStore::new(instance_id.to_string(), secret_store),
+    ));
+    manager
+        .initialize(vec![config])
+        .await
+        .map_err(|error| error.to_string())?;
+    manager
+        .clear_oauth(&bundle_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::keychain::{InMemorySecretStore, KeychainError};
+    use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+    use a2c_smcp::smcp_computer::oauth::OAuthCredentialRecordKind;
+
+    fn credential_key() -> OAuthCredentialKey {
+        OAuthCredentialKey {
+            bundle_id: BundleId::try_from("oauth-server").unwrap(),
+            resource: "https://resource.example/mcp".to_string(),
+            issuer: Some("https://issuer.example".to_string()),
+            grant_fingerprint: "dynamic-authorization-code".to_string(),
+            record_kind: OAuthCredentialRecordKind::Credentials,
+        }
+    }
+
+    #[tokio::test]
+    async fn persists_opaque_envelopes_and_isolates_computers() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::default());
+        let first = KeychainOAuthCredentialStore::new("computer-a", secrets.clone());
+        let second = KeychainOAuthCredentialStore::new("computer-b", secrets);
+        let key = credential_key();
+
+        first.save(&key, "opaque-credentials").await.unwrap();
+        let restarted = KeychainOAuthCredentialStore::new("computer-a", first.store.clone());
+        assert_eq!(
+            restarted.load(&key).await.unwrap().as_deref(),
+            Some("opaque-credentials")
+        );
+        assert_eq!(second.load(&key).await.unwrap(), None);
+
+        restarted.delete(&key).await.unwrap();
+        assert_eq!(restarted.load(&key).await.unwrap(), None);
+    }
+
+    struct FailingSecretStore;
+
+    impl SecretStore for FailingSecretStore {
+        fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
+            Err(KeychainError::Store("unavailable".to_string()))
+        }
+
+        fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+            Err(KeychainError::Store("unavailable".to_string()))
+        }
+
+        fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
+            Err(KeychainError::Store("unavailable".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_failures_never_fall_back_to_memory() {
+        let store = KeychainOAuthCredentialStore::new("computer-a", Arc::new(FailingSecretStore));
+        let key = credential_key();
+
+        assert_eq!(
+            store.load(&key).await,
+            Err(OAuthCredentialStoreError::OperationFailed)
+        );
+        assert_eq!(
+            store.save(&key, "opaque").await,
+            Err(OAuthCredentialStoreError::OperationFailed)
+        );
+        assert_eq!(
+            store.delete(&key).await,
+            Err(OAuthCredentialStoreError::OperationFailed)
+        );
+    }
+}

@@ -662,6 +662,55 @@ describe('runtimeStore', () => {
     expect(useRuntimeStore.getState().eventsByInstance['computer-a']).toBeUndefined();
   });
 
+  it('rehydrates a lagged OAuth row without overwriting a newer event', async () => {
+    const response = deferred<ReturnType<typeof useMcpStore.getState>['servers']>();
+    mockedInvoke.mockReturnValueOnce(response.promise);
+    useMcpStore.setState({
+      activeInstanceId: 'computer-a',
+      serversReady: true,
+      servers: [{
+        bundleId: 'protected',
+        name: 'protected',
+        running: false,
+        status_message: 'stopped',
+        disabled: false,
+        managedBy: { type: 'user' },
+        oauth_status: { state: 'unauthorized' },
+        oauth_interaction: 'interactive',
+      }],
+    });
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'resync', skipped_events: 3 },
+      snapshot: runtimeSnapshot({ snapshot_revision: 2 }),
+      connection: { present: false, revision: 0, context: null },
+    });
+    expect(useMcpStore.getState().servers).toHaveLength(1);
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'oauth_status_changed',
+        bundle_id: 'protected',
+        status: { state: 'authorized', scopes: ['tools.read'] },
+      },
+      snapshot: runtimeSnapshot({ snapshot_revision: 3 }),
+      connection: { present: false, revision: 0, context: null },
+    });
+    response.resolve([{
+      ...useMcpStore.getState().servers[0],
+      oauth_status: { state: 'unauthorized' },
+    }]);
+
+    await vi.waitFor(() => {
+      expect(useMcpStore.getState().servers[0].oauth_status).toEqual({
+        state: 'authorized',
+        scopes: ['tools.read'],
+      });
+    });
+  });
+
   it('does not let reconciliation forget erase an explicit deletion tombstone', () => {
     useRuntimeStore.getState().receiveSnapshot('computer-a', runtimeSnapshot());
     useRuntimeStore.getState().evictSnapshot('computer-a', 1);

@@ -390,6 +390,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // MCP server management
             commands::mcp::get_mcp_servers,
+            commands::mcp::authorize_mcp_server,
+            commands::mcp::cancel_mcp_authorization,
+            commands::mcp::clear_mcp_authorization,
             commands::sdk_config::get_computer_config_state,
             commands::sdk_config::upsert_computer_mcp_config,
             commands::sdk_config::remove_computer_mcp_config,

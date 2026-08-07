@@ -53,6 +53,11 @@ export function RuntimeDiagnostics({ runtime, recentEvents }: RuntimeDiagnostics
             ? t('computer.runtime.eventCauses.diagnosticFailed')
             : t('computer.runtime.eventCauses.diagnosticCleared'),
         });
+      case 'oauth_status_changed':
+        return t('computer.runtime.eventCauses.oauthStatusChanged', {
+          bundleId: cause.bundle_id,
+          status: cause.status.state,
+        });
       case 'handle_replaced':
         return t('computer.runtime.eventCauses.handleReplaced', { reason: cause.reason });
       case 'observation_advanced':

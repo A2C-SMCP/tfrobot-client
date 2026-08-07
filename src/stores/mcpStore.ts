@@ -19,6 +19,45 @@ export interface McpServerStatus {
   status_message: string;
   disabled: boolean;
   managedBy: McpServerManagedBy;
+  /** Optional only for compatibility with snapshots produced before OAuth support. */
+  oauth_status?: McpOAuthStatus;
+  /** Backend-owned actionability projection; machine credentials never launch a browser flow. */
+  oauth_interaction?: 'none' | 'interactive' | 'machine';
+}
+
+export type McpOAuthStatus =
+  | { state: 'not_applicable' }
+  | { state: 'unauthorized' }
+  | { state: 'authorization_pending' }
+  | { state: 'authorized'; scopes: string[] }
+  | { state: 'reauthorization_required'; required_scope: string }
+  | { state: 'error' };
+
+export type SdkOAuthStatus = Exclude<McpOAuthStatus, { state: 'not_applicable' }>;
+
+export type OAuthClientMode =
+  | { type: 'authorizationCode'; registration: 'dynamic' }
+  | {
+      type: 'authorizationCode';
+      registration: 'preregistered';
+      clientId: string;
+      clientSecretInput?: string | null;
+    }
+  | { type: 'authorizationCode'; registration: 'clientMetadataDocument'; url: string }
+  | { type: 'clientCredentialsSecret'; clientId: string; clientSecretInput: string }
+  | {
+      type: 'clientCredentialsPrivateKeyJwt';
+      clientId: string;
+      privateKeyInput: string;
+      algorithm?: string;
+      tokenEndpointAudience?: string | null;
+    };
+
+export interface OAuthOptions {
+  resource?: string | null;
+  scopes: string[];
+  clientName?: string | null;
+  mode: OAuthClientMode;
 }
 
 export type McpServerManagedBy =
@@ -79,6 +118,7 @@ export interface HttpServerConfig {
   tool_meta: Record<string, ToolMeta>;
   default_tool_meta?: ToolMeta | null;
   vrl?: string | null;
+  oauth?: OAuthOptions | null;
   server_parameters: HttpServerParameters;
 }
 
@@ -113,12 +153,20 @@ interface McpServerState {
   error: string | null;
   activeInstanceId: string | null;
   serversRequestId: number;
+  oauthEventEpoch: number;
+  oauthEventEpochByBundle: Record<string, number>;
+  latestOAuthStatusByBundle: Record<string, McpOAuthStatus>;
 
   fetchServers: (instanceId: string) => Promise<void>;
+  rehydrateServers: (instanceId: string) => Promise<void>;
   startServer: (instanceId: string, bundleId: string) => Promise<void>;
   stopServer: (instanceId: string, bundleId: string) => Promise<void>;
   startAll: (instanceId: string) => Promise<McpBatchOperationResult>;
   stopAll: (instanceId: string) => Promise<McpBatchOperationResult>;
+  authorizeServer: (instanceId: string, bundleId: string) => Promise<void>;
+  cancelAuthorization: (instanceId: string, bundleId: string) => Promise<void>;
+  clearAuthorization: (instanceId: string, bundleId: string) => Promise<void>;
+  applyOAuthStatusEvent: (instanceId: string, bundleId: string, status: SdkOAuthStatus) => void;
   reset: () => void;
 }
 
@@ -129,7 +177,23 @@ const initialState = {
   error: null as string | null,
   activeInstanceId: null as string | null,
   serversRequestId: 0,
+  oauthEventEpoch: 0,
+  oauthEventEpochByBundle: {} as Record<string, number>,
+  latestOAuthStatusByBundle: {} as Record<string, McpOAuthStatus>,
 };
+
+function preserveNewerOAuthEvents(
+  fetched: McpServerStatus[],
+  eventEpochByBundle: Record<string, number>,
+  latestStatusByBundle: Record<string, McpOAuthStatus>,
+  requestEpoch: number,
+): McpServerStatus[] {
+  return fetched.map((server) => {
+    if ((eventEpochByBundle[server.bundleId] ?? 0) <= requestEpoch) return server;
+    const newer = latestStatusByBundle[server.bundleId];
+    return newer ? { ...server, oauth_status: newer } : server;
+  });
+}
 
 export const useMcpStore = create<McpServerState>((set, get) => {
   const isActiveInstance = (instanceId: string) => get().activeInstanceId === instanceId;
@@ -147,20 +211,36 @@ export const useMcpStore = create<McpServerState>((set, get) => {
 
   fetchServers: async (instanceId: string) => {
     const requestId = get().serversRequestId + 1;
+    const requestEpoch = get().oauthEventEpoch;
+    const switchedInstance = get().activeInstanceId !== instanceId;
     set({
       activeInstanceId: instanceId,
       serversRequestId: requestId,
-      servers: [],
+      servers: switchedInstance ? [] : get().servers,
       serversReady: false,
       loading: true,
       error: null,
+      ...(switchedInstance ? {
+        oauthEventEpochByBundle: {},
+        latestOAuthStatusByBundle: {},
+      } : {}),
     });
     try {
       const servers = await invoke<McpServerStatus[]>('get_mcp_servers', { instanceId });
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ servers, serversReady: true, loading: false });
+      const current = get();
+      set({
+        servers: preserveNewerOAuthEvents(
+          servers,
+          current.oauthEventEpochByBundle,
+          current.latestOAuthStatusByBundle,
+          requestEpoch,
+        ),
+        serversReady: true,
+        loading: false,
+      });
     } catch (e) {
       if (get().serversRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
@@ -170,6 +250,31 @@ export const useMcpStore = create<McpServerState>((set, get) => {
         error: formatRuntimeActionError(e),
         loading: false,
       });
+    }
+  },
+
+  rehydrateServers: async (instanceId: string) => {
+    if (!isActiveInstance(instanceId)) return;
+    const requestId = get().serversRequestId + 1;
+    const requestEpoch = get().oauthEventEpoch;
+    set({ serversRequestId: requestId, error: null });
+    try {
+      const servers = await invoke<McpServerStatus[]>('get_mcp_servers', { instanceId });
+      const current = get();
+      if (current.serversRequestId !== requestId || current.activeInstanceId !== instanceId) return;
+      set({
+        servers: preserveNewerOAuthEvents(
+          servers,
+          current.oauthEventEpochByBundle,
+          current.latestOAuthStatusByBundle,
+          requestEpoch,
+        ),
+        serversReady: true,
+      });
+    } catch (e) {
+      if (get().serversRequestId === requestId && isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e) });
+      }
     }
   },
 
@@ -245,6 +350,67 @@ export const useMcpStore = create<McpServerState>((set, get) => {
       }
       throw e;
     }
+  },
+
+  authorizeServer: async (instanceId: string, bundleId: string) => {
+    beginInstanceAction(instanceId);
+    try {
+      await invoke('authorize_mcp_server', { instanceId, bundleId });
+      if (isActiveInstance(instanceId)) set({ loading: false });
+    } catch (e) {
+      if (isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e), loading: false });
+      }
+      throw e;
+    }
+  },
+
+  cancelAuthorization: async (instanceId: string, bundleId: string) => {
+    beginInstanceAction(instanceId);
+    try {
+      await invoke('cancel_mcp_authorization', { instanceId, bundleId });
+      if (isActiveInstance(instanceId)) set({ loading: false });
+    } catch (e) {
+      if (isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e), loading: false });
+      }
+      throw e;
+    }
+  },
+
+  clearAuthorization: async (instanceId: string, bundleId: string) => {
+    beginInstanceAction(instanceId);
+    try {
+      await invoke('clear_mcp_authorization', { instanceId, bundleId });
+      if (isActiveInstance(instanceId)) set({ loading: false });
+    } catch (e) {
+      if (isActiveInstance(instanceId)) {
+        set({ error: formatRuntimeActionError(e), loading: false });
+      }
+      throw e;
+    }
+  },
+
+  applyOAuthStatusEvent: (instanceId, bundleId, status) => {
+    if (!isActiveInstance(instanceId)) return;
+    const oauthStatus: McpOAuthStatus = status;
+    set((current) => {
+      const oauthEventEpoch = current.oauthEventEpoch + 1;
+      return {
+        oauthEventEpoch,
+        oauthEventEpochByBundle: {
+          ...current.oauthEventEpochByBundle,
+          [bundleId]: oauthEventEpoch,
+        },
+        latestOAuthStatusByBundle: {
+          ...current.latestOAuthStatusByBundle,
+          [bundleId]: oauthStatus,
+        },
+        servers: current.servers.map((server) => (
+          server.bundleId === bundleId ? { ...server, oauth_status: oauthStatus } : server
+        )),
+      };
+    });
   },
 
   reset: () => set(initialState),

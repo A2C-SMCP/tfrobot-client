@@ -87,22 +87,14 @@ impl ClientControlMcpClient {
     fn mcp_tool(definition: super::ToolDefinition) -> Tool {
         let input_schema = serde_json::from_value(definition.input_schema())
             .expect("Client Control schemas must be JSON objects");
-        Tool {
-            name: definition.id.as_str().to_string().into(),
-            title: None,
-            description: Some(
-                format!(
-                    "TFRobot Client Control: {} ({:?})",
-                    definition.id, definition.risk
-                )
-                .into(),
+        Tool::new(
+            definition.id.as_str().to_string(),
+            format!(
+                "TFRobot Client Control: {} ({:?})",
+                definition.id, definition.risk
             ),
-            input_schema: Arc::new(input_schema),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-            meta: None,
-        }
+            Arc::new(input_schema),
+        )
     }
 
     fn result(value: serde_json::Value) -> CallToolResult {

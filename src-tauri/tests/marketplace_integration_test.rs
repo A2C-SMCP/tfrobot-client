@@ -7,10 +7,15 @@ mod common;
 
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
+use a2c_smcp::smcp_computer::oauth::{
+    OAuthCredentialKey, OAuthCredentialRecordKind, OAuthCredentialStore,
+};
 use common::{create_test_app_state, echo_server_config, echo_server_path, mcp};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
     computer::{
@@ -31,6 +36,11 @@ use tfrobot_client_lib::commands::{
     sdk_config, skills,
 };
 use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
+use tfrobot_client_lib::services::config::ConfigService;
+use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
+use tfrobot_client_lib::services::oauth_credential_store::KeychainOAuthCredentialStore;
+use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 
 const TEST_INSTANCE_ID: &str = "computer-a";
@@ -82,6 +92,155 @@ async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
         .await
         .unwrap();
     state
+}
+
+#[derive(Default)]
+struct RecordingSecretStore {
+    values: Mutex<std::collections::HashMap<String, String>>,
+    deleted: Mutex<Vec<String>>,
+}
+
+impl RecordingSecretStore {
+    fn deleted_oauth_keys(&self) -> Vec<String> {
+        self.deleted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|key| key.starts_with("mcp-oauth:"))
+            .cloned()
+            .collect()
+    }
+}
+
+impl SecretStore for RecordingSecretStore {
+    fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), secret.to_string());
+        Ok(())
+    }
+
+    fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+        Ok(self.values.lock().unwrap().get(key).cloned())
+    }
+
+    fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+        self.values.lock().unwrap().remove(key);
+        self.deleted.lock().unwrap().push(key.to_string());
+        Ok(())
+    }
+}
+
+async fn create_marketplace_test_app_state_with_store(
+    path: &Path,
+    secret_store: Arc<dyn SecretStore>,
+) -> AppState {
+    let config = ConfigService::new(path.to_path_buf()).unwrap();
+    let observability = ObservabilityService::new(path).unwrap();
+    let settings = SettingsService::new(path.to_path_buf());
+    let state = AppState::new_with_secret_store(config, observability, settings, secret_store);
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(TEST_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    state
+}
+
+#[tokio::test]
+async fn disabled_plugin_oauth_credentials_are_retained_until_uninstall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(RecordingSecretStore::default());
+    let state = create_marketplace_test_app_state_with_store(tmp.path(), secrets.clone()).await;
+    let repo = tmp.path().join("oauth-marketplace-repo");
+    build_oauth_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: file_url(&repo),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "oauth-tools".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let credential_store = KeychainOAuthCredentialStore::new(TEST_INSTANCE_ID, secrets.clone());
+    let (index_key, credential_key) = plugin_oauth_credential_keys();
+    credential_store
+        .save(&index_key, r#"{"version":1,"issuers":[null]}"#)
+        .await
+        .unwrap();
+    credential_store
+        .save(&credential_key, "opaque-sdk-credential-envelope")
+        .await
+        .unwrap();
+    disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    assert!(
+        secrets.deleted_oauth_keys().is_empty(),
+        "disable must retain OAuth credentials"
+    );
+    assert_eq!(
+        credential_store
+            .load(&credential_key)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("opaque-sdk-credential-envelope")
+    );
+
+    uninstall_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    assert!(
+        !secrets.deleted_oauth_keys().is_empty(),
+        "uninstall must clear the disabled Plugin's OAuth credential namespace"
+    );
+    assert_eq!(credential_store.load(&index_key).await.unwrap(), None);
+    assert_eq!(credential_store.load(&credential_key).await.unwrap(), None);
+}
+
+fn plugin_oauth_credential_keys() -> (OAuthCredentialKey, OAuthCredentialKey) {
+    let mut digest = Sha256::new();
+    digest.update(b"A2C Computer\0");
+    let grant_fingerprint = format!(
+        "v1:authorization_code:dynamic:scopes-{:x}",
+        digest.finalize()
+    );
+    let index = OAuthCredentialKey {
+        bundle_id: BundleId::try_from("protected-plugin-mcp").unwrap(),
+        resource: "https://mcp.example.test/api".to_string(),
+        issuer: None,
+        grant_fingerprint,
+        record_kind: OAuthCredentialRecordKind::IssuerIndex,
+    };
+    let credential = OAuthCredentialKey {
+        record_kind: OAuthCredentialRecordKind::Credentials,
+        ..index.clone()
+    };
+    (index, credential)
 }
 
 #[tokio::test]
@@ -2095,6 +2254,49 @@ fn build_marketplace_repo(repo: &Path) {
     fs::write(
         servers.join("inputs.json"),
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","default":"demo","password":true}]}"#,
+    )
+    .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn build_oauth_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"oauth-tools","source":"./plugins/oauth-tools"}]}"#,
+    )
+    .unwrap();
+    let servers = repo.join("plugins/oauth-tools/mcp-servers");
+    fs::create_dir_all(&servers).unwrap();
+    fs::write(
+        servers.join("protected-plugin-mcp.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "type": "Http",
+            "name": "protected-plugin-mcp",
+            "oauth": {
+                "scopes": [],
+                "mode": { "type": "authorizationCode", "registration": "dynamic" }
+            },
+            "server_parameters": {
+                "url": "https://mcp.example.test/api",
+                "headers": {}
+            }
+        }))
+        .unwrap(),
     )
     .unwrap();
 

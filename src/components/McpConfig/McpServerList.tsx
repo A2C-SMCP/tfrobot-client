@@ -18,6 +18,9 @@ interface McpServerListProps {
   onStart?: (bundleId: string) => Promise<void>;
   onStop?: (bundleId: string, name: string) => Promise<void>;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  onAuthorize?: (bundleId: string) => Promise<void>;
+  onCancelAuthorization?: (bundleId: string) => Promise<void>;
+  onClearAuthorization?: (bundleId: string) => Promise<void>;
 }
 
 export function McpServerList({
@@ -28,6 +31,9 @@ export function McpServerList({
   onStart,
   onStop,
   onOpenPlugin,
+  onAuthorize,
+  onCancelAuthorization,
+  onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
   const safeStatusLabel = (record: McpServerStatus) => {
@@ -91,6 +97,110 @@ export function McpServerList({
       key: 'status_message',
       ellipsis: true,
       render: (_: unknown, record: McpServerStatus) => safeStatusLabel(record),
+    },
+    {
+      title: t('mcp.table.authorization'),
+      key: 'authorization',
+      render: (_: unknown, record: McpServerStatus) => {
+        // Older cached/test snapshots predate the authorization field; treat them as non-OAuth.
+        const oauthStatus = record.oauth_status ?? { state: 'not_applicable' as const };
+        const interaction = record.oauth_interaction
+          ?? (oauthStatus.state === 'not_applicable' ? 'none' : 'interactive');
+        if (interaction === 'machine') {
+          const label = (() => {
+            switch (oauthStatus.state) {
+              case 'authorized': return t('mcp.authorization.authorized');
+              case 'authorization_pending': return t('mcp.authorization.pending');
+              case 'reauthorization_required':
+                return t('mcp.authorization.requiredScope', { scope: oauthStatus.required_scope });
+              case 'error': return t('mcp.authorization.error');
+              default: return t('mcp.authorization.unauthorized');
+            }
+          })();
+          return <Tag color={oauthStatus.state === 'authorized' ? 'green' : undefined}>{label}</Tag>;
+        }
+        switch (oauthStatus.state) {
+          case 'not_applicable':
+            return <Typography.Text type="secondary">—</Typography.Text>;
+          case 'authorization_pending':
+            return (
+              <Button
+                size="small"
+                onClick={() => onCancelAuthorization?.(record.bundleId)}
+                disabled={actionsDisabled}
+              >
+                {t('mcp.authorization.cancel')}
+              </Button>
+            );
+          case 'authorized':
+            return (
+              <Space direction="vertical" size={2}>
+                <Tag color="green">{t('mcp.authorization.authorized')}</Tag>
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => onClearAuthorization?.(record.bundleId)}
+                  disabled={actionsDisabled}
+                >
+                  {t('mcp.authorization.clear')}
+                </Button>
+              </Space>
+            );
+          case 'reauthorization_required':
+            return (
+              <Space direction="vertical" size={2}>
+                <Typography.Text type="secondary">
+                  {t('mcp.authorization.requiredScope', { scope: oauthStatus.required_scope })}
+                </Typography.Text>
+                <Space size="small">
+                  <Button
+                    type="primary"
+                    size="small"
+                    onClick={() => onAuthorize?.(record.bundleId)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('mcp.authorization.reauthorize')}
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => onClearAuthorization?.(record.bundleId)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('mcp.authorization.clear')}
+                  </Button>
+                </Space>
+              </Space>
+            );
+          case 'error':
+            return (
+              <Space direction="vertical" size={2}>
+                <Typography.Text type="danger">
+                  {t('mcp.authorization.error')}
+                </Typography.Text>
+                <Button
+                  type="primary"
+                  size="small"
+                  onClick={() => onAuthorize?.(record.bundleId)}
+                  disabled={actionsDisabled}
+                >
+                  {t('mcp.authorization.authorize')}
+                </Button>
+              </Space>
+            );
+          default:
+            return (
+              <Button
+                type="primary"
+                size="small"
+                onClick={() => onAuthorize?.(record.bundleId)}
+                disabled={actionsDisabled}
+              >
+                {t('mcp.authorization.authorize')}
+              </Button>
+            );
+        }
+      },
     },
     {
       title: t('mcp.table.actions'),

@@ -140,6 +140,15 @@ pub fn secret_value_key(secret_id: &str) -> String {
     scoped_secret_key("secret", secret_id)
 }
 
+/// Stable per-Computer key for an opaque SDK OAuth credential record.
+///
+/// The SDK-provided identifier already separates bundle, resource, issuer, grant mode, and
+/// record kind. Hashing it together with the trusted Computer instance ID adds the host-owned
+/// namespace without exposing either identifier to platform keyring metadata.
+pub fn oauth_credential_key(instance_id: &str, sdk_stable_id: &str) -> String {
+    scoped_input_key("mcp-oauth", instance_id, sdk_stable_id)
+}
+
 pub fn set_input_value(
     store: &dyn SecretStore,
     instance_id: &str,
@@ -247,6 +256,18 @@ mod tests {
         assert_ne!(
             input_secret_key("computer-a", "api-key"),
             secret_value_key("api-key")
+        );
+        assert_eq!(
+            oauth_credential_key("computer-a", "sdk-record"),
+            oauth_credential_key("computer-a", "sdk-record")
+        );
+        assert_ne!(
+            oauth_credential_key("computer-a", "sdk-record"),
+            oauth_credential_key("computer-b", "sdk-record")
+        );
+        assert_ne!(
+            oauth_credential_key("computer-a", "sdk-record"),
+            oauth_credential_key("computer-a", "other-record")
         );
         assert!(!input_value_key("computer-a", "path/with spaces").contains("path/with spaces"));
     }
