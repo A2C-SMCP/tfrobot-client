@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE};
 use serde::Serialize;
 use tokio::sync::{watch, Mutex, RwLock};
 use url::Url;
@@ -61,7 +61,18 @@ struct ResolvedChatTarget {
     http_base_url: Url,
     socket_namespace_url: String,
     socket_path: String,
+    frontend_namespace: String,
+    frontend_robot_id: String,
     routing_headers: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct ResolvedChatEndpoints {
+    http_base_url: Url,
+    socket_namespace_url: String,
+    socket_path: String,
+    frontend_namespace: String,
+    frontend_robot_id: String,
 }
 
 #[derive(Debug)]
@@ -122,6 +133,7 @@ impl ChatSessionService {
             .pool_max_idle_per_host(0)
             .tcp_keepalive(Duration::from_secs(10))
             .timeout(CHAT_HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("chat BFF reqwest client should build with rustls");
         Self {
@@ -149,8 +161,7 @@ impl ChatSessionService {
         let connection_info = manager
             .get_connection_info_for_generation(manager_generation, employee_id)
             .await?;
-        let (http_base_url, socket_namespace_url, socket_path) =
-            resolve_chat_endpoints(&connection_info)?;
+        let endpoints = resolve_chat_endpoints(&connection_info)?;
         let exchanged = manager
             .exchange_token_for_generation(
                 manager_generation,
@@ -165,9 +176,11 @@ impl ChatSessionService {
             employee_id,
             robot_account_id,
             robot_name: employee.name,
-            http_base_url,
-            socket_namespace_url,
-            socket_path,
+            http_base_url: endpoints.http_base_url,
+            socket_namespace_url: endpoints.socket_namespace_url,
+            socket_path: endpoints.socket_path,
+            frontend_namespace: endpoints.frontend_namespace,
+            frontend_robot_id: endpoints.frontend_robot_id,
             routing_headers: connection_info.routing_headers,
         };
         let descriptor = ChatSessionDescriptor {
@@ -328,7 +341,7 @@ impl ChatSessionService {
             .http
             .request(request_method, url)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", credential.token));
+            .header(COOKIE, frontend_session_cookie(&target, &credential.token)?);
         for (name, value) in &target.routing_headers {
             let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                 ManagerError::InvalidResponse(
@@ -456,21 +469,21 @@ fn resolve_chat_employee(
 
 fn resolve_chat_endpoints(
     connection_info: &ConnectionInfoResponse,
-) -> Result<(Url, String, String), ManagerError> {
-    let mut http_base = Url::parse(connection_info.socket_base_url.trim()).map_err(|_| {
+) -> Result<ResolvedChatEndpoints, ManagerError> {
+    let mut transport_base = Url::parse(connection_info.socket_base_url.trim()).map_err(|_| {
         ManagerError::InvalidResponse("connection-info returned an invalid socketBaseURL".into())
     })?;
-    if !http_base.username().is_empty() || http_base.password().is_some() {
+    if !transport_base.username().is_empty() || transport_base.password().is_some() {
         return Err(ManagerError::InvalidResponse(
             "connection-info endpoint must not contain URL credentials".into(),
         ));
     }
-    match http_base.scheme() {
+    match transport_base.scheme() {
         "http" | "https" => {}
-        "ws" => http_base.set_scheme("http").map_err(|_| {
+        "ws" => transport_base.set_scheme("http").map_err(|_| {
             ManagerError::InvalidResponse("connection-info returned an invalid URL scheme".into())
         })?,
-        "wss" => http_base.set_scheme("https").map_err(|_| {
+        "wss" => transport_base.set_scheme("https").map_err(|_| {
             ManagerError::InvalidResponse("connection-info returned an invalid URL scheme".into())
         })?,
         _ => {
@@ -479,30 +492,83 @@ fn resolve_chat_endpoints(
             ))
         }
     }
-    http_base.set_query(None);
-    http_base.set_fragment(None);
-    if !http_base.path().ends_with('/') {
-        let path = format!("{}/", http_base.path().trim_end_matches('/'));
-        http_base.set_path(&path);
-    }
+    transport_base.set_query(None);
+    transport_base.set_fragment(None);
 
-    let mut socket_namespace = http_base.clone();
+    let robot_type =
+        required_frontend_route_id(connection_info.robot_type.as_deref(), "robotType")?;
+    let namespace = required_frontend_route_id(connection_info.namespace.as_deref(), "namespace")?;
+    let robot_id = required_frontend_route_id(connection_info.rid.as_deref(), "rid")?;
+    let instance_prefix = format!("/c/{robot_type}/{namespace}/{robot_id}");
+
+    let mut http_base = transport_base.clone();
+    http_base.set_path(&format!("{instance_prefix}/api/"));
+
+    let mut socket_namespace = transport_base;
     socket_namespace.set_path("/chat");
     socket_namespace.set_query(None);
     socket_namespace.set_fragment(None);
-    let socket_path = connection_info
+    let socket_transport_path = connection_info
         .sio_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("/socket.io")
         .trim()
         .to_string();
-    if !socket_path.starts_with('/') || socket_path.contains("..") {
+    if !socket_transport_path.starts_with('/') || socket_transport_path.contains("..") {
         return Err(ManagerError::InvalidResponse(
             "connection-info returned an invalid Socket.IO path".into(),
         ));
     }
-    Ok((http_base, socket_namespace.to_string(), socket_path))
+    let socket_path = format!("{instance_prefix}{socket_transport_path}");
+    Ok(ResolvedChatEndpoints {
+        http_base_url: http_base,
+        socket_namespace_url: socket_namespace.to_string(),
+        socket_path,
+        frontend_namespace: namespace.to_string(),
+        frontend_robot_id: robot_id.to_string(),
+    })
+}
+
+fn required_frontend_route_id<'a>(
+    value: Option<&'a str>,
+    field: &str,
+) -> Result<&'a str, ManagerError> {
+    let value = value.filter(|value| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    value.ok_or_else(|| {
+        ManagerError::InvalidResponse(format!(
+            "connection-info returned a missing or invalid {field} for chat"
+        ))
+    })
+}
+
+fn frontend_session_cookie(
+    target: &ResolvedChatTarget,
+    short_token: &str,
+) -> Result<HeaderValue, ManagerError> {
+    if short_token.is_empty()
+        || short_token
+            .bytes()
+            .any(|byte| byte <= 0x20 || byte >= 0x7f || byte == b';' || byte == b',')
+    {
+        return Err(ManagerError::InvalidResponse(
+            "token exchange returned an invalid chat credential".into(),
+        ));
+    }
+    let mut cookie = HeaderValue::from_str(&format!(
+        "tfNamespace={}; tfRobotId={}; tfUserToken={short_token}",
+        target.frontend_namespace, target.frontend_robot_id
+    ))
+    .map_err(|_| {
+        ManagerError::InvalidResponse("failed to construct the chat BFF session".into())
+    })?;
+    cookie.set_sensitive(true);
+    Ok(cookie)
 }
 
 fn validate_chat_request_url(
@@ -594,6 +660,8 @@ mod tests {
             http_base_url,
             socket_namespace_url: "http://127.0.0.1/chat".into(),
             socket_path: "/socket.io".into(),
+            frontend_namespace: "tenant-acme".into(),
+            frontend_robot_id: "rid-42".into(),
             routing_headers: HashMap::from([("X-TF-Route".into(), "robot-42".into())]),
         }
     }
@@ -638,21 +706,65 @@ mod tests {
     }
 
     #[test]
-    fn endpoints_are_derived_without_credentials_or_manager_secrets() {
+    fn http_endpoint_uses_instance_bff_without_exposing_credentials_or_manager_secrets() {
         let info = ConnectionInfoResponse {
             socket_base_url: "wss://robot.example.com/proxy".into(),
             sio_path: Some("/robot/socket.io".into()),
-            namespace: None,
+            namespace: Some("tenant-acme".into()),
             rid: Some("rid-42".into()),
-            robot_type: None,
+            robot_type: Some("tfrobot".into()),
             smcp_namespace: None,
             computer_name: None,
             routing_headers: HashMap::new(),
         };
-        let (http, socket, path) = resolve_chat_endpoints(&info).unwrap();
-        assert_eq!(http.as_str(), "https://robot.example.com/proxy/");
-        assert_eq!(socket, "https://robot.example.com/chat");
-        assert_eq!(path, "/robot/socket.io");
+        let endpoints = resolve_chat_endpoints(&info).unwrap();
+        assert_eq!(
+            endpoints.http_base_url.as_str(),
+            "https://robot.example.com/c/tfrobot/tenant-acme/rid-42/api/"
+        );
+        assert_eq!(
+            endpoints.socket_namespace_url,
+            "https://robot.example.com/chat"
+        );
+        assert_eq!(
+            endpoints.socket_path,
+            "/c/tfrobot/tenant-acme/rid-42/robot/socket.io"
+        );
+        assert_eq!(endpoints.frontend_namespace, "tenant-acme");
+        assert_eq!(endpoints.frontend_robot_id, "rid-42");
+    }
+
+    #[test]
+    fn chat_endpoints_require_valid_frontend_route_identity() {
+        let mut info = ConnectionInfoResponse {
+            socket_base_url: "https://robot.example.com".into(),
+            sio_path: None,
+            namespace: None,
+            rid: Some("rid-42".into()),
+            robot_type: Some("tfrobot".into()),
+            smcp_namespace: None,
+            computer_name: None,
+            routing_headers: HashMap::new(),
+        };
+        assert!(resolve_chat_endpoints(&info).is_err());
+
+        info.namespace = Some("Tenant_Acme".into());
+        assert!(resolve_chat_endpoints(&info).is_err());
+
+        info.namespace = Some("tenant-acme".into());
+        info.rid = None;
+        assert!(resolve_chat_endpoints(&info).is_err());
+    }
+
+    #[test]
+    fn frontend_session_cookie_rejects_credential_header_injection() {
+        let target = test_target(
+            Url::parse("https://robot.example.com/c/tfrobot/tenant-acme/rid-42/api/").unwrap(),
+            context("account-a"),
+        );
+
+        assert!(frontend_session_cookie(&target, "short-token; adminToken=forged").is_err());
+        assert!(frontend_session_cookie(&target, "short-token\r\nX-Forged: value").is_err());
     }
 
     #[test]
@@ -701,7 +813,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bff_injects_only_lease_owned_auth_and_route_headers() {
+    async fn bff_injects_only_lease_owned_session_and_route_headers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -751,10 +863,122 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(uri, "/proxy/v1/chat/conversations?count=20");
         assert_eq!(
-            headers.get(AUTHORIZATION).unwrap(),
-            "Bearer short-chat-token"
+            headers.get(COOKIE).unwrap(),
+            "tfNamespace=tenant-acme; tfRobotId=rid-42; tfUserToken=short-chat-token"
         );
+        assert!(headers.get("authorization").is_none());
         assert_eq!(headers.get("X-TF-Route").unwrap(), "robot-42");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bff_does_not_follow_login_redirects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(|_request: Request<hyper::body::Incoming>| async move {
+                        Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(hyper::StatusCode::TEMPORARY_REDIRECT)
+                                .header(hyper::header::LOCATION, "/login")
+                                .body(Full::new(Bytes::from_static(b"redirecting to login")))
+                                .unwrap(),
+                        )
+                    }),
+                )
+                .await
+                .unwrap();
+        });
+
+        let service = ChatSessionService::new(Weak::new());
+        let base = Url::parse(&format!("http://{address}/proxy/")).unwrap();
+        let target = test_target(base.clone(), context("account-a"));
+        let (_cancel_tx, cancelled) = watch::channel(false);
+        let response = service
+            .proxy_authorized(
+                target,
+                cancelled,
+                base.join("v1/chat/conversations?count=20").unwrap(),
+                "GET",
+                None,
+                ChatSessionCredential {
+                    token: "short-chat-token".into(),
+                    expires_at: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 307);
+        assert_eq!(response.body, "redirecting to login");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicit staging chat credential and route context"]
+    async fn staging_instance_bff_returns_a_valid_conversation_envelope() {
+        let socket_base_url = std::env::var("TFRC_CHAT_SOCKET_BASE_URL").unwrap();
+        let namespace = std::env::var("TFRC_CHAT_NAMESPACE").unwrap();
+        let robot_id = std::env::var("TFRC_CHAT_ROBOT_ID").unwrap();
+        let robot_type = std::env::var("TFRC_CHAT_ROBOT_TYPE").unwrap();
+        let short_token = std::env::var("TFRC_CHAT_SHORT_TOKEN").unwrap();
+        let info = ConnectionInfoResponse {
+            socket_base_url,
+            sio_path: Some("/socket.io/".into()),
+            namespace: Some(namespace.clone()),
+            rid: Some(robot_id.clone()),
+            robot_type: Some(robot_type.clone()),
+            smcp_namespace: None,
+            computer_name: None,
+            routing_headers: HashMap::from([
+                ("X-TF-Namespace".into(), namespace),
+                ("X-TF-RobotId".into(), robot_id),
+                ("X-TF-RobotType".into(), robot_type),
+            ]),
+        };
+        let endpoints = resolve_chat_endpoints(&info).unwrap();
+        let target = ResolvedChatTarget {
+            context_key: context("staging-account"),
+            manager_generation: 1,
+            employee_id: 1,
+            robot_account_id: "staging-robot-account".into(),
+            robot_name: "staging-robot".into(),
+            http_base_url: endpoints.http_base_url.clone(),
+            socket_namespace_url: endpoints.socket_namespace_url,
+            socket_path: endpoints.socket_path,
+            frontend_namespace: endpoints.frontend_namespace,
+            frontend_robot_id: endpoints.frontend_robot_id,
+            routing_headers: info.routing_headers,
+        };
+        let service = ChatSessionService::new(Weak::new());
+        let (_cancel_tx, cancelled) = watch::channel(false);
+        let response = service
+            .proxy_authorized(
+                target,
+                cancelled,
+                endpoints
+                    .http_base_url
+                    .join("v1/chat/conversations?count=1")
+                    .unwrap(),
+                "GET",
+                None,
+                ChatSessionCredential {
+                    token: short_token,
+                    expires_at: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(body["code"], 200);
+        assert!(body["message"].is_string());
+        assert!(body["data"]["conversations"].is_array());
     }
 }

@@ -1,21 +1,36 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { LoginOutlined, MessageOutlined, ReloadOutlined } from '@ant-design/icons';
+import {
+  ApartmentOutlined,
+  LoginOutlined,
+  MessageOutlined,
+  ReloadOutlined,
+  RobotOutlined,
+} from '@ant-design/icons';
 import {
   Alert,
   Button,
   Card,
   Empty,
+  Input,
+  Modal,
   Select,
   Space,
   Spin,
   Tag,
+  Tooltip,
   Typography,
+  theme,
 } from 'antd';
 import {
-  ChatWorkspace,
+  ChatConversationView,
+  ChatUiShell,
   OwnedChatProvider,
+  useConversationWorkspace,
+  type ChatContentState,
   type ChatError,
+  type ChatUiLabelOverrides,
+  type ConversationWorkspaceBinding,
 } from '@turingfocus/chat-kit';
 import { useTranslation } from 'react-i18next';
 
@@ -40,6 +55,7 @@ const { Text, Title } = Typography;
 const EMPTY_EMPLOYEES: DigitalEmployeeBrief[] = [];
 
 type Translator = (key: string, options?: Record<string, unknown>) => string;
+type ChatThemeStyle = CSSProperties & Record<`--chat-${string}`, string>;
 
 function managerErrorText(t: Translator, error: ManagerError | null): string | null {
   return error === null ? null : t(`manager.errors.${error.kind}`);
@@ -48,6 +64,38 @@ function managerErrorText(t: Translator, error: ManagerError | null): string | n
 interface ActiveChatProps {
   descriptor: ChatSessionDescriptor;
   creator: { uid: string; name: string };
+}
+
+type WorkspaceSnapshot = ConversationWorkspaceBinding['snapshot'];
+
+function contentStateFor(
+  ready: boolean,
+  snapshot: WorkspaceSnapshot,
+  refresh: () => void,
+  retrySelection: (() => void) | undefined,
+): ChatContentState {
+  if (!ready) return { kind: 'loading' };
+  if (snapshot.selectionStatus === 'ready') return { kind: 'ready' };
+  if (snapshot.selectionStatus === 'loading') return { kind: 'loading' };
+  if (snapshot.selectionStatus === 'error') {
+    const error = snapshot.selectionError;
+    return {
+      kind: error?.code === 'network' ? 'disconnected' : 'error',
+      ...(error === undefined ? {} : { description: error.message }),
+      ...(retrySelection === undefined ? {} : { onRetry: retrySelection }),
+    };
+  }
+  if (snapshot.listStatus === 'error' && snapshot.selectedConversationId === undefined) {
+    return {
+      kind: snapshot.listError?.code === 'network' ? 'disconnected' : 'error',
+      ...(snapshot.listError === undefined ? {} : { description: snapshot.listError.message }),
+      onRetry: refresh,
+    };
+  }
+  if (snapshot.listStatus === 'loading' || snapshot.listStatus === 'idle') {
+    return { kind: 'loading' };
+  }
+  return { kind: 'empty' };
 }
 
 function ActiveChat({ descriptor, creator }: ActiveChatProps) {
@@ -70,15 +118,131 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
       fallback={<div className={styles.centered}><Spin /></div>}
       onDisposeError={() => warn('chat: failed to dispose ChatClient cleanly')}
     >
-      <ChatWorkspace
-        allowCreate
-        getDeadlineAt={getChatDeadlineAt}
-        labels={labels}
-        pageSize={50}
-        sidebarTitle={t('chat.conversations')}
-        sidebarWidth={220}
-      />
+      <CompactChatWorkspace labels={labels} />
     </OwnedChatProvider>
+  );
+}
+
+interface CompactChatWorkspaceProps {
+  labels: ChatUiLabelOverrides;
+}
+
+/**
+ * Renders the chat workspace with chat-kit's compact navigation: an inline
+ * conversation title plus new/history entries in the header. Conversation
+ * listing, creation, paging, selection and async races stay owned by the
+ * workspace controller — only the navigation chrome is host-rendered.
+ */
+function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
+  const workspace = useConversationWorkspace({
+    getDeadlineAt: getChatDeadlineAt,
+    initialSelection: 'first',
+    onUnhandledError: () => warn('chat: unhandled workspace error'),
+    pageSize: 50,
+  });
+  const [createOpen, setCreateOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  useEffect(() => {
+    setCreateOpen(false);
+    setTitle('');
+  }, [workspace.controller]);
+
+  const snapshot = workspace.snapshot;
+  const refresh = useCallback(() => {
+    void workspace.refresh();
+  }, [workspace]);
+  const retryConversationId = snapshot.selectionError?.conversationId ?? snapshot.pendingConversationId;
+  const retrySelection = useMemo(
+    () => (retryConversationId === undefined
+      ? undefined
+      : () => {
+        void workspace.selectConversation(retryConversationId);
+      }),
+    [retryConversationId, workspace],
+  );
+  const contentState = contentStateFor(workspace.ready, snapshot, refresh, retrySelection);
+
+  const create = useCallback(async () => {
+    const normalizedTitle = title.trim();
+    if (normalizedTitle.length === 0 || snapshot.creating) return;
+    const result = await workspace.createConversation({ title: normalizedTitle });
+    if (result?.ok === true) {
+      setCreateOpen(false);
+      setTitle('');
+    }
+  }, [title, workspace, snapshot.creating]);
+
+  const selectedConversation = snapshot.selectedConversationId === undefined
+    ? undefined
+    : snapshot.conversations.find((item) => item.id === snapshot.selectedConversationId);
+  const compactNavigation = {
+    conversationTitle: selectedConversation?.title ?? labels.conversationListLabel ?? 'Conversations',
+    conversationHistoryOpen: historyOpen,
+    conversationHistoryItems: snapshot.conversations,
+    conversationHistoryLoading: snapshot.listStatus === 'loading',
+    conversationHistoryError: snapshot.listError?.message,
+    onConversationHistoryOpenChange: setHistoryOpen,
+    onNewConversation: () => setCreateOpen(true),
+  };
+
+  return (
+    <>
+      <ChatUiShell
+        compactNavigation={compactNavigation}
+        contentState={contentState}
+        conversationListError={
+          snapshot.listStatus !== 'error' || snapshot.listError === undefined
+            ? undefined
+            : { message: snapshot.listError.message, onRetry: refresh }
+        }
+        conversationListLoading={!workspace.ready || snapshot.listStatus === 'loading'}
+        conversations={snapshot.conversations}
+        labels={labels}
+        navigationMode="compact"
+        onConversationSelect={(conversationId) => {
+          void workspace.selectConversation(conversationId);
+        }}
+        pendingConversationId={snapshot.pendingConversationId}
+        selectedConversationId={snapshot.selectedConversationId}
+      >
+        <ChatConversationView getDeadlineAt={getChatDeadlineAt} labels={labels} />
+      </ChatUiShell>
+      <Modal
+        cancelButtonProps={{ disabled: snapshot.creating }}
+        closable={!snapshot.creating}
+        confirmLoading={snapshot.creating}
+        keyboard={!snapshot.creating}
+        maskClosable={!snapshot.creating}
+        okButtonProps={{ disabled: title.trim().length === 0 }}
+        okText={labels.createConversationConfirm ?? 'Create'}
+        onCancel={() => setCreateOpen(false)}
+        onOk={() => { void create(); }}
+        open={createOpen}
+        title={labels.createConversation ?? 'New conversation'}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          {snapshot.creationError === undefined ? null : (
+            <Alert message={snapshot.creationError.message} role="alert" showIcon type="error" />
+          )}
+          <label>
+            <Typography.Text>
+              {labels.createConversationTitleLabel ?? 'Conversation title'}
+            </Typography.Text>
+            <Input
+              aria-label={labels.createConversationTitleLabel ?? 'Conversation title'}
+              autoFocus
+              disabled={snapshot.creating}
+              onChange={(event) => setTitle(event.target.value)}
+              onPressEnter={() => { void create(); }}
+              placeholder={labels.createConversationTitlePlaceholder ?? 'Enter a conversation title'}
+              value={title}
+            />
+          </label>
+        </Space>
+      </Modal>
+    </>
   );
 }
 
@@ -135,6 +299,7 @@ function ChatSessionHost({ creator, employeeId }: ChatSessionHostProps) {
 
 export function Chat() {
   const { t } = useTranslation();
+  const { token } = theme.useToken();
   const {
     context,
     employeeResources,
@@ -145,11 +310,24 @@ export function Chat() {
   const scope = managerContextScope(context);
   const resource = currentEmployeeResource({ context, employeeResources });
   const employees = resource?.employees ?? EMPTY_EMPLOYEES;
+  const availableEmployeeCount = employees.filter(
+    (employee) => chatRobotDisabledReason(employee) === null,
+  ).length;
+  const hasEmployeeSnapshot = resource?.lastFetchAt != null;
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<number | null>(null);
   const creator = useMemo(() => context.account === null ? null : ({
     uid: context.account.id,
     name: context.account.nickname || context.account.name,
   }), [context.account]);
+  const chatThemeStyle: ChatThemeStyle = {
+    '--chat-primary': token.colorPrimary,
+    '--chat-primary-bg': token.colorPrimaryBg,
+    '--chat-surface': token.colorBgContainer,
+    '--chat-border': token.colorBorderSecondary,
+    '--chat-text': token.colorText,
+    '--chat-text-secondary': token.colorTextSecondary,
+    '--chat-shadow': token.boxShadowTertiary,
+  };
 
   useEffect(() => {
     setSelectedEmployeeId(null);
@@ -195,34 +373,53 @@ export function Chat() {
   });
 
   return (
-    <div className={styles.page}>
-      <div className={styles.pageHeader}>
-        <div>
-          <Title level={3} style={{ marginBottom: 4 }}>
-            <MessageOutlined /> {t('chat.title')}
-          </Title>
-          <Text type="secondary">
-            {t('chat.context', { organization: context.organization?.name ?? '' })}
-          </Text>
+    <div className={styles.page} style={chatThemeStyle}>
+      <section className={styles.hero}>
+        <div className={styles.heroIdentity}>
+          <div className={styles.heroIcon} aria-hidden="true">
+            <MessageOutlined />
+          </div>
+          <div className={styles.heroCopy}>
+            <Title level={3} className={styles.heroTitle}>{t('chat.title')}</Title>
+            <div className={styles.contextTags}>
+              <Tag bordered={false} icon={<ApartmentOutlined />}>
+                {t('chat.context', { organization: context.organization?.name ?? '' })}
+              </Tag>
+              {hasEmployeeSnapshot && (
+                <Tag bordered={false} color={availableEmployeeCount > 0 ? 'success' : 'default'}>
+                  {t('chat.availableRobots', { count: availableEmployeeCount })}
+                </Tag>
+              )}
+            </div>
+          </div>
         </div>
-        <Space className={styles.selector}>
-          <Select<number>
-            aria-label={t('chat.selectRobot')}
-            placeholder={t('chat.selectRobot')}
-            value={selectedEmployeeId ?? undefined}
-            options={options}
-            loading={resource?.loading === true}
-            onChange={setSelectedEmployeeId}
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <Button
-            aria-label={t('common.refresh')}
-            icon={<ReloadOutlined />}
-            loading={resource?.loading === true}
-            onClick={() => { void fetchEmployees().catch(() => undefined); }}
-          />
-        </Space>
-      </div>
+
+        <div className={styles.selectorPanel}>
+          <div className={styles.selectorControls}>
+            <Select<number>
+              aria-label={t('chat.selectRobot')}
+              className={styles.robotSelect}
+              size="large"
+              placeholder={t('chat.selectRobot')}
+              value={selectedEmployeeId ?? undefined}
+              options={options}
+              loading={resource?.loading === true}
+              notFoundContent={t('chat.noAvailableRobots')}
+              onChange={setSelectedEmployeeId}
+            />
+            <Tooltip title={t('common.refresh')}>
+              <Button
+                aria-label={t('common.refresh')}
+                className={styles.refreshButton}
+                icon={<ReloadOutlined />}
+                loading={resource?.loading === true}
+                size="large"
+                onClick={() => { void fetchEmployees().catch(() => undefined); }}
+              />
+            </Tooltip>
+          </div>
+        </div>
+      </section>
 
       {resourceError && (
         <Alert
@@ -236,8 +433,12 @@ export function Chat() {
       <Card className={styles.workspaceCard}>
         <div className={styles.workspace}>
           {selectedEmployeeId === null ? (
-            <div className={styles.centered}>
-              <Empty description={t('chat.chooseRobot')} />
+            <div className={styles.emptyState}>
+              <div className={styles.emptyVisual} aria-hidden="true">
+                <RobotOutlined />
+              </div>
+              <Title level={4} className={styles.emptyTitle}>{t('chat.emptyTitle')}</Title>
+              <Text className={styles.emptyDescription}>{t('chat.chooseRobot')}</Text>
             </div>
           ) : (
             <ChatSessionHost

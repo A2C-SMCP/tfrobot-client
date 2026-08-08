@@ -13,12 +13,15 @@ import type { DigitalEmployeeBrief, ManagerContextSnapshot } from '@/stores/mana
 
 const chatKitMock = vi.hoisted(() => ({
   createFactory: vi.fn((_options: unknown) => ({ create: vi.fn(), getDisposeOptions: vi.fn() })),
+  useConversationWorkspace: vi.fn(),
 }));
 
 vi.mock('@turingfocus/chat-kit', () => ({
   createTFRobotChatClientFactory: chatKitMock.createFactory,
   OwnedChatProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  ChatWorkspace: () => <div>Managed Chat Workspace</div>,
+  ChatUiShell: () => <div>Managed Chat Workspace</div>,
+  ChatConversationView: () => null,
+  useConversationWorkspace: chatKitMock.useConversationWorkspace,
 }));
 
 const employee = (overrides: Partial<DigitalEmployeeBrief> = {}): DigitalEmployeeBrief => ({
@@ -97,6 +100,20 @@ describe('Chat', () => {
       permissions: [],
     };
     managerStoreMock.employeeResources = {};
+    chatKitMock.useConversationWorkspace.mockReturnValue({
+      controller: {},
+      ready: true,
+      snapshot: {
+        conversations: [],
+        creating: false,
+        listStatus: 'idle',
+        selectionStatus: 'ready',
+      },
+      createConversation: vi.fn(),
+      loadMore: vi.fn(),
+      refresh: vi.fn(),
+      selectConversation: vi.fn(),
+    });
   });
 
   it('requires a Manager login before showing Robot chat controls', () => {
@@ -111,6 +128,22 @@ describe('Chat', () => {
     expect(chatRobotDisabledReason(employee({ status: 'stopped' }))).toBe('notRunning');
     expect(chatRobotDisabledReason(employee({ robotAccountId: undefined }))).toBe('missingAccount');
     expect(chatRobotDisabledReason(employee({ templateType: 'tfropenclaw' }))).toBe('incompatible');
+  });
+
+  it('presents organization context, availability and a guided empty state', () => {
+    setAuthenticatedEmployees([
+      employee(),
+      employee({ id: 43, name: 'Robot B', status: 'stopped' }),
+    ]);
+
+    render(<Chat />);
+
+    expect(screen.getByRole('heading', { name: 'Chat' })).toBeInTheDocument();
+    expect(screen.getByText('Organization: Organization')).toBeInTheDocument();
+    expect(screen.getByText('1 available')).toBeInTheDocument();
+    expect(screen.getByText('Select a Robot to start')).toBeInTheDocument();
+    expect(screen.getByText('Select an available Robot to open its conversation workspace.'))
+      .toBeInTheDocument();
   });
 
   it('opens an in-memory lease for the selected Robot and closes it on unmount', async () => {

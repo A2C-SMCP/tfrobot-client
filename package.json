@@ -35,7 +35,7 @@
     "@tauri-apps/plugin-log": "^2",
     "@tauri-apps/plugin-shell": "^2.2.0",
     "@tauri-apps/plugin-updater": "^2.10.0",
-    "@turingfocus/chat-kit": "0.4.2",
+    "@turingfocus/chat-kit": "0.5.0",
     "antd": "^5.23.4",
     "dayjs": "^1.11.19",
     "i18next": "^24.2.2",
@@ -71,11 +71,11 @@
   },
   "pnpm": {
     "overrides": {
-      "@turingfocus/chat-gateway-tfrobot": "0.4.2",
-      "@turingfocus/chat-protocol": "0.4.2",
-      "@turingfocus/chat-react": "0.4.2",
-      "@turingfocus/chat-runtime": "0.4.2",
-      "@turingfocus/chat-ui-antd": "0.4.2"
+      "@turingfocus/chat-gateway-tfrobot": "0.5.0",
+      "@turingfocus/chat-protocol": "0.5.0",
+      "@turingfocus/chat-react": "0.5.0",
+      "@turingfocus/chat-runtime": "0.5.0",
+      "@turingfocus/chat-ui-antd": "0.5.0"
     }
   },
   "packageManager": "pnpm@9.14.4+sha512.c8180b3fbe4e4bca02c94234717896b5529740a6cbadf19fa78254270403ea2f27d4e1d46a08a0f56c89b63dc8ebfd3ee53326da720273794e6200fcf0d184ab"
