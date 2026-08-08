@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Button, Form, InputNumber, Space, Segmented, Alert, Tag, Typography, Image } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useDebugStore, type ToolInfo, type ToolCallResponse } from '@/stores/debugStore';
+import { useDebugStore, DEFAULT_TOOL_TIMEOUT_S, type ToolInfo, type ToolCallResponse } from '@/stores/debugStore';
 import { SchemaForm } from './SchemaForm';
 
 const { Text } = Typography;
@@ -65,7 +65,7 @@ export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: T
           onChange={(v) => setMode(v as 'form' | 'json')}
         />
         <InputNumber
-          placeholder={t('debug.timeout')}
+          placeholder={t('debug.timeoutDefault', { seconds: DEFAULT_TOOL_TIMEOUT_S })}
           value={timeout}
           onChange={(v) => setTimeout(v ?? undefined)}
           min={1}

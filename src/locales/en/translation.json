@@ -752,6 +752,7 @@
     "formMode": "Form",
     "jsonMode": "JSON",
     "timeout": "Timeout",
+    "timeoutDefault": "Default {{seconds}}s",
     "execute": "Execute",
     "historyColumns": {
       "time": "Time",

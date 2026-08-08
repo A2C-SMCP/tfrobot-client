@@ -172,6 +172,15 @@ fn resource_to_debug_info(server: &str, resource: Resource) -> DebugResourceInfo
     }
 }
 
+/// Default deadline (seconds) applied when a tool caller omits `timeout`.
+///
+/// Safety net against MCP transports that strand a response when their
+/// server→client channel dies mid-stream — notably Streamable-HTTP/SSE servers
+/// (e.g. Atlassian) whose edge resets the long-lived GET connection. The
+/// pending tool response is lost on the flap, so without a deadline the call
+/// hangs forever. See `experiments/codex-sse-flap-hang-repro`.
+const DEFAULT_TOOL_TIMEOUT_SECS: f64 = 120.0;
+
 /// Execute a tool call for testing
 #[tauri::command]
 pub async fn execute_tool(
@@ -193,6 +202,11 @@ pub async fn execute_tool_core(
 ) -> Result<ToolCallResponse, String> {
     let instance_id = require_instance_id(instance_id)?.to_string();
     log::info!("Executing tool for instance {}: {}", instance_id, tool_name);
+
+    // An explicit caller timeout always wins; only a missing timeout falls back
+    // to the default deadline so a dead/flapping transport fails fast instead of
+    // hanging the invoke forever.
+    let timeout = timeout.or(Some(DEFAULT_TOOL_TIMEOUT_SECS));
 
     let runtime = state
         .computer_registry

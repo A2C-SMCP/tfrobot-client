@@ -752,6 +752,7 @@
     "formMode": "表单",
     "jsonMode": "JSON",
     "timeout": "超时时间",
+    "timeoutDefault": "默认 {{seconds}}秒",
     "execute": "执行",
     "historyColumns": {
       "time": "时间",
