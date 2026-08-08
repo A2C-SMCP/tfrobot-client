@@ -7,6 +7,7 @@ import {
   SunOutlined,
   MoonOutlined,
   ApiOutlined,
+  MessageOutlined,
 } from '@ant-design/icons';
 import { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -19,6 +20,7 @@ import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { ComputerSettings } from './components/ComputerSettings';
 import { GlobalManagerAccount } from './components/ManagerAccount/GlobalManagerAccount';
+import { Chat } from './components/Chat';
 import {
   legacyComputerSettingsSection,
   parsePluginSettingsTarget,
@@ -134,6 +136,11 @@ function App() {
           icon: <DesktopOutlined />,
           label: t('computer.title'),
         },
+        {
+          key: 'chat',
+          icon: <MessageOutlined />,
+          label: t('chat.title'),
+        },
       ],
     },
     {
@@ -216,6 +223,8 @@ function App() {
             onNavigate={setSelectedKey}
           />
         );
+      case 'chat':
+        return <Chat />;
       case 'robot-connections':
         return <RobotConnections />;
       case 'logs':

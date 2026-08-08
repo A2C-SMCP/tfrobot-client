@@ -1,0 +1,203 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 160px);
+  min-height: 440px;
+  min-width: 0;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 280px);
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--chat-border);
+  border-radius: 14px;
+  background: var(--chat-surface);
+  box-shadow: var(--chat-shadow);
+}
+
+.heroIdentity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.heroIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  color: var(--chat-primary);
+  background: var(--chat-primary-bg);
+  font-size: 21px;
+}
+
+.heroCopy {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  min-width: 0;
+}
+
+.heroTitle {
+  margin: 0 !important;
+  color: var(--chat-text) !important;
+  font-size: 22px !important;
+  line-height: 1.25 !important;
+}
+
+.contextTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.contextTags :global(.ant-tag) {
+  margin: 0;
+  padding-inline: 8px;
+  border-radius: 999px;
+  line-height: 23px;
+}
+
+.selectorPanel {
+  min-width: 0;
+}
+
+.selectorControls {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.robotSelect {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.robotSelect :global(.ant-select-selector),
+.refreshButton {
+  border-radius: 10px !important;
+}
+
+.refreshButton {
+  flex: 0 0 40px;
+}
+
+.workspaceCard {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  border-color: var(--chat-border);
+  border-radius: 20px;
+  background: var(--chat-surface);
+  box-shadow: var(--chat-shadow);
+}
+
+.workspaceCard :global(.ant-card-body) {
+  height: 100%;
+  padding: 0;
+}
+
+.workspace {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.centered {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 320px;
+  padding: 32px;
+  text-align: center;
+  background: var(--chat-surface);
+}
+
+.emptyVisual {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 14px;
+  border-radius: 14px;
+  color: var(--chat-primary);
+  background: var(--chat-primary-bg);
+  font-size: 24px;
+}
+
+.emptyTitle {
+  margin: 0 0 6px !important;
+  color: var(--chat-text) !important;
+}
+
+.emptyDescription {
+  max-width: 480px;
+  color: var(--chat-text-secondary) !important;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .page {
+    height: calc(100vh - 112px);
+  }
+
+  .heroIcon {
+    display: none;
+  }
+
+  .heroCopy {
+    display: block;
+  }
+
+  .contextTags {
+    flex-wrap: nowrap;
+    margin-top: 2px;
+    overflow: hidden;
+  }
+
+  .contextTags :global(.ant-tag) {
+    min-width: 0;
+    overflow: hidden;
+    padding-inline: 0;
+    background: transparent;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 700px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 12px;
+  }
+
+  .workspaceCard {
+    border-radius: 16px;
+  }
+
+  .emptyState {
+    min-height: 300px;
+    padding: 24px 16px;
+  }
+}

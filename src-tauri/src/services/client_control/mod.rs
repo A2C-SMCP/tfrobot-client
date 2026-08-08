@@ -24,6 +24,7 @@ pub use provider::{
     CLIENT_CONTROL_BUNDLE_ID,
 };
 
+use crate::services::chat_session::ChatSessionService;
 use crate::services::computer::{ComputerInstance, ComputerRegistry};
 use crate::services::config::ConfigService;
 use crate::services::keychain::SecretStore;
@@ -48,6 +49,7 @@ pub struct ClientControlHost {
     pub diagnostics: Arc<Diagnostics>,
     pub settings_service: Arc<SettingsService>,
     pub manager_context: Arc<ManagerContextCoordinator>,
+    pub chat_sessions: Arc<ChatSessionService>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +123,7 @@ impl ClientControlPlane {
             diagnostics: host.diagnostics.clone(),
             settings_service: host.settings_service.clone(),
             manager_context: host.manager_context.clone(),
+            chat_sessions: host.chat_sessions.clone(),
         })
     }
 

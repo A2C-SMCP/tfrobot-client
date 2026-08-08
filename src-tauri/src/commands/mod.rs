@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod chat;
 pub mod client_control;
 pub mod computer;
 pub mod computer_runtime;

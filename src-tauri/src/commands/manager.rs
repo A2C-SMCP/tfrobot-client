@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
+use crate::services::chat_session::ChatSessionService;
 use crate::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ComputerRegistry, ManagerRobotBindingState,
     RobotBindingMetadata,
@@ -54,6 +55,7 @@ pub(crate) struct TauriManagerContextLifecycleSink {
     config: Arc<ConfigService>,
     computer_registry: Arc<ComputerRegistry>,
     computer_lifecycle_lock: Arc<Mutex<()>>,
+    chat_sessions: Arc<ChatSessionService>,
 }
 
 impl TauriManagerContextLifecycleSink {
@@ -61,11 +63,13 @@ impl TauriManagerContextLifecycleSink {
         config: Arc<ConfigService>,
         computer_registry: Arc<ComputerRegistry>,
         computer_lifecycle_lock: Arc<Mutex<()>>,
+        chat_sessions: Arc<ChatSessionService>,
     ) -> Self {
         Self {
             config,
             computer_registry,
             computer_lifecycle_lock,
+            chat_sessions,
         }
     }
 
@@ -126,6 +130,10 @@ impl ManagerContextLifecycleSink for TauriManagerContextLifecycleSink {
         &self,
         departing_context: Option<&ManagerContextKey>,
     ) -> Vec<String> {
+        // Chat is single-current-Context state. Clear every lease fail-closed so an abnormal
+        // historical lease can never survive an account, organization, environment, or auth
+        // transition.
+        self.chat_sessions.close_for_context(None).await;
         let _lifecycle = self.computer_lifecycle_lock.lock().await;
         let runtimes = self.computer_registry.list_runtimes().await;
         let mut diagnostics = Vec::new();
@@ -381,6 +389,7 @@ mod tests {
             config.clone(),
             registry.clone(),
             Arc::new(Mutex::new(())),
+            Arc::new(ChatSessionService::new(std::sync::Weak::new())),
         );
 
         assert!(sink

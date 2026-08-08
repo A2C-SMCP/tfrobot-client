@@ -4,6 +4,7 @@ pub mod commands;
 pub mod services;
 pub mod tray;
 
+use services::chat_session::ChatSessionService;
 use services::client_computers::ClientComputersPaths;
 use services::client_control::{
     ClientControlHost, ClientControlPlane, ObservabilityControlAuditSink,
@@ -56,6 +57,8 @@ pub struct AppState {
     pub settings_service: Arc<SettingsService>,
     /// Backend-authoritative TFRSManager identity context and HTTP coordinator.
     pub manager_context: Arc<ManagerContextCoordinator>,
+    /// Context-bound in-memory chat leases and narrow RobotServer HTTP BFF.
+    pub chat_sessions: Arc<ChatSessionService>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -121,6 +124,7 @@ impl AppState {
             manager_client,
             settings_service.clone(),
         ));
+        let chat_sessions = Arc::new(ChatSessionService::new(Arc::downgrade(&manager_context)));
 
         migrate_legacy_config(
             config.as_ref(),
@@ -178,6 +182,7 @@ impl AppState {
                 diagnostics: diagnostics.clone(),
                 settings_service: settings_service.clone(),
                 manager_context: manager_context.clone(),
+                chat_sessions: chat_sessions.clone(),
             },
         ));
         computer_registry.bind_client_control(&client_control);
@@ -195,6 +200,7 @@ impl AppState {
             diagnostics,
             settings_service,
             manager_context,
+            chat_sessions,
         })
     }
 
@@ -335,6 +341,7 @@ pub fn run() {
                     state.config.clone(),
                     state.computer_registry.clone(),
                     state.computer_lifecycle_lock.clone(),
+                    state.chat_sessions.clone(),
                 ),
             )));
             tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
@@ -490,6 +497,12 @@ pub fn run() {
             commands::manager::manager_switch_account,
             commands::manager::manager_list_digital_employees,
             commands::manager::manager_logout,
+            // Context-bound Chat Kit session and HTTP BFF
+            commands::chat::chat_open_session,
+            commands::chat::chat_get_session_token,
+            commands::chat::chat_invalidate_session,
+            commands::chat::chat_http_request,
+            commands::chat::chat_close_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -498,6 +511,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
+                    state.chat_sessions.close_for_context(None).await;
                     state.computer_registry.shutdown_all().await;
                     if let Err(error) = state
                         .observability

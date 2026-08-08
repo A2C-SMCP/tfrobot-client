@@ -112,6 +112,9 @@ vi.mock('@/components/ActivityViewer', () => ({
 vi.mock('@/components/Settings', () => ({
   Settings: () => <div>Settings</div>,
 }));
+vi.mock('@/components/Chat', () => ({
+  Chat: () => <div>Managed Chat Page</div>,
+}));
 
 describe('App', () => {
   beforeEach(() => {
@@ -161,6 +164,12 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Activity'));
     await waitFor(() => expect(screen.getByText('ActivityViewer')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
+  });
+
+  it('opens Chat from the overview group', () => {
+    render(<App />);
+    fireEvent.click(screen.getByText('Chat'));
+    expect(screen.getByText('Managed Chat Page')).toBeInTheDocument();
   });
 
   it('does not restore a previous session while onboarding guidance is active', async () => {
