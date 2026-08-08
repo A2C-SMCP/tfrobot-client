@@ -1,7 +1,7 @@
 use super::*;
 use a2c_smcp::smcp_computer::oauth::{
-    OAuthBeginRequest, OAuthCallback, OAuthCancellation, OAuthCancellationReason, OAuthClientMode,
-    OAuthError, OAuthFlow, OAuthFlowOutcome, OAuthStatus,
+    OAuthBeginRequest, OAuthCallback, OAuthCancellation, OAuthCancellationReason, OAuthError,
+    OAuthFlow, OAuthFlowOutcome, OAuthStatus,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -123,10 +123,18 @@ impl ComputerInstanceRuntime {
         let MCPServerConfig::Http(config) = self.configured_oauth_server(bundle_id).await? else {
             return None;
         };
-        Some(matches!(
-            config.oauth?.mode,
-            OAuthClientMode::AuthorizationCode { .. }
-        ))
+        let effective = effective_http_oauth(&config)?;
+        if effective.automatic {
+            // Auto is not OAuth merely because discovery overrides are present. Only expose the
+            // authorization action after start validated a Bearer challenge and the SDK admitted
+            // an OAuth coordinator. Public HTTP and unrelated 401 failures remain non-OAuth.
+            return match self.computer.read().await.oauth_status(bundle_id).await {
+                Ok(_) => Some(effective.interactive),
+                Err(OAuthError::NotConfigured) => None,
+                Err(_) => Some(effective.interactive),
+            };
+        }
+        Some(effective.interactive)
     }
 
     pub async fn oauth_status(&self, bundle_id: &BundleId) -> Result<Option<OAuthStatus>, String> {
@@ -163,7 +171,7 @@ impl ComputerInstanceRuntime {
             .into_iter()
             .find(|config| {
                 resolve_bundle_id(config) == *bundle_id
-                    && matches!(config, MCPServerConfig::Http(http) if http.oauth.is_some())
+                    && matches!(config, MCPServerConfig::Http(http) if effective_http_oauth(http).is_some())
             })
     }
 
@@ -371,15 +379,31 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn clear_oauth_authorization(&self, bundle_id: &BundleId) -> Result<(), String> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
+        self.ensure_active()?;
+        self.clear_oauth_authorization_inner(bundle_id).await
+    }
+
+    pub(super) async fn clear_oauth_authorization_inner(
+        &self,
+        bundle_id: &BundleId,
+    ) -> Result<(), String> {
         if !self.mcp_server_has_oauth(bundle_id).await {
             return Ok(());
         }
         let _admission_guard = self.block_oauth_admission_for_server_change().await;
         self.cancel_oauth_authorization(bundle_id).await?;
+        self.stop_mcp_server_if_running(bundle_id).await?;
         let result = match self.computer.read().await.clear_oauth(bundle_id).await {
             Ok(()) => Ok(()),
             Err(OAuthError::NotConfigured) => {
                 let Some(config) = self.configured_oauth_server(bundle_id).await else {
+                    return Ok(());
+                };
+                let Some(config) =
+                    crate::services::oauth_credential_store::oauth_cleanup_config(config)
+                else {
                     return Ok(());
                 };
                 self.transient_oauth_manager(config)
@@ -401,11 +425,13 @@ impl ComputerInstanceRuntime {
         config: MCPServerConfig,
     ) -> Result<(), String> {
         let bundle_id = resolve_bundle_id(&config);
-        if !matches!(&config, MCPServerConfig::Http(http) if http.oauth.is_some()) {
+        let Some(config) = crate::services::oauth_credential_store::oauth_cleanup_config(config)
+        else {
             return Ok(());
-        }
+        };
         let _admission_guard = self.block_oauth_admission_for_server_change().await;
         self.cancel_oauth_authorization(&bundle_id).await?;
+        self.stop_mcp_server_if_running(&bundle_id).await?;
         let result = self
             .transient_oauth_manager(config)
             .await?
@@ -416,6 +442,26 @@ impl ComputerInstanceRuntime {
             self.oauth_required_scopes.write().await.remove(&bundle_id);
         }
         result
+    }
+
+    async fn stop_mcp_server_if_running(&self, bundle_id: &BundleId) -> Result<(), String> {
+        let running = self
+            .computer
+            .read()
+            .await
+            .get_server_status()
+            .await
+            .into_iter()
+            .any(|(id, _, running, _)| id == *bundle_id && running);
+        if running {
+            self.computer
+                .read()
+                .await
+                .stop_mcp_client(bundle_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub(super) async fn cancel_all_oauth_authorizations(&self) {
@@ -730,6 +776,285 @@ async fn respond(stream: &mut TcpStream, status: u16, message: &str) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "requires interactive Atlassian OAuth in a system browser"]
+    async fn atlassian_automatic_oauth_lifecycle_e2e() {
+        use a2c_smcp::smcp_computer::mcp_clients::model::{
+            HttpAuthPolicy, HttpServerConfig, HttpServerParameters,
+        };
+        use a2c_smcp::smcp_computer::oauth::{
+            OAuthClientMode, OAuthClientRegistration, OAuthOptions,
+        };
+        use std::process::{Command, Stdio};
+
+        const BUNDLE: &str = "atlassian-automatic-oauth-e2e";
+        const RESOURCE_TOOL: &str = "getAccessibleAtlassianResources";
+        const JQL_TOOL: &str = "searchJiraIssuesUsingJql";
+        const SEARCH_TOOLS: &[&str] = &["search", "searchAtlassian"];
+
+        println!("ATLASSIAN_E2E: START automatic-discovery-empty-scopes");
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = ComputerInstanceRuntime::new(
+            ComputerInstance::new("oauth-host-e2e", "OAuth Host E2E"),
+            directory.path().join("skills"),
+        );
+        runtime.start().await.unwrap();
+        let bundle_id = BundleId::try_from(BUNDLE).unwrap();
+        let mut http = HttpServerConfig::new(
+            "Atlassian automatic OAuth E2E",
+            HttpServerParameters {
+                url: "https://mcp.atlassian.com/v1/mcp/authv2".to_string(),
+                headers: HashMap::new(),
+            },
+        );
+        http.bundle_id = Some(bundle_id.clone());
+        http.auth_policy = Some(HttpAuthPolicy::Auto);
+        http.oauth = Some(OAuthOptions {
+            resource: None,
+            scopes: Vec::new(),
+            client_name: Some("TFRobot".to_string()),
+            mode: OAuthClientMode::AuthorizationCode {
+                registration: OAuthClientRegistration::Dynamic,
+            },
+        });
+        runtime
+            .apply_user_mcp_server_config(MCPServerConfig::Http(http))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime.mcp_server_oauth_is_interactive(&bundle_id).await,
+            Some(true)
+        );
+        assert!(matches!(
+            runtime.oauth_status(&bundle_id).await.unwrap(),
+            Some(OAuthStatus::Unauthorized)
+        ));
+        assert!(!runtime
+            .mcp_start_diagnostics()
+            .await
+            .contains_key(&bundle_id));
+        assert!(runtime
+            .available_tools()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|tool| !tool.name.as_ref().starts_with(BUNDLE)));
+        println!("ATLASSIAN_E2E: PASS phase=before-authorization tools=unavailable");
+
+        let authorization_url = runtime.begin_oauth_authorization(&bundle_id).await.unwrap();
+        let browser = Command::new("open")
+            .arg(&authorization_url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        drop(authorization_url);
+        assert!(browser.success(), "system browser did not open");
+        println!("ATLASSIAN_E2E: WAIT browser-authorization");
+
+        let authorization_deadline = Instant::now() + Duration::from_secs(5 * 60);
+        loop {
+            let status = runtime.oauth_status(&bundle_id).await.unwrap();
+            if matches!(status, Some(OAuthStatus::Authorized { .. })) {
+                break;
+            }
+            assert!(
+                !matches!(status, Some(OAuthStatus::Error { .. })),
+                "Atlassian authorization entered an error state: {status:?}"
+            );
+            assert!(
+                Instant::now() < authorization_deadline,
+                "Atlassian authorization callback did not complete: {status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        println!("ATLASSIAN_E2E: PASS phase=authorization-callback");
+
+        let exposed_resource_tool = format!("{BUNDLE}__{RESOURCE_TOOL}");
+        let tools_deadline = Instant::now() + Duration::from_secs(30);
+        let tools = loop {
+            if let Ok(tools) = runtime.available_tools().await {
+                if tools
+                    .iter()
+                    .any(|tool| tool.name.as_ref() == exposed_resource_tool)
+                {
+                    break tools;
+                }
+            }
+            assert!(
+                Instant::now() < tools_deadline,
+                "host did not expose Atlassian tools after authorization; diagnostics={:?}",
+                runtime.mcp_start_diagnostics().await
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+
+        assert!(matches!(
+            runtime.oauth_status(&bundle_id).await.unwrap(),
+            Some(OAuthStatus::Authorized { .. })
+        ));
+        println!("ATLASSIAN_E2E: PASS phase=authorized tools={}", tools.len());
+
+        let resource_result = runtime
+            .computer
+            .read()
+            .await
+            .execute_tool_cancellable(
+                "atlassian-oauth-e2e-resources",
+                &exposed_resource_tool,
+                serde_json::json!({}),
+                Some(30.0),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resource_result.is_error,
+            Some(true),
+            "Atlassian resource discovery failed"
+        );
+        let cloud_id = extract_atlassian_cloud_id(&resource_result)
+            .expect("resource response did not contain a cloud id");
+        println!("ATLASSIAN_E2E: PASS tool={RESOURCE_TOOL}");
+
+        let exposed_jql_tool = format!("{BUNDLE}__{JQL_TOOL}");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name.as_ref() == exposed_jql_tool),
+            "JQL search tool was not discovered"
+        );
+        let jql_result = runtime
+            .computer
+            .read()
+            .await
+            .execute_tool_cancellable(
+                "atlassian-oauth-e2e-jql",
+                &exposed_jql_tool,
+                serde_json::json!({
+                    "cloudId": cloud_id,
+                    "jql": "key = TFROBOT-E2E-0"
+                }),
+                Some(30.0),
+            )
+            .await
+            .unwrap();
+
+        let exposed_search_tool = SEARCH_TOOLS
+            .iter()
+            .map(|tool| format!("{BUNDLE}__{tool}"))
+            .find(|name| tools.iter().any(|tool| tool.name.as_ref() == name))
+            .expect("generic Atlassian search tool was not discovered");
+        let search_result = runtime
+            .computer
+            .read()
+            .await
+            .execute_tool_cancellable(
+                "atlassian-oauth-e2e-search",
+                &exposed_search_tool,
+                serde_json::json!({
+                    "cloudId": cloud_id,
+                    "query": "tfrobot-e2e-deliberately-nonexistent-query-7a6f0a"
+                }),
+                Some(30.0),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            jql_result.is_error,
+            Some(true),
+            "authorized JQL search returned an error"
+        );
+        assert_ne!(
+            search_result.is_error,
+            Some(true),
+            "authorized generic search returned an error"
+        );
+        println!("ATLASSIAN_E2E: PASS tool={JQL_TOOL}");
+        println!("ATLASSIAN_E2E: PASS tool=generic-search");
+
+        runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
+        assert!(matches!(
+            runtime.oauth_status(&bundle_id).await.unwrap(),
+            Some(OAuthStatus::Unauthorized)
+        ));
+        let post_clear_call_is_unavailable = match runtime
+            .computer
+            .read()
+            .await
+            .execute_tool_cancellable(
+                "atlassian-oauth-e2e-after-clear",
+                &exposed_resource_tool,
+                serde_json::json!({}),
+                Some(30.0),
+            )
+            .await
+        {
+            Err(_) => true,
+            Ok(result) => result.is_error == Some(true),
+        };
+        assert!(runtime
+            .available_tools()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|tool| !tool.name.as_ref().starts_with(BUNDLE)));
+        runtime.start_mcp_server(&bundle_id).await.unwrap();
+        assert!(matches!(
+            runtime.oauth_status(&bundle_id).await.unwrap(),
+            Some(OAuthStatus::Unauthorized)
+        ));
+        assert!(!runtime
+            .mcp_start_diagnostics()
+            .await
+            .contains_key(&bundle_id));
+        assert!(runtime
+            .available_tools()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|tool| !tool.name.as_ref().starts_with(BUNDLE)));
+        runtime.shutdown().await;
+
+        assert!(
+            post_clear_call_is_unavailable,
+            "protected tool call still succeeded after authorization was cleared"
+        );
+        println!("ATLASSIAN_E2E: PASS phase=after-clear tools=unavailable");
+        println!("ATLASSIAN_E2E: PASS automatic-discovery-empty-scopes");
+    }
+
+    fn extract_atlassian_cloud_id(result: &CallToolResult) -> Option<String> {
+        if let Some(value) = result.structured_content.as_ref() {
+            if let Some(id) = find_atlassian_cloud_id(value) {
+                return Some(id);
+            }
+        }
+        result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text())
+            .find_map(|text| {
+                serde_json::from_str::<serde_json::Value>(&text.text)
+                    .ok()
+                    .and_then(|value| find_atlassian_cloud_id(&value))
+            })
+    }
+
+    fn find_atlassian_cloud_id(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Array(items) => items.iter().find_map(find_atlassian_cloud_id),
+            serde_json::Value::Object(fields) => fields
+                .get("cloudId")
+                .or_else(|| fields.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| fields.values().find_map(find_atlassian_cloud_id)),
+            _ => None,
+        }
+    }
 
     async fn parse(request_target: &str, expected_state: &str) -> ParsedCallback {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))

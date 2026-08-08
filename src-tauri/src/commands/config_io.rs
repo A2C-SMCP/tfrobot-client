@@ -2,7 +2,8 @@ use crate::services::sdk_config::SdkConfigService;
 use crate::services::storage::write_json_atomically;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    HttpServerConfig, HttpServerParameters, StdioServerConfig, StdioServerParameters,
+    HttpAuthPolicy, HttpServerConfig, HttpServerParameters, StdioServerConfig,
+    StdioServerParameters,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::oauth::{OAuthClientMode, OAuthClientRegistration, OAuthOptions};
@@ -653,6 +654,16 @@ fn build_external_mcp_config(
                         registration: OAuthClientRegistration::Dynamic,
                     },
                 });
+                config.auth_policy = Some(if server.oauth == Some(true) {
+                    HttpAuthPolicy::OAuth
+                } else {
+                    HttpAuthPolicy::Auto
+                });
+            } else {
+                // `oauth: false` is an explicit opt-out. With the new SDK an omitted policy and
+                // no OAuth block means anonymous-first automatic discovery, so persist Disabled
+                // to preserve the user's intent (and make static Authorization remain static-only).
+                config.auth_policy = Some(HttpAuthPolicy::Disabled);
             }
             Ok(MCPServerConfig::Http(config))
         }
@@ -797,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn official_remote_url_maps_to_dynamic_oauth_http() {
+    fn official_remote_url_maps_to_automatic_dynamic_oauth_http() {
         let config = build_external_mcp_config(
             "atlassian",
             parse_external_server(serde_json::json!({
@@ -813,6 +824,7 @@ mod tests {
             http.server_parameters.url,
             "https://mcp.atlassian.com/v1/mcp/authv2"
         );
+        assert_eq!(http.auth_policy, Some(HttpAuthPolicy::Auto));
         let oauth = http.oauth.expect("remote URL defaults to dynamic OAuth");
         assert!(oauth.resource.is_none());
         assert!(oauth.scopes.is_empty());
@@ -840,6 +852,7 @@ mod tests {
         };
         assert_eq!(http.server_parameters.url, "https://public.example.com/mcp");
         assert!(http.oauth.is_none());
+        assert_eq!(http.auth_policy, Some(HttpAuthPolicy::Disabled));
     }
 
     #[test]
@@ -856,6 +869,20 @@ mod tests {
             panic!("URL entry must import as Streamable HTTP");
         };
         assert!(static_auth.oauth.is_none());
+        assert_eq!(static_auth.auth_policy, Some(HttpAuthPolicy::Disabled));
+
+        let proactive = build_external_mcp_config(
+            "proactive",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "oauth": true
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Http(proactive) = proactive else {
+            panic!("URL entry must import as Streamable HTTP");
+        };
+        assert_eq!(proactive.auth_policy, Some(HttpAuthPolicy::OAuth));
 
         let conflict = build_external_mcp_config(
             "conflict",

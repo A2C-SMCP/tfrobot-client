@@ -158,12 +158,12 @@ async fn create_marketplace_test_app_state_with_store(
 }
 
 #[tokio::test]
-async fn disabled_plugin_oauth_credentials_are_retained_until_uninstall() {
+async fn disabled_legacy_auto_plugin_oauth_credentials_are_retained_until_uninstall() {
     let tmp = tempfile::tempdir().unwrap();
     let secrets = Arc::new(RecordingSecretStore::default());
     let state = create_marketplace_test_app_state_with_store(tmp.path(), secrets.clone()).await;
     let repo = tmp.path().join("oauth-marketplace-repo");
-    build_oauth_marketplace_repo(&repo);
+    build_legacy_auto_oauth_marketplace_repo(&repo);
 
     add_marketplace_core(
         &state,
@@ -2273,7 +2273,7 @@ fn build_marketplace_repo(repo: &Path) {
     );
 }
 
-fn build_oauth_marketplace_repo(repo: &Path) {
+fn build_legacy_auto_oauth_marketplace_repo(repo: &Path) {
     fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
     fs::write(
         repo.join(".tfrobot-plugin/marketplace.json"),
@@ -2287,10 +2287,6 @@ fn build_oauth_marketplace_repo(repo: &Path) {
         serde_json::to_vec(&serde_json::json!({
             "type": "Http",
             "name": "protected-plugin-mcp",
-            "oauth": {
-                "scopes": [],
-                "mode": { "type": "authorizationCode", "registration": "dynamic" }
-            },
             "server_parameters": {
                 "url": "https://mcp.example.test/api",
                 "headers": {}

@@ -13,7 +13,7 @@ use crate::services::config::instance_storage_dir_name;
 use crate::services::input_resolver::RuntimeInputResolver;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
-use crate::services::oauth_credential_store::KeychainOAuthCredentialStore;
+use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
@@ -21,8 +21,8 @@ use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    BundleId, CallToolResult, CommandInput, MCPServerInput, PickStringInput, PromptStringInput,
-    ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
+    BundleId, CallToolResult, CommandInput, HttpAuthenticationError, MCPServerInput,
+    PickStringInput, PromptStringInput, ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::utils::client_factory;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -1271,15 +1271,13 @@ impl ComputerInstanceRuntime {
             return Ok(true);
         }
 
-        let interactive_oauth = matches!(
+        let proactive_interactive_oauth = matches!(
             &server,
             MCPServerConfig::Http(config)
-                if matches!(
-                    config.oauth.as_ref().map(|oauth| &oauth.mode),
-                    Some(a2c_smcp::smcp_computer::oauth::OAuthClientMode::AuthorizationCode { .. })
-                )
+                if effective_http_oauth(config)
+                    .is_some_and(|oauth| !oauth.automatic && oauth.interactive)
         );
-        if interactive_oauth {
+        if proactive_interactive_oauth {
             // Persisting and mounting configuration is complete. Interactive authorization is a
             // separate lifecycle: the OAuth callback starts the server after credentials commit,
             // so an expected Unauthorized response must never become a configuration error.
@@ -1384,9 +1382,17 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         let oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active()?;
-        self.clear_oauth_authorization(bundle_id).await?;
+        self.clear_oauth_authorization_inner(bundle_id).await?;
         let computer_running = self.is_running().await;
-        if computer_running {
+        let server_running = self
+            .computer
+            .read()
+            .await
+            .get_server_status()
+            .await
+            .into_iter()
+            .any(|(id, _, running, _)| id == *bundle_id && running);
+        if server_running {
             self.computer
                 .read()
                 .await
@@ -1506,6 +1512,14 @@ impl ComputerInstanceRuntime {
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
         let result = self.computer.read().await.start_mcp_client(bundle_id).await;
+        if Self::is_expected_oauth_required(&result) {
+            // A validated OAuth challenge is an expected runtime state, not a malformed server
+            // configuration or failed import. The SDK has admitted the OAuth coordinator, so the
+            // runtime status can now expose authorization and the callback will retry this start.
+            self.clear_mcp_start_diagnostic(bundle_id).await;
+            self.clear_mcp_config_apply_diagnostic(bundle_id).await;
+            return Ok(());
+        }
         match &result {
             Ok(()) => {
                 self.clear_mcp_start_diagnostic(bundle_id).await;
@@ -1519,6 +1533,27 @@ impl ComputerInstanceRuntime {
             }
         }
         result
+    }
+
+    /// True when a start result means "this OAuth server is awaiting authorization" rather than a
+    /// genuine configuration or connectivity failure. See `start_mcp_server_inner`.
+    ///
+    /// The SDK surfaces this single condition through two error paths with identical semantics.
+    /// A fresh connect returns the structured `HttpAuthentication(OAuthRequired)`. A restart after
+    /// credentials were cleared keeps the OAuth coordinator admitted but with no stored token, so
+    /// `prepare_request` fails and the SDK wraps `OAuthProtocolError::AuthorizationRequired` into a
+    /// `ConnectionError` whose message ends in the canonical "OAuth authorization is required"
+    /// string — the same text `HttpAuthenticationError::OAuthRequired` displays. Both must stay
+    /// soft, otherwise clearing authorization and re-starting reports a hard failure for a server
+    /// that is merely waiting to be authorized again.
+    fn is_expected_oauth_required(result: &ComputerResult<()>) -> bool {
+        match result {
+            Err(ComputerError::HttpAuthentication(HttpAuthenticationError::OAuthRequired)) => true,
+            Err(ComputerError::ConnectionError(message)) => {
+                message.contains("OAuth authorization is required")
+            }
+            _ => false,
+        }
     }
 
     async fn record_mcp_start_diagnostic(&self, bundle_id: BundleId, message: String) {
@@ -2730,6 +2765,44 @@ fn default_skill_home_base() -> PathBuf {
 mod tests {
     use super::*;
     use crate::commands::connection::{settle_refresh_terminal, RefreshTerminalOutcome};
+
+    #[test]
+    fn is_expected_oauth_required_classifies_both_sdk_error_paths() {
+        // Path A — a fresh connect surfaces the structured OAuth challenge, which the SDK models as
+        // HttpAuthentication(OAuthRequired).
+        let fresh_challenge: ComputerResult<()> = Err(ComputerError::HttpAuthentication(
+            HttpAuthenticationError::OAuthRequired,
+        ));
+        assert!(ComputerInstanceRuntime::is_expected_oauth_required(
+            &fresh_challenge
+        ));
+
+        // Path B — a restart after credentials were cleared keeps the OAuth coordinator admitted
+        // but with no stored token, so prepare_request fails and the SDK wraps the same
+        // "OAuth authorization is required" condition into a ConnectionError.
+        let cleared_restart: ComputerResult<()> = Err(ComputerError::ConnectionError(
+            "Failed to connect to svc: Connection error: OAuth request preparation failed: \
+             OAuth protocol error: OAuth authorization is required"
+                .to_string(),
+        ));
+        assert!(ComputerInstanceRuntime::is_expected_oauth_required(
+            &cleared_restart
+        ));
+
+        // A genuine connection failure must not be misclassified as a soft "needs authorization"
+        // state and silently swallowed.
+        let connectivity_failure: ComputerResult<()> = Err(ComputerError::ConnectionError(
+            "Failed to connect to svc: Connection error: DNS resolution failed".to_string(),
+        ));
+        assert!(!ComputerInstanceRuntime::is_expected_oauth_required(
+            &connectivity_failure
+        ));
+
+        // A successful start is not an "awaiting authorization" state.
+        assert!(!ComputerInstanceRuntime::is_expected_oauth_required(
+            &Ok(())
+        ));
+    }
 
     #[derive(Default)]
     struct RecordingRuntimeEventSink {

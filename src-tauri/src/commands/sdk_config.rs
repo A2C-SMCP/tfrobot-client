@@ -335,17 +335,27 @@ pub async fn upsert_computer_mcp_config_core(
 }
 
 fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServerConfig) -> bool {
-    let MCPServerConfig::Http(previous) = previous else {
+    let Some(previous) =
+        crate::services::oauth_credential_store::oauth_cleanup_config(previous.clone())
+    else {
         return false;
     };
-    let Some(previous_oauth) = previous.oauth.as_ref() else {
-        return false;
+    let Some(next) = crate::services::oauth_credential_store::oauth_cleanup_config(next.clone())
+    else {
+        return true;
+    };
+    let MCPServerConfig::Http(previous) = previous else {
+        unreachable!("OAuth cleanup config is always HTTP");
     };
     let MCPServerConfig::Http(next) = next else {
-        return true;
+        unreachable!("OAuth cleanup config is always HTTP");
     };
+    let previous_oauth = previous
+        .oauth
+        .as_ref()
+        .expect("OAuth cleanup config materializes options");
     let Some(next_oauth) = next.oauth.as_ref() else {
-        return true;
+        unreachable!("OAuth cleanup config materializes options");
     };
     let previous_resource = previous_oauth
         .resource
@@ -562,6 +572,34 @@ mod tests {
             &different_implicit_resource
         ));
         assert!(oauth_credential_identity_changed(&enabled, &oauth_off));
+
+        let legacy_auto: MCPServerConfig = serde_json::from_value(json!({
+            "type": "streamable",
+            "name": "legacy-auto",
+            "bundle_id": "legacy-auto",
+            "server_parameters": { "url": "https://legacy.example.com/mcp" }
+        }))
+        .unwrap();
+        let mut moved_legacy_auto = legacy_auto.clone();
+        if let MCPServerConfig::Http(http) = &mut moved_legacy_auto {
+            http.server_parameters.url = "https://new-legacy.example.com/mcp".to_string();
+        }
+        assert!(oauth_credential_identity_changed(
+            &legacy_auto,
+            &moved_legacy_auto
+        ));
+
+        let mut static_authorization = legacy_auto.clone();
+        if let MCPServerConfig::Http(http) = &mut static_authorization {
+            http.server_parameters.headers.insert(
+                "authorization".to_string(),
+                "Bearer static-token".to_string(),
+            );
+        }
+        assert!(oauth_credential_identity_changed(
+            &legacy_auto,
+            &static_authorization
+        ));
     }
 
     #[test]

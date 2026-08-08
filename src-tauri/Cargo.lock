@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2c-smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=29b66447302a9578de21144c3b62983f5d1b7577#29b66447302a9578de21144c3b62983f5d1b7577"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0ee5a4f73dc93cde2facc286159d51198c0a30d6#0ee5a4f73dc93cde2facc286159d51198c0a30d6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2881,6 +2881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-auth"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "150fa4a9462ef926824cf4519c84ed652ca8f4fbae34cb8af045b5cbcaf98822"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "http-body"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3073,7 +3082,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5276,7 +5285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6854,7 +6863,7 @@ dependencies = [
 [[package]]
 name = "smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=29b66447302a9578de21144c3b62983f5d1b7577#29b66447302a9578de21144c3b62983f5d1b7577"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0ee5a4f73dc93cde2facc286159d51198c0a30d6#0ee5a4f73dc93cde2facc286159d51198c0a30d6"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6869,7 +6878,7 @@ dependencies = [
 [[package]]
 name = "smcp-client-transport"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=29b66447302a9578de21144c3b62983f5d1b7577#29b66447302a9578de21144c3b62983f5d1b7577"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0ee5a4f73dc93cde2facc286159d51198c0a30d6#0ee5a4f73dc93cde2facc286159d51198c0a30d6"
 dependencies = [
  "serde_json",
  "smcp 0.3.1",
@@ -6881,7 +6890,7 @@ dependencies = [
 [[package]]
 name = "smcp-computer"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=29b66447302a9578de21144c3b62983f5d1b7577#29b66447302a9578de21144c3b62983f5d1b7577"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0ee5a4f73dc93cde2facc286159d51198c0a30d6#0ee5a4f73dc93cde2facc286159d51198c0a30d6"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -6895,6 +6904,7 @@ dependencies = [
  "futures",
  "futures-util",
  "http 1.4.0",
+ "http-auth",
  "indexmap 2.14.0",
  "jsonwebtoken",
  "keyring",

@@ -472,6 +472,135 @@ async fn start_delayed_oauth_discovery_server() -> (String, Arc<AtomicUsize>) {
     (url, discovery_requests)
 }
 
+async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    let discovery_requests = Arc::new(AtomicUsize::new(0));
+    let server_url = url.clone();
+    let server_discovery_requests = Arc::clone(&discovery_requests);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request_url = server_url.clone();
+            let request_count = Arc::clone(&server_discovery_requests);
+            tokio::spawn(async move {
+                let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                    let request_url = request_url.clone();
+                    let request_count = Arc::clone(&request_count);
+                    async move {
+                        let path = request.uri().path().to_string();
+                        if request.method() == hyper::Method::GET
+                            && path.starts_with("/.well-known/oauth-protected-resource")
+                        {
+                            request_count.fetch_add(1, Ordering::SeqCst);
+                            let payload = serde_json::json!({
+                                "resource": format!("{request_url}/mcp"),
+                                "authorization_servers": [&request_url],
+                                "scopes_supported": ["tools.read"]
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize protected resource metadata"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+                        if request.method() == hyper::Method::GET
+                            && matches!(
+                                path.as_str(),
+                                "/.well-known/oauth-authorization-server"
+                                    | "/.well-known/oauth-authorization-server/mcp"
+                            )
+                        {
+                            request_count.fetch_add(1, Ordering::SeqCst);
+                            let payload = serde_json::json!({
+                                "issuer": request_url,
+                                "authorization_endpoint": format!("{request_url}/authorize"),
+                                "token_endpoint": format!("{request_url}/token"),
+                                "registration_endpoint": format!("{request_url}/register"),
+                                "response_types_supported": ["code"],
+                                "grant_types_supported": ["authorization_code"],
+                                "token_endpoint_auth_methods_supported": ["none"],
+                                "code_challenge_methods_supported": ["S256"]
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize authorization server metadata"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+                        if request.method() == hyper::Method::POST && path == "/register" {
+                            let body = request
+                                .into_body()
+                                .collect()
+                                .await
+                                .expect("read registration request")
+                                .to_bytes();
+                            let registration: serde_json::Value =
+                                serde_json::from_slice(&body).expect("parse registration request");
+                            let payload = serde_json::json!({
+                                "client_id": "tfrobot-auto-test-client",
+                                "client_name": "TFRobot",
+                                "redirect_uris": registration["redirect_uris"],
+                                "token_endpoint_auth_method": "none"
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize registration response"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+                        if request.method() == hyper::Method::POST && path == "/mcp" {
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::UNAUTHORIZED)
+                                    .header(
+                                        "www-authenticate",
+                                        format!(
+                                            "Bearer resource_metadata=\"{request_url}/.well-known/oauth-protected-resource/mcp\""
+                                        ),
+                                    )
+                                    .body(Full::<Bytes>::from(Bytes::new()))
+                                    .unwrap(),
+                            );
+                        }
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::NOT_FOUND)
+                                .body(Full::<Bytes>::from(Bytes::new()))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let stream = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper_util::service::TowerToHyperService::new(service);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(stream, service)
+                    .await;
+            });
+        }
+    });
+
+    (url, discovery_requests)
+}
+
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
     let runtime = state
         .computer_registry
@@ -3145,6 +3274,42 @@ async fn oauth_delete_failure_keeps_the_durable_user_config_retryable() {
 }
 
 #[tokio::test]
+async fn static_authorization_config_removal_does_not_touch_oauth_credentials() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_config_only_state_with_store(tmp.path(), Arc::new(FailingOAuthDeleteStore));
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME))
+        .unwrap();
+    let static_auth: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "static-auth",
+        "bundle_id": "static-auth",
+        "server_parameters": {
+            "url": "https://mcp.example.invalid/mcp",
+            "headers": { "Authorization": "Bearer static-token" }
+        }
+    }))
+    .unwrap();
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, &[static_auth])
+        .unwrap();
+
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "static-auth")
+        .await
+        .expect("static Authorization removal must not depend on OAuth keychain deletion");
+
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .all(|server| server.name != "static-auth"));
+}
+
+#[tokio::test]
 async fn oauth_identity_cleanup_failure_does_not_overwrite_the_old_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_config_only_state_with_store(tmp.path(), Arc::new(FailingOAuthDeleteStore));
@@ -3499,6 +3664,186 @@ async fn test_real_http_oauth_401_returns_structured_tool_result() {
     let result = serde_json::to_value(response.result.expect("structured result")).unwrap();
     assert_eq!(result["isError"], true);
     assert_eq!(result["_meta"]["error_code"], 4006);
+}
+
+#[tokio::test]
+async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "oauth-auto-challenge",
+        "bundle_id": "oauth-auto-challenge",
+        "authPolicy": "auto",
+        "oauth": {
+            "scopes": [],
+            "client_name": "TFRobot",
+            "mode": { "type": "authorizationCode", "registration": "dynamic" }
+        },
+        "server_parameters": {
+            "url": format!("{url}/mcp"),
+            "headers": {}
+        }
+    }))
+    .unwrap();
+    let bundle_id = resolve_bundle_id(&config);
+
+    runtime
+        .apply_user_mcp_server_config(config)
+        .await
+        .expect("validated OAuth challenge must not fail configuration application");
+
+    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert!(!runtime
+        .mcp_start_diagnostics()
+        .await
+        .contains_key(&bundle_id));
+    assert_eq!(
+        runtime.mcp_server_oauth_is_interactive(&bundle_id).await,
+        Some(true)
+    );
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
+        ))
+    ));
+    assert!(runtime
+        .mcp_server_statuses()
+        .await
+        .iter()
+        .any(|(id, _, running, _)| id == &bundle_id && !running));
+}
+
+#[tokio::test]
+async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "oauth-legacy-auto",
+        "bundle_id": "oauth-legacy-auto",
+        "server_parameters": {
+            "url": format!("{url}/mcp"),
+            "headers": {}
+        }
+    }))
+    .unwrap();
+    let bundle_id = resolve_bundle_id(&config);
+
+    runtime
+        .apply_user_mcp_server_config(config)
+        .await
+        .expect("legacy HTTP defaults must perform anonymous-first admission");
+
+    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        runtime.mcp_server_oauth_is_interactive(&bundle_id).await,
+        Some(true)
+    );
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
+        ))
+    ));
+    let authorization_url = runtime
+        .begin_oauth_authorization(&bundle_id)
+        .await
+        .expect("admitted legacy Auto config must create an authorization flow");
+    let parsed = url::Url::parse(&authorization_url).expect("authorization URL");
+    assert_eq!(parsed.path(), "/authorize");
+    drop(authorization_url);
+    runtime
+        .cancel_oauth_authorization(&bundle_id)
+        .await
+        .unwrap();
+    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
+    runtime
+        .remove_user_mcp_server_config(&bundle_id)
+        .await
+        .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id));
+}
+
+#[tokio::test]
+async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let url = start_oauth_rejecting_mcp_server().await;
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "oauth-clear-active",
+        "bundle_id": "oauth-clear-active",
+        "authPolicy": "auto",
+        "oauth": {
+            "scopes": [],
+            "client_name": "TFRobot",
+            "mode": { "type": "authorizationCode", "registration": "dynamic" }
+        },
+        "server_parameters": {
+            "url": url,
+            "headers": {}
+        }
+    }))
+    .unwrap();
+    let bundle_id = resolve_bundle_id(&config);
+    runtime.apply_user_mcp_server_config(config).await.unwrap();
+    assert!(runtime
+        .available_tools()
+        .await
+        .unwrap()
+        .iter()
+        .any(|tool| tool.name.as_ref() == "oauth-clear-active__protected"));
+
+    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
+
+    assert!(runtime
+        .mcp_server_statuses()
+        .await
+        .iter()
+        .any(|(id, _, running, _)| id == &bundle_id && !running));
+    assert!(runtime
+        .available_tools()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .all(|tool| !tool.name.as_ref().starts_with("oauth-clear-active__")));
 }
 
 #[tokio::test]
@@ -3879,7 +4224,13 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
         http.server_parameters.url,
         "https://mcp.atlassian.com/v1/mcp/authv2"
     );
-    let oauth = http.oauth.expect("remote URL must default to OAuth");
+    assert_eq!(
+        http.auth_policy,
+        Some(a2c_smcp::smcp_computer::mcp_clients::HttpAuthPolicy::Auto)
+    );
+    let oauth = http
+        .oauth
+        .expect("remote URL must retain OAuth discovery overrides");
     assert!(oauth.resource.is_none());
     assert!(oauth.scopes.is_empty());
 

@@ -1,5 +1,6 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::force_mcp_server_enabled;
+use crate::services::oauth_credential_store::effective_http_oauth;
 use crate::AppState;
 use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
@@ -868,7 +869,7 @@ impl MarketplaceMcpHooks {
                             && !shared_bundle_ids.contains(&bundle_id)
                     })
                     .filter(|config| {
-                        matches!(config, MCPServerConfig::Http(http) if http.oauth.is_some())
+                        matches!(config, MCPServerConfig::Http(http) if effective_http_oauth(http).is_some())
                     })
                     .collect()
             })
