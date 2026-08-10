@@ -136,6 +136,29 @@ describe('McpRuntimeControls', () => {
     expect(onOpenPlugin).toHaveBeenCalledWith(owner);
   });
 
+  it('shows an OAuth-starting Plugin server as pending instead of stopped', () => {
+    mockStore.servers = [{
+      bundleId: 'plugin-oauth-server-id',
+      name: 'plugin-oauth-server',
+      running: false,
+      status_message: 'stopped',
+      disabled: false,
+      managedBy: {
+        type: 'plugin',
+        marketplace: 'tf-market',
+        plugin: 'desktop-tools',
+        pluginId: 'desktop-tools@tf-market',
+      },
+      oauth_status: { state: 'authorization_pending' },
+      oauth_interaction: 'interactive',
+    }];
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    expect(screen.getAllByText('Pending')).toHaveLength(2);
+    expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
+  });
+
   it('reports mixed batch results with changed, unchanged, excluded, and failed counts', async () => {
     mockStore.startAll.mockResolvedValueOnce({
       candidate_count: 3,

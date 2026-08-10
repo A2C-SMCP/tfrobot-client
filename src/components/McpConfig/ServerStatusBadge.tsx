@@ -1,37 +1,23 @@
 import { Badge } from 'antd';
 import { useTranslation } from 'react-i18next';
 
+export type ServerDisplayStatus = 'running' | 'error' | 'pending' | 'stopped';
+
 interface ServerStatusBadgeProps {
-  running: boolean;
-  statusMessage?: string;
+  status: ServerDisplayStatus;
 }
 
-export function ServerStatusBadge({ running, statusMessage }: ServerStatusBadgeProps) {
+export function ServerStatusBadge({ status }: ServerStatusBadgeProps) {
   const { t } = useTranslation();
 
-  if (running) {
-    return (
-      <Badge
-        status="success"
-        text={t('mcp.status.running')}
-      />
-    );
+  switch (status) {
+    case 'running':
+      return <Badge status="success" text={t('mcp.status.running')} />;
+    case 'error':
+      return <Badge status="error" text={t('mcp.status.error')} />;
+    case 'pending':
+      return <Badge status="processing" text={t('mcp.status.pending')} />;
+    default:
+      return <Badge status="default" text={t('mcp.status.stopped')} />;
   }
-
-  // Check if it's an error state
-  if (statusMessage && statusMessage.toLowerCase().includes('error')) {
-    return (
-      <Badge
-        status="error"
-        text={t('mcp.status.error')}
-      />
-    );
-  }
-
-  return (
-    <Badge
-      status="default"
-      text={t('mcp.status.stopped')}
-    />
-  );
 }

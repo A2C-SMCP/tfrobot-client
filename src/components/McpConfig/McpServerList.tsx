@@ -5,7 +5,7 @@ import {
   PauseCircleOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { ServerStatusBadge } from './ServerStatusBadge';
+import { ServerStatusBadge, type ServerDisplayStatus } from './ServerStatusBadge';
 import type { McpServerManagedBy, McpServerStatus } from '@/stores/mcpStore';
 
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
@@ -36,11 +36,19 @@ export function McpServerList({
   onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
+  const displayStatus = (record: McpServerStatus): ServerDisplayStatus => {
+    if (record.running) return 'running';
+    if (record.status_message.toLowerCase().includes('error')) return 'error';
+    if (
+      record.status_message === 'pending'
+      || record.oauth_status?.state === 'authorization_pending'
+    ) {
+      return 'pending';
+    }
+    return 'stopped';
+  };
   const safeStatusLabel = (record: McpServerStatus) => {
-    if (record.running) return t('mcp.status.running');
-    if (record.status_message === 'error') return t('mcp.status.error');
-    if (record.status_message === 'pending') return t('mcp.status.pending');
-    return t('mcp.status.stopped');
+    return t(`mcp.status.${displayStatus(record)}`);
   };
 
   const handleStart = async (bundleId: string) => {
@@ -86,10 +94,7 @@ export function McpServerList({
       title: t('mcp.table.status'),
       key: 'status',
       render: (_: unknown, record: McpServerStatus) => (
-        <ServerStatusBadge
-          running={record.running}
-          statusMessage={record.status_message}
-        />
+        <ServerStatusBadge status={displayStatus(record)} />
       ),
     },
     {
