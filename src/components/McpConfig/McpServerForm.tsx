@@ -3,8 +3,12 @@ import { Form, Select, Button, Space, Card, Collapse, Switch } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import type { HttpServerConfig, McpServerConfig, OAuthOptions, ToolMeta } from '@/stores/mcpStore';
+import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';
 import { useInputStore } from '@/stores/inputStore';
+import {
+  hasConflictingHttpAuthorization,
+  preserveHttpAuthenticationOptions,
+} from './httpAuthentication';
 
 type ServerType = 'stdio' | 'http' | 'sse';
 
@@ -69,33 +73,6 @@ export function normalizeToolMetaMap(toolMeta: Record<string, ToolMeta>): Record
   );
 }
 
-export function hasStaticAuthorizationHeader(headers: Record<string, string>): boolean {
-  return Object.keys(headers).some((header) => header.toLowerCase() === 'authorization');
-}
-
-export function buildHttpOAuthOptions(
-  enabled: boolean,
-  requestedResource: string | undefined,
-  url: string,
-  initialConfig?: HttpServerConfig,
-  resourceWasEdited = false,
-): OAuthOptions | null {
-  if (!enabled) return null;
-  const existingOAuth = initialConfig?.oauth;
-  if (
-    existingOAuth
-    && !resourceWasEdited
-    && url === initialConfig?.server_parameters.url
-  ) return existingOAuth;
-  return {
-    ...(existingOAuth ?? {
-      scopes: [],
-      mode: { type: 'authorizationCode', registration: 'dynamic' },
-    }),
-    resource: resourceWasEdited ? requestedResource : existingOAuth?.resource,
-  };
-}
-
 interface FormValues {
   type: ServerType;
   name: string;
@@ -109,8 +86,6 @@ interface FormValues {
   // Common
   env?: { key: string; value: string }[];
   headers?: { key: string; value: string }[];
-  oauth_enabled?: boolean;
-  oauth_resource?: string;
   disabled?: boolean;
   // Advanced
   forbidden_tools?: string[];
@@ -137,8 +112,6 @@ export function McpServerForm({
   const { t } = useTranslation();
   const [form] = Form.useForm<FormValues>();
   const serverType = Form.useWatch('type', form);
-  const oauthEnabled = Form.useWatch('oauth_enabled', form);
-  const serverUrl = Form.useWatch('url', form);
   const inputs = useInputStore((state) => state.inputs);
   const fetchInputs = useInputStore((state) => state.fetchInputs);
 
@@ -190,8 +163,6 @@ export function McpServerForm({
         type: 'http',
         url: sp.url,
         headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
-        oauth_enabled: initialValues.oauth != null,
-        oauth_resource: initialValues.oauth?.resource ?? undefined,
       };
     }
     if (initialValues.type === 'Sse') {
@@ -255,27 +226,20 @@ export function McpServerForm({
       values.headers?.forEach(({ key, value }) => {
         if (key) headersObj[key] = value;
       });
-      if (
-        values.oauth_enabled
-        && hasStaticAuthorizationHeader(headersObj)
-      ) {
-        form.setFields([{ name: 'headers', errors: [t('mcp.form.oauthAuthorizationConflict')] }]);
+      const authenticationOptions = preserveHttpAuthenticationOptions(
+        initialValues?.type === 'Http' ? initialValues : undefined,
+      );
+      if (hasConflictingHttpAuthorization(authenticationOptions, headersObj)) {
+        form.setFields([{
+          name: 'headers',
+          errors: [t('mcp.form.oauthAuthorizationConflict')],
+        }]);
         return;
       }
-
-      const requestedResource = values.oauth_resource?.trim() || undefined;
-      const oauth = buildHttpOAuthOptions(
-        values.oauth_enabled ?? false,
-        requestedResource,
-        values.url || '',
-        initialValues?.type === 'Http' ? initialValues : undefined,
-        form.isFieldTouched('oauth_resource'),
-      );
-
       config = {
         type: 'Http' as const,
         ...commonFields,
-        oauth,
+        ...authenticationOptions,
         server_parameters: {
           url: values.url || '',
           headers: headersObj,
@@ -423,31 +387,9 @@ export function McpServerForm({
             <Input placeholder="https://..." />
           </Form.Item>
 
-          {serverType === 'http' && (
-            <Card size="small" title={t('mcp.form.oauthTitle')} style={{ marginBottom: 16 }}>
-              <Form.Item
-                name="oauth_enabled"
-                label={t('mcp.form.oauthEnabled')}
-                valuePropName="checked"
-                extra={t('mcp.form.oauthHint')}
-              >
-                <Switch />
-              </Form.Item>
-              {oauthEnabled && (
-                <Form.Item
-                  name="oauth_resource"
-                  label={t('mcp.form.oauthResource')}
-                  extra={t('mcp.form.oauthResourceHint')}
-                >
-                  <Input placeholder={serverUrl || 'https://...'} />
-                </Form.Item>
-              )}
-            </Card>
-          )}
-
           <Card size="small" title={t('mcp.form.headers')} style={{ marginBottom: 16 }}>
             <Form.List name="headers">
-              {(fields, { add, remove }) => (
+              {(fields, { add, remove }, { errors }) => (
                 <>
                   {fields.map((field) => (
                     <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
@@ -482,6 +424,7 @@ export function McpServerForm({
                   <Button type="dashed" onClick={() => add({ key: '', value: '' })} block icon={<PlusOutlined />}>
                     {t('mcp.form.addHeader')}
                   </Button>
+                  <Form.ErrorList errors={errors} />
                 </>
               )}
             </Form.List>

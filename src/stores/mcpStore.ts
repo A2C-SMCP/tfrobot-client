@@ -60,6 +60,8 @@ export interface OAuthOptions {
   mode: OAuthClientMode;
 }
 
+export type HttpAuthPolicy = 'auto' | 'oauth' | 'disabled';
+
 export type McpServerManagedBy =
   | { type: 'user' }
   | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
@@ -119,6 +121,7 @@ export interface HttpServerConfig {
   default_tool_meta?: ToolMeta | null;
   vrl?: string | null;
   oauth?: OAuthOptions | null;
+  authPolicy?: HttpAuthPolicy;
   server_parameters: HttpServerParameters;
 }
 
