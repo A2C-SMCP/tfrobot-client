@@ -132,14 +132,14 @@ function App() {
           label: t('nav.dashboard'),
         },
         {
-          key: 'computer',
-          icon: <DesktopOutlined />,
-          label: t('computer.title'),
-        },
-        {
           key: 'chat',
           icon: <MessageOutlined />,
           label: t('chat.title'),
+        },
+        {
+          key: 'computer',
+          icon: <DesktopOutlined />,
+          label: t('nav.computer'),
         },
       ],
     },

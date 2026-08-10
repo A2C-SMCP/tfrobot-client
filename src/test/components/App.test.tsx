@@ -1,6 +1,7 @@
 import { act, render, screen, fireEvent, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import App from '@/App';
+import i18n from '@/i18n';
 
 const managerStoreMock = vi.hoisted(() => ({
   context: {
@@ -170,6 +171,30 @@ describe('App', () => {
     render(<App />);
     fireEvent.click(screen.getByText('Chat'));
     expect(screen.getByText('Managed Chat Page')).toBeInTheDocument();
+  });
+
+  it('places Chat immediately before Computer in the overview navigation', () => {
+    render(<App />);
+
+    const chatItem = screen.getByText('Chat').closest('.ant-menu-item');
+    const computerItem = screen.getByText('Computer').closest('.ant-menu-item');
+    expect(chatItem?.nextElementSibling).toBe(computerItem);
+  });
+
+  it('labels Computer as 计算机 in Chinese', async () => {
+    await act(async () => {
+      await i18n.changeLanguage('zh');
+    });
+
+    try {
+      render(<App />);
+      expect(screen.getByText('计算机')).toBeInTheDocument();
+      expect(i18n.t('computer.title')).toBe('Computer');
+    } finally {
+      await act(async () => {
+        await i18n.changeLanguage('en');
+      });
+    }
   });
 
   it('does not restore a previous session while onboarding guidance is active', async () => {
