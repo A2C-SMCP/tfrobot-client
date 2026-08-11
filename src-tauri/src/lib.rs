@@ -71,6 +71,8 @@ pub enum AppStateInitError {
     Keychain(#[from] services::keychain::KeychainError),
     #[error("failed to recover an interrupted configuration import: {0}")]
     ConfigImportRecovery(String),
+    #[error("failed to migrate removed rust-sdk HTTP OAuth fields: {0}")]
+    RemovedHttpOAuthMigration(String),
     #[error("failed to recover an interrupted Client Control Skill transaction: {0}")]
     SkillPackageRecovery(String),
 }
@@ -133,6 +135,30 @@ impl AppState {
             secret_store.as_ref(),
         )?;
         let stored_instances = config.load_computer_instances()?;
+        for instance in &stored_instances.instances {
+            let migration = sdk_config
+                .migrate_removed_http_oauth_fields(&instance.id)
+                .map_err(|error| {
+                    AppStateInitError::RemovedHttpOAuthMigration(format!(
+                        "Computer '{}': {error}",
+                        instance.id
+                    ))
+                })?;
+            if migration.removed_fields > 0 {
+                log::info!(
+                    "Migrated {} removed rust-sdk HTTP OAuth field(s) for Computer '{}'",
+                    migration.removed_fields,
+                    instance.id
+                );
+            }
+            if migration.disabled_opt_out_servers > 0 {
+                log::warn!(
+                    "Disabled {} MCP server(s) for Computer '{}' because their legacy explicit OAuth opt-out cannot be represented by the automatic-only rust-sdk",
+                    migration.disabled_opt_out_servers,
+                    instance.id
+                );
+            }
+        }
         commands::config_io::recover_pending_config_imports(
             config.as_ref(),
             sdk_config.as_ref(),
@@ -630,6 +656,56 @@ mod tests {
         let runtime = state.computer_registry.runtime("one").await.unwrap();
 
         assert!(!runtime.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn app_state_migrates_removed_http_oauth_fields_before_runtime_discovery() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
+            .unwrap();
+        let sdk_config = SdkConfigService::new(Arc::new(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+        ));
+        sdk_config
+            .save(
+                "one",
+                &a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc {
+                    mcp: Some(
+                        serde_json::json!({
+                            "servers": {
+                                "legacy": {
+                                    "type": "streamable",
+                                    "authPolicy": "auto",
+                                    "oauth": {"client_name": "TFRobot"},
+                                    "futureField": {"preserve": true},
+                                    "server_parameters": {
+                                        "url": "https://mcp.example/mcp"
+                                    }
+                                }
+                            }
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let state = AppState::new(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+        );
+        let migrated = state.sdk_config.load_raw_project_config("one").unwrap();
+        let server = &migrated.mcp.as_ref().unwrap()["servers"]["legacy"];
+        assert!(server.get("oauth").is_none());
+        assert!(server.get("authPolicy").is_none());
+        assert_eq!(server["futureField"], serde_json::json!({"preserve": true}));
+        assert!(state.computer_registry.runtime("one").await.is_some());
     }
 
     #[tokio::test]

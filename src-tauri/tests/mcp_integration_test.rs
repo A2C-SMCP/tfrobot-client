@@ -82,17 +82,14 @@ fn unavailable_server_config(name: &str) -> MCPServerConfig {
     serde_json::from_value(value).unwrap()
 }
 
-fn oauth_http_server_config(name: &str, resource: Option<&str>) -> MCPServerConfig {
+fn oauth_http_server_config(name: &str, endpoint: Option<&str>) -> MCPServerConfig {
     serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": name,
         "bundle_id": name,
-        "oauth": {
-            "resource": resource,
-            "scopes": [],
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
-        "server_parameters": { "url": "https://mcp.example.invalid/mcp" }
+        "server_parameters": {
+            "url": endpoint.unwrap_or("https://mcp.example.invalid/mcp")
+        }
     }))
     .unwrap()
 }
@@ -103,11 +100,6 @@ fn delayed_oauth_server_config(url: &str, disabled: bool) -> MCPServerConfig {
         "name": "oauth-delayed-discovery",
         "bundle_id": "oauth-delayed-discovery",
         "disabled": disabled,
-        "oauth": {
-            "resource": format!("{url}/mcp"),
-            "scopes": ["tools.read"],
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
         "server_parameters": {
             "url": format!("{url}/mcp"),
             "headers": {}
@@ -408,76 +400,22 @@ async fn start_oauth_rejecting_mcp_server() -> String {
     url
 }
 
-async fn start_delayed_oauth_discovery_server() -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
-    let discovery_requests = Arc::new(AtomicUsize::new(0));
-    let server_url = url.clone();
-    let server_discovery_requests = Arc::clone(&discovery_requests);
-
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let request_url = server_url.clone();
-            let request_count = Arc::clone(&server_discovery_requests);
-            tokio::spawn(async move {
-                let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                    let request_url = request_url.clone();
-                    let request_count = Arc::clone(&request_count);
-                    async move {
-                        if request.method() == hyper::Method::GET
-                            && request
-                                .uri()
-                                .path()
-                                .starts_with("/.well-known/oauth-protected-resource")
-                        {
-                            request_count.fetch_add(1, Ordering::SeqCst);
-                            sleep(Duration::from_secs(5)).await;
-                            let payload = serde_json::json!({
-                                "resource": format!("{request_url}/mcp"),
-                                "authorization_servers": [&request_url],
-                                "scopes_supported": ["tools.read"]
-                            });
-                            return Ok::<_, Infallible>(
-                                hyper::Response::builder()
-                                    .status(hyper::StatusCode::OK)
-                                    .header("content-type", "application/json")
-                                    .body(Full::<Bytes>::from(
-                                        serde_json::to_vec(&payload)
-                                            .expect("serialize discovery response"),
-                                    ))
-                                    .unwrap(),
-                            );
-                        }
-
-                        Ok::<_, Infallible>(
-                            hyper::Response::builder()
-                                .status(hyper::StatusCode::NOT_FOUND)
-                                .body(Full::<Bytes>::from("not found"))
-                                .unwrap(),
-                        )
-                    }
-                });
-                let stream = hyper_util::rt::TokioIo::new(stream);
-                let service = hyper_util::service::TowerToHyperService::new(service);
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(stream, service)
-                    .await;
-            });
-        }
-    });
-
+async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
+    let (url, discovery_requests, _) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::ZERO).await;
     (url, discovery_requests)
 }
 
-async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
+async fn start_auto_oauth_challenge_server_with_registration_delay(
+    registration_delay: Duration,
+) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("local_addr"));
     let discovery_requests = Arc::new(AtomicUsize::new(0));
+    let registration_requests = Arc::new(AtomicUsize::new(0));
     let server_url = url.clone();
     let server_discovery_requests = Arc::clone(&discovery_requests);
+    let server_registration_requests = Arc::clone(&registration_requests);
 
     tokio::spawn(async move {
         loop {
@@ -486,10 +424,12 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
             };
             let request_url = server_url.clone();
             let request_count = Arc::clone(&server_discovery_requests);
+            let registration_count = Arc::clone(&server_registration_requests);
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                     let request_url = request_url.clone();
                     let request_count = Arc::clone(&request_count);
+                    let registration_count = Arc::clone(&registration_count);
                     async move {
                         let path = request.uri().path().to_string();
                         if request.method() == hyper::Method::GET
@@ -542,6 +482,10 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                             );
                         }
                         if request.method() == hyper::Method::POST && path == "/register" {
+                            registration_count.fetch_add(1, Ordering::SeqCst);
+                            if !registration_delay.is_zero() {
+                                sleep(registration_delay).await;
+                            }
                             let body = request
                                 .into_body()
                                 .collect()
@@ -598,7 +542,7 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
         }
     });
 
-    (url, discovery_requests)
+    (url, discovery_requests, registration_requests)
 }
 
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
@@ -3685,12 +3629,6 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
         "type": "streamable",
         "name": "oauth-auto-challenge",
         "bundle_id": "oauth-auto-challenge",
-        "authPolicy": "auto",
-        "oauth": {
-            "scopes": [],
-            "client_name": "TFRobot",
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
         "server_parameters": {
             "url": format!("{url}/mcp"),
             "headers": {}
@@ -3810,12 +3748,6 @@ async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
         "type": "streamable",
         "name": "oauth-clear-active",
         "bundle_id": "oauth-clear-active",
-        "authPolicy": "auto",
-        "oauth": {
-            "scopes": [],
-            "client_name": "TFRobot",
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
         "server_parameters": {
             "url": url,
             "headers": {}
@@ -3847,16 +3779,22 @@ async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
 }
 
 #[tokio::test]
-async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
+async fn test_client_oauth_cancel_interrupts_delayed_dynamic_registration() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
-    let config = delayed_oauth_server_config(&url, true);
+    let (url, _, registration_requests) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
+    let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
     runtime
         .apply_user_mcp_server_config(config)
@@ -3872,12 +3810,12 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
     });
 
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) == 0 {
+        while registration_requests.load(Ordering::SeqCst) == 0 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("OAuth discovery request must start");
+    .expect("OAuth dynamic registration request must start after automatic admission");
 
     let started = Instant::now();
     timeout(
@@ -3885,7 +3823,7 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
         runtime.cancel_oauth_authorization(&oauth_bundle_id),
     )
     .await
-    .expect("client cancellation must not wait for provider discovery")
+    .expect("client cancellation must not wait for provider registration")
     .expect("client cancellation succeeds");
     assert!(started.elapsed() < Duration::from_secs(1));
 
@@ -3905,12 +3843,18 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
 async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
+    let (url, _, registration_requests) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
     let enabled = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&enabled);
     runtime
@@ -3926,19 +3870,19 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 1 {
+        while registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("first OAuth discovery request must start");
+    .expect("first OAuth registration request must start");
 
     timeout(
         Duration::from_secs(1),
         runtime.apply_user_mcp_server_config(delayed_oauth_server_config(&url, true)),
     )
     .await
-    .expect("server replacement must not wait for delayed discovery")
+    .expect("server replacement must not wait for delayed registration")
     .expect("replace OAuth server");
     let first_error = timeout(Duration::from_secs(1), first_begin)
         .await
@@ -3946,6 +3890,11 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
         .expect("first begin task joins")
         .expect_err("server replacement must cancel the first flow");
     assert!(first_error.to_ascii_lowercase().contains("cancel"));
+
+    runtime
+        .apply_user_mcp_server_config(delayed_oauth_server_config(&url, false))
+        .await
+        .expect("re-enable server and repeat automatic admission");
 
     let second_runtime = runtime.clone();
     let second_bundle_id = oauth_bundle_id.clone();
@@ -3955,7 +3904,7 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 2 {
+        while registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3981,18 +3930,28 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
 async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
-    let config = delayed_oauth_server_config(&url, true);
+    let (url, _, registration_requests) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
+    let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
     runtime
         .add_or_update_plugin_server(config.clone())
         .await
         .expect("mount plugin OAuth server");
+    runtime
+        .start_mcp_server(&oauth_bundle_id)
+        .await
+        .expect("automatic admission must expose plugin OAuth state");
 
     let begin_runtime = runtime.clone();
     let begin_bundle_id = oauth_bundle_id.clone();
@@ -4002,19 +3961,19 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 1 {
+        while registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("plugin OAuth discovery request must start");
+    .expect("plugin OAuth registration request must start");
 
     timeout(
         Duration::from_secs(1),
         runtime.remove_plugin_server(&oauth_bundle_id),
     )
     .await
-    .expect("plugin unmount must not wait for delayed discovery")
+    .expect("plugin unmount must not wait for delayed registration")
     .expect("unmount plugin OAuth server");
     timeout(Duration::from_secs(1), begin)
         .await
@@ -4026,6 +3985,10 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
         .add_or_update_plugin_server(config)
         .await
         .expect("remount plugin OAuth server");
+    runtime
+        .start_mcp_server(&oauth_bundle_id)
+        .await
+        .expect("remounted plugin must repeat automatic admission");
     let replacement_runtime = runtime.clone();
     let replacement_bundle_id = oauth_bundle_id.clone();
     let replacement = tokio::spawn(async move {
@@ -4034,7 +3997,7 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 2 {
+        while registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -4224,15 +4187,9 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
         http.server_parameters.url,
         "https://mcp.atlassian.com/v1/mcp/authv2"
     );
-    assert_eq!(
-        http.auth_policy,
-        Some(a2c_smcp::smcp_computer::mcp_clients::HttpAuthPolicy::Auto)
-    );
-    let oauth = http
-        .oauth
-        .expect("remote URL must retain OAuth discovery overrides");
-    assert!(oauth.resource.is_none());
-    assert!(oauth.scopes.is_empty());
+    let serialized = serde_json::to_value(&http).unwrap();
+    assert!(serialized.get("authPolicy").is_none());
+    assert!(serialized.get("oauth").is_none());
 
     let runtime = state
         .computer_registry

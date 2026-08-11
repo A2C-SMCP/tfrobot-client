@@ -781,12 +781,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[ignore = "requires interactive Atlassian OAuth in a system browser"]
     async fn atlassian_automatic_oauth_lifecycle_e2e() {
-        use a2c_smcp::smcp_computer::mcp_clients::model::{
-            HttpAuthPolicy, HttpServerConfig, HttpServerParameters,
-        };
-        use a2c_smcp::smcp_computer::oauth::{
-            OAuthClientMode, OAuthClientRegistration, OAuthOptions,
-        };
+        use a2c_smcp::smcp_computer::mcp_clients::model::{HttpServerConfig, HttpServerParameters};
         use std::process::{Command, Stdio};
 
         const BUNDLE: &str = "atlassian-automatic-oauth-e2e";
@@ -810,15 +805,6 @@ mod tests {
             },
         );
         http.bundle_id = Some(bundle_id.clone());
-        http.auth_policy = Some(HttpAuthPolicy::Auto);
-        http.oauth = Some(OAuthOptions {
-            resource: None,
-            scopes: Vec::new(),
-            client_name: Some("TFRobot".to_string()),
-            mode: OAuthClientMode::AuthorizationCode {
-                registration: OAuthClientRegistration::Dynamic,
-            },
-        });
         runtime
             .apply_user_mcp_server_config(MCPServerConfig::Http(http))
             .await
