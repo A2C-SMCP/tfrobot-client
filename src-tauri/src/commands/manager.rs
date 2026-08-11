@@ -1,11 +1,12 @@
 //! TFRSManager Tauri commands.
 //!
 //! Authentication and authenticated requests are delegated to the backend-owned
-//! [`ManagerContextCoordinator`]. Commands never construct identity context in the webview.
+//! [`ManagerContextCoordinator`]. The only credential-bearing webview boundary is the dedicated,
+//! generation-bound `@turingfocus/tfrs-auth` token bridge below.
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::services::chat_session::ChatSessionService;
@@ -23,6 +24,10 @@ use crate::services::manager_context::{
     MANAGER_CONTEXT_CHANGED_EVENT,
 };
 use crate::services::manager_environment::ManagerEnvironment;
+use crate::services::manager_token_bridge::{
+    ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
+    ManagerTokenHttpResponse,
+};
 use crate::AppState;
 
 pub(crate) struct TauriManagerContextEventSink {
@@ -45,6 +50,32 @@ impl ManagerContextEventSink for TauriManagerContextEventSink {
     fn emit_auth_expired(&self) -> Result<(), String> {
         self.app
             .emit(MANAGER_AUTH_EXPIRED_EVENT, ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub(crate) struct TauriManagerTokenBridgeSink {
+    app: AppHandle,
+}
+
+impl TauriManagerTokenBridgeSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl ManagerTokenBridgeSink for TauriManagerTokenBridgeSink {
+    async fn emit_token_request(&self, request: &ManagerTokenBridgeRequest) -> Result<(), String> {
+        let window = self
+            .app
+            .get_webview_window("main")
+            .ok_or_else(|| "main webview is unavailable".to_string())?;
+        window
+            .emit(
+                crate::services::manager_token_bridge::MANAGER_TOKEN_REQUEST_EVENT,
+                request,
+            )
             .map_err(|error| error.to_string())
     }
 }
@@ -223,6 +254,55 @@ pub async fn manager_get_context(
     state: State<'_, AppState>,
 ) -> Result<ManagerContextSnapshot, ManagerError> {
     Ok(state.manager_context.snapshot().await)
+}
+
+#[tauri::command]
+pub async fn manager_token_bridge_ready(
+    state: State<'_, AppState>,
+    lease_id: String,
+    ready: bool,
+) -> Result<(), ManagerError> {
+    state
+        .manager_context
+        .set_token_bridge_ready(&lease_id, ready)
+        .await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn manager_token_bridge_http_request(
+    state: State<'_, AppState>,
+    request_id: String,
+    generation: u64,
+    body: String,
+) -> Result<ManagerTokenHttpResponse, ManagerError> {
+    if body.len() > 1024 * 1024 {
+        return Err(ManagerError::InvalidResponse(
+            "Manager token request exceeded the 1 MiB bridge limit".to_string(),
+        ));
+    }
+    let (status, body, content_type) = state
+        .manager_context
+        .token_bridge_http_request(&request_id, generation, body)
+        .await?;
+    Ok(ManagerTokenHttpResponse {
+        status,
+        body,
+        content_type,
+    })
+}
+
+#[tauri::command]
+pub async fn manager_token_bridge_complete(
+    state: State<'_, AppState>,
+    request_id: String,
+    generation: u64,
+    completion: ManagerTokenBridgeCompletion,
+) -> Result<(), ManagerError> {
+    state
+        .manager_context
+        .complete_token_bridge_request(&request_id, generation, completion)
+        .await
 }
 
 #[tauri::command]

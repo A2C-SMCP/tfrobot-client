@@ -347,6 +347,9 @@ pub fn run() {
             tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
                 commands::manager::TauriManagerContextEventSink::new(app.handle().clone()),
             )));
+            tauri::async_runtime::block_on(state.manager_context.set_token_bridge_sink(Arc::new(
+                commands::manager::TauriManagerTokenBridgeSink::new(app.handle().clone()),
+            )));
 
             // Write startup log and cleanup old entries
             if let Err(error) = state
@@ -497,6 +500,9 @@ pub fn run() {
             commands::manager::manager_switch_account,
             commands::manager::manager_list_digital_employees,
             commands::manager::manager_logout,
+            commands::manager::manager_token_bridge_ready,
+            commands::manager::manager_token_bridge_http_request,
+            commands::manager::manager_token_bridge_complete,
             // Context-bound Chat Kit session and HTTP BFF
             commands::chat::chat_open_session,
             commands::chat::chat_get_session_token,
@@ -511,6 +517,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
+                    state.manager_context.force_token_bridge_not_ready().await;
                     state.chat_sessions.close_for_context(None).await;
                     state.computer_registry.shutdown_all().await;
                     if let Err(error) = state
