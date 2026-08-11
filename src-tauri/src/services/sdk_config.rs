@@ -66,6 +66,12 @@ pub enum SdkConfigPortabilityError {
     Crud(#[from] ConfigCrudError),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RemovedHttpOAuthMigration {
+    pub removed_fields: usize,
+    pub disabled_opt_out_servers: usize,
+}
+
 impl SdkConfigPortabilityError {
     fn invalid_source(errors: Vec<SettingsValidationError>) -> Self {
         let details = errors
@@ -507,6 +513,22 @@ impl SdkConfigService {
         load_project_config_doc(&anchor)
     }
 
+    /// Migrates the breaking automatic-only HTTP OAuth schema before the candidate SDK validates
+    /// the project files. The raw document path preserves unknown fields and both project layers.
+    /// A legacy explicit OAuth opt-out cannot be represented by the new SDK, so an otherwise
+    /// unauthenticated server is conservatively disabled instead of silently enabling OAuth.
+    pub(crate) fn migrate_removed_http_oauth_fields(
+        &self,
+        instance_id: &str,
+    ) -> Result<RemovedHttpOAuthMigration, ConfigCrudError> {
+        let mut document = self.load_raw_project_config(instance_id)?;
+        let migration = strip_removed_http_oauth_fields(&mut document);
+        if migration.removed_fields > 0 {
+            self.restore_raw_project_config(instance_id, &document)?;
+        }
+        Ok(migration)
+    }
+
     /// Bundle identities declared in this Computer's durable project/local MCP files.
     ///
     /// The merged SDK snapshot can project an enabled plugin over an independent declaration
@@ -773,6 +795,63 @@ impl SdkConfigService {
         path.starts_with(self.project_anchor(instance_id))
             || path.starts_with(self.skill_home(instance_id))
     }
+}
+
+fn strip_removed_http_oauth_fields(document: &mut ProjectConfigDoc) -> RemovedHttpOAuthMigration {
+    let mut migration = RemovedHttpOAuthMigration::default();
+    for layer in [&mut document.mcp, &mut document.mcp_local] {
+        let Some(layer) = layer.as_mut() else {
+            continue;
+        };
+        let Some(Value::Object(servers)) = layer.get_mut("servers") else {
+            continue;
+        };
+        for server in servers.values_mut() {
+            let Value::Object(body) = server else {
+                continue;
+            };
+            let is_http = body
+                .get("server_parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("url"))
+                .and_then(Value::as_str)
+                .is_some();
+            if !is_http {
+                continue;
+            }
+
+            let has_static_authorization = body
+                .get("server_parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("headers"))
+                .and_then(Value::as_object)
+                .is_some_and(|headers| {
+                    headers
+                        .keys()
+                        .any(|header| header.eq_ignore_ascii_case("authorization"))
+                });
+            let explicit_opt_out = body.get("oauth") == Some(&Value::Bool(false))
+                || ["authPolicy", "auth_policy"].into_iter().any(|field| {
+                    body.get(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|policy| policy.eq_ignore_ascii_case("disabled"))
+                });
+            if explicit_opt_out && !has_static_authorization {
+                let was_disabled = body.get("disabled") == Some(&Value::Bool(true));
+                body.insert("disabled".to_string(), Value::Bool(true));
+                if !was_disabled {
+                    migration.disabled_opt_out_servers += 1;
+                }
+            }
+
+            for field in ["oauth", "authPolicy", "auth_policy"] {
+                if body.remove(field).is_some() {
+                    migration.removed_fields += 1;
+                }
+            }
+        }
+    }
+    migration
 }
 
 /// The SDK sanitizer owns known secret-bearing value fields (env, headers, URL userinfo, and
@@ -1189,6 +1268,130 @@ mod tests {
             ),
             ..ProjectConfigDoc::default()
         }
+    }
+
+    fn legacy_http_oauth_document() -> ProjectConfigDoc {
+        ProjectConfigDoc {
+            settings: Some(
+                json!({"futureSetting": {"preserve": true}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+            mcp: Some(
+                json!({
+                    "futureLayerField": "preserve-me",
+                    "servers": {
+                        "remote": {
+                            "type": "streamable",
+                            "authPolicy": "auto",
+                            "oauth": {
+                                "resource": "https://mcp.example/mcp",
+                                "client_name": "TFRobot"
+                            },
+                            "futureServerField": {"preserve": true},
+                            "server_parameters": {
+                                "url": "https://mcp.example/mcp",
+                                "headers": {"X-Routing": "preserve-me"}
+                            }
+                        },
+                        "static": {
+                            "type": "streamable",
+                            "auth_policy": "disabled",
+                            "server_parameters": {
+                                "url": "https://static.example/mcp",
+                                "headers": {"authorization": "Bearer ${input:token}"}
+                            }
+                        },
+                        "stdio": {
+                            "type": "stdio",
+                            "oauth": {"extensionOwned": true},
+                            "server_parameters": {"command": "node"}
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            mcp_local: Some(
+                json!({
+                    "servers": {
+                        "opt-out": {
+                            "type": "sse",
+                            "oauth": false,
+                            "server_parameters": {"url": "https://public.example/sse"}
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            ..ProjectConfigDoc::default()
+        }
+    }
+
+    #[test]
+    fn removed_http_oauth_migration_is_selective_and_idempotent() {
+        let mut document = legacy_http_oauth_document();
+        let first = strip_removed_http_oauth_fields(&mut document);
+        assert_eq!(first.removed_fields, 4);
+        assert_eq!(first.disabled_opt_out_servers, 1);
+        assert!(document.mcp.as_ref().unwrap()["servers"]["remote"]
+            .get("oauth")
+            .is_none());
+        assert!(document.mcp.as_ref().unwrap()["servers"]["remote"]
+            .get("authPolicy")
+            .is_none());
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["remote"]["futureServerField"],
+            json!({"preserve": true})
+        );
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["static"]["server_parameters"]["headers"]
+                ["authorization"],
+            "Bearer ${input:token}"
+        );
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["stdio"]["oauth"],
+            json!({"extensionOwned": true})
+        );
+        assert_eq!(
+            document.mcp_local.as_ref().unwrap()["servers"]["opt-out"]["disabled"],
+            true
+        );
+
+        assert_eq!(
+            strip_removed_http_oauth_fields(&mut document),
+            RemovedHttpOAuthMigration::default()
+        );
+    }
+
+    #[test]
+    fn removed_http_oauth_migration_persists_through_raw_transaction() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config
+            .save("computer-a", &legacy_http_oauth_document())
+            .unwrap();
+
+        let first = sdk_config
+            .migrate_removed_http_oauth_fields("computer-a")
+            .unwrap();
+        assert_eq!(first.removed_fields, 4);
+        assert_eq!(first.disabled_opt_out_servers, 1);
+        assert!(sdk_config
+            .validate_instance("computer-a")
+            .unwrap()
+            .is_valid());
+        assert_eq!(
+            sdk_config
+                .migrate_removed_http_oauth_fields("computer-a")
+                .unwrap(),
+            RemovedHttpOAuthMigration::default()
+        );
     }
 
     #[test]

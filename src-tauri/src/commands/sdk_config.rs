@@ -350,27 +350,9 @@ fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServe
     let MCPServerConfig::Http(next) = next else {
         unreachable!("OAuth cleanup config is always HTTP");
     };
-    let previous_oauth = previous
-        .oauth
-        .as_ref()
-        .expect("OAuth cleanup config materializes options");
-    let Some(next_oauth) = next.oauth.as_ref() else {
-        unreachable!("OAuth cleanup config materializes options");
-    };
-    let previous_resource = previous_oauth
-        .resource
-        .as_deref()
-        .unwrap_or(&previous.server_parameters.url);
-    let next_resource = next_oauth
-        .resource
-        .as_deref()
-        .unwrap_or(&next.server_parameters.url);
     resolve_bundle_id(&MCPServerConfig::Http(previous.clone()))
         != resolve_bundle_id(&MCPServerConfig::Http(next.clone()))
-        || previous_resource != next_resource
-        || previous_oauth.mode != next_oauth.mode
-        || previous_oauth.scopes != next_oauth.scopes
-        || previous_oauth.client_name != next_oauth.client_name
+        || previous.server_parameters.url != next.server_parameters.url
 }
 
 async fn clear_oauth_before_config_change(
@@ -528,28 +510,21 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn oauth_http_config(resource: Option<&str>, disabled: bool) -> MCPServerConfig {
+    fn oauth_http_config(endpoint: Option<&str>, disabled: bool) -> MCPServerConfig {
         serde_json::from_value(json!({
             "type": "streamable",
             "name": "protected",
             "bundle_id": "protected",
             "disabled": disabled,
-            "oauth": {
-                "resource": resource,
-                "scopes": [],
-                "clientName": "TFRobot",
-                "mode": {
-                    "type": "authorizationCode",
-                    "registration": "dynamic"
-                }
-            },
-            "server_parameters": { "url": "https://mcp.example.com/mcp" }
+            "server_parameters": {
+                "url": endpoint.unwrap_or("https://mcp.example.com/mcp")
+            }
         }))
         .unwrap()
     }
 
     #[test]
-    fn oauth_identity_change_ignores_disable_but_detects_resource_or_oauth_removal() {
+    fn oauth_identity_change_ignores_disable_but_detects_endpoint_or_static_auth() {
         let enabled = oauth_http_config(None, false);
         let disabled = oauth_http_config(None, true);
         let different_resource = oauth_http_config(Some("https://resource.example.com"), false);
@@ -557,11 +532,6 @@ mod tests {
         if let MCPServerConfig::Http(http) = &mut different_implicit_resource {
             http.server_parameters.url = "https://new-mcp.example.com/mcp".to_string();
         }
-        let mut oauth_off = enabled.clone();
-        if let MCPServerConfig::Http(http) = &mut oauth_off {
-            http.oauth = None;
-        }
-
         assert!(!oauth_credential_identity_changed(&enabled, &disabled));
         assert!(oauth_credential_identity_changed(
             &enabled,
@@ -571,8 +541,6 @@ mod tests {
             &enabled,
             &different_implicit_resource
         ));
-        assert!(oauth_credential_identity_changed(&enabled, &oauth_off));
-
         let legacy_auto: MCPServerConfig = serde_json::from_value(json!({
             "type": "streamable",
             "name": "legacy-auto",
