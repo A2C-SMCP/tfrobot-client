@@ -11,6 +11,7 @@ pub mod keychain;
 pub mod manager_client;
 pub mod manager_context;
 pub mod manager_environment;
+pub mod manager_token_bridge;
 pub mod oauth_credential_store;
 pub mod observability;
 pub mod runtime;

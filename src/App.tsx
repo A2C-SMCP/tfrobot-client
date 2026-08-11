@@ -30,6 +30,7 @@ import {
 import { useThemeStore } from './stores/themeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
+import { initializeManagerTokenBridge } from './services/managerTokenBridge';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -61,11 +62,24 @@ function App() {
   }, [initFromSettings]);
 
   useEffect(() => {
-    initializeRuntimeEvents().catch(() => {
-      /* initialization errors are stored in runtime store */
+    let disposed = false;
+    let disposeTokenBridge: (() => Promise<void>) | null = null;
+    const initialize = async () => {
+      const disposeBridge = await initializeManagerTokenBridge();
+      if (disposed) {
+        await disposeBridge();
+        return;
+      }
+      disposeTokenBridge = disposeBridge;
+      await initializeRuntimeEvents();
+    };
+    void initialize().catch(() => {
+      /* runtime errors are stored in runtimeStore; token actions fail closed until bridge ready */
     });
     return () => {
+      disposed = true;
       void disposeRuntimeEvents();
+      if (disposeTokenBridge) void disposeTokenBridge();
     };
   }, [disposeRuntimeEvents, initializeRuntimeEvents]);
 
