@@ -76,6 +76,10 @@
       "createConversationConfirm": "创建",
       "createConversationTitleLabel": "会话标题",
       "createConversationTitlePlaceholder": "输入标题",
+      "deleteConversation": "删除会话",
+      "deleteConversationCancel": "取消",
+      "deleteConversationConfirm": "删除",
+      "deleteConversationPrompt": "永久删除此会话？此操作无法撤销。",
       "disconnectedDescription": "实时更新不可用，请检查连接后重试。",
       "disconnectedTitle": "连接已断开",
       "emptyDescription": "请选择一个会话开始对话。",
@@ -98,6 +102,8 @@
       "interrupting": "正在停止",
       "jumpToLatest": "跳至最新消息",
       "loadMoreConversations": "加载更多",
+      "renameConversation": "重命名会话",
+      "renameConversationConfirm": "重命名",
       "newMessages": "条新消息",
       "noConversations": "暂无会话",
       "openEventDetail": "打开事件详情",
@@ -106,7 +112,8 @@
       "send": "发送",
       "sending": "正在发送",
       "textSendingUnavailable": "当前无法发送文本消息。",
-      "timelineLabel": "会话时间线"
+      "timelineLabel": "会话时间线",
+      "lifecycleDegraded": "连接已恢复，但仅能尽力补回历史；部分瞬时更新可能缺失。"
     }
   },
   "computer": {
