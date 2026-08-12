@@ -671,6 +671,8 @@ describe('runtimeStore', () => {
       servers: [{
         bundleId: 'protected',
         name: 'protected',
+        activation_state: 'stopped',
+        connection_state: 'disconnected',
         running: false,
         status_message: 'stopped',
         disabled: false,

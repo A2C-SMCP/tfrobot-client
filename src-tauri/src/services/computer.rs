@@ -22,7 +22,8 @@ use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
     BundleId, CallToolResult, CommandInput, HttpAuthenticationError, MCPServerInput,
-    PickStringInput, PromptStringInput, ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
+    MCPServerRuntimeStatus, PickStringInput, PromptStringInput, ReadResourceResult, Resource,
+    ServerName, Tool, ToolMeta,
 };
 use a2c_smcp::smcp_computer::mcp_clients::utils::client_factory;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -1384,15 +1385,15 @@ impl ComputerInstanceRuntime {
         self.ensure_active()?;
         self.clear_oauth_authorization_inner(bundle_id).await?;
         let computer_running = self.is_running().await;
-        let server_running = self
+        let server_started = self
             .computer
             .read()
             .await
-            .get_server_status()
+            .get_server_runtime_statuses()
             .await
             .into_iter()
-            .any(|(id, _, running, _)| id == *bundle_id && running);
-        if server_running {
+            .any(|status| status.bundle_id == *bundle_id && status.is_started());
+        if server_started {
             self.computer
                 .read()
                 .await
@@ -1445,9 +1446,13 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    pub async fn mcp_server_statuses(&self) -> Vec<(BundleId, ServerName, bool, String)> {
+    pub async fn mcp_server_runtime_statuses(&self) -> Vec<MCPServerRuntimeStatus> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer.read().await.get_server_status().await
+        self.computer
+            .read()
+            .await
+            .get_server_runtime_statuses()
+            .await
     }
 
     pub async fn mcp_start_diagnostics(&self) -> HashMap<BundleId, String> {

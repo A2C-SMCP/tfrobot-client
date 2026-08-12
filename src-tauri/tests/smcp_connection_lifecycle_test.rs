@@ -950,10 +950,10 @@ async fn delete_succeeds_while_socket_reference_is_shared() {
         .expect("start MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "commit-echo" && *running),
+            .any(|status| status.name == "commit-echo" && status.is_connected()),
         "commit MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1034,10 +1034,10 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         .expect("start cleanup MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "cleanup-echo" && *running),
+            .any(|status| status.name == "cleanup-echo" && status.is_connected()),
         "cleanup MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1102,7 +1102,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         ComputerRuntimeState::Shutdown
     );
     assert!(
-        runtime.mcp_server_statuses().await.is_empty(),
+        runtime.mcp_server_runtime_statuses().await.is_empty(),
         "committed deletion retained SDK MCP runtime state"
     );
     wait_for("committed deletion left the SMCP socket active", || {

@@ -154,6 +154,8 @@ describe('mcpStore', () => {
       response.resolve([{
         bundleId: 'protected',
         name: 'protected',
+        activation_state: 'stopped',
+        connection_state: 'disconnected',
         running: false,
         status_message: 'stopped',
         disabled: false,
@@ -472,6 +474,8 @@ describe('MCP OAuth event actions', () => {
       servers: [{
         bundleId: 'protected',
         name: 'protected',
+        activation_state: 'stopped',
+        connection_state: 'disconnected',
         running: false,
         status_message: 'stopped',
         disabled: false,

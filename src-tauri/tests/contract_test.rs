@@ -51,7 +51,7 @@ async fn contract_computer_mcp_api_surface() {
 
     // These calls verify the API exists with expected signatures.
     // We don't assert behavior, just compilation.
-    let _statuses = computer.get_server_status().await;
+    let _statuses = computer.get_server_runtime_statuses().await;
     let _tools = computer.get_available_tools().await;
     let _ = computer.start_all_mcp_clients().await;
     let _ = computer.stop_all_mcp_clients().await;

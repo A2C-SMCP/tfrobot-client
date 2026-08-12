@@ -48,14 +48,25 @@ import {
   getChatDeadlineAt,
   type ChatSessionDescriptor,
 } from './chatBridge';
-import { chatRobotDisabledReason } from './availability';
+import {
+  chatRobotDisabledReason,
+  orderChatRobots,
+  preferredChatRobotId,
+} from './availability';
 import styles from './Chat.module.css';
 
 const { Text, Title } = Typography;
 const EMPTY_EMPLOYEES: DigitalEmployeeBrief[] = [];
+let lastSelectionRevision = 0;
 
 type Translator = (key: string, options?: Record<string, unknown>) => string;
 type ChatThemeStyle = CSSProperties & Record<`--chat-${string}`, string>;
+type ChatSelection = { scope: string; employeeId: number };
+
+function nextSelectionRevision(): number {
+  lastSelectionRevision = Math.max(lastSelectionRevision + 1, Date.now() * 1_000);
+  return lastSelectionRevision;
+}
 
 function managerErrorText(t: Translator, error: ManagerError | null): string | null {
   return error === null ? null : t(`manager.errors.${error.kind}`);
@@ -249,9 +260,10 @@ function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
 interface ChatSessionHostProps {
   creator: { uid: string; name: string };
   employeeId: number;
+  onOpened: (employeeId: number) => void;
 }
 
-function ChatSessionHost({ creator, employeeId }: ChatSessionHostProps) {
+function ChatSessionHost({ creator, employeeId, onOpened }: ChatSessionHostProps) {
   const { t } = useTranslation();
   const [descriptor, setDescriptor] = useState<ChatSessionDescriptor | null>(null);
   const [error, setError] = useState<ManagerError | null>(null);
@@ -260,15 +272,20 @@ function ChatSessionHost({ creator, employeeId }: ChatSessionHostProps) {
   useEffect(() => {
     let active = true;
     let leaseId: string | null = null;
+    const selectionRevision = nextSelectionRevision();
     setDescriptor(null);
     setError(null);
-    void invoke<ChatSessionDescriptor>('chat_open_session', { employeeId })
+    void invoke<ChatSessionDescriptor>('chat_open_session', { employeeId, selectionRevision })
       .then((opened) => {
         leaseId = opened.leaseId;
         if (!active) {
           return invoke('chat_close_session', { leaseId: opened.leaseId });
         }
         setDescriptor(opened);
+        onOpened(employeeId);
+        void invoke('chat_remember_robot', { leaseId: opened.leaseId }).catch(() => {
+          warn('chat: failed to save recent Robot preference');
+        });
         return undefined;
       })
       .catch((reason: ManagerError) => {
@@ -280,7 +297,7 @@ function ChatSessionHost({ creator, employeeId }: ChatSessionHostProps) {
         void invoke('chat_close_session', { leaseId }).catch(() => undefined);
       }
     };
-  }, [attempt, employeeId]);
+  }, [attempt, employeeId, onOpened]);
 
   if (error) {
     return (
@@ -298,7 +315,7 @@ function ChatSessionHost({ creator, employeeId }: ChatSessionHostProps) {
 }
 
 export function Chat() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { token } = theme.useToken();
   const {
     context,
@@ -314,7 +331,14 @@ export function Chat() {
     (employee) => chatRobotDisabledReason(employee) === null,
   ).length;
   const hasEmployeeSnapshot = resource?.lastFetchAt != null;
-  const [selectedEmployeeId, setSelectedEmployeeId] = useState<number | null>(null);
+  const resourceError = resource?.error ?? identityError;
+  const [selection, setSelection] = useState<ChatSelection | null>(null);
+  const [recentEmployeeId, setRecentEmployeeId] = useState<number | null>(null);
+  const [preferenceScope, setPreferenceScope] = useState<string | null>(null);
+  const selectedEmployeeId = selection?.scope === scope ? selection.employeeId : null;
+  const handleSessionOpened = useCallback((employeeId: number) => {
+    setRecentEmployeeId(employeeId);
+  }, []);
   const creator = useMemo(() => context.account === null ? null : ({
     uid: context.account.id,
     name: context.account.nickname || context.account.name,
@@ -330,25 +354,57 @@ export function Chat() {
   };
 
   useEffect(() => {
-    setSelectedEmployeeId(null);
+    setSelection(null);
+    setRecentEmployeeId(null);
+    setPreferenceScope(null);
     if (scope) {
+      let active = true;
+      void invoke<number | null>('chat_get_recent_robot')
+        .then((employeeId) => {
+          if (active) setRecentEmployeeId(employeeId ?? null);
+        })
+        .catch(() => {
+          warn('chat: failed to load recent Robot preference');
+        })
+        .finally(() => {
+          if (active) setPreferenceScope(scope);
+        });
       void fetchEmployeesIfStale().catch(() => undefined);
+      return () => {
+        active = false;
+      };
     }
+    return undefined;
   }, [fetchEmployeesIfStale, scope]);
 
+  const orderedEmployees = useMemo(() => orderChatRobots(
+    employees,
+    i18n.resolvedLanguage ?? i18n.language,
+  ), [employees, i18n.language, i18n.resolvedLanguage]);
+  const employeeListResolved = resource?.loading !== true
+    && (hasEmployeeSnapshot || resourceError !== null);
+  const selectionDecisionReady = scope !== null
+    && preferenceScope === scope
+    && employeeListResolved;
+
   useEffect(() => {
-    if (
-      selectedEmployeeId !== null
-      && !employees.some((employee) => employee.id === selectedEmployeeId
-        && chatRobotDisabledReason(employee) === null)
-    ) {
-      setSelectedEmployeeId(null);
+    if (!selectionDecisionReady) return;
+    const preferred = preferredChatRobotId(
+      orderedEmployees,
+      selectedEmployeeId,
+      recentEmployeeId,
+    );
+    if (preferred !== selectedEmployeeId) {
+      setSelection(preferred === null || scope === null ? null : {
+        scope,
+        employeeId: preferred,
+      });
     }
-  }, [employees, selectedEmployeeId]);
+  }, [orderedEmployees, recentEmployeeId, scope, selectedEmployeeId, selectionDecisionReady]);
 
   if (context.authState !== 'authenticated' || creator === null) {
     return (
-      <div className={styles.centered}>
+      <div className={styles.centered} data-testid="chat">
         <Empty
           image={<LoginOutlined style={{ fontSize: 48 }} />}
           description={t('chat.signInRequired')}
@@ -357,8 +413,7 @@ export function Chat() {
     );
   }
 
-  const resourceError = resource?.error ?? identityError;
-  const options = employees.map((employee) => {
+  const options = orderedEmployees.map((employee) => {
     const reason = chatRobotDisabledReason(employee);
     return {
       value: employee.id,
@@ -373,7 +428,7 @@ export function Chat() {
   });
 
   return (
-    <div className={styles.page} style={chatThemeStyle}>
+    <div className={styles.page} data-testid="chat" style={chatThemeStyle}>
       <section className={styles.hero}>
         <div className={styles.heroIdentity}>
           <div className={styles.heroIcon} aria-hidden="true">
@@ -405,7 +460,11 @@ export function Chat() {
               options={options}
               loading={resource?.loading === true}
               notFoundContent={t('chat.noAvailableRobots')}
-              onChange={setSelectedEmployeeId}
+              onChange={(employeeId) => {
+                if (scope !== null) {
+                  setSelection({ scope, employeeId });
+                }
+              }}
             />
             <Tooltip title={t('common.refresh')}>
               <Button
@@ -432,7 +491,9 @@ export function Chat() {
 
       <Card className={styles.workspaceCard}>
         <div className={styles.workspace}>
-          {selectedEmployeeId === null ? (
+          {selectedEmployeeId === null && !selectionDecisionReady ? (
+            <div className={styles.centered}><Spin /></div>
+          ) : selectedEmployeeId === null ? (
             <div className={styles.emptyState}>
               <div className={styles.emptyVisual} aria-hidden="true">
                 <RobotOutlined />
@@ -445,6 +506,7 @@ export function Chat() {
               key={`${scope}:${selectedEmployeeId}`}
               creator={creator}
               employeeId={selectedEmployeeId}
+              onOpened={handleSessionOpened}
             />
           )}
         </div>

@@ -4,7 +4,15 @@ import { ResourceBrowser } from '@/components/DebugPanel/ResourceBrowser';
 import { useMcpStore } from '@/stores/mcpStore';
 
 interface MockMcpStore {
-  servers: Array<{ bundleId: string; name: string; running: boolean; disabled: boolean; status_message: string }>;
+  servers: Array<{
+    bundleId: string;
+    name: string;
+    activation_state: 'stopped' | 'started';
+    connection_state: 'disconnected' | 'connected' | 'authorization_required';
+    running: boolean;
+    disabled: boolean;
+    status_message: string;
+  }>;
   loading: boolean;
   activeInstanceId: string | null;
   fetchServers: ReturnType<typeof vi.fn<() => Promise<void>>>;
@@ -30,8 +38,33 @@ let mockDebugStore = makeDebugStore();
 function makeMcpStore(overrides?: Partial<MockMcpStore>): MockMcpStore {
   return {
     servers: [
-      { bundleId: 'fs-bundle', name: 'fs-server', running: true, disabled: false, status_message: 'Running' },
-      { bundleId: 'stopped-bundle', name: 'stopped-server', running: false, disabled: false, status_message: 'Stopped' },
+      {
+        bundleId: 'fs-bundle',
+        name: 'fs-server',
+        activation_state: 'started',
+        connection_state: 'connected',
+        running: true,
+        disabled: false,
+        status_message: 'connected',
+      },
+      {
+        bundleId: 'auth-bundle',
+        name: 'auth-server',
+        activation_state: 'started',
+        connection_state: 'authorization_required',
+        running: true,
+        disabled: false,
+        status_message: 'authorization_required',
+      },
+      {
+        bundleId: 'stopped-bundle',
+        name: 'stopped-server',
+        activation_state: 'stopped',
+        connection_state: 'disconnected',
+        running: false,
+        disabled: false,
+        status_message: 'disconnected',
+      },
     ],
     loading: false,
     activeInstanceId: 'computer-a',
@@ -80,7 +113,8 @@ describe('ResourceBrowser', () => {
 
     await waitFor(() => {
       expect(mockMcpStore.fetchServers).toHaveBeenCalledWith('computer-a');
-      expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-bundle');
+    expect(mockDebugStore.fetchResources).toHaveBeenCalledWith('computer-a', 'fs-bundle');
+    expect(mockDebugStore.fetchResources).not.toHaveBeenCalledWith('computer-a', 'auth-bundle');
     });
 
     expect(screen.getByText('README.md')).toBeInTheDocument();

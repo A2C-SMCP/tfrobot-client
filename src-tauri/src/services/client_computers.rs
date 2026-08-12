@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalConfigFile {
+    ChatPreferences,
     ManualTargets,
     ManagerSession,
 }
@@ -14,6 +15,7 @@ pub const MIGRATION_STATE_FILE_NAME: &str = "migration_state.json";
 impl GlobalConfigFile {
     fn file_name(self) -> &'static str {
         match self {
+            Self::ChatPreferences => "chat_preferences.json",
             Self::ManualTargets => "manual_targets.json",
             Self::ManagerSession => "manager_session.json",
         }

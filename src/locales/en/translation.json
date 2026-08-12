@@ -576,6 +576,14 @@
       "error": "Error",
       "pending": "Pending"
     },
+    "connection": {
+      "disconnected": "Disconnected",
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "authorization_required": "Waiting for authorization",
+      "error": "Connection error",
+      "pending": "Pending"
+    },
     "table": {
       "name": "Name",
       "source": "Source",

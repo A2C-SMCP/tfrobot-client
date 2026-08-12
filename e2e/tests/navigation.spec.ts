@@ -6,8 +6,9 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
-test('default page is dashboard', async ({ page }) => {
-  await expect(page.getByText('Dashboard').first()).toBeVisible();
+test('default page is Chat', async ({ page }) => {
+  await expect(page.getByTestId('chat')).toBeVisible();
+  await expect(page.getByText('Sign in to Manager to chat with an available Robot.')).toBeVisible();
 });
 
 test('sidebar shows all navigation groups', async ({ page }) => {
@@ -20,7 +21,8 @@ test('sidebar shows all navigation groups', async ({ page }) => {
 
 test('sidebar shows all menu items', async ({ page }) => {
   const sidebar = page.locator('.ant-layout-sider');
-  await expect(sidebar.getByText('Dashboard')).toBeVisible();
+  await expect(sidebar.getByText('Dashboard')).toHaveCount(0);
+  await expect(sidebar.getByText('Chat')).toBeVisible();
   await expect(sidebar.getByText('Computer')).toBeVisible();
   await expect(sidebar.getByText('Robot Connections')).toBeVisible();
   await expect(sidebar.getByText('Settings')).toBeVisible();

@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2c-smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=187b62b4a6e061d993abeea25207d616c106b9c4#187b62b4a6e061d993abeea25207d616c106b9c4"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0eb3329391f33908d1d8a902a9c502d7a4b56da0#0eb3329391f33908d1d8a902a9c502d7a4b56da0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3082,7 +3082,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5285,7 +5285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6863,7 +6863,7 @@ dependencies = [
 [[package]]
 name = "smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=187b62b4a6e061d993abeea25207d616c106b9c4#187b62b4a6e061d993abeea25207d616c106b9c4"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0eb3329391f33908d1d8a902a9c502d7a4b56da0#0eb3329391f33908d1d8a902a9c502d7a4b56da0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6878,7 +6878,7 @@ dependencies = [
 [[package]]
 name = "smcp-client-transport"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=187b62b4a6e061d993abeea25207d616c106b9c4#187b62b4a6e061d993abeea25207d616c106b9c4"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0eb3329391f33908d1d8a902a9c502d7a4b56da0#0eb3329391f33908d1d8a902a9c502d7a4b56da0"
 dependencies = [
  "serde_json",
  "smcp 0.3.1",
@@ -6890,7 +6890,7 @@ dependencies = [
 [[package]]
 name = "smcp-computer"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=187b62b4a6e061d993abeea25207d616c106b9c4#187b62b4a6e061d993abeea25207d616c106b9c4"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=0eb3329391f33908d1d8a902a9c502d7a4b56da0#0eb3329391f33908d1d8a902a9c502d7a4b56da0"
 dependencies = [
  "async-recursion",
  "async-trait",

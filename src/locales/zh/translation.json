@@ -576,6 +576,14 @@
       "error": "错误",
       "pending": "等待中"
     },
+    "connection": {
+      "disconnected": "未连接",
+      "connecting": "连接中",
+      "connected": "已连接",
+      "authorization_required": "等待授权",
+      "error": "连接错误",
+      "pending": "等待中"
+    },
     "table": {
       "name": "名称",
       "source": "来源",

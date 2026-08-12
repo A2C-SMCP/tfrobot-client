@@ -587,11 +587,11 @@ async fn user_visible_sdk_status_snapshot(
         .filter(|config| resolve_bundle_id(config).as_str() != CLIENT_CONTROL_BUNDLE_ID)
         .count();
     snapshot.active_mcp_servers = computer
-        .get_server_status()
+        .get_server_runtime_statuses()
         .await
         .iter()
-        .filter(|(bundle_id, _, running, _)| {
-            bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID && *running
+        .filter(|status| {
+            status.bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
         })
         .count();
     snapshot

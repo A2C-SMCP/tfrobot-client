@@ -4,7 +4,9 @@
 mod common;
 
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
-use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    BundleId, MCPServerActivationState, MCPServerConnectionState,
+};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
@@ -30,8 +32,9 @@ use tfrobot_client_lib::commands::{
 };
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::computer_runtime_events::{
-    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
-    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+    ComputerRuntimeAffectedCapability, ComputerRuntimeEventCause, ComputerRuntimeEventSink,
+    ComputerRuntimeProblemMessage, ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+    ComputerRuntimeStatusEvent,
 };
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
@@ -400,22 +403,52 @@ async fn start_oauth_rejecting_mcp_server() -> String {
     url
 }
 
-async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
-    let (url, discovery_requests, _) =
-        start_auto_oauth_challenge_server_with_registration_delay(Duration::ZERO).await;
-    (url, discovery_requests)
+struct AutoOAuthMockStats {
+    discovery_requests: AtomicUsize,
+    registration_requests: AtomicUsize,
+    token_requests: AtomicUsize,
+    mcp_requests: AtomicUsize,
+    authorized_mcp_requests: AtomicUsize,
+    last_token_form: tokio::sync::Mutex<Option<HashMap<String, String>>>,
+}
+
+impl AutoOAuthMockStats {
+    fn new() -> Self {
+        Self {
+            discovery_requests: AtomicUsize::new(0),
+            registration_requests: AtomicUsize::new(0),
+            token_requests: AtomicUsize::new(0),
+            mcp_requests: AtomicUsize::new(0),
+            authorized_mcp_requests: AtomicUsize::new(0),
+            last_token_form: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+struct ChannelRuntimeEventSink {
+    sender: tokio::sync::mpsc::UnboundedSender<ComputerRuntimeStatusEvent>,
+}
+
+impl ComputerRuntimeEventSink for ChannelRuntimeEventSink {
+    fn emit(&self, event: &ComputerRuntimeStatusEvent) -> Result<(), String> {
+        self.sender
+            .send(event.clone())
+            .map_err(|_| "runtime event receiver closed".to_string())
+    }
+}
+
+async fn start_auto_oauth_challenge_server() -> (String, Arc<AutoOAuthMockStats>) {
+    start_auto_oauth_challenge_server_with_registration_delay(Duration::ZERO).await
 }
 
 async fn start_auto_oauth_challenge_server_with_registration_delay(
     registration_delay: Duration,
-) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+) -> (String, Arc<AutoOAuthMockStats>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("local_addr"));
-    let discovery_requests = Arc::new(AtomicUsize::new(0));
-    let registration_requests = Arc::new(AtomicUsize::new(0));
+    let stats = Arc::new(AutoOAuthMockStats::new());
     let server_url = url.clone();
-    let server_discovery_requests = Arc::clone(&discovery_requests);
-    let server_registration_requests = Arc::clone(&registration_requests);
+    let server_stats = Arc::clone(&stats);
 
     tokio::spawn(async move {
         loop {
@@ -423,19 +456,28 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
                 break;
             };
             let request_url = server_url.clone();
-            let request_count = Arc::clone(&server_discovery_requests);
-            let registration_count = Arc::clone(&server_registration_requests);
+            let stats = Arc::clone(&server_stats);
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                     let request_url = request_url.clone();
-                    let request_count = Arc::clone(&request_count);
-                    let registration_count = Arc::clone(&registration_count);
+                    let stats = Arc::clone(&stats);
                     async move {
+                        let method = request.method().clone();
                         let path = request.uri().path().to_string();
-                        if request.method() == hyper::Method::GET
+                        let authorized = request
+                            .headers()
+                            .get(hyper::header::AUTHORIZATION)
+                            .is_some_and(|value| value == "Bearer tfrobot-auto-test-token");
+                        let body = request
+                            .into_body()
+                            .collect()
+                            .await
+                            .expect("read OAuth mock request")
+                            .to_bytes();
+                        if method == hyper::Method::GET
                             && path.starts_with("/.well-known/oauth-protected-resource")
                         {
-                            request_count.fetch_add(1, Ordering::SeqCst);
+                            stats.discovery_requests.fetch_add(1, Ordering::SeqCst);
                             let payload = serde_json::json!({
                                 "resource": format!("{request_url}/mcp"),
                                 "authorization_servers": [&request_url],
@@ -445,6 +487,7 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize protected resource metadata"),
@@ -452,28 +495,31 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::GET
+                        if method == hyper::Method::GET
                             && matches!(
                                 path.as_str(),
                                 "/.well-known/oauth-authorization-server"
                                     | "/.well-known/oauth-authorization-server/mcp"
                             )
                         {
-                            request_count.fetch_add(1, Ordering::SeqCst);
+                            stats.discovery_requests.fetch_add(1, Ordering::SeqCst);
                             let payload = serde_json::json!({
                                 "issuer": request_url,
                                 "authorization_endpoint": format!("{request_url}/authorize"),
                                 "token_endpoint": format!("{request_url}/token"),
                                 "registration_endpoint": format!("{request_url}/register"),
                                 "response_types_supported": ["code"],
-                                "grant_types_supported": ["authorization_code"],
-                                "token_endpoint_auth_methods_supported": ["none"],
-                                "code_challenge_methods_supported": ["S256"]
+                                "grant_types_supported": ["authorization_code", "client_credentials"],
+                                "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+                                "code_challenge_methods_supported": ["S256"],
+                                "client_id_metadata_document_supported": true,
+                                "authorization_response_iss_parameter_supported": true,
                             });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize authorization server metadata"),
@@ -481,29 +527,23 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::POST && path == "/register" {
-                            registration_count.fetch_add(1, Ordering::SeqCst);
+                        if method == hyper::Method::POST && path == "/register" {
+                            stats.registration_requests.fetch_add(1, Ordering::SeqCst);
                             if !registration_delay.is_zero() {
                                 sleep(registration_delay).await;
                             }
-                            let body = request
-                                .into_body()
-                                .collect()
-                                .await
-                                .expect("read registration request")
-                                .to_bytes();
                             let registration: serde_json::Value =
                                 serde_json::from_slice(&body).expect("parse registration request");
                             let payload = serde_json::json!({
                                 "client_id": "tfrobot-auto-test-client",
-                                "client_name": "TFRobot",
-                                "redirect_uris": registration["redirect_uris"],
-                                "token_endpoint_auth_method": "none"
+                                "client_name": "A2C Computer",
+                                "redirect_uris": registration["redirect_uris"]
                             });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize registration response"),
@@ -511,17 +551,116 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::POST && path == "/mcp" {
+                        if method == hyper::Method::POST && path == "/token" {
+                            let form: HashMap<String, String> =
+                                url::form_urlencoded::parse(&body).into_owned().collect();
+                            stats.token_requests.fetch_add(1, Ordering::SeqCst);
+                            *stats.last_token_form.lock().await = Some(form.clone());
+                            let valid = form.get("grant_type").map(String::as_str)
+                                == Some("authorization_code")
+                                && form.get("code").map(String::as_str)
+                                    == Some("authorization-code")
+                                && form.get("client_id").map(String::as_str)
+                                    == Some("tfrobot-auto-test-client")
+                                && form
+                                    .get("code_verifier")
+                                    .is_some_and(|value| !value.is_empty())
+                                && form.get("resource").map(String::as_str)
+                                    == Some(format!("{request_url}/mcp").as_str());
+                            if !valid {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::UNAUTHORIZED)
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let payload = serde_json::json!({
+                                "access_token": "tfrobot-auto-test-token",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                                "scope": "tools.read"
+                            });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
-                                    .status(hyper::StatusCode::UNAUTHORIZED)
-                                    .header(
-                                        "www-authenticate",
-                                        format!(
-                                            "Bearer resource_metadata=\"{request_url}/.well-known/oauth-protected-resource/mcp\""
-                                        ),
-                                    )
-                                    .body(Full::<Bytes>::from(Bytes::new()))
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize token response"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == hyper::Method::POST && path == "/mcp" {
+                            stats.mcp_requests.fetch_add(1, Ordering::SeqCst);
+                            if authorized {
+                                stats.authorized_mcp_requests.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if !authorized {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::UNAUTHORIZED)
+                                        .header(
+                                            "www-authenticate",
+                                            format!(
+                                                "Bearer resource_metadata=\"{request_url}/.well-known/oauth-protected-resource/mcp\""
+                                            ),
+                                        )
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let request: serde_json::Value =
+                                serde_json::from_slice(&body).unwrap_or_default();
+                            let rpc_method = request
+                                .get("method")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default();
+                            if rpc_method.starts_with("notifications/") {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::ACCEPTED)
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let id = request
+                                .get("id")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let result = match rpc_method {
+                                "initialize" => serde_json::json!({
+                                    "protocolVersion": "2024-11-05",
+                                    "serverInfo": { "name": "oauth-mock", "version": "0.1.0" },
+                                    "capabilities": { "tools": {} }
+                                }),
+                                "tools/list" => serde_json::json!({
+                                    "tools": [{
+                                        "name": "protected",
+                                        "description": "Requires authorization",
+                                        "inputSchema": { "type": "object" }
+                                    }]
+                                }),
+                                "tools/call" => serde_json::json!({
+                                    "content": [{ "type": "text", "text": "authorized" }]
+                                }),
+                                _ => serde_json::json!({}),
+                            };
+                            let payload = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": result
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .header("mcp-session-id", "oauth-test-session")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize MCP response"),
+                                    ))
                                     .unwrap(),
                             );
                         }
@@ -542,7 +681,7 @@ async fn start_auto_oauth_challenge_server_with_registration_delay(
         }
     });
 
-    (url, discovery_requests, registration_requests)
+    (url, stats)
 }
 
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
@@ -789,8 +928,16 @@ async fn test_get_mcp_servers_uses_sdk_computer_status() {
 
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].name, "sdk-status");
+    assert_eq!(
+        statuses[0].activation_state,
+        MCPServerActivationState::Started
+    );
+    assert_eq!(
+        statuses[0].connection_state,
+        MCPServerConnectionState::Connected
+    );
     assert!(statuses[0].running);
-    assert_eq!(statuses[0].status_message, "running");
+    assert_eq!(statuses[0].status_message, "connected");
 }
 
 #[tokio::test]
@@ -923,7 +1070,16 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         healthy.running,
         "healthy MCP must not be blocked by another failure"
     );
-    assert!(!broken.running);
+    assert_eq!(
+        broken.activation_state,
+        MCPServerActivationState::Started,
+        "a failed connection must not be projected as an explicit stop"
+    );
+    assert_eq!(broken.connection_state, MCPServerConnectionState::Error);
+    assert!(
+        broken.running,
+        "running remains the started-state projection"
+    );
     assert_eq!(broken.status_message, "error");
     let snapshot = state
         .computer_registry
@@ -966,14 +1122,12 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         .unwrap();
     assert_eq!(batch.candidate_count, 2);
     assert_eq!(batch.actual_operation_count, 1);
-    assert_eq!(batch.unchanged_count, 0);
+    assert_eq!(
+        batch.unchanged_count, 1,
+        "an already-started server remains unchanged even when its connection failed"
+    );
     assert_eq!(batch.excluded_plugin_owned_count, 0);
-    assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.failures[0].name, "broken-server");
-    assert!(matches!(
-        &batch.failures[0].error,
-        tfrobot_client_lib::commands::runtime_error::RuntimeActionError::RuntimeError { .. }
-    ));
+    assert!(batch.failures.is_empty());
 }
 
 #[tokio::test]
@@ -1540,7 +1694,7 @@ async fn test_sdk_available_tools_raw_metadata_with_multiple_servers() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let statuses = runtime.mcp_server_statuses().await;
+    let statuses = runtime.mcp_server_runtime_statuses().await;
     eprintln!("server_statuses={statuses:#?}");
 
     let tools = runtime.available_tools().await.unwrap();
@@ -3560,6 +3714,13 @@ async fn test_sdk_computer_execute_echo_tool() {
 async fn test_real_http_oauth_401_returns_structured_tool_result() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    let (runtime_event_sender, mut runtime_events) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .computer_registry
+        .set_runtime_event_sink(Arc::new(ChannelRuntimeEventSink {
+            sender: runtime_event_sender,
+        }))
+        .await;
     let url = start_oauth_rejecting_mcp_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Http",
@@ -3583,6 +3744,16 @@ async fn test_real_http_oauth_401_returns_structured_tool_result() {
     mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &oauth_bundle_id)
         .await
         .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID && event.snapshot.tools > 0 {
+                return;
+            }
+        }
+        panic!("runtime event stream closed before the HTTP mock tool was projected");
+    })
+    .await
+    .expect("HTTP mock tool projection timed out");
     let protected_tool = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap()
@@ -3624,7 +3795,7 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let (url, stats) = start_auto_oauth_challenge_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": "oauth-auto-challenge",
@@ -3642,7 +3813,7 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
         .await
         .expect("validated OAuth challenge must not fail configuration application");
 
-    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert!(stats.discovery_requests.load(Ordering::SeqCst) > 0);
     assert!(!runtime
         .mcp_start_diagnostics()
         .await
@@ -3657,11 +3828,34 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
             a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
         ))
     ));
-    assert!(runtime
-        .mcp_server_statuses()
+    let runtime_status = runtime
+        .mcp_server_runtime_statuses()
         .await
-        .iter()
-        .any(|(id, _, running, _)| id == &bundle_id && !running));
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("OAuth MCP runtime status");
+    assert_eq!(runtime_status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        runtime_status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
+
+    let projected = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("projected OAuth MCP status");
+    assert_eq!(
+        projected.activation_state,
+        MCPServerActivationState::Started
+    );
+    assert_eq!(
+        projected.connection_state,
+        MCPServerConnectionState::AuthorizationRequired
+    );
+    assert!(projected.running, "legacy running must project activation");
+    assert_eq!(projected.status_message, "authorization_required");
 }
 
 #[tokio::test]
@@ -3678,7 +3872,7 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let (url, stats) = start_auto_oauth_challenge_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": "oauth-legacy-auto",
@@ -3696,7 +3890,7 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
         .await
         .expect("legacy HTTP defaults must perform anonymous-first admission");
 
-    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert!(stats.discovery_requests.load(Ordering::SeqCst) > 0);
     assert_eq!(
         runtime.mcp_server_oauth_is_interactive(&bundle_id).await,
         Some(true)
@@ -3730,9 +3924,16 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
 }
 
 #[tokio::test]
-async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
+async fn test_clear_oauth_preserves_runtime_and_withdraws_authorized_tools() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    let (runtime_event_sender, mut runtime_events) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .computer_registry
+        .set_runtime_event_sink(Arc::new(ChannelRuntimeEventSink {
+            sender: runtime_event_sender,
+        }))
+        .await;
     state
         .computer_registry
         .start_runtime(TEST_INSTANCE_ID)
@@ -3743,39 +3944,175 @@ async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let url = start_oauth_rejecting_mcp_server().await;
+    let (url, stats) = start_auto_oauth_challenge_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": "oauth-clear-active",
         "bundle_id": "oauth-clear-active",
         "server_parameters": {
-            "url": url,
+            "url": format!("{url}/mcp"),
             "headers": {}
         }
     }))
     .unwrap();
     let bundle_id = resolve_bundle_id(&config);
     runtime.apply_user_mcp_server_config(config).await.unwrap();
+    let unauthorized_snapshot = runtime.runtime_snapshot().await;
+
+    let authorization_url = runtime
+        .begin_oauth_authorization(&bundle_id)
+        .await
+        .expect("automatic OAuth server must begin authorization");
+    let authorization_url = url::Url::parse(&authorization_url).expect("authorization URL");
+    let authorization_query: HashMap<_, _> = authorization_url.query_pairs().into_owned().collect();
+    let redirect_uri = authorization_query
+        .get("redirect_uri")
+        .expect("authorization URL redirect_uri");
+    let oauth_state = authorization_query
+        .get("state")
+        .expect("authorization URL state");
+    let mut callback_url = url::Url::parse(redirect_uri).expect("callback URL");
+    callback_url
+        .query_pairs_mut()
+        .append_pair("code", "authorization-code")
+        .append_pair("state", oauth_state)
+        .append_pair("iss", &url);
+    let callback_response = reqwest::get(callback_url)
+        .await
+        .expect("submit OAuth callback");
+    assert!(callback_response.status().is_success());
+    let projected = timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID
+                && event.snapshot.capability_revision > unauthorized_snapshot.capability_revision
+                && event.snapshot.tools > unauthorized_snapshot.tools
+            {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    if projected.is_none() {
+        panic!(
+            "authorized MCP capability projection was not published; oauth_status={:?}, runtime_snapshot={:?}, token_requests={}, registration_requests={}, token_form={:?}",
+            runtime.oauth_status(&bundle_id).await,
+            runtime.runtime_snapshot().await,
+            stats.token_requests.load(Ordering::SeqCst),
+            stats.registration_requests.load(Ordering::SeqCst),
+            *stats.last_token_form.lock().await,
+        );
+    }
+
+    assert_eq!(stats.token_requests.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Authorized { .. }
+        ))
+    ));
+    let protected_tool = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tool| tool.name == "oauth-clear-active__protected")
+        .expect("authorized MCP tool must be projected");
+    let authorized_call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &protected_tool.name,
+        serde_json::json!({}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(authorized_call.success);
+    assert!(stats.authorized_mcp_requests.load(Ordering::SeqCst) > 0);
+
+    let authorized_snapshot = runtime.runtime_snapshot().await;
+    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
+
+    let revoked = timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID
+                && matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::CapabilityRevisionBumped { .. }
+                )
+                && event.snapshot.capability_revision > authorized_snapshot.capability_revision
+                && event.snapshot.tools < authorized_snapshot.tools
+            {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    assert!(
+        revoked.is_some(),
+        "clear_oauth did not publish a capability invalidation; before={authorized_snapshot:?}, after={:?}",
+        runtime.runtime_snapshot().await
+    );
+
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
+        ))
+    ));
+    let runtime_status = runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("cleared OAuth MCP runtime status");
+    assert_eq!(runtime_status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        runtime_status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
     assert!(runtime
         .available_tools()
         .await
         .unwrap()
         .iter()
-        .any(|tool| tool.name.as_ref() == "oauth-clear-active__protected"));
+        .all(|tool| tool.name.as_ref() != "oauth-clear-active__protected"));
+    let mcp_requests_after_clear = stats.mcp_requests.load(Ordering::SeqCst);
+    let authorized_requests_after_clear = stats.authorized_mcp_requests.load(Ordering::SeqCst);
+    let unauthorized_call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &protected_tool.name,
+        serde_json::json!({}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(!unauthorized_call.success);
+    assert_eq!(
+        stats.mcp_requests.load(Ordering::SeqCst),
+        mcp_requests_after_clear,
+        "cleared credentials must block the tool call before MCP transport"
+    );
+    assert_eq!(
+        stats.authorized_mcp_requests.load(Ordering::SeqCst),
+        authorized_requests_after_clear,
+        "the cleared bearer token must never be reused"
+    );
 
-    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
-
-    assert!(runtime
-        .mcp_server_statuses()
+    runtime.stop_mcp_server(&bundle_id).await.unwrap();
+    let stopped = runtime
+        .mcp_server_runtime_statuses()
         .await
-        .iter()
-        .any(|(id, _, running, _)| id == &bundle_id && !running));
-    assert!(runtime
-        .available_tools()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .all(|tool| !tool.name.as_ref().starts_with("oauth-clear-active__")));
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("stopped OAuth MCP runtime status");
+    assert_eq!(stopped.activation, MCPServerActivationState::Stopped);
+    assert_eq!(stopped.connection, MCPServerConnectionState::Disconnected);
 }
 
 #[tokio::test]
@@ -3792,7 +4129,7 @@ async fn test_client_oauth_cancel_interrupts_delayed_dynamic_registration() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, _, registration_requests) =
+    let (url, stats) =
         start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
     let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
@@ -3810,7 +4147,7 @@ async fn test_client_oauth_cancel_interrupts_delayed_dynamic_registration() {
     });
 
     timeout(Duration::from_secs(1), async {
-        while registration_requests.load(Ordering::SeqCst) == 0 {
+        while stats.registration_requests.load(Ordering::SeqCst) == 0 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3853,7 +4190,7 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, _, registration_requests) =
+    let (url, stats) =
         start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
     let enabled = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&enabled);
@@ -3870,7 +4207,7 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while registration_requests.load(Ordering::SeqCst) < 1 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3904,7 +4241,7 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while registration_requests.load(Ordering::SeqCst) < 2 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3940,7 +4277,7 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, _, registration_requests) =
+    let (url, stats) =
         start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
     let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
@@ -3961,7 +4298,7 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while registration_requests.load(Ordering::SeqCst) < 1 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3997,7 +4334,7 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while registration_requests.load(Ordering::SeqCst) < 2 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -4200,11 +4537,17 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
         .sdk_mcp_server_configs()
         .await
         .contains_key(&bundle_id("atlassian")));
-    assert!(runtime
-        .mcp_server_statuses()
+    let status = runtime
+        .mcp_server_runtime_statuses()
         .await
-        .iter()
-        .any(|(id, _, running, _)| id.as_str() == "atlassian" && !*running));
+        .into_iter()
+        .find(|status| status.bundle_id.as_str() == "atlassian")
+        .expect("imported server must have runtime status");
+    assert_eq!(status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
 }
 
 #[tokio::test]
@@ -4251,10 +4594,10 @@ async fn test_import_stdio_server_updates_an_active_runtime() {
         .await
         .contains_key(&bundle_id("runtime-import")));
     assert!(runtime
-        .mcp_server_statuses()
+        .mcp_server_runtime_statuses()
         .await
         .iter()
-        .any(|(id, _, running, _)| id.as_str() == "runtime-import" && *running));
+        .any(|status| status.bundle_id.as_str() == "runtime-import" && status.is_connected()));
 }
 
 #[tokio::test]

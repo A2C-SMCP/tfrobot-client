@@ -18,6 +18,7 @@ use crate::services::manager_client::{
     ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
 };
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
+use crate::services::settings::SettingsService;
 
 const CHAT_SCOPE: &str = "chat:read chat:send";
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
@@ -111,19 +112,43 @@ impl CachedToken {
 #[derive(Debug)]
 struct ChatLease {
     target: ResolvedChatTarget,
+    selection_revision: u64,
     token: Option<CachedToken>,
     cancelled: watch::Sender<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveChatSelection {
+    revision: u64,
+    lease_id: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct ChatSessionService {
     manager_context: Weak<ManagerContextCoordinator>,
+    settings: Option<Arc<SettingsService>>,
     http: reqwest::Client,
     leases: RwLock<HashMap<String, Arc<Mutex<ChatLease>>>>,
+    active_selections: Mutex<HashMap<ManagerContextKey, ActiveChatSelection>>,
+    preference_write: Mutex<()>,
 }
 
 impl ChatSessionService {
     pub fn new(manager_context: Weak<ManagerContextCoordinator>) -> Self {
+        Self::build(manager_context, None)
+    }
+
+    pub fn new_with_settings(
+        manager_context: Weak<ManagerContextCoordinator>,
+        settings: Arc<SettingsService>,
+    ) -> Self {
+        Self::build(manager_context, Some(settings))
+    }
+
+    fn build(
+        manager_context: Weak<ManagerContextCoordinator>,
+        settings: Option<Arc<SettingsService>>,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(format!(
                 "tfrobot-client/{} (chat-bff; {})",
@@ -138,12 +163,35 @@ impl ChatSessionService {
             .expect("chat BFF reqwest client should build with rustls");
         Self {
             manager_context,
+            settings,
             http,
             leases: RwLock::new(HashMap::new()),
+            active_selections: Mutex::new(HashMap::new()),
+            preference_write: Mutex::new(()),
         }
     }
 
-    pub async fn open(&self, employee_id: u64) -> Result<ChatSessionDescriptor, ManagerError> {
+    pub async fn recent_employee(&self) -> Result<Option<u64>, ManagerError> {
+        let manager = self.manager()?;
+        let generation = manager.capture_authenticated_generation().await?;
+        let context = manager.context_key_for_generation(generation).await?;
+        let Some(settings) = &self.settings else {
+            return Ok(None);
+        };
+        match settings.load_recent_chat_employee(&context) {
+            Ok(employee_id) => Ok(employee_id),
+            Err(error) => {
+                log::warn!("failed to load recent chat Robot preference: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    pub async fn open(
+        &self,
+        employee_id: u64,
+        selection_revision: u64,
+    ) -> Result<ChatSessionDescriptor, ManagerError> {
         let manager = self.manager()?;
         let manager_generation = manager.capture_authenticated_generation().await?;
         let context_key = manager
@@ -171,7 +219,7 @@ impl ChatSessionService {
             .await?;
         let lease_id = Uuid::new_v4().to_string();
         let target = ResolvedChatTarget {
-            context_key,
+            context_key: context_key.clone(),
             manager_generation,
             employee_id,
             robot_account_id,
@@ -193,20 +241,142 @@ impl ChatSessionService {
         };
         let committed_lease = Arc::new(Mutex::new(ChatLease {
             target,
+            selection_revision,
             token: Some(CachedToken::new(exchanged)),
             cancelled: watch::channel(false).0,
         }));
-        let committed_id = lease_id;
+        let committed_id = lease_id.clone();
+        let committed_context = context_key;
         manager
             .commit_for_authenticated_generation(manager_generation, || async move {
                 self.leases
                     .write()
                     .await
-                    .insert(committed_id, committed_lease);
+                    .insert(committed_id.clone(), committed_lease);
+                self.activate_selection(committed_context, selection_revision, committed_id)
+                    .await;
                 Ok(())
             })
             .await?;
         Ok(descriptor)
+    }
+
+    pub async fn remember(&self, lease_id: &str) -> Result<(), ManagerError> {
+        let lease = self.lease(lease_id).await?;
+        let (target, selection_revision) = {
+            let current = lease.lock().await;
+            (current.target.clone(), current.selection_revision)
+        };
+        let target_context = target.context_key.clone();
+        let target_generation = target.manager_generation;
+        let _preference_write = self.preference_write.lock().await;
+        let manager = self.manager()?;
+        manager
+            .commit_for_authenticated_generation(target_generation, || async move {
+                self.validate_active_lease(lease_id, &lease, &target_context, selection_revision)
+                    .await
+            })
+            .await?;
+        self.save_recent_preference(target).await;
+        Ok(())
+    }
+
+    async fn validate_active_lease(
+        &self,
+        lease_id: &str,
+        lease: &Arc<Mutex<ChatLease>>,
+        context: &ManagerContextKey,
+        selection_revision: u64,
+    ) -> Result<(), ManagerError> {
+        let leases = self.leases.read().await;
+        if !leases
+            .get(lease_id)
+            .is_some_and(|current| Arc::ptr_eq(current, lease))
+        {
+            return Err(ManagerError::ContextChanged);
+        }
+        if *lease.lock().await.cancelled.borrow() {
+            return Err(ManagerError::ContextChanged);
+        }
+        if !self
+            .is_active_selection(context, selection_revision, lease_id)
+            .await
+        {
+            return Err(ManagerError::ContextChanged);
+        }
+        Ok(())
+    }
+
+    async fn save_recent_preference(&self, target: ResolvedChatTarget) {
+        if let Some(settings) = self.settings.clone() {
+            let context = target.context_key;
+            let employee_id = target.employee_id;
+            match tokio::task::spawn_blocking(move || {
+                settings.save_recent_chat_employee(&context, employee_id)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    log::warn!("failed to save recent chat Robot preference: {error}");
+                }
+                Err(error) => {
+                    log::warn!("failed to join recent chat Robot preference save: {error}");
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn remember_active_for_test(&self, lease_id: &str) -> Result<(), ManagerError> {
+        let lease = self.lease(lease_id).await?;
+        let (target, selection_revision) = {
+            let current = lease.lock().await;
+            (current.target.clone(), current.selection_revision)
+        };
+        let _preference_write = self.preference_write.lock().await;
+        self.validate_active_lease(lease_id, &lease, &target.context_key, selection_revision)
+            .await?;
+        self.save_recent_preference(target).await;
+        Ok(())
+    }
+
+    async fn activate_selection(
+        &self,
+        context: ManagerContextKey,
+        revision: u64,
+        lease_id: String,
+    ) -> bool {
+        let mut active = self.active_selections.lock().await;
+        if let Some(current) = active.get(&context) {
+            if current.revision > revision
+                || (current.revision == revision
+                    && current.lease_id.as_deref() != Some(lease_id.as_str()))
+            {
+                return false;
+            }
+        }
+        active.insert(
+            context,
+            ActiveChatSelection {
+                revision,
+                lease_id: Some(lease_id),
+            },
+        );
+        true
+    }
+
+    async fn is_active_selection(
+        &self,
+        context: &ManagerContextKey,
+        revision: u64,
+        lease_id: &str,
+    ) -> bool {
+        self.active_selections.lock().await.get(context)
+            == Some(&ActiveChatSelection {
+                revision,
+                lease_id: Some(lease_id.to_string()),
+            })
     }
 
     pub async fn credential(&self, lease_id: &str) -> Result<ChatSessionCredential, ManagerError> {
@@ -265,7 +435,26 @@ impl ChatSessionService {
 
     pub async fn close(&self, lease_id: &str) {
         if let Some(lease) = self.leases.write().await.remove(lease_id) {
-            let _ = lease.lock().await.cancelled.send(true);
+            let current = lease.lock().await;
+            let context = current.target.context_key.clone();
+            let revision = current.selection_revision;
+            let _ = current.cancelled.send(true);
+            drop(current);
+            let mut active = self.active_selections.lock().await;
+            if active.get(&context)
+                == Some(&ActiveChatSelection {
+                    revision,
+                    lease_id: Some(lease_id.to_string()),
+                })
+            {
+                active.insert(
+                    context,
+                    ActiveChatSelection {
+                        revision,
+                        lease_id: None,
+                    },
+                );
+            }
         }
     }
 
@@ -674,11 +863,17 @@ mod tests {
         }
     }
 
-    async fn insert_test_lease(service: &ChatSessionService, id: &str, target: ResolvedChatTarget) {
+    async fn insert_test_lease(
+        service: &ChatSessionService,
+        id: &str,
+        target: ResolvedChatTarget,
+        selection_revision: u64,
+    ) {
         service.leases.write().await.insert(
             id.into(),
             Arc::new(Mutex::new(ChatLease {
                 target,
+                selection_revision,
                 token: Some(CachedToken::new(ExchangedToken {
                     access_token: "short-chat-token".into(),
                     token_type: "Bearer".into(),
@@ -802,14 +997,167 @@ mod tests {
             &service,
             "lease-a",
             test_target(base.clone(), context("account-a")),
+            1,
         )
         .await;
-        insert_test_lease(&service, "lease-b", test_target(base, context("account-b"))).await;
+        insert_test_lease(
+            &service,
+            "lease-b",
+            test_target(base, context("account-b")),
+            1,
+        )
+        .await;
 
         service.close_for_context(Some(&context("account-a"))).await;
 
         assert!(service.lease("lease-a").await.is_err());
         assert!(service.lease("lease-b").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn older_selection_revision_cannot_reclaim_active_preference() {
+        let service = ChatSessionService::new(Weak::new());
+        let context = context("account-a");
+
+        assert!(
+            service
+                .activate_selection(context.clone(), 10, "lease-old".into())
+                .await
+        );
+        assert!(
+            service
+                .activate_selection(context.clone(), 20, "lease-new".into())
+                .await
+        );
+        assert!(
+            !service
+                .activate_selection(context.clone(), 10, "lease-old".into())
+                .await
+        );
+
+        assert!(!service.is_active_selection(&context, 10, "lease-old").await);
+        assert!(service.is_active_selection(&context, 20, "lease-new").await);
+    }
+
+    #[tokio::test]
+    async fn same_revision_cannot_replace_a_different_active_lease() {
+        let service = ChatSessionService::new(Weak::new());
+        let context = context("account-a");
+        let base = Url::parse("https://robot.example/proxy/").unwrap();
+        insert_test_lease(
+            &service,
+            "lease-live",
+            test_target(base.clone(), context.clone()),
+            20,
+        )
+        .await;
+        insert_test_lease(
+            &service,
+            "lease-stale",
+            test_target(base, context.clone()),
+            20,
+        )
+        .await;
+
+        assert!(
+            service
+                .activate_selection(context.clone(), 20, "lease-live".into())
+                .await
+        );
+        assert!(
+            !service
+                .activate_selection(context.clone(), 20, "lease-stale".into())
+                .await
+        );
+        assert!(
+            service
+                .is_active_selection(&context, 20, "lease-live")
+                .await
+        );
+        assert!(
+            !service
+                .is_active_selection(&context, 20, "lease-stale")
+                .await
+        );
+
+        service.close("lease-stale").await;
+        assert!(
+            service
+                .is_active_selection(&context, 20, "lease-live")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_old_lease_does_not_clear_newer_active_selection() {
+        let service = ChatSessionService::new(Weak::new());
+        let base = Url::parse("https://robot.example/proxy/").unwrap();
+        let context = context("account-a");
+        insert_test_lease(
+            &service,
+            "lease-old",
+            test_target(base.clone(), context.clone()),
+            1,
+        )
+        .await;
+        insert_test_lease(&service, "lease-new", test_target(base, context.clone()), 2).await;
+        service
+            .activate_selection(context.clone(), 1, "lease-old".into())
+            .await;
+        service
+            .activate_selection(context.clone(), 2, "lease-new".into())
+            .await;
+
+        service.close("lease-old").await;
+
+        assert!(service.is_active_selection(&context, 2, "lease-new").await);
+        assert!(!service.is_active_selection(&context, 1, "lease-old").await);
+
+        service.close("lease-new").await;
+        assert!(
+            !service
+                .activate_selection(context.clone(), 1, "lease-old".into())
+                .await
+        );
+        assert!(!service.is_active_selection(&context, 1, "lease-old").await);
+    }
+
+    #[tokio::test]
+    async fn late_old_remember_cannot_overwrite_newer_persisted_preference() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+        let service = ChatSessionService::new_with_settings(Weak::new(), settings.clone());
+        let base = Url::parse("https://robot.example/proxy/").unwrap();
+        let context = context("account-a");
+        let old_target = test_target(base.clone(), context.clone());
+        let mut new_target = test_target(base, context.clone());
+        new_target.employee_id = 43;
+        new_target.robot_name = "Robot B".into();
+        insert_test_lease(&service, "lease-old", old_target, 10).await;
+        insert_test_lease(&service, "lease-new", new_target, 20).await;
+        service
+            .activate_selection(context.clone(), 10, "lease-old".into())
+            .await;
+        service
+            .activate_selection(context.clone(), 20, "lease-new".into())
+            .await;
+
+        service.remember_active_for_test("lease-new").await.unwrap();
+        assert!(matches!(
+            service.remember_active_for_test("lease-old").await,
+            Err(ManagerError::ContextChanged)
+        ));
+
+        assert_eq!(
+            settings.load_recent_chat_employee(&context).unwrap(),
+            Some(43)
+        );
+        service.close("lease-new").await;
+        assert!(service.remember_active_for_test("lease-new").await.is_err());
+        assert_eq!(
+            settings.load_recent_chat_employee(&context).unwrap(),
+            Some(43)
+        );
     }
 
     #[tokio::test]

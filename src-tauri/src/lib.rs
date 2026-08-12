@@ -126,7 +126,10 @@ impl AppState {
             manager_client,
             settings_service.clone(),
         ));
-        let chat_sessions = Arc::new(ChatSessionService::new(Arc::downgrade(&manager_context)));
+        let chat_sessions = Arc::new(ChatSessionService::new_with_settings(
+            Arc::downgrade(&manager_context),
+            settings_service.clone(),
+        ));
 
         migrate_legacy_config(
             config.as_ref(),
@@ -531,6 +534,8 @@ pub fn run() {
             commands::manager::manager_token_bridge_complete,
             // Context-bound Chat Kit session and HTTP BFF
             commands::chat::chat_open_session,
+            commands::chat::chat_get_recent_robot,
+            commands::chat::chat_remember_robot,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,
