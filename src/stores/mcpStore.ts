@@ -15,6 +15,9 @@ export interface ToolMeta {
 export interface McpServerStatus {
   bundleId: string;
   name: string;
+  activation_state: McpServerActivationState;
+  connection_state: McpServerConnectionState;
+  /** Compatibility projection from activation_state; do not use for capability readiness. */
   running: boolean;
   status_message: string;
   disabled: boolean;
@@ -24,6 +27,15 @@ export interface McpServerStatus {
   /** Backend-owned actionability projection; machine credentials never launch a browser flow. */
   oauth_interaction?: 'none' | 'interactive' | 'machine';
 }
+
+export type McpServerActivationState = 'stopped' | 'started';
+
+export type McpServerConnectionState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'authorization_required'
+  | 'error';
 
 export type McpOAuthStatus =
   | { state: 'not_applicable' }

@@ -20,6 +20,8 @@ const mockMcpStore = vi.hoisted(() => ({
   servers: [] as Array<{
     bundleId: string;
     name: string;
+    activation_state: 'stopped' | 'started';
+    connection_state: 'disconnected' | 'connecting' | 'connected' | 'authorization_required' | 'error';
     running: boolean;
     status_message: string;
     disabled: boolean;
@@ -382,6 +384,8 @@ describe('McpConfig', () => {
     mockMcpStore.servers = [{
       bundleId: 'plugin-tools',
       name: 'plugin-tools',
+      activation_state: 'stopped',
+      connection_state: 'disconnected',
       running: false,
       status_message: 'Stopped',
       disabled: false,
@@ -433,6 +437,8 @@ describe('McpConfig', () => {
     mockMcpStore.servers = [{
       bundleId: 'plugin-tools',
       name: 'plugin-tools',
+      activation_state: 'stopped',
+      connection_state: 'disconnected',
       running: false,
       status_message: 'Stopped',
       disabled: false,
@@ -474,6 +480,8 @@ describe('McpConfig', () => {
     mockMcpStore.servers = [{
       bundleId: 'plugin-tools',
       name: 'plugin-tools',
+      activation_state: 'stopped',
+      connection_state: 'disconnected',
       running: false,
       status_message: 'Stopped',
       disabled: false,

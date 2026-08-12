@@ -6,6 +6,8 @@ import type { McpServerStatus } from '@/stores/mcpStore';
 const userServer: McpServerStatus = {
   bundleId: 'runtime-server-id',
   name: 'runtime-server',
+  activation_state: 'stopped',
+  connection_state: 'disconnected',
   running: false,
   status_message: 'Stopped',
   disabled: false,
@@ -111,6 +113,8 @@ describe('McpRuntimeControls', () => {
     mockStore.servers = [{
       bundleId: 'plugin-server-id',
       name: 'plugin-server',
+      activation_state: 'started',
+      connection_state: 'connected',
       running: true,
       status_message: 'Connected with 3 tools',
       disabled: false,
@@ -136,12 +140,14 @@ describe('McpRuntimeControls', () => {
     expect(onOpenPlugin).toHaveBeenCalledWith(owner);
   });
 
-  it('shows an OAuth-starting Plugin server as pending instead of stopped', () => {
+  it('shows an unauthorized started Plugin server as running and waiting for authorization', () => {
     mockStore.servers = [{
       bundleId: 'plugin-oauth-server-id',
       name: 'plugin-oauth-server',
-      running: false,
-      status_message: 'stopped',
+      activation_state: 'started',
+      connection_state: 'authorization_required',
+      running: true,
+      status_message: 'authorization_required',
       disabled: false,
       managedBy: {
         type: 'plugin',
@@ -149,13 +155,15 @@ describe('McpRuntimeControls', () => {
         plugin: 'desktop-tools',
         pluginId: 'desktop-tools@tf-market',
       },
-      oauth_status: { state: 'authorization_pending' },
+      oauth_status: { state: 'unauthorized' },
       oauth_interaction: 'interactive',
     }];
 
     render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
 
-    expect(screen.getAllByText('Pending')).toHaveLength(2);
+    expect(screen.getByText('Running')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for authorization')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Authorize' })).toBeInTheDocument();
     expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
   });
 

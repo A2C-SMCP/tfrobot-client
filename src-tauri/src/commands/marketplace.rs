@@ -548,10 +548,10 @@ async fn start_registered_plugin_servers_if_running(
     }
 
     let running: HashSet<BundleId> = runtime
-        .mcp_server_statuses()
+        .mcp_server_runtime_statuses()
         .await
         .into_iter()
-        .filter_map(|(bundle_id, _, is_running, _)| is_running.then_some(bundle_id))
+        .filter_map(|status| status.is_started().then_some(status.bundle_id))
         .collect();
     let mut seen = HashSet::new();
     let bundle_ids = hooks

@@ -8,11 +8,14 @@ function server(
   plugin = false,
   oauth_interaction: McpServerStatus['oauth_interaction'] = 'interactive',
 ): McpServerStatus {
+  const connected = oauth_status.state === 'authorized';
   return {
     bundleId,
     name: bundleId,
-    running: false,
-    status_message: 'stopped',
+    activation_state: 'started',
+    connection_state: connected ? 'connected' : 'authorization_required',
+    running: true,
+    status_message: connected ? 'connected' : 'authorization_required',
     disabled: false,
     managedBy: plugin
       ? { type: 'plugin', marketplace: 'official', plugin: 'protected-tools' }

@@ -2,7 +2,6 @@ import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
   FileTextOutlined,
-  DashboardOutlined,
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
@@ -13,7 +12,6 @@ import { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
-import { Dashboard } from './components/Dashboard';
 import { ActivityViewer } from './components/ActivityViewer';
 import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
@@ -39,7 +37,7 @@ const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 
 function App() {
   const { t, i18n } = useTranslation();
-  const [selectedKey, setSelectedKey] = useState('dashboard');
+  const [selectedKey, setSelectedKey] = useState('chat');
   const menuSelectedKey = selectedKey.startsWith('computer-detail')
     || selectedKey.startsWith('computer-settings')
     ? 'computer'
@@ -141,11 +139,6 @@ function App() {
       type: 'group' as const,
       children: [
         {
-          key: 'dashboard',
-          icon: <DashboardOutlined />,
-          label: t('nav.dashboard'),
-        },
-        {
           key: 'chat',
           icon: <MessageOutlined />,
           label: t('chat.title'),
@@ -216,8 +209,6 @@ function App() {
       : null;
 
     switch (pageKey) {
-      case 'dashboard':
-        return <Dashboard onNavigate={setSelectedKey} />;
       case 'computer':
         return <Computer key="computer-list" onNavigate={setSelectedKey} />;
       case 'computer-detail':

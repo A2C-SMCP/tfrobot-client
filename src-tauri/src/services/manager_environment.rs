@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// URLs are intentionally owned by the Rust trust boundary. The webview only sends this enum,
 /// so it cannot turn Manager login into an arbitrary outbound HTTP request.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ManagerEnvironment {
     Staging,

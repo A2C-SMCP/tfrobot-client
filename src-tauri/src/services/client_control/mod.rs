@@ -870,12 +870,15 @@ mod tests {
 
         assert!(runtime.sdk_mcp_server_ownership().await.is_empty());
         let provider = runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .into_iter()
-            .find(|(bundle_id, _, _, _)| bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
+            .find(|status| status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
             .expect("reserved provider must be mounted");
-        assert!(provider.2, "reserved provider must be running");
+        assert!(
+            provider.is_connected(),
+            "reserved provider must be connected"
+        );
 
         let tools = runtime.available_tools().await.unwrap();
         let control_tools = tools
@@ -889,12 +892,12 @@ mod tests {
 
         runtime.stop_all_mcp_servers().await.unwrap();
         let provider_after_batch_stop = runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .into_iter()
-            .find(|(bundle_id, _, _, _)| bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
+            .find(|status| status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
             .unwrap();
-        assert!(provider_after_batch_stop.2);
+        assert!(provider_after_batch_stop.is_connected());
         runtime.shutdown().await;
     }
 
@@ -935,11 +938,11 @@ mod tests {
             .unwrap();
         let enabled = registry.runtime("source").await.unwrap();
         assert!(enabled
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(bundle_id, _, running, _)| {
-                bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && *running
+            .any(|status| {
+                status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
             }));
         assert!(enabled.sdk_mcp_server_ownership().await.is_empty());
         plane
@@ -998,10 +1001,10 @@ mod tests {
             .unwrap();
         let disabled = registry.runtime("source").await.unwrap();
         assert!(disabled
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .all(|(bundle_id, _, _, _)| bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID));
+            .all(|status| status.bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID));
         disabled.shutdown().await;
     }
 

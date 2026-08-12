@@ -37,18 +37,12 @@ export function McpServerList({
 }: McpServerListProps) {
   const { t } = useTranslation();
   const displayStatus = (record: McpServerStatus): ServerDisplayStatus => {
-    if (record.running) return 'running';
-    if (record.status_message.toLowerCase().includes('error')) return 'error';
-    if (
-      record.status_message === 'pending'
-      || record.oauth_status?.state === 'authorization_pending'
-    ) {
-      return 'pending';
-    }
-    return 'stopped';
+    return record.activation_state === 'started' ? 'running' : 'stopped';
   };
-  const safeStatusLabel = (record: McpServerStatus) => {
-    return t(`mcp.status.${displayStatus(record)}`);
+  const safeConnectionLabel = (record: McpServerStatus) => {
+    if (record.status_message === 'error') return t('mcp.connection.error');
+    if (record.status_message === 'pending') return t('mcp.connection.pending');
+    return t(`mcp.connection.${record.connection_state}`);
   };
 
   const handleStart = async (bundleId: string) => {
@@ -101,7 +95,7 @@ export function McpServerList({
       title: t('mcp.table.message'),
       key: 'status_message',
       ellipsis: true,
-      render: (_: unknown, record: McpServerStatus) => safeStatusLabel(record),
+      render: (_: unknown, record: McpServerStatus) => safeConnectionLabel(record),
     },
     {
       title: t('mcp.table.authorization'),
@@ -230,7 +224,7 @@ export function McpServerList({
         }
         return (
           <Space size="small">
-            {record.running ? (
+            {record.activation_state === 'started' ? (
               <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
                 <span>
                   <Button
