@@ -76,6 +76,10 @@
       "createConversationConfirm": "Create",
       "createConversationTitleLabel": "Conversation title",
       "createConversationTitlePlaceholder": "Enter a title",
+      "deleteConversation": "Delete conversation",
+      "deleteConversationCancel": "Cancel",
+      "deleteConversationConfirm": "Delete",
+      "deleteConversationPrompt": "Delete this conversation permanently? This action cannot be undone.",
       "disconnectedDescription": "Live updates are unavailable. Check the connection and try again.",
       "disconnectedTitle": "Disconnected",
       "emptyDescription": "Select a conversation to start chatting.",
@@ -98,6 +102,8 @@
       "interrupting": "Stopping",
       "jumpToLatest": "Jump to latest",
       "loadMoreConversations": "Load more",
+      "renameConversation": "Rename conversation",
+      "renameConversationConfirm": "Rename",
       "newMessages": "new messages",
       "noConversations": "No conversations",
       "openEventDetail": "Open event details",
@@ -106,7 +112,8 @@
       "send": "Send",
       "sending": "Sending",
       "textSendingUnavailable": "Text sending is unavailable.",
-      "timelineLabel": "Conversation timeline"
+      "timelineLabel": "Conversation timeline",
+      "lifecycleDegraded": "Connected with best-effort history recovery; some transient updates may be missing."
     }
   },
   "computer": {

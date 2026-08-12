@@ -36,6 +36,16 @@ export interface ChatMessageCreator {
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
+export const CURRENT_SERVER_PROFILE = Object.freeze({
+  kind: 'current-server' as const,
+  rebase: Object.freeze({
+    deadlineMs: 10_000,
+    maxItems: 500,
+    maxPages: 10,
+    pageSize: 50,
+  }),
+});
+
 export const getChatDeadlineAt = (): number => Date.now() + REQUEST_TIMEOUT_MS;
 
 function abortError(): DOMException {
@@ -108,6 +118,7 @@ export function createClientChatFactory({
     baseUrl: descriptor.httpBaseUrl,
     socketNamespaceUrl: descriptor.socketNamespaceUrl,
     socketPath: descriptor.socketPath,
+    serverProfile: CURRENT_SERVER_PROFILE,
     sessionProvider,
     messageCreatorProvider: () => messageCreator,
     fetch: createTauriChatFetch(descriptor.leaseId),
@@ -140,6 +151,10 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
     createConversationConfirm: label('createConversationConfirm'),
     createConversationTitleLabel: label('createConversationTitleLabel'),
     createConversationTitlePlaceholder: label('createConversationTitlePlaceholder'),
+    deleteConversation: label('deleteConversation'),
+    deleteConversationCancel: label('deleteConversationCancel'),
+    deleteConversationConfirm: label('deleteConversationConfirm'),
+    deleteConversationPrompt: label('deleteConversationPrompt'),
     disconnectedDescription: label('disconnectedDescription'),
     disconnectedTitle: label('disconnectedTitle'),
     emptyDescription: label('emptyDescription'),
@@ -162,6 +177,8 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
     interrupting: label('interrupting'),
     jumpToLatest: label('jumpToLatest'),
     loadMoreConversations: label('loadMoreConversations'),
+    renameConversation: label('renameConversation'),
+    renameConversationConfirm: label('renameConversationConfirm'),
     newMessages: label('newMessages'),
     noConversations: label('noConversations'),
     openEventDetail: label('openEventDetail'),
@@ -171,5 +188,8 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
     sending: label('sending'),
     textSendingUnavailable: label('textSendingUnavailable'),
     timelineLabel: label('timelineLabel'),
+    lifecycleStatus: {
+      degraded: label('lifecycleDegraded'),
+    },
   };
 }
