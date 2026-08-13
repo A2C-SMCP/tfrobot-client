@@ -571,10 +571,12 @@
       "invalid": "SDK 配置存在 {{count}} 个 Schema 错误。"
     },
     "status": {
-      "running": "运行中",
       "stopped": "已停止",
-      "error": "错误",
-      "pending": "等待中"
+      "disconnected": "已启动但未连接",
+      "connecting": "连接中",
+      "connected": "可用",
+      "authorizationRequired": "等待授权",
+      "error": "连接失败"
     },
     "connection": {
       "disconnected": "未连接",
@@ -615,6 +617,7 @@
     },
     "actions": {
       "start": "启动",
+      "retry": "重试连接",
       "stop": "停止",
       "managePlugin": "管理 {{plugin}}",
       "edit": "编辑",
@@ -673,6 +676,7 @@
       "disabled": "服务器 {{name}} 已禁用",
       "removed": "服务器删除成功",
       "started": "服务器 {{name}} 已启动",
+      "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
       "operationFailed": "MCP 操作失败，请查看 Runtime 诊断或日志了解详情。",
       "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",

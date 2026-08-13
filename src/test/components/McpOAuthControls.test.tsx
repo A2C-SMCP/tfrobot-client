@@ -25,7 +25,79 @@ function server(
   };
 }
 
+function runtimeServer(
+  bundleId: string,
+  activation_state: McpServerStatus['activation_state'],
+  connection_state: McpServerStatus['connection_state'],
+): McpServerStatus {
+  return {
+    bundleId,
+    name: bundleId,
+    activation_state,
+    connection_state,
+    running: activation_state === 'started',
+    status_message: connection_state,
+    disabled: false,
+    managedBy: { type: 'user' },
+    oauth_status: { state: 'not_applicable' },
+    oauth_interaction: 'none',
+  };
+}
+
 describe('MCP OAuth runtime controls', () => {
+  it('projects activation and connection into one non-contradictory user status', () => {
+    render(
+      <McpServerList
+        servers={[
+          runtimeServer('stopped', 'stopped', 'disconnected'),
+          runtimeServer('disconnected', 'started', 'disconnected'),
+          runtimeServer('connecting', 'started', 'connecting'),
+          runtimeServer('available', 'started', 'connected'),
+          runtimeServer('authorization', 'started', 'authorization_required'),
+          runtimeServer('failed', 'started', 'error'),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Stopped')).toBeInTheDocument();
+    expect(screen.getByText('Started, not connected')).toBeInTheDocument();
+    expect(screen.getByText('Connecting')).toBeInTheDocument();
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for authorization')).toBeInTheDocument();
+    expect(screen.getByText('Connection failed')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Message' })).not.toBeInTheDocument();
+  });
+
+  it('offers start for stopped servers and retry plus stop for failed connections', () => {
+    const onStart = vi.fn().mockResolvedValue(undefined);
+    const onRetry = vi.fn().mockResolvedValue(undefined);
+    const onStop = vi.fn().mockResolvedValue(undefined);
+    render(
+      <McpServerList
+        servers={[
+          runtimeServer('stopped', 'stopped', 'disconnected'),
+          runtimeServer('disconnected', 'started', 'disconnected'),
+          runtimeServer('failed', 'started', 'error'),
+          runtimeServer('available', 'started', 'connected'),
+        ]}
+        onStart={onStart}
+        onRetry={onRetry}
+        onStop={onStop}
+      />,
+    );
+
+    expect(screen.getAllByTitle('Start')).toHaveLength(1);
+    expect(screen.getAllByTitle('Retry connection')).toHaveLength(2);
+    expect(screen.getAllByTitle('Stop')).toHaveLength(3);
+
+    fireEvent.click(screen.getAllByTitle('Retry connection')[1]);
+    fireEvent.click(screen.getAllByTitle('Stop')[0]);
+    expect(onRetry).toHaveBeenCalledWith('failed', 'failed');
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onStop).toHaveBeenCalledWith('disconnected', 'disconnected');
+  });
+
   it('renders all six projected states for user and Plugin MCP servers', () => {
     const onAuthorize = vi.fn().mockResolvedValue(undefined);
     const onCancel = vi.fn().mockResolvedValue(undefined);

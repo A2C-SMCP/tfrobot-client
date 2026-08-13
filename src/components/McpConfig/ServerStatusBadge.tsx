@@ -1,22 +1,41 @@
 import { Badge } from 'antd';
 import { useTranslation } from 'react-i18next';
+import type { McpServerStatus } from '@/stores/mcpStore';
 
-export type ServerDisplayStatus = 'running' | 'error' | 'pending' | 'stopped';
+type ServerDisplayStatus =
+  | 'stopped'
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'authorization_required'
+  | 'error';
 
-interface ServerStatusBadgeProps {
-  status: ServerDisplayStatus;
+function projectServerDisplayStatus(
+  server: Pick<McpServerStatus, 'activation_state' | 'connection_state'>,
+): ServerDisplayStatus {
+  if (server.activation_state === 'stopped') return 'stopped';
+  return server.connection_state;
 }
 
-export function ServerStatusBadge({ status }: ServerStatusBadgeProps) {
+interface ServerStatusBadgeProps {
+  server: Pick<McpServerStatus, 'activation_state' | 'connection_state'>;
+}
+
+export function ServerStatusBadge({ server }: ServerStatusBadgeProps) {
   const { t } = useTranslation();
+  const status = projectServerDisplayStatus(server);
 
   switch (status) {
-    case 'running':
-      return <Badge status="success" text={t('mcp.status.running')} />;
+    case 'connected':
+      return <Badge status="success" text={t('mcp.status.connected')} />;
+    case 'connecting':
+      return <Badge status="processing" text={t('mcp.status.connecting')} />;
+    case 'authorization_required':
+      return <Badge status="warning" text={t('mcp.status.authorizationRequired')} />;
     case 'error':
       return <Badge status="error" text={t('mcp.status.error')} />;
-    case 'pending':
-      return <Badge status="processing" text={t('mcp.status.pending')} />;
+    case 'disconnected':
+      return <Badge status="warning" text={t('mcp.status.disconnected')} />;
     default:
       return <Badge status="default" text={t('mcp.status.stopped')} />;
   }

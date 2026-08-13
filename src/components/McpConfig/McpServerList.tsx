@@ -3,9 +3,10 @@ import {
   AppstoreOutlined,
   PlayCircleOutlined,
   PauseCircleOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { ServerStatusBadge, type ServerDisplayStatus } from './ServerStatusBadge';
+import { ServerStatusBadge } from './ServerStatusBadge';
 import type { McpServerManagedBy, McpServerStatus } from '@/stores/mcpStore';
 
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
@@ -16,6 +17,7 @@ interface McpServerListProps {
   actionsDisabledReason?: string;
   loading?: boolean;
   onStart?: (bundleId: string) => Promise<void>;
+  onRetry?: (bundleId: string, name: string) => Promise<void>;
   onStop?: (bundleId: string, name: string) => Promise<void>;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   onAuthorize?: (bundleId: string) => Promise<void>;
@@ -29,6 +31,7 @@ export function McpServerList({
   actionsDisabledReason,
   loading,
   onStart,
+  onRetry,
   onStop,
   onOpenPlugin,
   onAuthorize,
@@ -36,14 +39,6 @@ export function McpServerList({
   onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
-  const displayStatus = (record: McpServerStatus): ServerDisplayStatus => {
-    return record.activation_state === 'started' ? 'running' : 'stopped';
-  };
-  const safeConnectionLabel = (record: McpServerStatus) => {
-    if (record.status_message === 'error') return t('mcp.connection.error');
-    if (record.status_message === 'pending') return t('mcp.connection.pending');
-    return t(`mcp.connection.${record.connection_state}`);
-  };
 
   const handleStart = async (bundleId: string) => {
     await onStart?.(bundleId);
@@ -88,14 +83,8 @@ export function McpServerList({
       title: t('mcp.table.status'),
       key: 'status',
       render: (_: unknown, record: McpServerStatus) => (
-        <ServerStatusBadge status={displayStatus(record)} />
+        <ServerStatusBadge server={record} />
       ),
-    },
-    {
-      title: t('mcp.table.message'),
-      key: 'status_message',
-      ellipsis: true,
-      render: (_: unknown, record: McpServerStatus) => safeConnectionLabel(record),
     },
     {
       title: t('mcp.table.authorization'),
@@ -222,8 +211,23 @@ export function McpServerList({
             </Space>
           );
         }
+        const retryable = record.activation_state === 'started'
+          && (record.connection_state === 'disconnected' || record.connection_state === 'error');
         return (
           <Space size="small">
+            {retryable && (
+              <Tooltip title={actionsDisabled ? actionsDisabledReason : t('mcp.actions.retry')}>
+                <span>
+                  <Button
+                    type="text"
+                    icon={<ReloadOutlined />}
+                    onClick={() => onRetry?.(record.bundleId, record.name)}
+                    title={t('mcp.actions.retry')}
+                    disabled={actionsDisabled}
+                  />
+                </span>
+              </Tooltip>
+            )}
             {record.activation_state === 'started' ? (
               <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
                 <span>

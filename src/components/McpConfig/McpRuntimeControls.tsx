@@ -27,6 +27,8 @@ function runtimeSuccessMessage(action: McpRuntimeAction) {
   switch (action.kind) {
     case 'start':
       return { key: 'mcp.messages.started' as const, options: { name: action.name } };
+    case 'retry':
+      return { key: 'mcp.messages.reconnected' as const, options: { name: action.name } };
     default:
       return null;
   }
@@ -78,6 +80,7 @@ export function McpRuntimeControls({
   const runtimeActions = useMcpRuntimeActions({
     instanceId,
     startServer,
+    stopServer,
     startAll,
     onBatchResult: (result) => setBatchFeedback({ action: 'start', result }),
     onError: () => message.error(t('mcp.messages.operationFailed')),
@@ -248,6 +251,7 @@ export function McpRuntimeControls({
         onCancelAuthorization={(bundleId) => runAuthorizationAction(cancelAuthorization, bundleId)}
         onClearAuthorization={(bundleId) => runAuthorizationAction(clearAuthorization, bundleId)}
         onStop={(bundleId, name) => handleStopServer(bundleId, name)}
+        onRetry={(bundleId, name) => runtimeActions.run({ kind: 'retry', bundleId, name })}
         onStart={(bundleId) => {
           const server = servers.find((candidate) => candidate.bundleId === bundleId);
           return runtimeActions.run({ kind: 'start', bundleId, name: server?.name ?? bundleId });
