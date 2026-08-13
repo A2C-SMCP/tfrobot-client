@@ -571,10 +571,12 @@
       "invalid": "The SDK configuration has {{count}} schema error(s)."
     },
     "status": {
-      "running": "Running",
       "stopped": "Stopped",
-      "error": "Error",
-      "pending": "Pending"
+      "disconnected": "Started, not connected",
+      "connecting": "Connecting",
+      "connected": "Available",
+      "authorizationRequired": "Waiting for authorization",
+      "error": "Connection failed"
     },
     "connection": {
       "disconnected": "Disconnected",
@@ -615,6 +617,7 @@
     },
     "actions": {
       "start": "Start",
+      "retry": "Retry connection",
       "stop": "Stop",
       "managePlugin": "Manage {{plugin}}",
       "edit": "Edit",
@@ -673,6 +676,7 @@
       "disabled": "Server {{name}} disabled",
       "removed": "Server removed successfully",
       "started": "Server {{name}} started",
+      "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
       "operationFailed": "The MCP operation failed. View Runtime diagnostics or logs for details.",
       "statusLoadFailed": "MCP status could not be loaded. Retry or view logs for details.",

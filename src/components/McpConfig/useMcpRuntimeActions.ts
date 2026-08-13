@@ -8,11 +8,13 @@ import type { McpBatchOperationResult } from '@/stores/mcpStore';
 
 export type McpRuntimeAction =
   | { kind: 'start'; bundleId: string; name: string }
+  | { kind: 'retry'; bundleId: string; name: string }
   | { kind: 'startAll' };
 
 interface UseMcpRuntimeActionsOptions {
   instanceId: string;
   startServer: (instanceId: string, bundleId: string) => Promise<void>;
+  stopServer: (instanceId: string, bundleId: string) => Promise<void>;
   startAll: (instanceId: string) => Promise<McpBatchOperationResult>;
   onBatchResult: (result: McpBatchOperationResult) => void;
   onError: (message: string) => void;
@@ -22,6 +24,7 @@ interface UseMcpRuntimeActionsOptions {
 export function useMcpRuntimeActions({
   instanceId,
   startServer,
+  stopServer,
   startAll,
   onBatchResult,
   onError,
@@ -74,6 +77,12 @@ export function useMcpRuntimeActions({
     try {
       switch (action.kind) {
         case 'start':
+          await startServer(context.instanceId, action.bundleId);
+          if (!isCurrentAction(context)) return false;
+          break;
+        case 'retry':
+          await stopServer(context.instanceId, action.bundleId);
+          if (!isCurrentAction(context)) return false;
           await startServer(context.instanceId, action.bundleId);
           if (!isCurrentAction(context)) return false;
           break;
