@@ -23,7 +23,7 @@ export function RuntimeInputPrompt({
   const { t } = useTranslation();
   const promptKey = `${instanceId}:${error.input_id}`;
   const getInput = useInputStore((state) => state.getInput);
-  const addOrUpdateInput = useInputStore((state) => state.addOrUpdateInput);
+  const saveInput = useInputStore((state) => state.saveInput);
   const setValue = useInputStore((state) => state.setValue);
   const setRuntimeValue = useInputStore((state) => state.setRuntimeValue);
   const [loadedDefinition, setLoadedDefinition] = useState<{
@@ -74,14 +74,13 @@ export function RuntimeInputPrompt({
               `Runtime input definition '${error.input_id}' is no longer available`,
             );
           }
-          await addOrUpdateInput(instanceId, {
+          await saveInput(instanceId, {
             type: 'PromptString',
             id: error.input_id,
             label: error.input_id,
             description: error.message,
             password: createAsSecret,
-          });
-          await setValue(instanceId, error.input_id, value);
+          }, value);
         }
       } else {
         await setValue(instanceId, error.input_id, value);
@@ -96,7 +95,9 @@ export function RuntimeInputPrompt({
 
   return (
     <Modal
-      title={t(error.code === 'missing_secret' ? 'inputs.runtime.missingSecret' : 'inputs.runtime.missingInput')}
+      title={error.code === 'invalid_selection'
+        ? t('inputs.status.invalidSelection', { value: error.value ?? '' })
+        : t(error.code === 'missing_secret' ? 'inputs.runtime.missingSecret' : 'inputs.runtime.missingInput')}
       open
       onCancel={onCancel}
       footer={null}
@@ -104,9 +105,11 @@ export function RuntimeInputPrompt({
       width={440}
     >
       <Typography.Paragraph>{error.message}</Typography.Paragraph>
-      <Typography.Paragraph type="secondary">
-        {t('inputs.runtime.envHint', { env: error.env_hint })}
-      </Typography.Paragraph>
+      {error.env_hint && (
+        <Typography.Paragraph type="secondary">
+          {t('inputs.runtime.envHint', { env: error.env_hint })}
+        </Typography.Paragraph>
+      )}
       {loadError && (
         <Alert type="error" showIcon message={t('inputs.runtime.loadFailed')} />
       )}

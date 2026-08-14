@@ -37,7 +37,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
   const [formVisible, setFormVisible] = useState(false);
   const [editingInput, setEditingInput] = useState<InputDefinition | undefined>();
   const [valueEditorVisible, setValueEditorVisible] = useState(false);
-  const [editingValueId, setEditingValueId] = useState<string>('');
+  const [editingValueId, setEditingValueId] = useState('');
 
   useEffect(() => {
     fetchInputs(instanceId);
@@ -111,29 +111,34 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     },
     {
       title: t('inputs.table.label'),
-      dataIndex: 'label',
       key: 'label',
+      render: (_: unknown, record: InputDefinition) => record.label || record.id,
     },
     {
       title: t('inputs.table.currentValue'),
       key: 'value',
       width: 200,
       render: (_: unknown, record: InputDefinition) => {
+        if (record.type === 'Command') return t('inputs.runtimeCommand');
         const stored = values[record.id];
-        if (stored?.configured) {
-          const displayValue = record.type === 'PromptString' && record.password
-            ? t('inputs.configuredSecret')
-            : String(stored.value ?? '');
-          return (
-            <Button
-              type="link"
-              size="small"
-              aria-label={t('inputs.setValueFor', { id: record.id })}
-              onClick={() => handleSetValue(record.id)}
-            >
-              {displayValue.length > 30 ? displayValue.substring(0, 30) + '...' : displayValue}
-            </Button>
-          );
+        let displayValue: string;
+        switch (stored?.status) {
+          case 'configured':
+            displayValue = record.type === 'PromptString' && record.password
+              ? t('inputs.configuredSecret')
+              : String(stored.value ?? '');
+            break;
+          case 'using_default':
+            displayValue = t('inputs.status.usingDefault');
+            break;
+          case 'first_option':
+            displayValue = t('inputs.status.firstOption');
+            break;
+          case 'invalid_selection':
+            displayValue = t('inputs.status.invalidSelection', { value: String(stored.value ?? '') });
+            break;
+          default:
+            displayValue = t('inputs.notConfigured');
         }
         return (
           <Button
@@ -142,7 +147,9 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
             aria-label={t('inputs.setValueFor', { id: record.id })}
             onClick={() => handleSetValue(record.id)}
           >
-            {t('inputs.setValue')}
+            {stored?.status === 'configured' && displayValue.length > 30
+              ? `${displayValue.substring(0, 30)}...`
+              : displayValue}
           </Button>
         );
       },
@@ -195,7 +202,10 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
       >
         <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
         <Space wrap>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchInputs(instanceId); fetchValues(instanceId); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => {
+            fetchInputs(instanceId);
+            fetchValues(instanceId);
+          }} loading={loading}>
             {t('common.refresh')}
           </Button>
           <Popconfirm title={t('inputs.confirmClearValues')} onConfirm={handleClearAll}>
@@ -260,6 +270,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           onCancel={() => setValueEditorVisible(false)}
         />
       </Modal>
+
     </div>
   );
 }

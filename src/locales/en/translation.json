@@ -651,6 +651,7 @@
       "envVars": "Environment Variables",
       "addEnv": "Add Variable",
       "inputReference": "Use Input",
+      "pickInputOption": "Choose option",
       "url": "URL",
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
@@ -670,11 +671,11 @@
       "toolMetaInvalidFormat": "Each tool_meta value must be an object (e.g. {\"auto_apply\": true})"
     },
     "messages": {
-      "added": "Server added successfully",
-      "updated": "Server updated successfully",
-      "enabled": "Server {{name}} enabled",
-      "disabled": "Server {{name}} disabled",
-      "removed": "Server removed successfully",
+      "added": "Server saved; restart Runtime to apply it",
+      "updated": "Server saved; restart Runtime to apply changes",
+      "enabled": "Server {{name}} saved as enabled; restart Runtime to apply it",
+      "disabled": "Server {{name}} saved as disabled; restart Runtime to apply it",
+      "removed": "Server removed; restart Runtime to apply it",
       "started": "Server {{name}} started",
       "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
@@ -683,7 +684,7 @@
       "allStarted": "All servers started",
       "allStopped": "All servers stopped",
       "editNotImplemented": "Edit functionality coming soon",
-      "importSuccess": "Imported {{servers}} servers and {{inputs}} inputs",
+      "importSuccess": "Imported {{servers}} servers and {{inputs}} inputs; restart Runtime to apply them",
       "exportSuccess": "Configuration exported successfully"
     }
   },
@@ -701,6 +702,17 @@
     "confirmClearValues": "Are you sure you want to clear all cached values?",
     "setValueFor": "Set value for: {{id}}",
     "configuredSecret": "Configured secret",
+    "notConfigured": "Not configured",
+    "runtimeCommand": "Executed at runtime",
+    "status": {
+      "usingDefault": "Using default",
+      "firstOption": "Not set; first option will be used",
+      "invalidSelection": "Invalid selection: {{value}}"
+    },
+    "referenceIssues": {
+      "title": "Some legacy PickString references need attention",
+      "item": "{{serverName}} · {{layer}} · {{fieldPath}} still references {{inputId}}"
+    },
     "runtime": {
       "missingInput": "Input required to start",
       "missingSecret": "Secret required to start",
@@ -722,21 +734,24 @@
       "id": "Variable ID",
       "idRequired": "Variable ID is required",
       "label": "Display Label",
-      "labelRequired": "Display label is required",
       "description": "Description",
       "defaultValue": "Default Value",
+      "actualValue": "Actual Value",
+      "actualValueRequired": "Actual value is required",
+      "secretBlankKeeps": "Leave blank to keep the configured secret.",
       "password": "Password Mode",
       "options": "Options",
+      "optionRequired": "Add at least one option.",
       "addOption": "Add Option",
       "command": "Command",
       "args": "Arguments",
       "addArg": "Add Argument"
     },
     "messages": {
-      "saved": "Variable saved successfully",
-      "removed": "Variable removed successfully",
-      "valueSet": "Value set successfully",
-      "valuesCleared": "All cached values cleared"
+      "saved": "Variable saved; restart Runtime to apply it",
+      "removed": "Variable removed; restart Runtime to apply it",
+      "valueSet": "Value saved; restart Runtime to apply it",
+      "valuesCleared": "All saved values cleared; restart Runtime to apply it"
     }
   },
   "connection": {

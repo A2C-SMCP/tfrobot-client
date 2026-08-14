@@ -1,7 +1,8 @@
 export type MissingRuntimeInputError = {
-  code: 'missing_input' | 'missing_secret';
+  code: 'missing_input' | 'missing_secret' | 'invalid_selection';
   input_id: string;
-  env_hint: string;
+  env_hint?: string;
+  value?: string;
   message: string;
 };
 
@@ -20,9 +21,11 @@ export type RuntimeActionError = MissingRuntimeInputError | {
 export function isMissingRuntimeInputError(error: unknown): error is MissingRuntimeInputError {
   if (!error || typeof error !== 'object') return false;
   const candidate = error as Partial<MissingRuntimeInputError>;
-  return (candidate.code === 'missing_input' || candidate.code === 'missing_secret')
+  return (candidate.code === 'missing_input'
+    || candidate.code === 'missing_secret'
+    || candidate.code === 'invalid_selection')
     && typeof candidate.input_id === 'string'
-    && typeof candidate.env_hint === 'string'
+    && (candidate.code === 'invalid_selection' || typeof candidate.env_hint === 'string')
     && typeof candidate.message === 'string';
 }
 

@@ -57,8 +57,12 @@ impl ComputerInstanceRuntime {
                 | LifecycleState::Shutdown
                 | LifecycleState::Error
         ) {
-            self.replace_sdk_computer(false, "start_with_persisted_configuration")
-                .await?;
+            self.replace_sdk_computer(
+                false,
+                "start_with_persisted_configuration",
+                HandleReplacementConfig::ReloadPersisted,
+            )
+            .await?;
         } else if matches!(
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
@@ -68,7 +72,10 @@ impl ComputerInstanceRuntime {
                 .map_err(ComputerRuntimeStartError::Sdk)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, "idempotent Computer startup");
-            return Ok(());
+            return match Self::take_first_input_start_failure(failures) {
+                Some(error) => Err(ComputerRuntimeStartError::Sdk(error)),
+                None => Ok(()),
+            };
         } else if matches!(
             lifecycle,
             LifecycleState::Starting
@@ -101,8 +108,10 @@ impl ComputerInstanceRuntime {
         }
         let failures = self.start_desired_mcp_servers_inner().await;
         self.log_mcp_start_failures(&failures, "Computer startup");
-
-        Ok(())
+        match Self::take_first_input_start_failure(failures) {
+            Some(error) => Err(ComputerRuntimeStartError::Sdk(error)),
+            None => Ok(()),
+        }
     }
 
     pub async fn is_running(&self) -> bool {
@@ -363,7 +372,8 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(true, "restart").await
+        self.replace_sdk_computer(true, "restart", HandleReplacementConfig::ReloadPersisted)
+            .await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {

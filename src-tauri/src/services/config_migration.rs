@@ -417,7 +417,7 @@ fn verify_plan(
     for (profile, context, inputs) in &plan.profiles {
         if config.load_computer_profile(&profile.id)? != *profile
             || config.load_sdk_context(&profile.id)? != *context
-            || config.load_inputs_for_instance(&profile.id)? != *inputs
+            || config.load_legacy_input_definitions_for_migration_audit(&profile.id)? != *inputs
         {
             return Err(MigrationError::Verification(format!(
                 "Computer '{}' destination data does not match the migration plan",
@@ -638,9 +638,9 @@ mod tests {
             instances: vec![ComputerInstance {
                 inputs: vec![InputDefinition::PromptString {
                     id: "token".to_string(),
-                    label: "Token".to_string(),
+                    label: Some("Token".to_string()),
                     description: None,
-                    default: Some("legacy-default".to_string()),
+                    default: None,
                     password: Some(true),
                 }],
                 input_values: HashMap::from([(
@@ -661,7 +661,10 @@ mod tests {
             MigrationOutcome::Completed
         );
 
-        assert!(config.load_inputs_for_instance("one").unwrap().is_empty());
+        assert!(config
+            .load_legacy_input_definitions_for_migration_audit("one")
+            .unwrap()
+            .is_empty());
         assert_eq!(
             keychain::get_input_value(&secrets, "one", "token").unwrap(),
             None
@@ -822,7 +825,7 @@ mod tests {
         .unwrap();
         let existing_input = InputDefinition::PromptString {
             id: "current-token".to_string(),
-            label: "Current token".to_string(),
+            label: Some("Current token".to_string()),
             description: None,
             default: None,
             password: Some(true),
@@ -840,6 +843,12 @@ mod tests {
             &ProjectConfigDoc {
                 mcp: Some(
                     serde_json::json!({
+                        "inputs": [{
+                            "type": "PromptString",
+                            "id": "current-token",
+                            "description": "Current token",
+                            "password": true
+                        }],
                         "servers": {
                             "existing": {
                                 "type": "stdio",
@@ -867,7 +876,7 @@ mod tests {
             .to_string()
             .contains("injected raw SDK restore failure"));
         assert_eq!(
-            config.load_inputs_for_instance("one").unwrap(),
+            sdk.load_project_input_definitions("one").unwrap(),
             vec![existing_input]
         );
         assert!(config.legacy_computer_instances_path().exists());

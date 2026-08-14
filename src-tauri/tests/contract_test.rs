@@ -2,6 +2,7 @@
 //! These verify that tfrobot-client's assumptions about smcp-computer's public API hold.
 //! When smcp-computer upgrades, these tests should fail first, providing clear guidance.
 
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::model::*;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::{
@@ -69,7 +70,7 @@ fn contract_version_exists() {
 }
 
 #[tokio::test]
-async fn contract_boot_surfaces_structured_missing_input() {
+async fn contract_boot_defers_input_resolution_until_actual_start() {
     let input = MCPServerInput::PromptString(PromptStringInput {
         id: "required-token".to_string(),
         description: "Required token".to_string(),
@@ -79,7 +80,7 @@ async fn contract_boot_surfaces_structured_missing_input() {
     let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "stdio",
         "name": "missing-input-contract",
-        "disabled": true,
+        "disabled": false,
         "server_parameters": {
             "command": "echo",
             "args": ["${input:required-token}"],
@@ -87,6 +88,7 @@ async fn contract_boot_surfaces_structured_missing_input() {
         }
     }))
     .unwrap();
+    let bundle_id = resolve_bundle_id(&server);
     let computer = Computer::new(
         "contract-computer",
         SilentSession::new("contract-session"),
@@ -99,10 +101,14 @@ async fn contract_boot_surfaces_structured_missing_input() {
         true,
     );
 
-    let error = computer
+    computer
         .boot_up()
         .await
-        .expect_err("boot_up must surface a referenced missing input");
+        .expect("boot_up must only load raw declarations");
+    let error = computer
+        .start_mcp_client(&bundle_id)
+        .await
+        .expect_err("actual start must surface a referenced missing input");
     assert!(matches!(
         error,
         a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(_)

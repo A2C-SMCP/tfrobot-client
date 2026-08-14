@@ -941,7 +941,7 @@ async fn test_get_mcp_servers_uses_sdk_computer_status() {
 }
 
 #[tokio::test]
-async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
+async fn disabled_user_mcp_toggle_applies_only_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -974,6 +974,14 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
         .await
         .unwrap()
         .iter()
+        .any(|server| server.name == "toggle-server" && server.running));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
         .all(|server| server.name != "toggle-server"));
 
     sdk_config::upsert_computer_mcp_config_core(
@@ -983,6 +991,14 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
     )
     .await
     .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .all(|server| server.name != "toggle-server"));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
     let reenabled = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -992,7 +1008,7 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
 }
 
 #[tokio::test]
-async fn changing_bundle_id_removes_the_previous_runtime_identity() {
+async fn changing_bundle_id_replaces_the_runtime_identity_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1014,6 +1030,16 @@ async fn changing_bundle_id_removes_the_previous_runtime_identity() {
     )
     .await
     .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime.sdk_mcp_server_ids().await.is_empty());
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
 
     let runtime = state
         .computer_registry
@@ -1213,7 +1239,7 @@ async fn test_mcp_lifecycle_requires_started_computer() {
 }
 
 #[tokio::test]
-async fn test_config_add_applies_without_reloading_or_stopping_existing_servers() {
+async fn test_config_add_keeps_existing_process_and_applies_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1250,15 +1276,22 @@ async fn test_config_add_applies_without_reloading_or_stopping_existing_servers(
         .find(|status| status.name == "already-running")
         .expect("active server status should exist");
     assert!(active.running, "active server should remain running");
-    let added = statuses
+    assert!(statuses
         .iter()
-        .find(|status| status.name == "newly-added")
-        .expect("enabled config addition should enter the live runtime");
-    assert!(added.running);
+        .any(|status| status.name == "newly-added" && !status.running));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(statuses
+        .iter()
+        .any(|status| status.name == "newly-added" && status.running));
 }
 
 #[tokio::test]
-async fn test_connected_config_update_syncs_without_rejoining_computer() {
+async fn test_connected_config_update_does_not_hot_sync_or_rejoin_computer() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1286,22 +1319,18 @@ async fn test_connected_config_update_syncs_without_rejoining_computer() {
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(stats.update_config_events() > config_events_before);
-    assert_eq!(
-        stats.join_events(),
-        1,
-        "hot config apply must not reconnect"
-    );
+    assert_eq!(stats.update_config_events(), config_events_before);
+    assert_eq!(stats.join_events(), 1, "saved config must not reconnect");
     let config_events_after_upsert = stats.update_config_events();
     sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "echo-sync")
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(stats.update_config_events() > config_events_after_upsert);
+    assert_eq!(stats.update_config_events(), config_events_after_upsert);
     assert_eq!(
         stats.join_events(),
         1,
-        "hot config removal must not reconnect"
+        "saved config removal must not reconnect"
     );
 }
 
@@ -1332,6 +1361,11 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         .servers
         .iter()
         .any(|server| server.name == "full-chain-echo"));
+    assert!(!runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("full-chain-echo")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_ids()
         .await
@@ -1394,10 +1428,7 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
     );
 
     let final_snapshot = runtime.runtime_snapshot().await;
-    assert_eq!(
-        final_snapshot.generation, initial_snapshot.generation,
-        "hot MCP config apply must not rebuild the Computer runtime"
-    );
+    assert!(final_snapshot.generation > initial_snapshot.generation);
     assert!(final_snapshot.capability_revision > initial_snapshot.capability_revision);
     assert_eq!(final_snapshot.active_mcp_servers, 1);
     assert_eq!(final_snapshot.tools, 1);
@@ -1473,7 +1504,7 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
 }
 
 #[tokio::test]
-async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
+async fn test_remove_mcp_server_command_applies_to_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -1485,6 +1516,7 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    runtime.start().await.unwrap();
     assert!(runtime
         .synced_sdk_servers()
         .await
@@ -1502,10 +1534,11 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
         .unwrap();
 
     assert!(configs.is_empty());
-    assert!(!runtime
+    assert!(runtime
         .synced_sdk_servers()
         .await
         .contains_key(&bundle_id("remove-me")));
+    runtime.restart().await.unwrap();
     assert!(!runtime
         .sdk_mcp_server_ids()
         .await
@@ -1950,7 +1983,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
     assert!(second_configs
         .iter()
         .any(|server| server.name == "exported-second"));
-    assert!(second_sdk_servers.contains_key(&bundle_id("imported-second")));
+    assert!(!second_sdk_servers.contains_key(&bundle_id("imported-second")));
     assert!(!default_sdk_servers.contains_key(&bundle_id("imported-second")));
     let exported_names: std::collections::HashSet<_> = exported["servers"]
         .as_array()
@@ -1962,6 +1995,11 @@ async fn test_config_io_import_export_are_instance_scoped() {
         exported_names,
         std::collections::HashSet::from(["imported-second", "exported-second"])
     );
+    second_runtime.start().await.unwrap();
+    assert!(second_runtime
+        .synced_sdk_servers()
+        .await
+        .contains_key(&bundle_id("imported-second")));
 
     let round_trip = config_io::import_config_core(
         &state,
@@ -2044,7 +2082,7 @@ async fn test_config_io_import_atomically_merges_all_servers_into_local_sdk_conf
 }
 
 #[tokio::test]
-async fn test_config_io_input_only_import_does_not_mutate_sdk_config() {
+async fn test_config_io_input_only_import_updates_sdk_owned_top_level_inputs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let before_document = a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
@@ -2083,8 +2121,9 @@ async fn test_config_io_input_only_import_does_not_mutate_sdk_config() {
     .unwrap();
     assert_eq!(result.servers_imported, 0);
     assert_eq!(result.inputs_imported, 1);
-    assert_eq!(after_document, before_document);
-    assert_eq!(
+    assert_ne!(after_document, before_document);
+    assert_eq!(after_document.mcp.unwrap()["inputs"][0]["id"], "input-only");
+    assert_ne!(
         state.sdk_config.load(TEST_INSTANCE_ID).revision,
         before_revision
     );
@@ -2121,9 +2160,7 @@ async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_ex
     .unwrap_err();
     assert!(import_error.contains("inputs.unsafe-command.args[0]"));
     assert!(import_error.contains("access_token"));
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
     assert!(!state
@@ -2132,33 +2169,24 @@ async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_ex
         .join("config_import_transaction.json")
         .exists());
 
-    state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::Command {
-                id: "unsafe-command".to_string(),
-                label: "Unsafe command".to_string(),
-                command: "helper".to_string(),
-                args: Some(vec!["--api-key=plain-export-secret".to_string()]),
-            }],
-        )
-        .unwrap();
-    let export_path = tmp.path().join("unsafe-command-export.json");
-    std::fs::write(&export_path, "existing-target").unwrap();
-    let export_error = config_io::export_config_core(
+    let save_error = inputs::add_or_update_input_core(
         &state,
-        export_path.to_string_lossy().into_owned(),
-        TEST_INSTANCE_ID.to_string(),
-        None,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::Command {
+            id: "unsafe-command".to_string(),
+            label: Some("Unsafe command".to_string()),
+            command: "helper".to_string(),
+            args: Some(vec!["--api-key=plain-export-secret".to_string()]),
+        },
     )
     .await
     .unwrap_err();
-    assert!(export_error.contains("inputs.unsafe-command.args[0]"));
-    assert_eq!(
-        std::fs::read_to_string(export_path).unwrap(),
-        "existing-target"
-    );
+    assert!(save_error
+        .to_string()
+        .contains("inputs.unsafe-command.args[0]"));
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2288,7 +2316,7 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
         TEST_INSTANCE_ID,
         inputs::InputDefinition::Command {
             id: "unsafe-crud-input".to_string(),
-            label: "Unsafe CRUD input".to_string(),
+            label: Some("Unsafe CRUD input".to_string()),
             command: "helper".to_string(),
             args: Some(vec!["https://example.com/run?mode=debug".to_string()]),
         },
@@ -2297,15 +2325,13 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
     .unwrap_err();
     assert!(input_error.contains("inputs.unsafe-crud-input.args[0]"));
     assert!(input_error.contains("mode"));
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
 }
 
 #[tokio::test]
-async fn test_password_input_defaults_are_removed_from_crud_import_and_read_views() {
+async fn test_password_input_import_rejects_plaintext_defaults() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -2314,9 +2340,9 @@ async fn test_password_input_defaults_are_removed_from_crud_import_and_read_view
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "crud-password".to_string(),
-            label: "CRUD password".to_string(),
+            label: Some("CRUD password".to_string()),
             description: None,
-            default: Some("crud-plaintext-secret".to_string()),
+            default: None,
             password: Some(true),
         },
     )
@@ -2336,40 +2362,33 @@ async fn test_password_input_defaults_are_removed_from_crud_import_and_read_view
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        inputs::import_inputs_core(
-            &state,
-            TEST_INSTANCE_ID,
-            import_path.to_string_lossy().as_ref()
-        )
-        .await
-        .unwrap(),
-        1
-    );
+    let error = inputs::import_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        import_path.to_string_lossy().as_ref(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("cannot contain a plaintext default"));
 
     let listed = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
-    for id in ["crud-password", "imported-password"] {
-        assert!(matches!(
-            listed.iter().find(|input| input.id() == id),
-            Some(inputs::InputDefinition::PromptString {
-                default: None,
-                password: Some(true),
-                ..
-            })
-        ));
-        assert!(matches!(
-            inputs::get_input_core(&state, TEST_INSTANCE_ID, id).unwrap(),
-            Some(inputs::InputDefinition::PromptString {
-                default: None,
-                password: Some(true),
-                ..
-            })
-        ));
-    }
-    let persisted =
-        std::fs::read_to_string(state.config.computer_inputs_path(TEST_INSTANCE_ID).unwrap())
-            .unwrap();
-    assert!(!persisted.contains("crud-plaintext-secret"));
+    assert!(matches!(
+        listed.as_slice(),
+        [inputs::InputDefinition::PromptString {
+            id,
+            password: Some(true),
+            ..
+        }] if id == "crud-password"
+    ));
+    let persisted = serde_json::to_string(
+        &a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
+            &state.sdk_config.project_anchor(TEST_INSTANCE_ID),
+        )
+        .unwrap()
+        .mcp,
+    )
+    .unwrap();
+    assert!(!persisted.contains("default"));
     assert!(!persisted.contains("imported-plaintext-secret"));
 }
 
@@ -2378,25 +2397,18 @@ async fn test_config_import_preflights_sdk_target_before_journal_or_input_write(
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::PromptString {
-                id: "existing-input".to_string(),
-                label: "Existing".to_string(),
-                description: None,
-                default: None,
-                password: Some(false),
-            }],
-        )
-        .unwrap();
-    state
         .sdk_config
         .save(
             TEST_INSTANCE_ID,
             &ProjectConfigDoc {
                 mcp: Some(
                     serde_json::json!({
+                        "inputs": [{
+                            "type": "PromptString",
+                            "id": "existing-input",
+                            "description": "Existing",
+                            "password": false
+                        }],
                         "servers": {
                             "existing-invalid": { "type": "carrier-pigeon" }
                         }
@@ -2444,10 +2456,7 @@ async fn test_config_import_preflights_sdk_target_before_journal_or_input_write(
         .computer_instance_storage_root(TEST_INSTANCE_ID)
         .join("config_import_transaction.json")
         .exists());
-    let inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].id(), "existing-input");
 }
@@ -2492,9 +2501,8 @@ async fn test_startup_recovers_a_crash_interrupted_config_import_transaction() {
         .any(|server| server.name == "recovered-server"));
     assert_eq!(
         recovered
-            .config
-            .load_inputs_for_instance(TEST_INSTANCE_ID)
-            .unwrap()[0]
+            .sdk_config
+            .load_input_definitions(TEST_INSTANCE_ID)[0]
             .id(),
         "recovered-command"
     );
@@ -2519,12 +2527,12 @@ fn test_startup_discards_an_aborted_config_import_transaction_without_replay() {
         .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
         .unwrap();
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PromptString {
                 id: "existing-input".to_string(),
-                label: "Existing".to_string(),
+                label: Some("Existing".to_string()),
                 description: None,
                 default: None,
                 password: Some(false),
@@ -2566,8 +2574,8 @@ fn test_startup_discards_an_aborted_config_import_transaction_without_replay() {
         .iter()
         .any(|server| server.name == "must-not-replay"));
     let persisted_inputs = recovered
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap();
     assert_eq!(persisted_inputs.len(), 1);
     assert_eq!(persisted_inputs[0].id(), "existing-input");
@@ -2683,8 +2691,10 @@ fn test_startup_recovery_preflights_sdk_target_before_replaying_inputs() {
     assert!(transaction_path.exists());
     let config =
         tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
-    assert!(config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    let sdk_config =
+        tfrobot_client_lib::services::sdk_config::SdkConfigService::new(Arc::new(config));
+    assert!(sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
 }
@@ -2751,12 +2761,12 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
         )
         .unwrap();
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PromptString {
                 id: "api-token".to_string(),
-                label: "API token".to_string(),
+                label: Some("API token".to_string()),
                 description: None,
                 default: None,
                 password: Some(true),
@@ -2857,7 +2867,6 @@ async fn test_config_io_import_redacts_secret_surfaces_before_persisting() {
             "type": "PromptString",
             "id": "api-token",
             "label": "API token",
-            "default": "input-default-secret",
             "password": true
         }]
     });
@@ -2892,14 +2901,10 @@ async fn test_config_io_import_redacts_secret_surfaces_before_persisting() {
         persisted["server_parameters"]["env"]["TOKEN_REF"],
         "${input:api-token}"
     );
-    let imported_inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let imported_inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
     assert!(matches!(
         imported_inputs.as_slice(),
         [inputs::InputDefinition::PromptString {
-            default: None,
             password: Some(true),
             ..
         }]
@@ -2973,18 +2978,18 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PickString {
                 id: "existing-input".to_string(),
-                label: "Existing input".to_string(),
+                label: Some("Existing input".to_string()),
                 description: None,
+                default: None,
                 options: vec![inputs::PickOption {
                     label: "Existing".to_string(),
                     value: "existing".to_string(),
                 }],
-                default: Some("existing".to_string()),
             }],
         )
         .unwrap();
@@ -3041,8 +3046,8 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
     assert!(error.contains("unsafe-relative-import"));
     assert!(error.contains("access_token"));
     let inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap();
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].id(), "existing-input");
@@ -3059,19 +3064,6 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
 async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::PromptString {
-                id: "shared-token".to_string(),
-                label: "Existing token".to_string(),
-                description: None,
-                default: None,
-                password: Some(true),
-            }],
-        )
-        .unwrap();
     tfrobot_client_lib::services::keychain::set_input_secret(
         state.secret_store.as_ref(),
         TEST_INSTANCE_ID,
@@ -3103,6 +3095,19 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
                 ),
                 ..Default::default()
             },
+        )
+        .unwrap();
+    state
+        .sdk_config
+        .replace_input_definitions(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PromptString {
+                id: "shared-token".to_string(),
+                label: Some("Existing token".to_string()),
+                description: None,
+                default: None,
+                password: Some(true),
+            }],
         )
         .unwrap();
     let blocked_local_mcp = state
@@ -3147,11 +3152,12 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
         .exists());
     assert!(matches!(
         state
-            .config
-            .load_inputs_for_instance(TEST_INSTANCE_ID)
+            .sdk_config
+            .load_project_input_definitions(TEST_INSTANCE_ID)
             .unwrap()
             .as_slice(),
-        [inputs::InputDefinition::PromptString { label, .. }] if label == "Existing token"
+        [inputs::InputDefinition::PromptString { label, .. }]
+            if label.as_deref() == Some("Existing token")
     ));
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_secret(
@@ -3497,7 +3503,8 @@ async fn test_config_io_export_does_not_overwrite_target_when_source_is_corrupt(
 }
 
 #[tokio::test]
-async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtime() {
+async fn test_cli_native_import_persists_sdk_inputs_without_hot_updating_runtimes() {
+    require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let other_instance = ComputerInstance::new("other-computer", "Other Computer");
@@ -3551,10 +3558,7 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let imported_inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let imported_inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
 
     assert_eq!(import_result.servers_imported, 1);
     assert_eq!(import_result.inputs_imported, 1);
@@ -3567,8 +3571,8 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
         .iter()
         .any(|server| server.name == "input-backed-server"));
     assert!(
-        runtime.inputs.read().await.contains_key("node-command"),
-        "imported Input definitions must synchronize to the target runtime"
+        !runtime.inputs.read().await.contains_key("node-command"),
+        "saved Input definitions must not hot-update the target runtime"
     );
     assert!(
         !other_runtime
@@ -3578,6 +3582,19 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
             .contains_key("node-command"),
         "the import must not synchronize Input definitions to another Computer runtime"
     );
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .inputs
+        .read()
+        .await
+        .contains_key("node-command"));
 }
 
 // ── SDK Computer MCP lifecycle (requires Node.js) ──
@@ -4477,7 +4494,7 @@ async fn test_sdk_computer_invalid_command_fails() {
 // ── Config IO integration ──
 
 #[tokio::test]
-async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime() {
+async fn test_import_official_remote_url_updates_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
@@ -4533,6 +4550,11 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("atlassian")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_configs()
         .await
@@ -4551,7 +4573,7 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
 }
 
 #[tokio::test]
-async fn test_import_stdio_server_updates_an_active_runtime() {
+async fn test_import_stdio_server_updates_an_active_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
@@ -4589,6 +4611,11 @@ async fn test_import_stdio_server_updates_an_active_runtime() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("runtime-import")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_configs()
         .await
@@ -4772,38 +4799,21 @@ async fn test_input_definitions_crud() {
         }))
         .unwrap();
 
-    let mut inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    inputs.push(input);
-    state
-        .config
-        .save_inputs_for_instance(TEST_INSTANCE_ID, &inputs)
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, input)
+        .await
         .unwrap();
 
     // Read back
-    let loaded = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let loaded = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id(), "test-input");
 
     // Remove
-    let filtered: Vec<_> = loaded
-        .into_iter()
-        .filter(|i| i.id() != "test-input")
-        .collect();
-    state
-        .config
-        .save_inputs_for_instance(TEST_INSTANCE_ID, &filtered)
+    inputs::remove_input_core(&state, TEST_INSTANCE_ID, "test-input")
+        .await
         .unwrap();
 
-    let after = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let after = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
     assert!(after.is_empty());
 }
 
@@ -4856,7 +4866,7 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "runtime-token".to_string(),
-            label: "Runtime token".to_string(),
+            label: Some("Runtime token".to_string()),
             description: None,
             default: None,
             password: Some(false),
@@ -4878,13 +4888,9 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     }))
     .unwrap();
 
-    let save_error = sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
         .await
-        .unwrap_err();
-    assert!(matches!(
-        &save_error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "runtime-token"
-    ));
+        .unwrap();
     let persisted = state
         .sdk_config
         .load(TEST_INSTANCE_ID)
@@ -4982,6 +4988,55 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
     );
 }
 
+#[tokio::test]
+async fn test_mcp_config_persists_a_canonical_pick_reference() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PickString {
+            id: "region".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            options: vec![inputs::PickOption {
+                label: "US".to_string(),
+                value: "us".to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "dynamic-pick",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"REGION": "${input:region}"}
+        }
+    }))
+    .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    let persisted = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "dynamic-pick")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(persisted.config).unwrap()["server_parameters"]["env"]["REGION"],
+        "${input:region}"
+    );
+}
+
 async fn create_running_input_backed_state(path: &std::path::Path, server_name: &str) -> AppState {
     let state = create_mcp_test_app_state(path).await;
     inputs::add_or_update_input_core(
@@ -4989,7 +5044,7 @@ async fn create_running_input_backed_state(path: &std::path::Path, server_name: 
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "runtime-token".to_string(),
-            label: "Runtime token".to_string(),
+            label: Some("Runtime token".to_string()),
             description: None,
             default: None,
             password: Some(false),
@@ -5050,7 +5105,69 @@ async fn test_restart_preserves_structured_missing_input_error() {
 }
 
 #[tokio::test]
-async fn test_input_commands_sync_runtime_definitions() {
+async fn test_start_preserves_structured_invalid_pick_selection_and_stored_value() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let pick = |value: &str| inputs::InputDefinition::PickString {
+        id: "region".to_string(),
+        label: None,
+        description: Some("Region".to_string()),
+        default: Some(value.to_string()),
+        options: vec![inputs::PickOption {
+            label: value.to_uppercase(),
+            value: value.to_string(),
+        }],
+    };
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, pick("eu"))
+        .await
+        .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("eu"),
+    )
+    .await
+    .unwrap();
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, pick("cn"))
+        .await
+        .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "invalid-pick",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::InvalidSelection {
+            ref input_id,
+            ref value,
+            ..
+        } if input_id == "region" && value == "eu"
+    ));
+    let view = inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "region")
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.status, inputs::InputValueStatus::InvalidSelection);
+    assert_eq!(view.value, Some(serde_json::json!("eu")));
+}
+
+#[tokio::test]
+async fn test_input_definition_changes_require_runtime_recreation() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -5059,9 +5176,9 @@ async fn test_input_commands_sync_runtime_definitions() {
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "api-key".to_string(),
-            label: "API Key".to_string(),
+            label: Some("API Key".to_string()),
             description: Some("Secret API key".to_string()),
-            default: Some("default-key".to_string()),
+            default: None,
             password: Some(false),
         },
     )
@@ -5073,19 +5190,7 @@ async fn test_input_commands_sync_runtime_definitions() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    {
-        let runtime_inputs = runtime.inputs.read().await;
-        let input = runtime_inputs
-            .get("api-key")
-            .expect("runtime input definition should be synced");
-        assert!(matches!(
-            input,
-            a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
-                if prompt.description == "Secret API key"
-                    && prompt.default.as_deref() == Some("default-key")
-                    && prompt.password == Some(false)
-        ));
-    }
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
 
     inputs::set_input_value_core(
         &state,
@@ -5096,25 +5201,6 @@ async fn test_input_commands_sync_runtime_definitions() {
     .await
     .unwrap();
 
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    let resolver_probe: MCPServerConfig = serde_json::from_value(serde_json::json!({
-        "type": "stdio",
-        "name": "input-resolver-probe",
-        "disabled": true,
-        "server_parameters": {
-            "command": "echo",
-            "args": ["${input:api-key}"],
-            "env": {}
-        }
-    }))
-    .unwrap();
-    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, resolver_probe)
-        .await
-        .unwrap();
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_value(
             state.secret_store.as_ref(),
@@ -5124,87 +5210,22 @@ async fn test_input_commands_sync_runtime_definitions() {
         .unwrap(),
         Some(serde_json::json!("runtime-key"))
     );
-    assert!(runtime
-        .sdk_mcp_server_ids()
-        .await
-        .contains(&bundle_id("input-resolver-probe")));
-
-    inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "api-key")
-        .await
-        .unwrap();
-    assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "api-key"
-        )
-        .unwrap(),
-        None
-    );
-
-    inputs::set_input_value_core(
-        &state,
-        TEST_INSTANCE_ID,
-        "api-key".to_string(),
-        serde_json::json!("runtime-key-2"),
-    )
-    .await
-    .unwrap();
-    inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "api-key"
-        )
-        .unwrap(),
-        None
-    );
-
-    inputs::set_input_value_core(
-        &state,
-        TEST_INSTANCE_ID,
-        "api-key".to_string(),
-        serde_json::json!("stale-runtime-key"),
-    )
-    .await
-    .unwrap();
-    inputs::remove_input_core(&state, TEST_INSTANCE_ID, "api-key")
-        .await
-        .unwrap();
-
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     assert!(!runtime.inputs.read().await.contains_key("api-key"));
 
-    inputs::add_or_update_input_core(
-        &state,
-        TEST_INSTANCE_ID,
-        inputs::InputDefinition::PromptString {
-            id: "api-key".to_string(),
-            label: "API Key".to_string(),
-            description: None,
-            default: Some("default-key".to_string()),
-            password: Some(false),
-        },
-    )
-    .await
-    .unwrap();
-    let runtime = state
+    drop(state);
+    let restarted_state = create_mcp_test_app_state(tmp.path()).await;
+    let restarted_runtime = restarted_state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let runtime_inputs = runtime.inputs.read().await;
+    let runtime_inputs = restarted_runtime.inputs.read().await;
     assert!(matches!(
         runtime_inputs.get("api-key"),
         Some(a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt))
-            if prompt.default.as_deref() == Some("default-key")
+            if prompt.description == "API Key"
+                && prompt.default.is_none()
+                && prompt.password == Some(false)
     ));
 }
 
@@ -5219,7 +5240,7 @@ async fn test_input_values_crud() {
             TEST_INSTANCE_ID,
             inputs::InputDefinition::PromptString {
                 id: id.to_string(),
-                label: id.to_string(),
+                label: Some(id.to_string()),
                 description: None,
                 default: None,
                 password: None,
@@ -5240,7 +5261,7 @@ async fn test_input_values_crud() {
         &state,
         TEST_INSTANCE_ID,
         "key2".to_string(),
-        serde_json::json!(42),
+        serde_json::json!("42"),
     )
     .await
     .unwrap();
@@ -5261,7 +5282,7 @@ async fn test_input_values_crud() {
             "key2"
         )
         .unwrap(),
-        Some(serde_json::json!(42))
+        Some(serde_json::json!("42"))
     );
 
     inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)

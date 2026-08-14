@@ -15,6 +15,8 @@ export function InputForm({ initialValues, onSubmit, onCancel, loading }: InputF
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const inputType = Form.useWatch('type', form);
+  const passwordMode = Form.useWatch('password', form);
+  const pickOptions = Form.useWatch('options', form);
 
   const getInitialValues = () => {
     if (!initialValues) return { type: 'PromptString' };
@@ -32,25 +34,27 @@ export function InputForm({ initialValues, onSubmit, onCancel, loading }: InputF
       input = {
         type: 'PromptString',
         id: values.id as string,
-        label: values.label as string,
+        label: (values.label as string | undefined)?.trim() || undefined,
         description: values.description as string | undefined,
-        default: values.default as string | undefined,
+        default: values.password
+          ? undefined
+          : (values.default as string | undefined)?.trim() || undefined,
         password: values.password as boolean | undefined,
       };
     } else if (values.type === 'PickString') {
       input = {
         type: 'PickString',
         id: values.id as string,
-        label: values.label as string,
+        label: (values.label as string | undefined)?.trim() || undefined,
         description: values.description as string | undefined,
         options: (values.options as { label: string; value: string }[]) || [],
-        default: values.default as string | undefined,
+        default: (values.default as string | undefined)?.trim() || undefined,
       };
     } else {
       input = {
         type: 'Command',
         id: values.id as string,
-        label: values.label as string,
+        label: (values.label as string | undefined)?.trim() || undefined,
         command: values.command as string,
         args: (values.args as string[])?.filter(Boolean) || undefined,
       };
@@ -73,17 +77,26 @@ export function InputForm({ initialValues, onSubmit, onCancel, loading }: InputF
         <Input disabled={!!initialValues} />
       </Form.Item>
 
-      <Form.Item name="label" label={t('inputs.form.label')} rules={[{ required: true, message: t('inputs.form.labelRequired') }]}>
+      <Form.Item name="label" label={t('inputs.form.label')}>
         <Input />
       </Form.Item>
 
-      <Form.Item name="description" label={t('inputs.form.description')}>
-        <Input.TextArea rows={2} />
-      </Form.Item>
-
-      {(inputType === 'PromptString' || inputType === 'PickString') && (
+      {((inputType === 'PromptString' && !passwordMode) || inputType === 'PickString') && (
         <Form.Item name="default" label={t('inputs.form.defaultValue')}>
-          <Input />
+          {inputType === 'PickString' ? (
+            <Select
+              allowClear
+              options={((pickOptions || []) as { label?: string; value?: string }[])
+                .filter((option) => option.label && option.value)
+                .map((option, index) => ({
+                  label: option.label,
+                  value: option.value,
+                  key: `${index}:${option.label}:${option.value}`,
+                }))}
+            />
+          ) : (
+            <Input />
+          )}
         </Form.Item>
       )}
 
@@ -94,16 +107,31 @@ export function InputForm({ initialValues, onSubmit, onCancel, loading }: InputF
       )}
 
       {inputType === 'PickString' && (
-        <Form.Item label={t('inputs.form.options')}>
-          <Form.List name="options">
-            {(fields, { add, remove }) => (
+          <Form.Item
+            label={t('inputs.form.options')}
+            required
+          >
+            <Form.List
+              name="options"
+              rules={[{
+                validator: async (_, options) => {
+                  if (!options || options.length === 0) {
+                    throw new Error(t('inputs.form.optionRequired'));
+                  }
+                },
+              }]}
+            >
+            {(fields, { add, remove }, { errors }) => (
               <>
                 {fields.map((field) => (
                   <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
-                    <Form.Item name={[field.name, 'label']} noStyle>
+                    <Form.Item name={[field.name, 'label']} rules={[{ required: true }]}>
                       <Input placeholder="Label" style={{ width: 150 }} />
                     </Form.Item>
-                    <Form.Item name={[field.name, 'value']} noStyle>
+                    <Form.Item
+                      name={[field.name, 'value']}
+                      rules={[{ required: true }]}
+                    >
                       <Input placeholder="Value" style={{ width: 150 }} />
                     </Form.Item>
                     <MinusCircleOutlined onClick={() => remove(field.name)} />
@@ -112,6 +140,7 @@ export function InputForm({ initialValues, onSubmit, onCancel, loading }: InputF
                 <Button type="dashed" onClick={() => add({ label: '', value: '' })} block icon={<PlusOutlined />}>
                   {t('inputs.form.addOption')}
                 </Button>
+                <Form.ErrorList errors={errors} />
               </>
             )}
           </Form.List>

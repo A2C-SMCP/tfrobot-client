@@ -1,5 +1,6 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
+use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
 use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
 use crate::AppState;
@@ -10,13 +11,10 @@ use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, Provenan
 use a2c_smcp::smcp_computer::settings::SettingsValidationError;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tauri::State;
 
 /// Client-facing projection of SDK-owned configuration.
-///
-/// SDK input definitions are intentionally omitted: tfrobot-client owns per-Computer input
-/// definitions, values, and secrets, so the SDK snapshot must not become their UI source of truth.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SdkConfigSnapshotView {
@@ -263,11 +261,9 @@ pub async fn upsert_computer_mcp_config_core(
             "bundleId 'client_control' is reserved for the built-in Client Control provider",
         ));
     }
-    let defined_inputs = state
-        .config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let missing_input_id = referenced_input_ids(&config)?
+    let defined_inputs = state.sdk_config.load_input_definitions(instance_id);
+    let referenced_input_ids = referenced_input_ids(&config)?;
+    let missing_input_id = referenced_input_ids
         .into_iter()
         .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
     let previous_config = state
@@ -278,7 +274,6 @@ pub async fn upsert_computer_mcp_config_core(
         .into_iter()
         .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
         .map(|server| server.config);
-    let next_bundle_id = resolve_bundle_id(&config);
     let runtime = state.computer_registry.runtime(instance_id).await;
     let oauth_identity_change = previous_config
         .as_ref()
@@ -300,35 +295,7 @@ pub async fn upsert_computer_mcp_config_core(
         .sdk_config
         .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    if let Some(runtime) = runtime {
-        if let Some(previous_bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
-            if previous_bundle_id != next_bundle_id {
-                if let Err(error) = runtime
-                    .remove_user_mcp_server_config(&previous_bundle_id)
-                    .await
-                {
-                    runtime
-                        .record_mcp_config_apply_diagnostic(
-                            previous_bundle_id.clone(),
-                            format!(
-                                "Configuration saved, but the previous MCP runtime identity could not be removed: {error}. Restart Runtime or inspect the logs before retrying."
-                            ),
-                        )
-                        .await;
-                    return Err(RuntimeActionError::runtime(format!(
-                        "MCP config was saved, but the previous runtime identity could not be removed: {error}"
-                    )));
-                }
-            }
-        }
-        if let Some(input_id) = missing_input_id {
-            return Err(missing_input_definition_error(input_id));
-        }
-        runtime
-            .apply_user_mcp_server_config(config)
-            .await
-            .map_err(RuntimeActionError::from)?;
-    } else if let Some(input_id) = missing_input_id {
+    if let Some(input_id) = missing_input_id {
         return Err(missing_input_definition_error(input_id));
     }
     Ok(())
@@ -376,45 +343,19 @@ fn missing_input_definition_error(input_id: String) -> RuntimeActionError {
     }
 }
 
-fn referenced_input_ids(config: &MCPServerConfig) -> Result<BTreeSet<String>, RuntimeActionError> {
+fn referenced_input_ids(
+    config: &MCPServerConfig,
+) -> Result<std::collections::BTreeSet<String>, RuntimeActionError> {
     let value = serde_json::to_value(config)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let mut references = BTreeSet::new();
-    if let Some(parameters) = value.get("server_parameters") {
-        collect_input_references_in_value(parameters, &mut references);
-    }
-    if let Some(env_file) = value.get("envFile") {
-        collect_input_references_in_value(env_file, &mut references);
+    let mut references = std::collections::BTreeSet::new();
+    for field in [value.get("server_parameters"), value.get("envFile")]
+        .into_iter()
+        .flatten()
+    {
+        references.extend(input_references::referenced_input_ids(field));
     }
     Ok(references)
-}
-
-fn collect_input_references_in_value(value: &Value, references: &mut BTreeSet<String>) {
-    match value {
-        Value::String(text) => collect_input_references_in_string(text, references),
-        Value::Array(values) => values
-            .iter()
-            .for_each(|value| collect_input_references_in_value(value, references)),
-        Value::Object(values) => values
-            .values()
-            .for_each(|value| collect_input_references_in_value(value, references)),
-        _ => {}
-    }
-}
-
-fn collect_input_references_in_string(value: &str, references: &mut BTreeSet<String>) {
-    let mut remaining = value;
-    while let Some(start) = remaining.find("${input:") {
-        let candidate = &remaining[start + "${input:".len()..];
-        let Some(end) = candidate.find('}') else {
-            return;
-        };
-        let id = &candidate[..end];
-        if !id.is_empty() {
-            references.insert(id.to_string());
-        }
-        remaining = &candidate[end + 1..];
-    }
 }
 
 /// Removes one SDK-owned MCP declaration without stopping or reloading runtime state.
@@ -458,23 +399,6 @@ pub async fn remove_computer_mcp_config_core(
         .sdk_config
         .remove_mcp_config(instance_id, name)
         .map_err(|error| error.to_string())?;
-    if let Some(runtime) = runtime {
-        if let Some(bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
-            if let Err(error) = runtime.remove_user_mcp_server_config(&bundle_id).await {
-                runtime
-                    .record_mcp_config_apply_diagnostic(
-                        bundle_id.clone(),
-                        format!(
-                            "Configuration removed, but the active MCP runtime could not be cleaned up: {error}. Restart Runtime or inspect the logs before retrying."
-                        ),
-                    )
-                    .await;
-                return Err(format!(
-                    "MCP config was removed, but runtime cleanup failed: {error}"
-                ));
-            }
-        }
-    }
     Ok(())
 }
 

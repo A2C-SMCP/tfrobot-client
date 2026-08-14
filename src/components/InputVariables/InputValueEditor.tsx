@@ -38,8 +38,8 @@ export function InputValueEditor({ inputId, inputs, currentValue, onSubmit, onCa
           onChange={(v) => setValue(v)}
           placeholder={t('inputs.selectValue')}
         >
-          {input.options.map((opt) => (
-            <Select.Option key={opt.value} value={opt.value}>
+          {input.options.map((opt, index) => (
+            <Select.Option key={`${index}:${opt.label}:${opt.value}`} value={opt.value}>
               {opt.label}
             </Select.Option>
           ))}

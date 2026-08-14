@@ -7,9 +7,9 @@ export interface PickOption {
 }
 
 export type InputDefinition =
-  | { type: 'PromptString'; id: string; label: string; description?: string; default?: string; password?: boolean }
-  | { type: 'PickString'; id: string; label: string; description?: string; options: PickOption[]; default?: string }
-  | { type: 'Command'; id: string; label: string; command: string; args?: string[] };
+  | { type: 'PromptString'; id: string; label?: string; description?: string; default?: string; password?: boolean }
+  | { type: 'PickString'; id: string; label?: string; description?: string; options: PickOption[]; default?: string }
+  | { type: 'Command'; id: string; label?: string; command: string; args?: string[] };
 
 export function getInputId(input: InputDefinition): string {
   return input.id;
@@ -17,12 +17,21 @@ export function getInputId(input: InputDefinition): string {
 
 export interface InputValueView {
   configured: boolean;
+  status: 'configured' | 'using_default' | 'first_option' | 'invalid_selection' | 'missing' | 'runtime_command';
   value?: unknown;
+}
+
+export interface InputReferenceIssue {
+  inputId: string;
+  serverName: string;
+  layer: 'project' | 'local';
+  fieldPath: string;
 }
 
 interface InputState {
   inputs: InputDefinition[];
   values: Record<string, InputValueView>;
+  referenceIssues: InputReferenceIssue[];
   loading: boolean;
   error: string | null;
   activeInstanceId: string | null;
@@ -31,8 +40,15 @@ interface InputState {
 
   fetchInputs: (instanceId: string) => Promise<void>;
   fetchValues: (instanceId: string) => Promise<void>;
+  fetchReferenceIssues: (instanceId: string) => Promise<void>;
   getInput: (instanceId: string, id: string) => Promise<InputDefinition | null>;
   addOrUpdateInput: (instanceId: string, input: InputDefinition) => Promise<void>;
+  saveInput: (
+    instanceId: string,
+    input: InputDefinition,
+    value?: string,
+    keepExistingValue?: boolean,
+  ) => Promise<void>;
   removeInput: (instanceId: string, id: string) => Promise<void>;
   setValue: (instanceId: string, id: string, value: unknown) => Promise<void>;
   setRuntimeValue: (instanceId: string, id: string, value: unknown) => Promise<boolean>;
@@ -45,6 +61,7 @@ interface InputState {
 const initialState = {
   inputs: [] as InputDefinition[],
   values: {} as Record<string, InputValueView>,
+  referenceIssues: [] as InputReferenceIssue[],
   loading: false,
   error: null as string | null,
   activeInstanceId: null as string | null,
@@ -102,6 +119,15 @@ export const useInputStore = create<InputState>((set, get) => ({
     }
   },
 
+  fetchReferenceIssues: async (instanceId: string) => {
+    try {
+      const referenceIssues = await invoke<InputReferenceIssue[]>('list_input_reference_issues', { instanceId });
+      if (get().activeInstanceId === instanceId) set({ referenceIssues });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   getInput: async (instanceId: string, id: string) => (
     invoke<InputDefinition | null>('get_input', { instanceId, id })
   ),
@@ -117,12 +143,31 @@ export const useInputStore = create<InputState>((set, get) => ({
     }
   },
 
+  saveInput: async (instanceId, input, value, keepExistingValue = false) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('save_input', {
+        instanceId,
+        input,
+        value: value ?? null,
+        keepExistingValue,
+      });
+      await get().fetchInputs(instanceId);
+      await get().fetchValues(instanceId);
+      await get().fetchReferenceIssues(instanceId);
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
   removeInput: async (instanceId: string, id: string) => {
     set({ loading: true, error: null });
     try {
       await invoke('remove_input', { instanceId, id });
       await get().fetchInputs(instanceId);
       await get().fetchValues(instanceId);
+      await get().fetchReferenceIssues(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
@@ -161,7 +206,7 @@ export const useInputStore = create<InputState>((set, get) => ({
   clearValues: async (instanceId: string) => {
     try {
       await invoke('clear_input_values', { instanceId });
-      set({ values: {} });
+      await get().fetchValues(instanceId);
     } catch (e) {
       set({ error: String(e) });
       throw e;

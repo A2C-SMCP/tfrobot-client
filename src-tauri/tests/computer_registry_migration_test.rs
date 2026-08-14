@@ -64,9 +64,9 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
     legacy_instance.local_skills_root = Some(expected_skill_home.clone());
     legacy_instance.inputs = vec![InputDefinition::PromptString {
         id: "api-token".to_string(),
-        label: "API token".to_string(),
+        label: Some("API token".to_string()),
         description: None,
-        default: Some("password-default".to_string()),
+        default: None,
         password: Some(true),
     }];
     legacy_instance.input_values.insert(
@@ -159,8 +159,8 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
     assert!(!state.config.legacy_connection_targets_path().exists());
 
     assert!(state
-        .config
-        .load_inputs_for_instance("computer-a")
+        .sdk_config
+        .load_project_input_definitions("computer-a")
         .unwrap()
         .is_empty());
     assert_eq!(
@@ -259,8 +259,8 @@ async fn startup_does_not_import_legacy_global_inputs_or_read_unscoped_keychain_
 
     assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
     assert!(state
-        .config
-        .load_inputs_for_instance("computer-a")
+        .sdk_config
+        .load_project_input_definitions("computer-a")
         .unwrap()
         .is_empty());
     assert_eq!(
