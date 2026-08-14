@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 import type { McpServerStatus } from '@/stores/mcpStore';
 
@@ -24,6 +25,7 @@ const mockStore = {
   startAll: vi.fn(),
   stopAll: vi.fn(),
 };
+const mockedInvoke = vi.mocked(invoke);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -42,6 +44,7 @@ vi.mock('@/stores/mcpStore', () => ({
 describe('McpRuntimeControls', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedInvoke.mockReset();
     mockStore.servers = [userServer];
   });
 
@@ -127,6 +130,73 @@ describe('McpRuntimeControls', () => {
       'The MCP operation failed. View Runtime diagnostics or logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
+  });
+
+  it('advances through missing inputs and closes the prompt while MCP startup continues', async () => {
+    const startup = deferred<void>();
+    mockStore.startServer
+      .mockRejectedValueOnce({
+        code: 'missing_input',
+        input_id: 'openrouterkey',
+        env_hint: 'A2C_SMCP_openrouterkey',
+        message: "Required value input 'openrouterkey' is unresolved",
+      })
+      .mockRejectedValueOnce({
+        code: 'missing_input',
+        input_id: 'zhipukey',
+        env_hint: 'A2C_SMCP_zhipukey',
+        message: "Required value input 'zhipukey' is unresolved",
+      })
+      .mockReturnValueOnce(startup.promise);
+    mockedInvoke.mockImplementation(async (command, args) => {
+      if (command === 'get_input') {
+        const inputId = (args as { id: string }).id;
+        return {
+          type: 'PromptString',
+          id: inputId,
+          label: inputId,
+          password: false,
+        };
+      }
+      if (command === 'set_input_value') return undefined;
+      if (command === 'list_input_values') return {};
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+    fireEvent.click(screen.getByTitle('Start'));
+
+    expect(await screen.findByText(
+      "Required value input 'openrouterkey' is unresolved",
+    )).toBeInTheDocument();
+    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
+      target: { value: 'test-openrouter-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(
+      "Required value input 'openrouterkey' is unresolved",
+    )).not.toBeInTheDocument();
+    expect(await screen.findByText(
+      "Required value input 'zhipukey' is unresolved",
+    )).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
+      target: { value: 'test-zhipu-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText(
+      "Required value input 'zhipukey' is unresolved",
+    )).not.toBeInTheDocument();
+
+    await act(async () => {
+      startup.resolve();
+      await startup.promise;
+    });
+    expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
   });
 
   it('shows Plugin-owned diagnostics without lifecycle buttons and opens the matching Plugin', () => {

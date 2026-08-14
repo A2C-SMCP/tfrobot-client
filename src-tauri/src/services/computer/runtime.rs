@@ -67,15 +67,12 @@ impl ComputerInstanceRuntime {
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
         ) {
-            self.reconcile_sdk_governance_inner()
+            self.reconcile_governance_for_computer_start("idempotent Computer startup")
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, "idempotent Computer startup");
-            return match Self::take_first_input_start_failure(failures) {
-                Some(error) => Err(ComputerRuntimeStartError::Sdk(error)),
-                None => Ok(()),
-            };
+            return Ok(());
         } else if matches!(
             lifecycle,
             LifecycleState::Starting
@@ -93,7 +90,10 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.computer.read().await.boot_up().await {
             return Err(ComputerRuntimeStartError::Sdk(error));
         }
-        if let Err(error) = self.reconcile_sdk_governance_inner().await {
+        if let Err(error) = self
+            .reconcile_governance_for_computer_start("Computer startup")
+            .await
+        {
             // boot_up has already moved the SDK lifecycle to Started. A governance failure is
             // still a failed Computer start transaction, so roll the partially started handle
             // back to Shutdown; otherwise the public Start action becomes unavailable and the
@@ -108,10 +108,7 @@ impl ComputerInstanceRuntime {
         }
         let failures = self.start_desired_mcp_servers_inner().await;
         self.log_mcp_start_failures(&failures, "Computer startup");
-        match Self::take_first_input_start_failure(failures) {
-            Some(error) => Err(ComputerRuntimeStartError::Sdk(error)),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     pub async fn is_running(&self) -> bool {

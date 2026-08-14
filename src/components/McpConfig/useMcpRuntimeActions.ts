@@ -123,6 +123,7 @@ export function useMcpRuntimeActions({
     if (!pending) return;
     const action = pending.action;
     const context = beginAction();
+    setPending(null);
     if (await execute(action, context)) onSuccess(action);
   };
 

@@ -10,6 +10,7 @@ use crate::services::computer_runtime_events::{
     RuntimeDiagnosticRecord, SdkProblemObservations,
 };
 use crate::services::config::instance_storage_dir_name;
+use crate::services::input_references::referenced_input_ids;
 use crate::services::input_resolver::RuntimeInputResolver;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
@@ -17,7 +18,7 @@ use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAut
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
-use a2c_smcp::smcp_computer::inputs::run_command;
+use a2c_smcp::smcp_computer::inputs::{env_var_name, run_command};
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
@@ -1557,6 +1558,11 @@ impl ComputerInstanceRuntime {
 
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
+        if let Some(error) = self.missing_configured_input_definition(bundle_id).await {
+            self.record_mcp_start_diagnostic(bundle_id.clone(), format!("Start failed: {error}"))
+                .await;
+            return Err(ComputerError::InputResolution(error));
+        }
         let result = self.computer.read().await.start_mcp_client(bundle_id).await;
         if Self::is_expected_oauth_required(&result) {
             // A validated OAuth challenge is an expected runtime state, not a malformed server
@@ -1579,6 +1585,27 @@ impl ComputerInstanceRuntime {
             }
         }
         result
+    }
+
+    async fn missing_configured_input_definition(
+        &self,
+        bundle_id: &BundleId,
+    ) -> Option<InputResolutionError> {
+        let config = self.sdk_mcp_server_config_map().await.remove(bundle_id)?;
+        let config = serde_json::to_value(config).ok()?;
+        let referenced = referenced_input_ids(&config);
+        if referenced.is_empty() {
+            return None;
+        }
+        let defined = self.inputs.read().await;
+        referenced
+            .into_iter()
+            .find(|input_id| !defined.contains_key(input_id))
+            .map(|id| InputResolutionError::Missing {
+                env_hint: env_var_name(&id),
+                id,
+                kind: InputKind::Value,
+            })
     }
 
     /// True when a start result means "this OAuth server is awaiting authorization" rather than a
@@ -1710,18 +1737,23 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    pub(super) fn take_first_input_start_failure(
-        failures: Vec<(BundleId, ComputerError)>,
-    ) -> Option<ComputerError> {
-        failures.into_iter().find_map(|(_, error)| match &error {
-            ComputerError::InputResolution(_) => Some(error),
-            ComputerError::RuntimeError(message)
-                if message.starts_with("Failed to execute command") =>
-            {
-                Some(error)
+    pub(super) async fn reconcile_governance_for_computer_start(
+        &self,
+        cause: &str,
+    ) -> ComputerResult<()> {
+        match self.reconcile_sdk_governance_inner().await {
+            Ok(_) => Ok(()),
+            Err(ComputerError::InputResolution(error)) => {
+                log::warn!(
+                    "Plugin MCP input resolution failed for Computer instance {} during {}: {}",
+                    self.instance.id,
+                    cause,
+                    error
+                );
+                Ok(())
             }
-            _ => None,
-        })
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn remount_enabled_plugin_servers(&self) -> ComputerResult<()> {
@@ -1856,6 +1888,35 @@ impl ComputerInstanceRuntime {
             .add_or_update_input(input)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Adds persisted definitions that were absent when this SDK handle was created.
+    ///
+    /// This is intentionally narrower than ordinary Input CRUD: callers use it only at an
+    /// explicit MCP start boundary, and existing runtime definitions are never refreshed. That
+    /// lets a user create a definition in response to a structured start failure and retry only
+    /// the affected MCP without hot-applying unrelated Input edits.
+    pub async fn materialize_missing_configured_inputs_for_retry(
+        &self,
+        inputs: Vec<MCPServerInput>,
+    ) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active_computer()
+            .map_err(|error| error.to_string())?;
+        for input in inputs {
+            let input_id = input.id().to_string();
+            if self.inputs.read().await.contains_key(&input_id) {
+                continue;
+            }
+            self.computer
+                .read()
+                .await
+                .add_or_update_input(input.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            self.inputs.write().await.insert(input_id, input);
+        }
+        Ok(())
     }
 
     pub async fn synced_sdk_servers(&self) -> HashMap<BundleId, ServerName> {
@@ -2267,14 +2328,11 @@ impl ComputerInstanceRuntime {
                 .boot_up()
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
-            self.reconcile_sdk_governance_inner()
+            self.reconcile_governance_for_computer_start(reason)
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
             let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, reason);
-            if let Some(error) = Self::take_first_input_start_failure(failures) {
-                return Err(ComputerRuntimeStartError::Sdk(error));
-            }
         }
         Ok(())
     }
