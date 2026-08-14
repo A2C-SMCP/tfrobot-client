@@ -1,9 +1,12 @@
+use crate::commands::inputs::input_definition_to_sdk;
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::computer::{
-    ComputerRuntimeAction, ComputerRuntimeActionUnavailable, McpServerManagedBy,
+    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeActionUnavailable,
+    McpServerManagedBy,
 };
 use crate::services::computer_runtime_events::PublicOAuthStatus;
+use crate::services::input_references::referenced_input_ids;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -265,6 +268,13 @@ pub async fn start_mcp_server_core(
     let server_name = ensure_user_managed_server(bundle_id, &runtime)
         .await
         .map_err(RuntimeActionError::runtime)?;
+    materialize_missing_configured_inputs_for_retry(
+        state,
+        instance_id,
+        &runtime,
+        std::slice::from_ref(bundle_id),
+    )
+    .await?;
     runtime
         .start_mcp_server(bundle_id)
         .await
@@ -387,6 +397,12 @@ pub async fn start_all_servers_core(
         .filter(|candidate| !candidate.started)
         .collect();
     let operation_count = operation_candidates.len();
+    let operation_ids: Vec<_> = operation_candidates
+        .iter()
+        .map(|candidate| candidate.bundle_id.clone())
+        .collect();
+    materialize_missing_configured_inputs_for_retry(state, instance_id, &runtime, &operation_ids)
+        .await?;
     let names: std::collections::HashMap<_, _> = operation_candidates
         .iter()
         .map(|candidate| (candidate.bundle_id.clone(), candidate.name.clone()))
@@ -427,6 +443,43 @@ pub async fn start_all_servers_core(
         result.failures.len()
     );
     Ok(result)
+}
+
+async fn materialize_missing_configured_inputs_for_retry(
+    state: &AppState,
+    instance_id: &str,
+    runtime: &ComputerInstanceRuntime,
+    bundle_ids: &[BundleId],
+) -> Result<(), RuntimeActionError> {
+    if bundle_ids.is_empty() {
+        return Ok(());
+    }
+    let bundle_ids = bundle_ids.iter().collect::<std::collections::HashSet<_>>();
+    let referenced_inputs = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .filter(|server| bundle_ids.contains(&resolve_bundle_id(&server.config)))
+        .filter_map(|server| serde_json::to_value(server.config).ok())
+        .flat_map(|config| referenced_input_ids(&config))
+        .collect::<std::collections::HashSet<_>>();
+    if referenced_inputs.is_empty() {
+        return Ok(());
+    }
+    let definitions = state
+        .sdk_config
+        .load_project_input_definitions(instance_id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?
+        .into_iter()
+        .filter(|definition| referenced_inputs.contains(definition.id()))
+        .map(|definition| input_definition_to_sdk(&definition))
+        .collect();
+    runtime
+        .materialize_missing_configured_inputs_for_retry(definitions)
+        .await
+        .map_err(RuntimeActionError::runtime)
 }
 
 #[tauri::command]

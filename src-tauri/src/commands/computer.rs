@@ -11,14 +11,11 @@ use crate::services::computer::{
     ConnectionStateSummary, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
-use crate::services::input_references::referenced_input_ids;
 use crate::services::input_value_index;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
-use a2c_smcp::smcp_computer::inputs::env_var_name;
-use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -577,7 +574,6 @@ pub async fn start_computer_instance_core(
         .ensure_runtime_action(ComputerRuntimeAction::Start)
         .await
         .map_err(RuntimeActionError::from)?;
-    preflight_input_definitions(state, &id)?;
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
@@ -675,7 +671,6 @@ pub async fn restart_computer_instance_core(
         .ensure_runtime_action(ComputerRuntimeAction::Restart)
         .await
         .map_err(RuntimeActionError::from)?;
-    preflight_input_definitions(state, &id)?;
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
@@ -695,41 +690,6 @@ pub async fn restart_computer_instance_core(
     }
 
     Ok(status_from_instance(&instance, &runtime).await)
-}
-
-fn preflight_input_definitions(
-    state: &AppState,
-    instance_id: &str,
-) -> Result<(), RuntimeActionError> {
-    let snapshot = state.sdk_config.load(instance_id);
-    let defined = snapshot
-        .inputs
-        .inputs
-        .into_iter()
-        .map(|definition| definition.id().to_string())
-        .collect::<HashSet<_>>();
-    let missing = snapshot
-        .mcp
-        .servers
-        .into_iter()
-        // Plugin inputs are runtime-only declarations loaded from the installed plugin root.
-        // They intentionally do not appear in the SDK top-level input document, so their
-        // structured resolution errors must come from governance reconciliation.
-        .filter(|server| server.origin != ProvenanceScope::Plugin)
-        .find_map(|server| {
-            let value = serde_json::to_value(server.config).ok()?;
-            referenced_input_ids(&value)
-                .into_iter()
-                .find(|input_id| !defined.contains(input_id))
-        });
-    if let Some(input_id) = missing {
-        return Err(RuntimeActionError::MissingInput {
-            env_hint: env_var_name(&input_id),
-            message: format!("Required input '{input_id}' is not defined for this Computer"),
-            input_id,
-        });
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1368,7 +1328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_preflight_reports_a_missing_sdk_input_definition() {
+    async fn computer_start_is_not_blocked_by_a_missing_sdk_input_definition() {
         let (state, _dir) = test_state();
         state
             .sdk_config
@@ -1387,18 +1347,11 @@ mod tests {
             )
             .unwrap();
 
-        let error = start_computer_instance_core(None, &state, "computer-a".to_string())
+        let status = start_computer_instance_core(None, &state, "computer-a".to_string())
             .await
-            .unwrap_err();
+            .expect("an MCP input failure must not fail Computer startup");
 
-        assert_eq!(
-            error,
-            RuntimeActionError::MissingInput {
-                input_id: "workspace".to_string(),
-                env_hint: env_var_name("workspace"),
-                message: "Required input 'workspace' is not defined for this Computer".to_string(),
-            }
-        );
+        assert!(status.running);
     }
 
     #[tokio::test]

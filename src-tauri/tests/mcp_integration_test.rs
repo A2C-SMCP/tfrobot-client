@@ -1157,6 +1157,195 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
 }
 
 #[tokio::test]
+async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let missing_input_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "picture",
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": {
+                "OPENROUTER_API_KEY": "${input:openrouterkey}",
+                "ZHIPUAI_API_KEY": "${input:zhipukey}"
+            }
+        }
+    }))
+    .unwrap();
+
+    let config_error =
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, missing_input_server)
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        config_error,
+        RuntimeActionError::MissingInput { input_id, .. } if input_id == "openrouterkey"
+    ));
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("healthy-server"),
+    )
+    .await
+    .unwrap();
+
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .expect("an MCP input failure must not fail Computer startup");
+    assert!(started.running);
+
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .find(|server| server.name == "healthy-server")
+        .is_some_and(|server| server.running));
+    let picture = servers
+        .iter()
+        .find(|server| server.name == "picture")
+        .expect("the failed MCP must remain visible for a targeted retry");
+    assert_eq!(picture.activation_state, MCPServerActivationState::Stopped);
+    assert_eq!(
+        picture.connection_state,
+        MCPServerConnectionState::Disconnected
+    );
+
+    let start_error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        start_error,
+        RuntimeActionError::MissingInput { input_id, .. } if input_id == "openrouterkey"
+    ));
+
+    inputs::save_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "openrouterkey".to_string(),
+            label: Some("openrouterkey".to_string()),
+            description: Some("OpenRouter API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+        Some("test-secret".to_string()),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let second_start_error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        second_start_error,
+        RuntimeActionError::MissingInput { input_id, .. } if input_id == "zhipukey"
+    ));
+    inputs::save_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "zhipukey".to_string(),
+            label: Some("zhipukey".to_string()),
+            description: Some("Zhipu API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+        Some("second-test-secret".to_string()),
+        false,
+    )
+    .await
+    .unwrap();
+
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+        .await
+        .expect("saving missing definitions sequentially must allow retrying the affected MCP");
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .find(|server| server.name == "picture")
+        .is_some_and(|server| server.running));
+}
+
+#[tokio::test]
+async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let missing_input_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "batch-picture",
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "OPENROUTER_API_KEY": "${input:batch-openrouterkey}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, missing_input_server)
+        .await
+        .unwrap_err();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("batch-healthy"),
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let first_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(first_batch.candidate_count, 2);
+    assert_eq!(first_batch.actual_operation_count, 0);
+    assert_eq!(first_batch.unchanged_count, 1);
+    assert!(matches!(
+        first_batch.failures.as_slice(),
+        [mcp::McpBatchFailure {
+            error: RuntimeActionError::MissingInput { input_id, .. },
+            ..
+        }] if input_id == "batch-openrouterkey"
+    ));
+
+    inputs::save_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "batch-openrouterkey".to_string(),
+            label: Some("batch-openrouterkey".to_string()),
+            description: Some("Batch OpenRouter API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+        Some("batch-test-secret".to_string()),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let retry_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(retry_batch.candidate_count, 2);
+    assert_eq!(retry_batch.actual_operation_count, 1);
+    assert_eq!(retry_batch.unchanged_count, 1);
+    assert!(retry_batch.failures.is_empty());
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers.iter().all(|server| server.running));
+}
+
+#[tokio::test]
 async fn test_stop_all_servers_uses_sdk_computer_runtime() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -4907,16 +5096,21 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     // Recreate the application/runtime so boot reads the persisted SDK configuration,
     // matching the production cold-start path rather than an already-loaded runtime.
     let state = create_mcp_test_app_state(tmp.path()).await;
-    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
+        .unwrap();
+    assert!(started.running);
+    let error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-apply"))
+            .await
+            .unwrap_err();
     assert!(
         matches!(
             &error,
             RuntimeActionError::MissingInput { input_id, env_hint, .. }
                 if input_id == "runtime-token" && env_hint == "A2C_SMCP_runtime_token"
         ),
-        "unexpected boot error: {error:?}"
+        "unexpected MCP start error: {error:?}"
     );
 
     inputs::set_input_value_core(
@@ -4927,11 +5121,6 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     )
     .await
     .unwrap();
-    state
-        .computer_registry
-        .start_runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-apply"))
         .await
         .unwrap();
@@ -5081,7 +5270,7 @@ async fn create_running_input_backed_state(path: &std::path::Path, server_name: 
 }
 
 #[tokio::test]
-async fn test_restart_preserves_structured_missing_input_error() {
+async fn test_restart_is_not_blocked_and_mcp_start_preserves_missing_input_error() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_running_input_backed_state(tmp.path(), "restart-runtime-input").await;
@@ -5089,10 +5278,18 @@ async fn test_restart_preserves_structured_missing_input_error() {
         .await
         .unwrap();
 
-    let error =
+    let restarted =
         computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
             .await
-            .unwrap_err();
+            .unwrap();
+    assert!(restarted.running);
+    let error = mcp::start_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id("restart-runtime-input"),
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -5100,12 +5297,12 @@ async fn test_restart_preserves_structured_missing_input_error() {
             RuntimeActionError::MissingInput { ref input_id, .. }
                 if input_id == "runtime-token"
         ),
-        "restart returned an unexpected error: {error:?}"
+        "MCP start returned an unexpected error after restart: {error:?}"
     );
 }
 
 #[tokio::test]
-async fn test_start_preserves_structured_invalid_pick_selection_and_stored_value() {
+async fn test_mcp_start_preserves_structured_invalid_pick_selection_and_stored_value() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -5148,7 +5345,11 @@ async fn test_start_preserves_structured_invalid_pick_selection_and_stored_value
         .await
         .unwrap();
 
-    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(started.running);
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("invalid-pick"))
         .await
         .unwrap_err();
     assert!(matches!(

@@ -16,7 +16,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
     computer::{
         duplicate_computer_instance_core, get_computer_instance_status_core,
@@ -481,7 +480,7 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
 }
 
 #[tokio::test]
-async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_start() {
+async fn plugin_missing_input_does_not_block_computer_across_retry_and_cold_start() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("runtime-input-marketplace");
@@ -508,19 +507,14 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap();
-    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            RuntimeActionError::MissingSecret {
-                input_id,
-                ..
-            } if input_id == "audit@acme/api_token"
-        ),
-        "unexpected runtime start error: {error:?}"
-    );
+        .unwrap();
+    assert!(started.running);
+    assert!(started.runtime.problems.iter().any(|problem| problem
+        .technical_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("audit@acme/api_token"))));
     assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
@@ -561,16 +555,14 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     )
     .unwrap();
     runtime.remount_enabled_plugin_servers().await.unwrap();
-    let remount_error = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let remounted = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
-    assert!(matches!(
-        remount_error,
-        RuntimeActionError::MissingSecret {
-            ref input_id,
-            ..
-        } if input_id == "audit@acme/api_token"
-    ));
+        .unwrap();
+    assert!(remounted.running);
+    assert!(remounted.runtime.problems.iter().any(|problem| problem
+        .technical_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("audit@acme/api_token"))));
     assert!(inputs::set_runtime_input_value_core(
         &state,
         TEST_INSTANCE_ID,
@@ -607,16 +599,14 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
-    let status_error = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let status_retry = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
-    assert!(matches!(
-        status_error,
-        RuntimeActionError::MissingSecret {
-            ref input_id,
-            ..
-        } if input_id == "audit@acme/api_token"
-    ));
+        .unwrap();
+    assert!(status_retry.running);
+    assert!(status_retry.runtime.problems.iter().any(|problem| problem
+        .technical_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("audit@acme/api_token"))));
     assert!(inputs::set_runtime_input_value_core(
         &state,
         TEST_INSTANCE_ID,
@@ -630,16 +620,14 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
         .unwrap();
 
     let restarted = create_test_app_state(tmp.path());
-    let error = start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+    let cold_started = start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        RuntimeActionError::MissingSecret {
-            ref input_id,
-            ..
-        } if input_id == "audit@acme/api_token"
-    ));
+        .unwrap();
+    assert!(cold_started.running);
+    assert!(cold_started.runtime.problems.iter().any(|problem| problem
+        .technical_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("audit@acme/api_token"))));
     assert!(inputs::set_runtime_input_value_core(
         &restarted,
         TEST_INSTANCE_ID,
