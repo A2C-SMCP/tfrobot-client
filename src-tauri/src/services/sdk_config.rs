@@ -1,3 +1,6 @@
+use crate::commands::inputs::{
+    input_definition_from_sdk, input_definition_to_sdk, InputDefinition,
+};
 use crate::services::config::ConfigService;
 use crate::services::storage::write_json_atomically;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -9,9 +12,9 @@ use a2c_smcp::smcp_computer::settings::config::{
     EntityKey, ProjectConfigDoc, ProvenanceScope, ValidationReport, WriteScope, WriteTargetError,
 };
 use a2c_smcp::smcp_computer::settings::{
-    resolve_mcp_config, resolve_settings, EnvMap, ResolveMcpConfigArgs, ResolveSettingsArgs,
-    ResolvedMcpConfig, SettingsValidationError, MANAGED_MCP_FILENAME, TFROBOT_DIRNAME,
-    XDG_CONFIG_HOME_ENV,
+    resolve_mcp_config, resolve_settings, workdir_mcp_config_path, EnvMap, ResolveMcpConfigArgs,
+    ResolveSettingsArgs, ResolvedMcpConfig, SettingsValidationError, MANAGED_MCP_FILENAME,
+    TFROBOT_DIRNAME, XDG_CONFIG_HOME_ENV,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -276,6 +279,124 @@ impl SdkConfigService {
 
     pub fn load(&self, instance_id: &str) -> ComputerConfigSnapshot {
         self.context(instance_id).load()
+    }
+
+    /// Reads the merged top-level MCP input definitions projected by the SDK.
+    ///
+    /// The returned client DTO is a UI/API projection only; definitions remain owned by the
+    /// SDK `ProjectConfigDoc` and are never persisted in client profile storage.
+    pub fn load_input_definitions(&self, instance_id: &str) -> Vec<InputDefinition> {
+        self.load(instance_id)
+            .inputs
+            .inputs
+            .iter()
+            .map(input_definition_from_sdk)
+            .collect()
+    }
+
+    /// Reads only the definitions owned by this Computer's writable project document.
+    ///
+    /// The SDK merged snapshot is intentionally not suitable for CRUD: copying it back would
+    /// shadow local/user/policy definitions in project scope and could make an edit appear to
+    /// succeed while a higher-precedence owner remains unchanged.
+    pub fn load_project_input_definitions(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<InputDefinition>, ConfigCrudError> {
+        let mcp = self.load_project_mcp_document(instance_id)?;
+        let Some(encoded) = mcp.get("inputs") else {
+            return Ok(Vec::new());
+        };
+        let definitions = serde_json::from_value::<
+            Vec<a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput>,
+        >(encoded.clone())
+        .map_err(|error| ConfigCrudError::Io {
+            path: self.project_anchor(instance_id),
+            reason: format!("failed to deserialize project MCP input definitions: {error}"),
+        })?;
+        Ok(definitions.iter().map(input_definition_from_sdk).collect())
+    }
+
+    /// Replaces the current Computer's project-scope top-level MCP input definitions atomically.
+    /// Runtime state is deliberately untouched; the SDK rematerializes this raw configuration on
+    /// the next actual start or restart.
+    pub fn replace_input_definitions(
+        &self,
+        instance_id: &str,
+        definitions: &[InputDefinition],
+    ) -> Result<ProjectConfigDoc, ConfigCrudError> {
+        let previous_mcp = self.load_project_mcp_document(instance_id)?;
+        let encoded = definitions
+            .iter()
+            .map(input_definition_to_sdk)
+            .map(|definition| {
+                serde_json::to_value(definition).map_err(|error| ConfigCrudError::Io {
+                    path: self.project_anchor(instance_id),
+                    reason: format!("failed to serialize MCP input definition: {error}"),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut next_mcp = previous_mcp.clone();
+        next_mcp.insert("inputs".to_string(), Value::Array(encoded));
+        self.save_project_mcp_document(instance_id, &next_mcp)?;
+        Ok(ProjectConfigDoc {
+            mcp: Some(previous_mcp),
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn load_project_input_document(
+        &self,
+        instance_id: &str,
+    ) -> Result<ProjectConfigDoc, ConfigCrudError> {
+        Ok(ProjectConfigDoc {
+            mcp: Some(self.load_project_mcp_document(instance_id)?),
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn restore_project_input_document(
+        &self,
+        instance_id: &str,
+        document: &ProjectConfigDoc,
+    ) -> Result<(), ConfigCrudError> {
+        let empty = Map::new();
+        self.save_project_mcp_document(instance_id, document.mcp.as_ref().unwrap_or(&empty))
+    }
+
+    fn load_project_mcp_document(
+        &self,
+        instance_id: &str,
+    ) -> Result<Map<String, Value>, ConfigCrudError> {
+        let path = workdir_mcp_config_path(&self.project_anchor(instance_id));
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(error) => return Err(raw_restore_io(&path, error)),
+        };
+        serde_json::from_slice::<Map<String, Value>>(&bytes).map_err(|error| ConfigCrudError::Io {
+            path,
+            reason: format!("failed to deserialize project MCP document: {error}"),
+        })
+    }
+
+    fn save_project_mcp_document(
+        &self,
+        instance_id: &str,
+        document: &Map<String, Value>,
+    ) -> Result<(), ConfigCrudError> {
+        let path = workdir_mcp_config_path(&self.project_anchor(instance_id));
+        #[cfg(test)]
+        if self.fail_next_raw_restore.swap(false, Ordering::SeqCst) {
+            return Err(ConfigCrudError::Io {
+                path,
+                reason: "injected raw SDK restore failure".to_string(),
+            });
+        }
+        write_json_atomically(&path, document).map_err(|error| ConfigCrudError::Io {
+            path,
+            reason: error.to_string(),
+        })
     }
 
     pub fn load_with_validation(
@@ -1268,6 +1389,71 @@ mod tests {
             ),
             ..ProjectConfigDoc::default()
         }
+    }
+
+    #[test]
+    fn project_input_crud_never_copies_or_edits_local_scope_definitions() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config
+            .save(
+                "computer-a",
+                &ProjectConfigDoc {
+                    mcp: Some(
+                        json!({
+                            "inputs": [{
+                                "type": "PromptString",
+                                "id": "project-token",
+                                "description": "Project token"
+                            }]
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    mcp_local: Some(
+                        json!({
+                            "inputs": [{
+                                "type": "PromptString",
+                                "id": "local-token",
+                                "description": "Local token"
+                            }]
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let project = sdk_config
+            .load_project_input_definitions("computer-a")
+            .unwrap();
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0].id(), "project-token");
+
+        sdk_config
+            .replace_input_definitions(
+                "computer-a",
+                &[InputDefinition::PromptString {
+                    id: "replacement".to_string(),
+                    label: Some("Replacement".to_string()),
+                    description: None,
+                    default: None,
+                    password: Some(false),
+                }],
+            )
+            .unwrap();
+
+        let raw = sdk_config.load_raw_project_config("computer-a").unwrap();
+        assert_eq!(raw.mcp.as_ref().unwrap()["inputs"][0]["id"], "replacement");
+        assert_eq!(
+            raw.mcp_local.as_ref().unwrap()["inputs"][0]["id"],
+            "local-token"
+        );
     }
 
     fn legacy_http_oauth_document() -> ProjectConfigDoc {

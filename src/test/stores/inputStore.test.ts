@@ -101,12 +101,12 @@ describe('inputStore', () => {
       const firstFetch = useInputStore.getState().fetchValues('computer-a');
       const secondFetch = useInputStore.getState().fetchValues('computer-b');
 
-      second.resolve({ token: { configured: true } });
+      second.resolve({ token: { configured: true, status: 'configured' } });
       await secondFetch;
-      first.resolve({ token: { configured: true } });
+      first.resolve({ token: { configured: true, status: 'configured' } });
       await firstFetch;
 
-      expect(useInputStore.getState().values).toEqual({ token: { configured: true } });
+      expect(useInputStore.getState().values).toEqual({ token: { configured: true, status: 'configured' } });
       expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
     });
 
@@ -126,7 +126,7 @@ describe('inputStore', () => {
       const secondValuesFetch = useInputStore.getState().fetchValues('computer-b');
 
       inputsB.resolve(definitionsB);
-      valuesB.resolve({ token_b: { configured: true } });
+      valuesB.resolve({ token_b: { configured: true, status: 'configured' } });
       await secondInputsFetch;
       await secondValuesFetch;
 
@@ -134,7 +134,7 @@ describe('inputStore', () => {
       await firstInputsFetch;
 
       expect(useInputStore.getState().inputs).toEqual(definitionsB);
-      expect(useInputStore.getState().values).toEqual({ token_b: { configured: true } });
+      expect(useInputStore.getState().values).toEqual({ token_b: { configured: true, status: 'configured' } });
       expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
       expect(useInputStore.getState().loading).toBe(false);
       expect(useInputStore.getState().error).toBeNull();
@@ -164,11 +164,32 @@ describe('inputStore', () => {
     });
   });
 
+  describe('saveInput', () => {
+    it('atomically saves a Prompt definition and value before refreshing projections', async () => {
+      const input: InputDefinition = { type: 'PromptString', id: 'token', password: true };
+      mockedInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([input])
+        .mockResolvedValueOnce({ token: { configured: true } })
+        .mockResolvedValueOnce([]);
+
+      await useInputStore.getState().saveInput(instanceId, input, 'secret', false);
+
+      expect(mockedInvoke).toHaveBeenCalledWith('save_input', {
+        instanceId,
+        input,
+        value: 'secret',
+        keepExistingValue: false,
+      });
+    });
+  });
+
   describe('removeInput', () => {
     it('invokes remove_input and refreshes inputs + values', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined); // remove_input
       mockedInvoke.mockResolvedValueOnce([]);         // fetchInputs
       mockedInvoke.mockResolvedValueOnce({});          // fetchValues
+      mockedInvoke.mockResolvedValueOnce([]);          // fetchReferenceIssues
 
       await useInputStore.getState().removeInput(instanceId, 'api_key');
 
@@ -191,16 +212,23 @@ describe('inputStore', () => {
     it('clears values map', async () => {
       useInputStore.setState({
         values: {
-          a: { configured: true, value: '1' },
-          b: { configured: true, value: '2' },
+          a: { configured: true, status: 'configured', value: '1' },
+          b: { configured: true, status: 'configured', value: '2' },
         },
       });
       mockedInvoke.mockResolvedValueOnce(undefined);
+      mockedInvoke.mockResolvedValueOnce({
+        a: { configured: false, status: 'missing' },
+        b: { configured: false, status: 'first_option' },
+      });
 
       await useInputStore.getState().clearValues(instanceId);
 
       expect(mockedInvoke).toHaveBeenCalledWith('clear_input_values', { instanceId });
-      expect(useInputStore.getState().values).toEqual({});
+      expect(useInputStore.getState().values).toEqual({
+        a: { configured: false, status: 'missing' },
+        b: { configured: false, status: 'first_option' },
+      });
     });
   });
 });

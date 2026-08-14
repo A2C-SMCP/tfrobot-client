@@ -20,7 +20,7 @@ use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
     computer::{
         duplicate_computer_instance_core, get_computer_instance_status_core,
-        start_computer_instance_core, stop_computer_instance_core,
+        restart_computer_instance_core, start_computer_instance_core, stop_computer_instance_core,
         DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
     },
     config_io,
@@ -446,10 +446,7 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         McpServerManagedBy::Plugin { .. }
     ));
 
-    let injected = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let injected = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
     assert!(injected
         .iter()
         .all(|input| input.id() != "audit@acme/api_token"));
@@ -508,19 +505,23 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
         .await
         .unwrap();
 
-    let error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        RuntimeActionError::MissingSecret {
-            ref input_id,
-            ..
-        } if input_id == "audit@acme/api_token"
-    ));
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(
+        matches!(
+            &error,
+            RuntimeActionError::MissingSecret {
+                input_id,
+                ..
+            } if input_id == "audit@acme/api_token"
+        ),
+        "unexpected runtime start error: {error:?}"
+    );
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
 
@@ -529,9 +530,7 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
     assert!(inputs::set_runtime_input_value_core(
@@ -542,7 +541,7 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     )
     .await
     .unwrap());
-    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+    restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
 
@@ -561,15 +560,16 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
         "audit@acme/api_token",
     )
     .unwrap();
-    let remount_error = runtime.remount_enabled_plugin_servers().await.unwrap_err();
+    runtime.remount_enabled_plugin_servers().await.unwrap();
+    let remount_error = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap_err();
     assert!(matches!(
         remount_error,
-        a2c_smcp::smcp_computer::errors::ComputerError::InputResolution(
-            a2c_smcp::smcp_computer::inputs::InputResolutionError::Missing {
-                ref id,
-                ..
-            }
-        ) if id == "audit@acme/api_token"
+        RuntimeActionError::MissingSecret {
+            ref input_id,
+            ..
+        } if input_id == "audit@acme/api_token"
     ));
     assert!(inputs::set_runtime_input_value_core(
         &state,
@@ -579,11 +579,10 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     )
     .await
     .unwrap());
-    runtime.remount_enabled_plugin_servers().await.unwrap();
-
-    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
+
     assert!(
         wait_for_mcp_server_running(TEST_INSTANCE_ID, &state, "audit-mcp")
             .await
@@ -605,7 +604,10 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     assert!(listed
         .iter()
         .any(|instance| instance.id == TEST_INSTANCE_ID));
-    let status_error = get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+    get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let status_error = restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -623,7 +625,7 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     )
     .await
     .unwrap());
-    get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+    restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
 
@@ -646,7 +648,7 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
     )
     .await
     .unwrap());
-    let retried = start_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+    let retried = restart_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
     assert!(retried.running);
@@ -655,9 +657,7 @@ async fn plugin_missing_input_stays_structured_across_enable_retry_and_cold_star
             .await
             .is_some_and(|server| server.running)
     );
-    assert!(restarted
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(inputs::list_inputs_core(&restarted, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
 }
@@ -686,16 +686,9 @@ async fn plugin_runtime_input_is_excluded_from_client_crud_import_and_export() {
     install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
         .await
         .unwrap();
-    let error = enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        RuntimeActionError::MissingSecret {
-            ref input_id,
-            ..
-        } if input_id == "audit@acme/api_token"
-    ));
+        .unwrap();
     assert!(inputs::set_runtime_input_value_core(
         &state,
         TEST_INSTANCE_ID,
@@ -704,9 +697,6 @@ async fn plugin_runtime_input_is_excluded_from_client_crud_import_and_export() {
     )
     .await
     .unwrap());
-    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
-        .await
-        .unwrap();
     assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
@@ -1004,6 +994,23 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
             && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })
     }));
     assert!(before_batch.iter().any(|server| {
+        server.name == "user-batch-mcp"
+            && !server.running
+            && matches!(server.managed_by, McpServerManagedBy::User)
+    }));
+
+    restart_computer_instance_core(None, &restarted, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let after_restart = mcp::get_mcp_servers_core(&restarted, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(after_restart.iter().any(|server| {
+        server.name == "audit-mcp"
+            && server.running
+            && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })
+    }));
+    assert!(after_restart.iter().any(|server| {
         server.name == "user-batch-mcp"
             && server.running
             && matches!(server.managed_by, McpServerManagedBy::User)

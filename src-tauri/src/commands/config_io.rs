@@ -43,10 +43,7 @@ struct ConfigImportTransaction {
 }
 
 #[derive(Debug, Default)]
-struct RecoveredConfigImport {
-    servers: Vec<MCPServerConfig>,
-    inputs_changed: bool,
-}
+struct RecoveredConfigImport;
 
 /// Detected config format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +186,7 @@ async fn import_servers_and_inputs(
         .map_err(|error| error.to_string())?;
     let transaction_inputs = inputs.clone();
 
-    let recovered_import = recover_pending_config_import_for_instance(
+    recover_pending_config_import_for_instance(
         state.config.as_ref(),
         state.sdk_config.as_ref(),
         state.secret_store.as_ref(),
@@ -202,9 +199,9 @@ async fn import_servers_and_inputs(
         None
     } else {
         let mut existing = state
-            .config
-            .load_inputs_for_instance(instance_id)
-            .map_err(|e| e.to_string())?;
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
         for input in inputs {
             let id = input.id().to_string();
             existing.retain(|item| item.id() != id);
@@ -212,19 +209,6 @@ async fn import_servers_and_inputs(
         }
         Some(existing)
     };
-
-    if !recovered_import.servers.is_empty() || recovered_import.inputs_changed {
-        // Recovery is a completed prior transaction. Synchronize it independently so a
-        // preflight failure in this new import cannot leave recovered declarations stale in an
-        // already-created runtime.
-        synchronize_imported_runtime(
-            state,
-            instance_id,
-            &recovered_import.servers,
-            recovered_import.inputs_changed,
-        )
-        .await?;
-    }
 
     if servers.is_empty() && merged_inputs.is_none() {
         return Ok(ImportResult {
@@ -255,7 +239,7 @@ async fn import_servers_and_inputs(
     let mut transaction = transaction;
     let input_snapshot = if let Some(merged_inputs) = &merged_inputs {
         match crate::commands::inputs::replace_input_definitions_config_only_locked(
-            state.config.as_ref(),
+            state.sdk_config.as_ref(),
             state.secret_store.as_ref(),
             instance_id,
             merged_inputs,
@@ -286,7 +270,7 @@ async fn import_servers_and_inputs(
     {
         let rollback_error = input_snapshot.as_ref().and_then(|snapshot| {
             crate::commands::inputs::restore_input_definitions_config_only_locked(
-                state.config.as_ref(),
+                state.sdk_config.as_ref(),
                 state.secret_store.as_ref(),
                 instance_id,
                 snapshot,
@@ -313,55 +297,11 @@ async fn import_servers_and_inputs(
 
     finish_config_import_transaction(state.config.as_ref(), &mut transaction);
 
-    synchronize_imported_runtime(state, instance_id, &servers, merged_inputs.is_some()).await?;
-
     Ok(ImportResult {
         servers_imported,
         inputs_imported,
         servers_skipped: Vec::new(),
     })
-}
-
-async fn synchronize_imported_runtime(
-    state: &AppState,
-    instance_id: &str,
-    servers: &[MCPServerConfig],
-    inputs_changed: bool,
-) -> Result<(), String> {
-    let Some(mut runtime) = state.computer_registry.runtime(instance_id).await else {
-        return Ok(());
-    };
-
-    if inputs_changed {
-        let instance = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|error| error.to_string())?;
-        runtime = state
-            .computer_registry
-            .update_runtime_instance(instance)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Configuration was imported, but the target Computer runtime could not synchronize its Inputs: {error}"
-                )
-            })?;
-    }
-
-    for server in servers {
-        if let Err(error) = runtime.apply_user_mcp_server_config(server.clone()).await {
-            // The SDK declaration is already committed. A runtime may still be unable to mount
-            // it until a required input, secret, or authorization is supplied; the runtime keeps
-            // that failure as a per-server diagnostic, but import remains a configuration success.
-            log::warn!(
-                "Imported MCP config for instance {}, but active runtime application is pending for {}: {}",
-                instance_id,
-                server.name(),
-                error
-            );
-        }
-    }
-    Ok(())
 }
 
 fn config_import_transaction_path(
@@ -501,7 +441,7 @@ fn recover_pending_config_import_for_instance(
     instance_id: &str,
 ) -> Result<RecoveredConfigImport, String> {
     let Some(mut transaction) = load_config_import_transaction(config, instance_id)? else {
-        return Ok(RecoveredConfigImport::default());
+        return Ok(RecoveredConfigImport);
     };
 
     if matches!(
@@ -509,7 +449,7 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Aborted | ConfigImportTransactionPhase::Committed
     ) {
         clear_terminal_config_import_transaction(config, instance_id);
-        return Ok(RecoveredConfigImport::default());
+        return Ok(RecoveredConfigImport);
     }
 
     transaction.inputs = super::inputs::prepare_portable_input_definitions(&transaction.inputs)?;
@@ -522,8 +462,8 @@ fn recover_pending_config_import_for_instance(
 
     let inputs_changed = !transaction.inputs.is_empty();
     if inputs_changed {
-        let mut merged_inputs = config
-            .load_inputs_for_instance(instance_id)
+        let mut merged_inputs = sdk_config
+            .load_project_input_definitions(instance_id)
             .map_err(|error| error.to_string())?;
         for input in &transaction.inputs {
             let id = input.id().to_string();
@@ -531,7 +471,7 @@ fn recover_pending_config_import_for_instance(
             merged_inputs.push(input.clone());
         }
         crate::commands::inputs::replace_input_definitions_config_only_locked(
-            config,
+            sdk_config,
             secret_store,
             instance_id,
             &merged_inputs,
@@ -547,10 +487,7 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Committed,
     )?;
     clear_terminal_config_import_transaction(config, instance_id);
-    Ok(RecoveredConfigImport {
-        servers: transaction.servers,
-        inputs_changed,
-    })
+    Ok(RecoveredConfigImport)
 }
 
 pub(crate) fn recover_pending_config_imports(
@@ -733,9 +670,9 @@ pub async fn export_config_core(
     let servers = SdkConfigService::mcp_configs_from_portable_document(portable)
         .map_err(|error| error.to_string())?;
     let inputs = state
-        .config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
+        .sdk_config
+        .load_project_input_definitions(instance_id)
+        .map_err(|error| error.to_string())?;
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
 
     let filtered_servers = match server_names {

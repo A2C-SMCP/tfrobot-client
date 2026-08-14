@@ -2,9 +2,9 @@ import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 
-const { getInput, addOrUpdateInput, setValue, setRuntimeValue } = vi.hoisted(() => ({
+const { getInput, saveInput, setValue, setRuntimeValue } = vi.hoisted(() => ({
   getInput: vi.fn(),
-  addOrUpdateInput: vi.fn(),
+  saveInput: vi.fn(),
   setValue: vi.fn(),
   setRuntimeValue: vi.fn(),
 }));
@@ -12,7 +12,7 @@ const { getInput, addOrUpdateInput, setValue, setRuntimeValue } = vi.hoisted(() 
 vi.mock('@/stores/inputStore', () => ({
   useInputStore: (selector: (state: unknown) => unknown) => selector({
     getInput,
-    addOrUpdateInput,
+    saveInput,
     setValue,
     setRuntimeValue,
   }),
@@ -21,7 +21,7 @@ vi.mock('@/stores/inputStore', () => ({
 describe('RuntimeInputPrompt', () => {
   beforeEach(() => {
     getInput.mockReset();
-    addOrUpdateInput.mockReset();
+    saveInput.mockReset();
     setValue.mockReset();
     setRuntimeValue.mockReset();
     getInput.mockResolvedValue({
@@ -32,7 +32,7 @@ describe('RuntimeInputPrompt', () => {
     });
     setValue.mockResolvedValue(undefined);
     setRuntimeValue.mockResolvedValue(false);
-    addOrUpdateInput.mockResolvedValue(undefined);
+    saveInput.mockResolvedValue(undefined);
   });
 
   it('loads the missing definition, stores the secret, and requests a retry', async () => {
@@ -60,6 +60,42 @@ describe('RuntimeInputPrompt', () => {
 
     await waitFor(() => {
       expect(setValue).toHaveBeenCalledWith('computer-a', 'api-key', 'top-secret');
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows current PickString options for an invalid saved selection', async () => {
+    getInput.mockResolvedValueOnce({
+      type: 'PickString',
+      id: 'region',
+      description: 'Region',
+      options: [
+        { label: 'China', value: 'cn' },
+        { label: 'Europe', value: 'eu' },
+      ],
+    });
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'invalid_selection',
+          input_id: 'region',
+          value: 'retired',
+          message: 'Stored value is not one of the current options',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    expect(await screen.findByText('Invalid selection: retired')).toBeInTheDocument();
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    fireEvent.click(await screen.findByText('China'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(setValue).toHaveBeenCalledWith('computer-a', 'region', 'cn');
       expect(onSubmitted).toHaveBeenCalledTimes(1);
     });
   });
@@ -198,14 +234,14 @@ describe('RuntimeInputPrompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
-      expect(addOrUpdateInput).toHaveBeenCalledWith('computer-a', {
+      expect(saveInput).toHaveBeenCalledWith('computer-a', {
         type: 'PromptString',
         id: 'OPENAI_KEY',
         label: 'OPENAI_KEY',
         description: 'Required secret input is unresolved',
         password: true,
-      });
-      expect(setValue).toHaveBeenCalledWith('computer-a', 'OPENAI_KEY', 'top-secret');
+      }, 'top-secret');
+      expect(setValue).not.toHaveBeenCalled();
       expect(onSubmitted).toHaveBeenCalledTimes(1);
     });
   });
@@ -239,7 +275,7 @@ describe('RuntimeInputPrompt', () => {
         'audit@acme/api-key',
         'plugin-secret',
       );
-      expect(addOrUpdateInput).not.toHaveBeenCalled();
+      expect(saveInput).not.toHaveBeenCalled();
       expect(setValue).not.toHaveBeenCalled();
       expect(onSubmitted).toHaveBeenCalledTimes(1);
     });
@@ -274,7 +310,7 @@ describe('RuntimeInputPrompt', () => {
     expect(await screen.findByText(
       'The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs.',
     )).toBeInTheDocument();
-    expect(addOrUpdateInput).not.toHaveBeenCalled();
+    expect(saveInput).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
     expect(onSubmitted).not.toHaveBeenCalled();
   });
@@ -332,9 +368,10 @@ describe('RuntimeInputPrompt', () => {
     fireEvent.change(valueInput, { target: { value: 'secret-value' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(addOrUpdateInput).toHaveBeenCalledWith(
+    await waitFor(() => expect(saveInput).toHaveBeenCalledWith(
       'computer-a',
       expect.objectContaining({ id: 'CUSTOM_TOKEN', password: true }),
+      'secret-value',
     ));
   });
 

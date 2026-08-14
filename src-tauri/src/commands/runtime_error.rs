@@ -22,6 +22,12 @@ pub enum RuntimeActionError {
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
     #[error("{message}")]
+    InvalidSelection {
+        input_id: String,
+        value: String,
+        message: String,
+    },
+    #[error("{message}")]
     ActionUnavailable {
         action: String,
         lifecycle: String,
@@ -57,6 +63,7 @@ impl RuntimeActionError {
             Self::MissingInput { message, .. }
             | Self::MissingSecret { message, .. }
             | Self::ResolverFailed { message, .. }
+            | Self::InvalidSelection { message, .. }
             | Self::RuntimeError { message } => {
                 *message = format!("{message}; {suffix}");
             }
@@ -93,6 +100,16 @@ impl From<ComputerError> for RuntimeActionError {
                     message: reason,
                 }
             }
+            ComputerError::InputResolution(InputResolutionError::InvalidSelection {
+                id,
+                value,
+            }) => Self::InvalidSelection {
+                message: format!(
+                    "Stored value for PickString input '{id}' is not one of its current options"
+                ),
+                input_id: id,
+                value,
+            },
             other => Self::runtime(other.to_string()),
         }
     }
@@ -150,6 +167,26 @@ mod tests {
                 "code": "resolver_failed",
                 "input_id": "region",
                 "message": "secret store unavailable"
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_invalid_pick_selection_for_reselection_ui() {
+        let error = RuntimeActionError::from(ComputerError::InputResolution(
+            InputResolutionError::InvalidSelection {
+                id: "region".to_string(),
+                value: "retired".to_string(),
+            },
+        ));
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "invalid_selection",
+                "input_id": "region",
+                "value": "retired",
+                "message": "Stored value for PickString input 'region' is not one of its current options"
             })
         );
     }

@@ -18,7 +18,14 @@ const { fetchInputs } = vi.hoisted(() => ({
 
 vi.mock('@/stores/inputStore', () => ({
   useInputStore: (selector: (state: unknown) => unknown) => selector({
-    inputs: [{ type: 'PromptString', id: 'OPENAI_KEY', label: 'OpenAI key', password: true }],
+    inputs: [
+      { type: 'PromptString', id: 'OPENAI_KEY', label: 'OpenAI key', password: true },
+      { type: 'PickString', id: 'REGION', options: [
+        { label: 'US East', value: 'us-east' },
+        { label: 'Europe', value: 'eu' },
+      ] },
+      { type: 'Command', id: 'SESSION_TOKEN', command: 'token-helper' },
+    ],
     fetchInputs,
   }),
 }));
@@ -290,4 +297,58 @@ describe('McpServerForm input attributes (issue #26)', () => {
 
     expect(screen.getByPlaceholderText('value')).toHaveValue('${input:OPENAI_KEY}');
   });
+
+  it('stores a canonical PickString reference without materializing an option', async () => {
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
+    fireEvent.click(await screen.findByText('REGION (REGION)'));
+
+    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:REGION}');
+    expect(screen.queryByRole('combobox', { name: 'Choose option' })).not.toBeInTheDocument();
+  }, 15_000);
+
+  it('keeps the same PickString reference in multiple MCP fields', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
+      target: { value: 'two-regions' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), {
+      target: { value: 'echo' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    const keys = screen.getAllByPlaceholderText('KEY');
+    fireEvent.change(keys[0], { target: { value: 'PRIMARY' } });
+    fireEvent.change(keys[1], { target: { value: 'SECONDARY' } });
+
+    let selectors = screen.getAllByRole('combobox', { name: 'Use Input' });
+    fireEvent.mouseDown(selectors[0]);
+    fireEvent.click(await screen.findByText('REGION (REGION)'));
+
+    selectors = screen.getAllByRole('combobox', { name: 'Use Input' });
+    fireEvent.mouseDown(selectors[1]);
+    const regionOptions = await screen.findAllByText('REGION (REGION)');
+    fireEvent.click(regionOptions[regionOptions.length - 1]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].server_parameters.env).toEqual({
+      PRIMARY: '${input:REGION}',
+      SECONDARY: '${input:REGION}',
+    });
+  }, 15000);
+
+  it('uses the ID fallback and canonical reference for Command', async () => {
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
+    fireEvent.click(await screen.findByText('SESSION_TOKEN (SESSION_TOKEN)'));
+
+    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:SESSION_TOKEN}');
+  }, 10000);
 });

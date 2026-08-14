@@ -651,6 +651,7 @@
       "envVars": "环境变量",
       "addEnv": "添加变量",
       "inputReference": "引用 Input",
+      "pickInputOption": "选择选项",
       "url": "URL",
       "urlRequired": "请输入 URL",
       "headers": "HTTP 请求头",
@@ -670,11 +671,11 @@
       "toolMetaInvalidFormat": "每个 tool_meta 的值必须是对象（如 {\"auto_apply\": true}）"
     },
     "messages": {
-      "added": "服务器添加成功",
-      "updated": "服务器更新成功",
-      "enabled": "服务器 {{name}} 已启用",
-      "disabled": "服务器 {{name}} 已禁用",
-      "removed": "服务器删除成功",
+      "added": "服务器已保存，重启 Runtime 后生效",
+      "updated": "服务器已保存，重启 Runtime 后生效",
+      "enabled": "服务器 {{name}} 已保存为启用，重启 Runtime 后生效",
+      "disabled": "服务器 {{name}} 已保存为禁用，重启 Runtime 后生效",
+      "removed": "服务器已删除，重启 Runtime 后生效",
       "started": "服务器 {{name}} 已启动",
       "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
@@ -683,7 +684,7 @@
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
       "editNotImplemented": "编辑功能即将推出",
-      "importSuccess": "已导入 {{servers}} 个服务器和 {{inputs}} 个变量",
+      "importSuccess": "已导入 {{servers}} 个服务器和 {{inputs}} 个变量，重启 Runtime 后生效",
       "exportSuccess": "配置导出成功"
     }
   },
@@ -701,6 +702,17 @@
     "confirmClearValues": "确定要清空所有缓存值吗？",
     "setValueFor": "设置变量值：{{id}}",
     "configuredSecret": "密钥已配置",
+    "notConfigured": "未配置",
+    "runtimeCommand": "运行时执行",
+    "status": {
+      "usingDefault": "使用默认值",
+      "firstOption": "未设置，将使用第一项",
+      "invalidSelection": "已失效：{{value}}"
+    },
+    "referenceIssues": {
+      "title": "部分旧 PickString 引用需要处理",
+      "item": "{{serverName}} · {{layer}} · {{fieldPath}} 仍引用 {{inputId}}"
+    },
     "runtime": {
       "missingInput": "启动需要补充变量",
       "missingSecret": "启动需要补充密钥",
@@ -722,21 +734,24 @@
       "id": "变量 ID",
       "idRequired": "请输入变量 ID",
       "label": "显示名称",
-      "labelRequired": "请输入显示名称",
       "description": "描述",
       "defaultValue": "默认值",
+      "actualValue": "实际值",
+      "actualValueRequired": "请输入实际值",
+      "secretBlankKeeps": "留空将保留已配置的密钥。",
       "password": "密码模式",
       "options": "选项列表",
+      "optionRequired": "请至少添加一个选项。",
       "addOption": "添加选项",
       "command": "命令",
       "args": "参数",
       "addArg": "添加参数"
     },
     "messages": {
-      "saved": "变量保存成功",
-      "removed": "变量删除成功",
-      "valueSet": "值设置成功",
-      "valuesCleared": "所有缓存值已清空"
+      "saved": "变量已保存，重启 Runtime 后生效",
+      "removed": "变量已删除，重启 Runtime 后生效",
+      "valueSet": "值已保存，重启 Runtime 后生效",
+      "valuesCleared": "所有已保存值已清空，重启 Runtime 后生效"
     }
   },
   "connection": {

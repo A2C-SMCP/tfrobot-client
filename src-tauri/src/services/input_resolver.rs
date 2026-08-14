@@ -36,12 +36,23 @@ impl InputValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<Value>, InputResolutionError> {
-        keychain::get_input_value(
+        let value = keychain::get_input_value(
             self.store.as_ref(),
             self.instance_id.as_ref(),
             definition.id(),
         )
-        .map_err(|error| resolver_failed(definition.id(), error))
+        .map_err(|error| resolver_failed(definition.id(), error))?;
+        if let (MCPServerInput::PickString(input), Some(Value::String(selected))) =
+            (definition, value.as_ref())
+        {
+            if !input.options.iter().any(|option| option.value == *selected) {
+                return Err(InputResolutionError::InvalidSelection {
+                    id: input.id.clone(),
+                    value: selected.clone(),
+                });
+            }
+        }
+        Ok(value)
     }
 }
 
@@ -64,7 +75,9 @@ impl SecretValueResolver for RuntimeInputResolver {
 mod tests {
     use super::*;
     use crate::services::keychain::{self, InMemorySecretStore, KeychainError, SecretStore};
-    use a2c_smcp::smcp_computer::mcp_clients::model::{MCPServerInput, PromptStringInput};
+    use a2c_smcp::smcp_computer::mcp_clients::model::{
+        MCPServerInput, PickStringInput, PickStringOption, PromptStringInput,
+    };
 
     fn definition(id: &str, password: bool) -> MCPServerInput {
         MCPServerInput::PromptString(PromptStringInput {
@@ -135,6 +148,38 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_pick_value_returns_structured_invalid_selection_without_deleting_it() {
+        let store = Arc::new(InMemorySecretStore::default());
+        keychain::set_input_value(
+            store.as_ref(),
+            "computer-a",
+            "region",
+            &serde_json::json!("retired"),
+        )
+        .unwrap();
+        let resolver = RuntimeInputResolver::new("computer-a", store.clone());
+        let definition = MCPServerInput::PickString(PickStringInput {
+            id: "region".to_string(),
+            description: "Region".to_string(),
+            options: vec![PickStringOption {
+                label: "China".to_string(),
+                value: "cn".to_string(),
+            }],
+            default: Some("cn".to_string()),
+        });
+
+        assert!(matches!(
+            InputValueResolver::resolve_input(&resolver, &definition).await,
+            Err(InputResolutionError::InvalidSelection { id, value })
+                if id == "region" && value == "retired"
+        ));
+        assert_eq!(
+            keychain::get_input_value(store.as_ref(), "computer-a", "region").unwrap(),
+            Some(serde_json::json!("retired"))
         );
     }
 
