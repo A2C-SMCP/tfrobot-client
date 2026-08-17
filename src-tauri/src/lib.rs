@@ -470,6 +470,7 @@ pub fn run() {
             commands::inputs::remove_input_value,
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,
+            commands::inputs::preview_command_input,
             // SMCP connection management
             commands::connection::list_manual_smcp_targets,
             commands::connection::save_manual_smcp_target,
