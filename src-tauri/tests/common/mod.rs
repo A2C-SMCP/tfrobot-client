@@ -28,6 +28,12 @@ pub fn echo_server_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index.js")
 }
 
+/// Path to the environment-reading MCP fixture used to verify process materialization.
+#[allow(dead_code)]
+pub fn env_server_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-env.js")
+}
+
 /// Build an MCPServerConfig for the echo server
 #[allow(dead_code)]
 pub fn echo_server_config(name: &str) -> a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig {
@@ -144,8 +150,7 @@ pub mod mcp {
             .map_err(|error| error.to_string())?;
         state
             .sdk_config
-            .sanitize_snapshot_for_view(state.sdk_config.load(instance_id))
-            .map_err(|error| error.to_string())?
+            .load(instance_id)
             .mcp
             .servers
             .into_iter()

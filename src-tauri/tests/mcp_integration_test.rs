@@ -10,8 +10,8 @@ use a2c_smcp::smcp_computer::mcp_clients::model::{
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
 use common::{
-    create_test_app_state, echo_server_config, echo_server_path, mcp, multi_tool_server_config,
-    slow_echo_server_config, stderr_flood_server_config,
+    create_test_app_state, echo_server_config, echo_server_path, env_server_path, mcp,
+    multi_tool_server_config, slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -2379,7 +2379,7 @@ async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_ex
 }
 
 #[tokio::test]
-async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_write() {
+async fn test_local_config_crud_preserves_field_literals_but_rejects_sensitive_cli_plaintext() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let unsafe_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
@@ -2407,30 +2407,50 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
         .servers
         .is_empty());
 
-    let secret_stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "REGION".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: Some("cn".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+
+    let literal_stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Stdio",
-        "name": "redacted-crud-stdio",
+        "name": "literal-crud-stdio",
         "server_parameters": {
             "command": "helper",
             "args": [],
-            "env": { "TOKEN": "literal-crud-env-secret" }
+            "env": {
+                "LOG_LEVEL": "debug",
+                "MUSTACHE_LITERAL": "{{REGION}}",
+                "PREFIXED_MUSTACHE_LITERAL": "prefix-{{REGION}}",
+                "REGION": "${input:REGION}",
+                "PREFIXED_INPUT": "prefix-${input:REGION}"
+            }
         }
     }))
     .unwrap();
-    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_stdio)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, literal_stdio)
         .await
         .unwrap();
 
-    let secret_http: MCPServerConfig = serde_json::from_value(serde_json::json!({
+    let literal_http: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Http",
-        "name": "redacted-crud-http",
+        "name": "literal-crud-http",
         "server_parameters": {
-            "url": "https://user:password@example.com/mcp",
-            "headers": { "Authorization": "Bearer literal-crud-header-secret" }
+            "url": "https://example.com/mcp",
+            "headers": { "X-Deployment": "staging" }
         }
     }))
     .unwrap();
-    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_http)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, literal_http)
         .await
         .unwrap();
 
@@ -2441,22 +2461,41 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
             .join(".tfrobot/mcp.local.json"),
     )
     .unwrap();
-    assert!(!persisted.contains("literal-crud-env-secret"));
-    assert!(!persisted.contains("literal-crud-header-secret"));
-    assert!(!persisted.contains("user:password"));
-    assert!(persisted.contains("${REDACTED}"));
+    assert!(persisted.contains("debug"));
+    assert!(persisted.contains("{{REGION}}"));
+    assert!(persisted.contains("prefix-{{REGION}}"));
+    assert!(persisted.contains("${input:REGION}"));
+    assert!(persisted.contains("prefix-${input:REGION}"));
+    assert!(persisted.contains("staging"));
+    assert!(!persisted.contains("${REDACTED}"));
 
     let view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
+    let stdio_view = view
+        .snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "literal-crud-stdio")
+        .expect("local view should include the literal stdio declaration");
+    let stdio_value = serde_json::to_value(&stdio_view.config).unwrap();
+    let env = &stdio_value["server_parameters"]["env"];
+    assert_eq!(env["MUSTACHE_LITERAL"], "{{REGION}}");
+    assert_eq!(env["PREFIXED_MUSTACHE_LITERAL"], "prefix-{{REGION}}");
+    assert_eq!(env["REGION"], "${input:REGION}");
+    assert_eq!(env["PREFIXED_INPUT"], "prefix-${input:REGION}");
     let view_json = serde_json::to_string(&view).unwrap();
-    assert!(!view_json.contains("literal-crud-env-secret"));
-    assert!(!view_json.contains("literal-crud-header-secret"));
-    assert!(!view_json.contains("user:password"));
-    assert!(view_json.contains("${REDACTED}"));
+    assert!(view_json.contains("debug"));
+    assert!(view_json.contains("{{REGION}}"));
+    assert!(view_json.contains("prefix-{{REGION}}"));
+    assert!(view_json.contains("${input:REGION}"));
+    assert!(view_json.contains("prefix-${input:REGION}"));
+    assert!(view_json.contains("staging"));
+    assert!(!view_json.contains("${REDACTED}"));
 
-    // A legacy/on-disk declaration that predates the guarded CRUD boundary must still never be
-    // echoed to the WebView snapshot with its plaintext secret surfaces intact.
+    // Same-machine configuration is an editable source of truth, so existing literals must also
+    // be visible to the trusted local WebView instead of being replaced by export sentinels.
     state
         .sdk_config
         .save(
@@ -2468,9 +2507,9 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
                             "legacy-plaintext-http": {
                                 "type": "http",
                                 "server_parameters": {
-                                    "url": "https://legacy-user:legacy-password@example.com/mcp",
+                                    "url": "https://example.com/mcp",
                                     "headers": {
-                                        "Authorization": "Bearer legacy-header-secret"
+                                        "X-Legacy-Mode": "compatibility"
                                     }
                                 }
                             }
@@ -2491,14 +2530,13 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
             .join(".tfrobot/mcp.json"),
     )
     .unwrap();
-    assert!(legacy_raw.contains("legacy-header-secret"));
+    assert!(legacy_raw.contains("compatibility"));
     let legacy_view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
     let legacy_view_json = serde_json::to_string(&legacy_view).unwrap();
-    assert!(!legacy_view_json.contains("legacy-header-secret"));
-    assert!(!legacy_view_json.contains("legacy-user:legacy-password"));
-    assert!(legacy_view_json.contains("${REDACTED}"));
+    assert!(legacy_view_json.contains("compatibility"));
+    assert!(!legacy_view_json.contains("${REDACTED}"));
 
     let input_error = inputs::add_or_update_input_core(
         &state,
@@ -2514,9 +2552,10 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
     .unwrap_err();
     assert!(input_error.contains("inputs.unsafe-crud-input.args[0]"));
     assert!(input_error.contains("mode"));
-    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
+    assert!(!inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
-        .is_empty());
+        .iter()
+        .any(|input| input.id() == "unsafe-crud-input"));
 }
 
 #[tokio::test]
@@ -5071,7 +5110,7 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
             "command": "node",
             "args": [common::echo_server_path().to_str().unwrap()],
             "env": {
-                "RUNTIME_TOKEN": "{{runtime-token}}"
+                "RUNTIME_TOKEN": "${input:runtime-token}"
             }
         }
     }))
@@ -5137,6 +5176,100 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
 }
 
 #[tokio::test]
+async fn test_mcp_runtime_materializes_literal_and_input_sources_on_each_actual_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "region".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("cn"),
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "mixed-env-sources",
+        "bundle_id": "mixed-env-sources",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [env_server_path().to_str().unwrap()],
+            "env": {
+                "LOG_LEVEL": "debug",
+                "REGION": "${input:region}"
+            }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bundle = bundle_id("mixed-env-sources");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+
+    async fn read_env(state: &AppState) -> serde_json::Value {
+        let response = debug::execute_tool_core(
+            state,
+            TEST_INSTANCE_ID,
+            "mixed-env-sources__read_env",
+            serde_json::json!({}),
+            Some(10.0),
+        )
+        .await
+        .unwrap();
+        assert!(response.success, "tool call failed: {:?}", response.error);
+        let result = serde_json::to_value(response.result.unwrap()).unwrap();
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    assert_eq!(
+        read_env(&state).await,
+        serde_json::json!({ "LOG_LEVEL": "debug", "REGION": "cn" })
+    );
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("eu"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_env(&state).await["REGION"], "cn");
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_env(&state).await,
+        serde_json::json!({ "LOG_LEVEL": "debug", "REGION": "eu" })
+    );
+}
+
+#[tokio::test]
 async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -5148,7 +5281,7 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
             "command": "node",
             "args": [common::echo_server_path().to_str().unwrap()],
             "env": {
-                "OPENAI_API_KEY": "{{OPENAI_KEY}}"
+                "OPENAI_API_KEY": "${input:OPENAI_KEY}"
             }
         }
     }))

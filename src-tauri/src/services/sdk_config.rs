@@ -98,8 +98,10 @@ impl SdkConfigPortabilityError {
     }
 }
 
-/// Accepts the UI-friendly `{{ID}}` spelling only in fields consumed while creating an MCP
-/// transport. Identity, governance, and tool metadata are deliberately left unchanged.
+/// Converts the legacy UI's `{{ID}}` spelling while migrating pre-SDK client configuration.
+///
+/// This must remain confined to [`crate::services::config_migration`]. Applying it during normal
+/// CRUD would make literal constants ambiguous and corrupt their exact persisted value.
 pub(crate) fn normalize_mcp_input_references(
     config: MCPServerConfig,
 ) -> Result<MCPServerConfig, String> {
@@ -449,7 +451,7 @@ impl SdkConfigService {
         instance_id: &str,
         servers: &[MCPServerConfig],
     ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
-        let servers = self.prepare_portable_mcp_configs(servers)?;
+        let servers = self.prepare_local_mcp_configs(servers)?;
         let context = self.context(instance_id);
         let mut sdk_context = context.sdk_context();
         sdk_context.opts.upsert_new_scope = WriteScope::Local;
@@ -845,8 +847,8 @@ impl SdkConfigService {
         Ok((sanitized, report))
     }
 
-    /// Converts MCP declarations through the one SDK-owned portability boundary used by every
-    /// client persistence entry point.
+    /// Converts MCP declarations through the SDK-owned portability boundary used by import,
+    /// export, and crash-recovery artifacts that may leave this Computer.
     ///
     /// The preflight guard rejects sensitive CLI/query plaintext before the SDK staging write;
     /// the SDK then redacts env, headers, URL userinfo, and password defaults and validates only
@@ -856,21 +858,34 @@ impl SdkConfigService {
         &self,
         servers: &[MCPServerConfig],
     ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
-        let servers = servers
-            .iter()
-            .cloned()
-            .map(normalize_mcp_input_references)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|reason| ConfigCrudError::Io {
-                path: PathBuf::from("<in-memory-mcp-config>"),
-                reason,
-            })?;
-        let document = project_document_from_servers(&servers)?;
+        let document = project_document_from_servers(servers)?;
         let (sanitized, report) = self.prepare_import(&document)?;
         if !report.is_valid() {
             return Err(SdkConfigPortabilityError::invalid_source(report.errors));
         }
         Ok(mcp_configs_from_project_document(sanitized)?)
+    }
+
+    /// Canonicalizes and validates MCP declarations for same-machine CRUD without crossing the
+    /// portable import/export boundary. Environment variables, headers, and URL userinfo may be
+    /// intentional plaintext constants and must remain editable and runnable on this Computer.
+    /// Portable import/export continues to redact those fields through
+    /// [`Self::prepare_portable_mcp_configs`].
+    fn prepare_local_mcp_configs(
+        &self,
+        servers: &[MCPServerConfig],
+    ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
+        let document = project_document_from_servers(servers)?;
+
+        // Keep the existing structured argument/query guard. Unlike env/header values, these
+        // locations have no dedicated value-source editor and should still require references
+        // when they carry secret intent.
+        ensure_portable_secret_references(&document)?;
+        let report = validate_config(&document);
+        if !report.is_valid() {
+            return Err(SdkConfigPortabilityError::invalid_source(report.errors));
+        }
+        Ok(mcp_configs_from_project_document(document)?)
     }
 
     /// Decodes an SDK portable document through the same canonical typed boundary used by import.
@@ -880,10 +895,10 @@ impl SdkConfigService {
         Ok(mcp_configs_from_project_document(document)?)
     }
 
-    /// Redacts the MCP part of a reconciled snapshot before it crosses the Tauri/UI boundary.
-    /// Existing legacy plaintext is never echoed to the WebView; unsafe CLI/query plaintext makes
-    /// the read fail closed instead of exposing the value.
-    pub fn sanitize_snapshot_for_view(
+    /// Redacts the MCP portion of a reconciled snapshot before it crosses the Client Control
+    /// boundary. The trusted local WebView uses the raw projection so its editor can round-trip
+    /// intentional constants; remote automation receives only SDK-sanitized declarations.
+    pub fn sanitize_snapshot_for_client_control(
         &self,
         mut snapshot: ComputerConfigSnapshot,
     ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
@@ -904,7 +919,7 @@ impl SdkConfigService {
                 .ok_or_else(|| ConfigCrudError::Io {
                     path: PathBuf::from("<in-memory-mcp-config>"),
                     reason: format!(
-                        "SDK portability sanitizer omitted MCP server '{}'",
+                        "SDK Client Control sanitizer omitted MCP server '{}'",
                         server.name
                     ),
                 })?;

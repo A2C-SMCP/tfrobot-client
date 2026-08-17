@@ -2,7 +2,7 @@ use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
-use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
+use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::env_var_name;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -220,16 +220,47 @@ pub async fn get_computer_config_state_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<SdkConfigStateView, String> {
+    get_computer_config_state_for_projection(state, instance_id, ConfigStateProjection::LocalRaw)
+        .await
+}
+
+/// Returns the API-safe configuration projection used by Client Control. Unlike the trusted
+/// same-machine editor projection, this boundary must not expose plaintext configuration values.
+pub async fn get_computer_config_state_for_client_control_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<SdkConfigStateView, String> {
+    get_computer_config_state_for_projection(
+        state,
+        instance_id,
+        ConfigStateProjection::ClientControlRedacted,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfigStateProjection {
+    LocalRaw,
+    ClientControlRedacted,
+}
+
+async fn get_computer_config_state_for_projection(
+    state: &AppState,
+    instance_id: &str,
+    projection: ConfigStateProjection,
+) -> Result<SdkConfigStateView, String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
-    let (snapshot, report) = state
+    let (mut snapshot, report) = state
         .sdk_config
         .load_with_validation(instance_id)
         .map_err(|error| error.to_string())?;
-    let snapshot = state
-        .sdk_config
-        .sanitize_snapshot_for_view(snapshot)
-        .map_err(|error| error.to_string())?;
+    if matches!(projection, ConfigStateProjection::ClientControlRedacted) {
+        snapshot = state
+            .sdk_config
+            .sanitize_snapshot_for_client_control(snapshot)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(SdkConfigStateView {
         snapshot: snapshot.into(),
         validation: validation_view(report),
@@ -255,7 +286,6 @@ pub async fn upsert_computer_mcp_config_core(
 ) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    let config = normalize_mcp_input_references(config).map_err(RuntimeActionError::runtime)?;
     if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
         return Err(RuntimeActionError::runtime(
             "bundleId 'client_control' is reserved for the built-in Client Control provider",
@@ -601,48 +631,6 @@ mod tests {
         ] {
             assert!(!is_writable_provenance(origin));
         }
-    }
-
-    #[test]
-    fn normalizes_mustache_input_references_to_sdk_canonical_syntax() {
-        let config: MCPServerConfig = serde_json::from_value(json!({
-            "type": "stdio",
-            "name": "openai-{{STAGE}}",
-            "vrl": "{{VRL_TEMPLATE}}",
-            "server_parameters": {
-                "command": "node",
-                "args": ["--token={{ OPENAI_KEY }}", "{{not {an id}}}"],
-                "env": {
-                    "OPENAI_API_KEY": "{{OPENAI_KEY}}",
-                    "UNICODE": "{{地区 key}}",
-                    "EXISTING": "${input:EXISTING}"
-                }
-            }
-        }))
-        .unwrap();
-
-        let normalized = normalize_mcp_input_references(config).unwrap();
-        let value = serde_json::to_value(normalized).unwrap();
-
-        assert_eq!(
-            value["server_parameters"]["env"]["OPENAI_API_KEY"],
-            "${input:OPENAI_KEY}"
-        );
-        assert_eq!(
-            value["server_parameters"]["args"][0],
-            "--token=${input:OPENAI_KEY}"
-        );
-        assert_eq!(value["server_parameters"]["args"][1], "{{not {an id}}}");
-        assert_eq!(
-            value["server_parameters"]["env"]["UNICODE"],
-            "${input:地区 key}"
-        );
-        assert_eq!(
-            value["server_parameters"]["env"]["EXISTING"],
-            "${input:EXISTING}"
-        );
-        assert_eq!(value["name"], "openai-{{STAGE}}");
-        assert_eq!(value["vrl"], "{{VRL_TEMPLATE}}");
     }
 
     #[test]

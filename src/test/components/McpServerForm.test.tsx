@@ -7,6 +7,10 @@ import {
   parseToolMetaJson,
 } from '@/components/McpConfig/McpServerForm';
 import {
+  parseConfigValue,
+  serializeConfigValue,
+} from '@/components/McpConfig/configValue';
+import {
   hasConflictingHttpAuthorization,
   preserveHttpAuthenticationOptions,
 } from '@/components/McpConfig/httpAuthentication';
@@ -105,6 +109,51 @@ describe('normalizeToolMeta', () => {
       echo: { tags: ['debug'] },
       ping: { alias: 'pong' },
     });
+  });
+});
+
+describe('MCP config value sources', () => {
+  it('round-trips constants and canonical Input references without materializing values', () => {
+    expect(parseConfigValue('debug')).toEqual({ source: 'constant', value: 'debug' });
+    expect(parseConfigValue('${input:REGION}')).toEqual({ source: 'input', value: 'REGION' });
+    expect(serializeConfigValue({ source: 'constant', value: 'debug' })).toBe('debug');
+    expect(serializeConfigValue({ source: 'input', value: 'REGION' }))
+      .toBe('${input:REGION}');
+  });
+
+  it('treats composite strings as constants so imported values are never truncated', () => {
+    const composite = 'prefix-${input:REGION}';
+    expect(parseConfigValue(composite)).toEqual({ source: 'constant', value: composite });
+    expect(serializeConfigValue(parseConfigValue(composite))).toBe(composite);
+  });
+
+  it('edits persisted constants and Input references through their matching source controls', () => {
+    render(
+      <McpServerForm
+        instanceId="computer-a"
+        initialValues={{
+          type: 'Stdio',
+          name: 'mixed-values',
+          disabled: false,
+          forbidden_tools: [],
+          tool_meta: {},
+          server_parameters: {
+            command: 'echo',
+            args: [],
+            env: { LOG_LEVEL: 'debug', REGION: '${input:REGION}' },
+          },
+        }}
+        onSubmit={async () => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole('textbox', { name: 'Constant value' })).toHaveValue('debug');
+    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
+      .toHaveTextContent('REGION');
+    const sources = screen.getAllByRole('combobox', { name: 'Value Source' });
+    expect(sources[0].closest('.ant-select')).toHaveTextContent('Constant');
+    expect(sources[1].closest('.ant-select')).toHaveTextContent('Input');
   });
 });
 
@@ -269,7 +318,7 @@ describe('HTTP OAuth configuration', () => {
   });
 });
 
-describe('McpServerForm input attributes (issue #26)', () => {
+describe('McpServerForm technical fields and config value sources', () => {
   // macOS WKWebView auto-capitalizes / auto-corrects technical input
   // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
   it('disables auto-capitalization/correction/autofill on the command field', () => {
@@ -292,22 +341,69 @@ describe('McpServerForm input attributes (issue #26)', () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
+    fireEvent.click(await screen.findByText('Input'));
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
     fireEvent.click(await screen.findByText('OpenAI key (OPENAI_KEY)'));
 
-    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:OPENAI_KEY}');
+    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
+      .toHaveTextContent('OPENAI_KEY');
   });
 
   it('stores a canonical PickString reference without materializing an option', async () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
+    fireEvent.click(await screen.findByText('Input'));
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
     fireEvent.click(await screen.findByText('REGION (REGION)'));
 
-    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:REGION}');
+    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
+      .toHaveTextContent('REGION');
     expect(screen.queryByRole('combobox', { name: 'Choose option' })).not.toBeInTheDocument();
   }, 15_000);
+
+  it('submits a user-entered environment constant as a literal', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
+      target: { value: 'literal-env' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), {
+      target: { value: 'echo' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.change(screen.getByPlaceholderText('KEY'), { target: { value: 'LOG_LEVEL' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Constant value' }), {
+      target: { value: 'debug' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].server_parameters.env).toEqual({ LOG_LEVEL: 'debug' });
+  });
+
+  it('requires a definition when an environment value uses the Input source', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
+      target: { value: 'missing-input-choice' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), {
+      target: { value: 'echo' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.change(screen.getByPlaceholderText('KEY'), { target: { value: 'REGION' } });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
+    fireEvent.click(await screen.findByText('Input'));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByText('Choose an Input')).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 
   it('keeps the same PickString reference in multiple MCP fields', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -324,6 +420,15 @@ describe('McpServerForm input attributes (issue #26)', () => {
     const keys = screen.getAllByPlaceholderText('KEY');
     fireEvent.change(keys[0], { target: { value: 'PRIMARY' } });
     fireEvent.change(keys[1], { target: { value: 'SECONDARY' } });
+
+    let sourceSelectors = screen.getAllByRole('combobox', { name: 'Value Source' });
+    fireEvent.mouseDown(sourceSelectors[0]);
+    let inputOptions = await screen.findAllByText('Input');
+    fireEvent.click(inputOptions[inputOptions.length - 1]);
+    sourceSelectors = screen.getAllByRole('combobox', { name: 'Value Source' });
+    fireEvent.mouseDown(sourceSelectors[1]);
+    inputOptions = await screen.findAllByText('Input');
+    fireEvent.click(inputOptions[inputOptions.length - 1]);
 
     let selectors = screen.getAllByRole('combobox', { name: 'Use Input' });
     fireEvent.mouseDown(selectors[0]);
@@ -346,9 +451,12 @@ describe('McpServerForm input attributes (issue #26)', () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
+    fireEvent.click(await screen.findByText('Input'));
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
     fireEvent.click(await screen.findByText('SESSION_TOKEN (SESSION_TOKEN)'));
 
-    expect(screen.getByPlaceholderText('value')).toHaveValue('${input:SESSION_TOKEN}');
+    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
+      .toHaveTextContent('SESSION_TOKEN');
   }, 10000);
 });
