@@ -14,6 +14,10 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // Experiments are independently executable evidence assets, not part of the
+    // maintained frontend regression suite. Keep the default test command scoped
+    // to the production-facing tests under src/test.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
     exclude: ['e2e/**', 'node_modules/**'],
     css: true,
     coverage: {
