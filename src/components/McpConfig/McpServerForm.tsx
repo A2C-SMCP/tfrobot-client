@@ -365,7 +365,12 @@ export function McpServerForm({
           </Form.Item>
 
           <Card size="small" title={t('mcp.form.envVars')} style={{ marginBottom: 16 }}>
-            <ConfigEntryList name="env" inputs={inputs} addLabel={t('mcp.form.addEnv')} />
+            <ConfigEntryList
+              name="env"
+              instanceId={instanceId}
+              inputs={inputs}
+              addLabel={t('mcp.form.addEnv')}
+            />
           </Card>
         </>
       )}
@@ -381,7 +386,12 @@ export function McpServerForm({
           </Form.Item>
 
           <Card size="small" title={t('mcp.form.headers')} style={{ marginBottom: 16 }}>
-            <ConfigEntryList name="headers" inputs={inputs} addLabel={t('mcp.form.addHeader')} />
+            <ConfigEntryList
+              name="headers"
+              instanceId={instanceId}
+              inputs={inputs}
+              addLabel={t('mcp.form.addHeader')}
+            />
           </Card>
         </>
       )}

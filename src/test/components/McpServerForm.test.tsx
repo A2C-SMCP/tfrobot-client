@@ -1,11 +1,13 @@
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import {
   McpServerForm,
   normalizeToolMeta,
   normalizeToolMetaMap,
   parseToolMetaJson,
 } from '@/components/McpConfig/McpServerForm';
+import { ConfigValueEditor } from '@/components/McpConfig/ConfigValueEditor';
 import {
   applyConfigEntryEdit,
   buildInputDefinitionChanges,
@@ -50,6 +52,7 @@ beforeEach(() => {
   inputState.error = null;
   inputState.activeInstanceId = 'computer-a';
   fetchInputs.mockClear();
+  vi.mocked(invoke).mockReset();
 });
 
 describe('parseToolMetaJson', () => {
@@ -461,6 +464,189 @@ describe('McpServerForm technical fields and config value sources', () => {
       'PickString',
       'Command',
     ]));
+  }, 10_000);
+
+  it('previews an unsaved Command Input without submitting the configuration item', async () => {
+    vi.mocked(invoke).mockResolvedValue({ stdout: 'preview-output', truncated: false });
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.mouseDown(within(dialog).getByRole('combobox', { name: 'Configuration type' }));
+    const commandOptions = await screen.findAllByText('Command');
+    fireEvent.click(commandOptions[commandOptions.length - 1]);
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Command' }), {
+      target: { value: 'echo' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Add Argument/ }));
+    fireEvent.change(within(dialog).getByPlaceholderText('Arg 1'), {
+      target: { value: 'preview-output' },
+    });
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Test Run' }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('preview_command_input', {
+      instanceId: 'computer-a',
+      command: 'echo',
+      args: ['preview-output'],
+    }));
+    expect(await within(dialog).findByText('Command completed successfully')).toBeInTheDocument();
+    expect(within(dialog).getAllByDisplayValue('preview-output')
+      .some((element) => element.tagName === 'TEXTAREA')).toBe(true);
+    expect(screen.queryByText('SESSION_TOKEN · echo')).not.toBeInTheDocument();
+  }, 20_000);
+
+  it('does not invoke the backend when a Command preview has no command', async () => {
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.mouseDown(within(dialog).getByRole('combobox', { name: 'Configuration type' }));
+    const commandOptions = await screen.findAllByText('Command');
+    fireEvent.click(commandOptions[commandOptions.length - 1]);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Test Run' }));
+
+    await waitFor(() => expect(within(dialog).getByRole('textbox', { name: 'Command' }))
+      .toHaveAttribute('aria-invalid', 'true'));
+    expect(invoke).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it('shows a Command preview failure returned by the SDK', async () => {
+    vi.mocked(invoke).mockRejectedValue('Command failed with exit code 7: denied');
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.mouseDown(within(dialog).getByRole('combobox', { name: 'Configuration type' }));
+    const commandOptions = await screen.findAllByText('Command');
+    fireEvent.click(commandOptions[commandOptions.length - 1]);
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Command' }), {
+      target: { value: 'exit 7' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Test Run' }));
+
+    expect(await within(dialog).findByText('Command failed')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('Command failed with exit code 7: denied'))
+      .toBeInTheDocument();
+  }, 20_000);
+
+  it('reports a successful Command preview with empty stdout', async () => {
+    vi.mocked(invoke).mockResolvedValue({ stdout: '', truncated: false });
+    render(
+      <ConfigValueEditor
+        open
+        instanceId="computer-a"
+        initialValue={{
+          key: 'TOKEN',
+          value: {
+            type: 'Input',
+            inputId: 'TOKEN_COMMAND',
+            definition: {
+              type: 'Command',
+              id: 'TOKEN_COMMAND',
+              command: 'true',
+            },
+          },
+        }}
+        inputs={[]}
+        existingKeys={[]}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    const dialog = screen.getByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Test Run' }));
+
+    expect(await within(dialog).findByText('The command completed successfully with no output.'))
+      .toBeInTheDocument();
+  }, 10_000);
+
+  it('runs a Command only once when the preview button is clicked repeatedly', async () => {
+    let resolvePreview!: (result: { stdout: string; truncated: boolean }) => void;
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((resolve) => { resolvePreview = resolve; }),
+    );
+    render(
+      <ConfigValueEditor
+        open
+        instanceId="computer-a"
+        initialValue={{
+          key: 'TOKEN',
+          value: {
+            type: 'Input',
+            inputId: 'TOKEN_COMMAND',
+            definition: {
+              type: 'Command',
+              id: 'TOKEN_COMMAND',
+              command: 'one-shot-command',
+            },
+          },
+        }}
+        inputs={[]}
+        existingKeys={[]}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    const previewButton = within(screen.getByRole('dialog'))
+      .getByRole('button', { name: 'Test Run' });
+    fireEvent.click(previewButton);
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await act(async () => resolvePreview({ stdout: 'once', truncated: false }));
+    expect(await screen.findByDisplayValue('once')).toBeInTheDocument();
+  }, 10_000);
+
+  it('does not attribute an obsolete Command result to edited form values', async () => {
+    let resolveOld!: (result: { stdout: string; truncated: boolean }) => void;
+    let resolveCurrent!: (result: { stdout: string; truncated: boolean }) => void;
+    vi.mocked(invoke)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveCurrent = resolve; }));
+    render(
+      <ConfigValueEditor
+        open
+        instanceId="computer-a"
+        initialValue={{
+          key: 'TOKEN',
+          value: {
+            type: 'Input',
+            inputId: 'TOKEN_COMMAND',
+            definition: {
+              type: 'Command',
+              id: 'TOKEN_COMMAND',
+              command: 'old-command',
+            },
+          },
+        }}
+        inputs={[]}
+        existingKeys={[]}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    const dialog = screen.getByRole('dialog');
+    const previewButton = within(dialog).getByRole('button', { name: 'Test Run' });
+    const commandInput = within(dialog).getByRole('textbox', { name: 'Command' });
+    fireEvent.click(previewButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(commandInput, { target: { value: 'current-command' } });
+    await waitFor(() => expect(previewButton).not.toHaveClass('ant-btn-loading'));
+    fireEvent.click(previewButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+
+    await act(async () => resolveOld({ stdout: 'obsolete-output', truncated: false }));
+    expect(within(dialog).queryByDisplayValue('obsolete-output')).not.toBeInTheDocument();
+    expect(previewButton).toHaveClass('ant-btn-loading');
+
+    await act(async () => resolveCurrent({ stdout: 'current-output', truncated: false }));
+    expect(await within(dialog).findByDisplayValue('current-output')).toBeInTheDocument();
+    expect(commandInput).toHaveValue('current-command');
   }, 10_000);
 
   it('submits a user-entered environment constant as a literal', async () => {

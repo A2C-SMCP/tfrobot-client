@@ -12,6 +12,7 @@ import {
 
 interface ConfigEntryListProps {
   name: 'env' | 'headers';
+  instanceId: string;
   inputs: InputDefinition[];
   addLabel: string;
 }
@@ -32,7 +33,7 @@ function entrySummary(entry: ConfigEntryFormValue | undefined, unresolved: strin
   return definition.password ? `${definition.id} · Secret` : definition.id;
 }
 
-export function ConfigEntryList({ name, inputs, addLabel }: ConfigEntryListProps) {
+export function ConfigEntryList({ name, instanceId, inputs, addLabel }: ConfigEntryListProps) {
   const { t } = useTranslation();
   const form = Form.useFormInstance();
   const entries = (Form.useWatch(name, form) ?? []) as ConfigEntryFormValue[];
@@ -107,6 +108,7 @@ export function ConfigEntryList({ name, inputs, addLabel }: ConfigEntryListProps
           {editor && (
             <ConfigValueEditor
               open
+              instanceId={instanceId}
               initialValue={editor.value}
               inputs={draftInputDefinitions(entries, inputs)}
               existingKeys={entries

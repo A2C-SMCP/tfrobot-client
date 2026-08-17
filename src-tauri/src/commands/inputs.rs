@@ -4,7 +4,7 @@ use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
 use crate::services::sdk_config::{ensure_portable_cli_arguments, SdkConfigService};
 use crate::AppState;
-use a2c_smcp::smcp_computer::inputs::InputKind;
+use a2c_smcp::smcp_computer::inputs::{run_command, InputKind};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
     CommandInput, MCPServerInput, PickStringInput, PickStringOption, PromptStringInput,
 };
@@ -52,6 +52,15 @@ pub enum InputDefinition {
 pub struct PickOption {
     pub label: String,
     pub value: String,
+}
+
+const COMMAND_PREVIEW_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandPreviewResult {
+    pub stdout: String,
+    pub truncated: bool,
 }
 
 impl InputDefinition {
@@ -1004,6 +1013,49 @@ pub async fn import_inputs(
     import_inputs_core(&state, &instance_id, &path).await
 }
 
+/// Execute an unsaved Command Input definition once without mutating Computer configuration.
+#[tauri::command]
+pub async fn preview_command_input(
+    state: State<'_, AppState>,
+    instance_id: String,
+    command: String,
+    args: Vec<String>,
+) -> Result<CommandPreviewResult, String> {
+    preview_command_input_core(&state, &instance_id, command, args).await
+}
+
+pub async fn preview_command_input_core(
+    state: &AppState,
+    instance_id: &str,
+    command: String,
+    args: Vec<String>,
+) -> Result<CommandPreviewResult, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    require_existing_instance(state, instance_id)?;
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("Command is required".to_string());
+    }
+
+    let stdout = run_command(command, &args)
+        .await
+        .map_err(|error| truncate_command_preview_text(&error.to_string()).0)?;
+    let (stdout, truncated) = truncate_command_preview_text(&stdout);
+    Ok(CommandPreviewResult { stdout, truncated })
+}
+
+fn truncate_command_preview_text(value: &str) -> (String, bool) {
+    if value.len() <= COMMAND_PREVIEW_OUTPUT_LIMIT_BYTES {
+        return (value.to_string(), false);
+    }
+
+    let mut end = COMMAND_PREVIEW_OUTPUT_LIMIT_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
+}
+
 pub async fn import_inputs_core(
     state: &AppState,
     instance_id: &str,
@@ -1332,6 +1384,61 @@ mod tests {
             store.clone(),
         );
         (state, store, dir)
+    }
+
+    #[tokio::test]
+    async fn command_preview_returns_stdout_without_persisting_an_input_definition() {
+        let (state, _store, _dir) = test_state();
+
+        let result = preview_command_input_core(
+            &state,
+            "computer-a",
+            "echo".to_string(),
+            vec!["preview-output".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stdout, "preview-output");
+        assert!(!result.truncated);
+        assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_preview_reports_command_failures() {
+        let (state, _store, _dir) = test_state();
+
+        let error =
+            preview_command_input_core(&state, "computer-a", "exit 7".to_string(), Vec::new())
+                .await
+                .unwrap_err();
+
+        assert!(error.contains("exit code 7"));
+        assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_preview_rejects_blank_commands_before_execution() {
+        let (state, _store, _dir) = test_state();
+
+        let error = preview_command_input_core(&state, "computer-a", "   ".to_string(), Vec::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Command is required");
+    }
+
+    #[test]
+    fn command_preview_truncation_preserves_utf8_boundaries() {
+        let output = format!("{}界", "a".repeat(COMMAND_PREVIEW_OUTPUT_LIMIT_BYTES - 1));
+
+        let (truncated, was_truncated) = truncate_command_preview_text(&output);
+
+        assert!(was_truncated);
+        assert_eq!(
+            truncated,
+            "a".repeat(COMMAND_PREVIEW_OUTPUT_LIMIT_BYTES - 1)
+        );
     }
 
     #[test]

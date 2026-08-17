@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Alert, AutoComplete, Button, Form, Modal, Select, Space, Switch } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -24,11 +25,23 @@ interface EditorValues {
 
 interface ConfigValueEditorProps {
   open: boolean;
+  instanceId: string;
   initialValue?: ConfigEntryFormValue;
   inputs: InputDefinition[];
   existingKeys: string[];
   onSubmit: (value: ConfigEntryFormValue) => void;
   onCancel: () => void;
+}
+
+interface CommandPreviewResult {
+  stdout: string;
+  truncated: boolean;
+}
+
+interface CommandPreviewView {
+  type: 'success' | 'error';
+  output: string;
+  truncated?: boolean;
 }
 
 function definitionToValues(definition: InputDefinition): Partial<EditorValues> {
@@ -90,6 +103,7 @@ function valuesToDefinition(values: EditorValues): InputDefinition {
 
 export function ConfigValueEditor({
   open,
+  instanceId,
   initialValue,
   inputs,
   existingKeys,
@@ -102,14 +116,39 @@ export function ConfigValueEditor({
   const password = Form.useWatch('password', form);
   const pickOptions = Form.useWatch('options', form);
   const inputId = Form.useWatch('id', form);
+  const command = Form.useWatch('command', form);
+  const commandArgs = Form.useWatch('args', form);
+  const commandArgsSignature = JSON.stringify(commandArgs ?? []);
   const matchingInput = inputs.find((input) => input.id === inputId);
+  const [previewingCommand, setPreviewingCommand] = useState(false);
+  const [commandPreview, setCommandPreview] = useState<CommandPreviewView>();
+  const commandPreviewRequestId = useRef(0);
+  const commandPreviewInFlight = useRef(false);
 
   useEffect(() => {
-    if (open) {
-      form.resetFields();
-      form.setFieldsValue(entryToValues(initialValue));
+    commandPreviewRequestId.current += 1;
+    commandPreviewInFlight.current = false;
+    setCommandPreview(undefined);
+    setPreviewingCommand(false);
+    if (!open) {
+      return;
     }
+
+    form.resetFields();
+    form.setFieldsValue(entryToValues(initialValue));
   }, [form, initialValue, open]);
+
+  useEffect(() => {
+    commandPreviewRequestId.current += 1;
+    commandPreviewInFlight.current = false;
+    setCommandPreview(undefined);
+    setPreviewingCommand(false);
+  }, [command, commandArgsSignature, instanceId, type]);
+
+  useEffect(() => () => {
+    commandPreviewRequestId.current += 1;
+    commandPreviewInFlight.current = false;
+  }, []);
 
   useEffect(() => {
     if (type !== 'PickString') return;
@@ -135,6 +174,49 @@ export function ConfigValueEditor({
       key,
       value: { type: 'Input', inputId: definition.id, definition },
     });
+  };
+
+  const handlePreviewCommand = async () => {
+    if (commandPreviewInFlight.current) return;
+    const requestId = commandPreviewRequestId.current + 1;
+    commandPreviewRequestId.current = requestId;
+    commandPreviewInFlight.current = true;
+    try {
+      await form.validateFields(['command']);
+    } catch {
+      if (commandPreviewRequestId.current === requestId) {
+        commandPreviewInFlight.current = false;
+      }
+      return;
+    }
+    if (commandPreviewRequestId.current !== requestId) return;
+
+    const previewCommand = String(form.getFieldValue('command') ?? '').trim();
+    const previewArgs = ((form.getFieldValue('args') ?? []) as Array<string | undefined>)
+      .filter((arg): arg is string => Boolean(arg));
+    setPreviewingCommand(true);
+    setCommandPreview(undefined);
+    try {
+      const result = await invoke<CommandPreviewResult>('preview_command_input', {
+        instanceId,
+        command: previewCommand,
+        args: previewArgs,
+      });
+      if (commandPreviewRequestId.current !== requestId) return;
+      setCommandPreview({
+        type: 'success',
+        output: result.stdout,
+        truncated: result.truncated,
+      });
+    } catch (error) {
+      if (commandPreviewRequestId.current !== requestId) return;
+      setCommandPreview({ type: 'error', output: String(error) });
+    } finally {
+      if (commandPreviewRequestId.current === requestId) {
+        commandPreviewInFlight.current = false;
+        setPreviewingCommand(false);
+      }
+    }
   };
 
   return (
@@ -298,6 +380,35 @@ export function ConfigValueEditor({
                     )}
                   </Form.List>
                 </Form.Item>
+                <Space direction="vertical" style={{ display: 'flex', marginBottom: 16 }}>
+                  <Button onClick={() => void handlePreviewCommand()} loading={previewingCommand}>
+                    {t('mcp.form.previewCommand')}
+                  </Button>
+                  {commandPreview && (
+                    <Alert
+                      type={commandPreview.type}
+                      showIcon
+                      message={commandPreview.type === 'success'
+                        ? t('mcp.form.commandPreviewSucceeded')
+                        : t('mcp.form.commandPreviewFailed')}
+                      description={commandPreview.type === 'success' && commandPreview.output === ''
+                        ? t('mcp.form.commandPreviewEmpty')
+                        : (
+                          <>
+                            <Input.TextArea
+                              readOnly
+                              value={commandPreview.output}
+                              autoSize={{ minRows: 2, maxRows: 8 }}
+                              style={{ fontFamily: 'monospace' }}
+                            />
+                            {commandPreview.truncated && (
+                              <div style={{ marginTop: 8 }}>{t('mcp.form.commandPreviewTruncated')}</div>
+                            )}
+                          </>
+                        )}
+                    />
+                  )}
+                </Space>
               </>
             )}
           </>
