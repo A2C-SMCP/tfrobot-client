@@ -178,7 +178,7 @@ pub(crate) fn input_definition_from_sdk(input: &MCPServerInput) -> InputDefiniti
         MCPServerInput::Command(input) => {
             let args = input.args.as_ref().map(|args| {
                 let mut args = args.iter().collect::<Vec<_>>();
-                args.sort_by(|(left, _), (right, _)| left.cmp(right));
+                args.sort_by_key(|(left, _)| *left);
                 args.into_iter().map(|(_, value)| value.clone()).collect()
             });
             InputDefinition::Command {
@@ -562,10 +562,7 @@ pub async fn save_input_core(
                 state,
                 instance_id,
                 Some(&previous_config),
-                previous_value
-                    .as_ref()
-                    .map(std::slice::from_ref)
-                    .unwrap_or(&[]),
+                previous_value.as_slice(),
                 error,
             )
             .await);
@@ -592,10 +589,7 @@ pub async fn save_input_core(
             state,
             instance_id,
             Some(&previous_config),
-            previous_value
-                .as_ref()
-                .map(std::slice::from_ref)
-                .unwrap_or(&[]),
+            previous_value.as_slice(),
             error.to_string(),
         )
         .await);
