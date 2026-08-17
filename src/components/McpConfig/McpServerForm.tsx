@@ -1,11 +1,16 @@
 import { useEffect } from 'react';
-import { Form, Select, Button, Space, Card, Collapse, Switch } from 'antd';
+import { Form, Select, Button, Space, Card, Collapse, Switch, Typography } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';
 import { useInputStore } from '@/stores/inputStore';
-import { InputValuePicker } from './InputValuePicker';
+import { ConfigValueEditor } from './ConfigValueEditor';
+import {
+  parseConfigValue,
+  serializeConfigValue,
+  type ConfigValueFormValue,
+} from './configValue';
 import {
   hasConflictingHttpAuthorization,
   preserveHttpAuthenticationOptions,
@@ -85,8 +90,8 @@ interface FormValues {
   // Http/Sse fields
   url?: string;
   // Common
-  env?: { key: string; value: string }[];
-  headers?: { key: string; value: string }[];
+  env?: { key: string; value: ConfigValueFormValue }[];
+  headers?: { key: string; value: ConfigValueFormValue }[];
   disabled?: boolean;
   // Advanced
   forbidden_tools?: string[];
@@ -120,6 +125,12 @@ export function McpServerForm({
     void fetchInputs(instanceId);
   }, [fetchInputs, instanceId]);
 
+  const validateConfigValue = (_: unknown, value: ConfigValueFormValue | undefined) => (
+    value?.source !== 'input' || value.value
+      ? Promise.resolve()
+      : Promise.reject(new Error(t('mcp.form.inputRequired')))
+  );
+
   // Convert initial config to form values
   const getInitialFormValues = (): FormValues | undefined => {
     if (!initialValues) return { type: 'stdio', name: '', env: [], args: [], disabled: false };
@@ -148,7 +159,10 @@ export function McpServerForm({
         command: sp.command,
         args: sp.args,
         cwd: sp.cwd ?? undefined,
-        env: Object.entries(sp.env).map(([key, value]) => ({ key, value })),
+        env: Object.entries(sp.env).map(([key, value]) => ({
+          key,
+          value: parseConfigValue(value),
+        })),
       };
     }
     if (initialValues.type === 'Http') {
@@ -158,7 +172,10 @@ export function McpServerForm({
         ...advanced,
         type: 'http',
         url: sp.url,
-        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
+        headers: Object.entries(sp.headers).map(([key, value]) => ({
+          key,
+          value: parseConfigValue(value),
+        })),
       };
     }
     if (initialValues.type === 'Sse') {
@@ -168,7 +185,10 @@ export function McpServerForm({
         ...advanced,
         type: 'sse',
         url: sp.url,
-        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
+        headers: Object.entries(sp.headers).map(([key, value]) => ({
+          key,
+          value: parseConfigValue(value),
+        })),
       };
     }
     return { type: 'stdio', name: '', env: [], args: [] };
@@ -204,7 +224,7 @@ export function McpServerForm({
     if (values.type === 'stdio') {
       const envObj: Record<string, string> = {};
       values.env?.forEach(({ key, value }) => {
-        if (key) envObj[key] = value;
+        if (key) envObj[key] = serializeConfigValue(value);
       });
 
       config = {
@@ -220,7 +240,7 @@ export function McpServerForm({
     } else if (values.type === 'http') {
       const headersObj: Record<string, string> = {};
       values.headers?.forEach(({ key, value }) => {
-        if (key) headersObj[key] = value;
+        if (key) headersObj[key] = serializeConfigValue(value);
       });
       const authenticationOptions = preserveHttpAuthenticationOptions(
         initialValues?.type === 'Http' ? initialValues : undefined,
@@ -244,7 +264,7 @@ export function McpServerForm({
     } else {
       const headersObj: Record<string, string> = {};
       values.headers?.forEach(({ key, value }) => {
-        if (key) headersObj[key] = value;
+        if (key) headersObj[key] = serializeConfigValue(value);
       });
 
       config = {
@@ -343,25 +363,25 @@ export function McpServerForm({
                       </Form.Item>
                       <Form.Item
                         name={[field.name, 'value']}
-                        noStyle
+                        style={{ marginBottom: 0 }}
+                        rules={[{ validator: validateConfigValue }]}
                       >
-                        <Input placeholder="value" style={{ width: 200 }} />
+                        <ConfigValueEditor inputs={inputs} />
                       </Form.Item>
-                      <InputValuePicker
-                        inputs={inputs}
-                        onSelect={(value) => {
-                          form.setFieldValue(
-                            ['env', field.name, 'value'],
-                            value,
-                          );
-                        }}
-                      />
                       <MinusCircleOutlined onClick={() => remove(field.name)} />
                     </Space>
                   ))}
-                  <Button type="dashed" onClick={() => add({ key: '', value: '' })} block icon={<PlusOutlined />}>
+                  <Button
+                    type="dashed"
+                    onClick={() => add({ key: '', value: { source: 'constant', value: '' } })}
+                    block
+                    icon={<PlusOutlined />}
+                  >
                     {t('mcp.form.addEnv')}
                   </Button>
+                  <Typography.Text type="secondary">
+                    {t('mcp.form.constantHint')}
+                  </Typography.Text>
                 </>
               )}
             </Form.List>
@@ -393,25 +413,25 @@ export function McpServerForm({
                       </Form.Item>
                       <Form.Item
                         name={[field.name, 'value']}
-                        noStyle
+                        style={{ marginBottom: 0 }}
+                        rules={[{ validator: validateConfigValue }]}
                       >
-                        <Input placeholder="value" style={{ width: 200 }} />
+                        <ConfigValueEditor inputs={inputs} />
                       </Form.Item>
-                      <InputValuePicker
-                        inputs={inputs}
-                        onSelect={(value) => {
-                          form.setFieldValue(
-                            ['headers', field.name, 'value'],
-                            value,
-                          );
-                        }}
-                      />
                       <MinusCircleOutlined onClick={() => remove(field.name)} />
                     </Space>
                   ))}
-                  <Button type="dashed" onClick={() => add({ key: '', value: '' })} block icon={<PlusOutlined />}>
+                  <Button
+                    type="dashed"
+                    onClick={() => add({ key: '', value: { source: 'constant', value: '' } })}
+                    block
+                    icon={<PlusOutlined />}
+                  >
                     {t('mcp.form.addHeader')}
                   </Button>
+                  <Typography.Text type="secondary">
+                    {t('mcp.form.constantHint')}
+                  </Typography.Text>
                   <Form.ErrorList errors={errors} />
                 </>
               )}
