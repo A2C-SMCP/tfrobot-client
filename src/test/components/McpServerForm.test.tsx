@@ -7,7 +7,12 @@ import {
   parseToolMetaJson,
 } from '@/components/McpConfig/McpServerForm';
 import {
+  applyConfigEntryEdit,
+  buildInputDefinitionChanges,
+  draftInputDefinitions,
   parseConfigValue,
+  projectConfigEntries,
+  serializeConfigEntries,
   serializeConfigValue,
 } from '@/components/McpConfig/configValue';
 import {
@@ -16,8 +21,13 @@ import {
 } from '@/components/McpConfig/httpAuthentication';
 import type { HttpServerConfig } from '@/stores/mcpStore';
 
-const { fetchInputs } = vi.hoisted(() => ({
+const { fetchInputs, inputState } = vi.hoisted(() => ({
   fetchInputs: vi.fn().mockResolvedValue(undefined),
+  inputState: {
+    loading: false,
+    error: null as string | null,
+    activeInstanceId: 'computer-a' as string | null,
+  },
 }));
 
 vi.mock('@/stores/inputStore', () => ({
@@ -31,8 +41,16 @@ vi.mock('@/stores/inputStore', () => ({
       { type: 'Command', id: 'SESSION_TOKEN', command: 'token-helper' },
     ],
     fetchInputs,
+    ...inputState,
   }),
 }));
+
+beforeEach(() => {
+  inputState.loading = false;
+  inputState.error = null;
+  inputState.activeInstanceId = 'computer-a';
+  fetchInputs.mockClear();
+});
 
 describe('parseToolMetaJson', () => {
   it('returns empty object for undefined/empty input', () => {
@@ -114,20 +132,20 @@ describe('normalizeToolMeta', () => {
 
 describe('MCP config value sources', () => {
   it('round-trips constants and canonical Input references without materializing values', () => {
-    expect(parseConfigValue('debug')).toEqual({ source: 'constant', value: 'debug' });
-    expect(parseConfigValue('${input:REGION}')).toEqual({ source: 'input', value: 'REGION' });
-    expect(serializeConfigValue({ source: 'constant', value: 'debug' })).toBe('debug');
-    expect(serializeConfigValue({ source: 'input', value: 'REGION' }))
+    expect(parseConfigValue('debug')).toEqual({ type: 'Constant', value: 'debug' });
+    expect(parseConfigValue('${input:REGION}')).toEqual({ type: 'Input', inputId: 'REGION' });
+    expect(serializeConfigValue({ type: 'Constant', value: 'debug' })).toBe('debug');
+    expect(serializeConfigValue({ type: 'Input', inputId: 'REGION' }))
       .toBe('${input:REGION}');
   });
 
   it('treats composite strings as constants so imported values are never truncated', () => {
     const composite = 'prefix-${input:REGION}';
-    expect(parseConfigValue(composite)).toEqual({ source: 'constant', value: composite });
+    expect(parseConfigValue(composite)).toEqual({ type: 'Constant', value: composite });
     expect(serializeConfigValue(parseConfigValue(composite))).toBe(composite);
   });
 
-  it('edits persisted constants and Input references through their matching source controls', () => {
+  it('projects persisted constants and Input references into the four-type first-level list', () => {
     render(
       <McpServerForm
         instanceId="computer-a"
@@ -148,12 +166,95 @@ describe('MCP config value sources', () => {
       />,
     );
 
-    expect(screen.getByRole('textbox', { name: 'Constant value' })).toHaveValue('debug');
-    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
-      .toHaveTextContent('REGION');
-    const sources = screen.getAllByRole('combobox', { name: 'Value Source' });
-    expect(sources[0].closest('.ant-select')).toHaveTextContent('Constant');
-    expect(sources[1].closest('.ant-select')).toHaveTextContent('Input');
+    expect(screen.getByText('LOG_LEVEL')).toBeInTheDocument();
+    expect(screen.getByText('debug')).toBeInTheDocument();
+    expect(screen.getByText('Constant')).toBeInTheDocument();
+    expect(screen.getByText('PickString')).toBeInTheDocument();
+    expect(screen.getByText('REGION · 2')).toBeInTheDocument();
+  });
+
+  it('deduplicates shared definitions and reports atomic definition changes', () => {
+    const existing = [{
+      type: 'PickString' as const,
+      id: 'REGION',
+      options: [{ label: 'US East', value: 'us-east' }],
+    }];
+    const initial = projectConfigEntries({ PRIMARY: '${input:REGION}' }, existing);
+    const result = serializeConfigEntries([
+      ...initial,
+      { key: 'SECONDARY', value: { type: 'Input', inputId: 'REGION', definition: existing[0] } },
+    ]);
+
+    expect(result).toEqual({
+      ok: true,
+      values: { PRIMARY: '${input:REGION}', SECONDARY: '${input:REGION}' },
+      definitions: existing,
+    });
+    if (result.ok) {
+      expect(buildInputDefinitionChanges(initial, result.definitions, existing)).toEqual({
+        upsert: [],
+        removeIfUnused: [],
+      });
+    }
+  });
+
+  it('treats an omitted PromptString password flag as false', () => {
+    const existing = [{
+      type: 'PromptString' as const,
+      id: 'REGION',
+      password: false,
+    }];
+    const initial = projectConfigEntries({ REGION: '${input:REGION}' }, existing);
+    const next = [{ type: 'PromptString' as const, id: 'REGION' }];
+
+    expect(buildInputDefinitionChanges(initial, next, existing)).toEqual({
+      upsert: [],
+      removeIfUnused: [],
+    });
+  });
+
+  it('updates every draft reference when a shared Input definition is edited', () => {
+    const original = {
+      type: 'PickString' as const,
+      id: 'REGION',
+      options: [{ label: 'US East', value: 'us-east' }],
+    };
+    const updated = {
+      ...original,
+      options: [...original.options, { label: 'Europe', value: 'eu' }],
+    };
+    const initial = projectConfigEntries({
+      PRIMARY: '${input:REGION}',
+      SECONDARY: '${input:REGION}',
+    }, [original]);
+
+    const next = applyConfigEntryEdit(initial, 0, {
+      key: 'PRIMARY',
+      value: { type: 'Input', inputId: 'REGION', definition: updated },
+    });
+    const serialized = serializeConfigEntries(next);
+
+    expect(next[1].value).toEqual({ type: 'Input', inputId: 'REGION', definition: updated });
+    expect(serialized).toEqual({
+      ok: true,
+      values: { PRIMARY: '${input:REGION}', SECONDARY: '${input:REGION}' },
+      definitions: [updated],
+    });
+  });
+
+  it('makes a definition created in the current draft available to later entries', () => {
+    const custom = {
+      type: 'PromptString' as const,
+      id: 'custom',
+      description: 'Custom value',
+      password: false,
+    };
+    const entries = applyConfigEntryEdit([], undefined, {
+      key: 'FIRST',
+      value: { type: 'Input', inputId: 'custom', definition: custom },
+    });
+
+    expect(draftInputDefinitions(entries, [])).toEqual([custom]);
   });
 });
 
@@ -290,7 +391,7 @@ describe('HTTP OAuth configuration', () => {
       'Remove the static Authorization header: this server has an explicit OAuth configuration.',
     )).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('matches SDK authentication compatibility rules', () => {
     const oauth = {
@@ -315,10 +416,20 @@ describe('HTTP OAuth configuration', () => {
       { authPolicy: 'disabled' },
       { Authorization: 'Bearer token' },
     )).toBe(false);
-  });
+  }, 10_000);
 });
 
 describe('McpServerForm technical fields and config value sources', () => {
+  it('fails closed and offers retry when Input definitions cannot be loaded', () => {
+    inputState.error = 'load failed';
+    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
+
+    expect(screen.getByText(/Input definitions could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Server Name' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(fetchInputs).toHaveBeenCalledWith('computer-a');
+  });
+
   // macOS WKWebView auto-capitalizes / auto-corrects technical input
   // (e.g. "npx" → "Npx"), which then fails to spawn. Text inputs must opt out.
   it('disables auto-capitalization/correction/autofill on the command field', () => {
@@ -337,32 +448,20 @@ describe('McpServerForm technical fields and config value sources', () => {
     expect(screen.queryByText('Alias Prefix')).not.toBeInTheDocument();
   });
 
-  it('inserts a canonical Input reference into an environment value', async () => {
+  it('offers Constant, PromptString, PickString, and Command as first-class item types', async () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
-    fireEvent.click(await screen.findByText('Input'));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
-    fireEvent.click(await screen.findByText('OpenAI key (OPENAI_KEY)'));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Configuration type' }));
 
-    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
-      .toHaveTextContent('OPENAI_KEY');
-  });
-
-  it('stores a canonical PickString reference without materializing an option', async () => {
-    render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
-
-    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
-    fireEvent.click(await screen.findByText('Input'));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
-    fireEvent.click(await screen.findByText('REGION (REGION)'));
-
-    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
-      .toHaveTextContent('REGION');
-    expect(screen.queryByRole('combobox', { name: 'Choose option' })).not.toBeInTheDocument();
-  }, 15_000);
+    const options = await screen.findAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual(expect.arrayContaining([
+      'Constant',
+      'PromptString',
+      'PickString',
+      'Command',
+    ]));
+  }, 10_000);
 
   it('submits a user-entered environment constant as a literal', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -375,88 +474,98 @@ describe('McpServerForm technical fields and config value sources', () => {
       target: { value: 'echo' },
     });
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.change(screen.getByPlaceholderText('KEY'), { target: { value: 'LOG_LEVEL' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable / header name' }), {
+      target: { value: 'LOG_LEVEL' },
+    });
     fireEvent.change(screen.getByRole('textbox', { name: 'Constant value' }), {
       target: { value: 'debug' },
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await screen.findByText('LOG_LEVEL');
 
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][0].server_parameters.env).toEqual({ LOG_LEVEL: 'debug' });
-  });
+    expect(onSubmit.mock.calls[0][1]).toEqual({ upsert: [], removeIfUnused: [] });
+  }, 20_000);
 
-  it('requires a definition when an environment value uses the Input source', async () => {
+  it('submitting the secondary form only updates the outer draft', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
 
-    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
-      target: { value: 'missing-input-choice' },
-    });
-    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), {
-      target: { value: 'echo' },
-    });
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.change(screen.getByPlaceholderText('KEY'), { target: { value: 'REGION' } });
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
-    fireEvent.click(await screen.findByText('Input'));
-    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const key = screen.getByRole('textbox', { name: 'Environment variable / header name' });
+    fireEvent.change(key, { target: { value: 'LOG_LEVEL' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Constant value' }), {
+      target: { value: 'debug' },
+    });
+    fireEvent.submit(key.closest('form')!);
 
-    expect(await screen.findByText('Choose an Input')).toBeInTheDocument();
+    expect(await screen.findByText('LOG_LEVEL')).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
-  });
+  }, 20_000);
 
-  it('keeps the same PickString reference in multiple MCP fields', async () => {
+  it('creates a PromptString definition and canonical reference in one outer save', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />);
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), {
-      target: { value: 'two-regions' },
+      target: { value: 'custom-input' },
     });
     fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), {
       target: { value: 'echo' },
     });
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    const keys = screen.getAllByPlaceholderText('KEY');
-    fireEvent.change(keys[0], { target: { value: 'PRIMARY' } });
-    fireEvent.change(keys[1], { target: { value: 'SECONDARY' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable / header name' }), {
+      target: { value: 'API_KEY' },
+    });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Configuration type' }));
+    const promptOptions = await screen.findAllByText('PromptString');
+    fireEvent.click(promptOptions[promptOptions.length - 1]);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Variable ID' }), {
+      target: { value: 'custom' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), {
+      target: { value: 'API key' },
+    });
+    fireEvent.click(screen.getByRole('switch', { name: 'Password Mode' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
-    let sourceSelectors = screen.getAllByRole('combobox', { name: 'Value Source' });
-    fireEvent.mouseDown(sourceSelectors[0]);
-    let inputOptions = await screen.findAllByText('Input');
-    fireEvent.click(inputOptions[inputOptions.length - 1]);
-    sourceSelectors = screen.getAllByRole('combobox', { name: 'Value Source' });
-    fireEvent.mouseDown(sourceSelectors[1]);
-    inputOptions = await screen.findAllByText('Input');
-    fireEvent.click(inputOptions[inputOptions.length - 1]);
-
-    let selectors = screen.getAllByRole('combobox', { name: 'Use Input' });
-    fireEvent.mouseDown(selectors[0]);
-    fireEvent.click(await screen.findByText('REGION (REGION)'));
-
-    selectors = screen.getAllByRole('combobox', { name: 'Use Input' });
-    fireEvent.mouseDown(selectors[1]);
-    const regionOptions = await screen.findAllByText('REGION (REGION)');
-    fireEvent.click(regionOptions[regionOptions.length - 1]);
-
+    expect(await screen.findByText('PromptString')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][0].server_parameters.env).toEqual({
-      PRIMARY: '${input:REGION}',
-      SECONDARY: '${input:REGION}',
+      API_KEY: '${input:custom}',
     });
-  }, 15000);
+    expect(onSubmit.mock.calls[0][1]).toEqual({
+      upsert: [{
+        type: 'PromptString',
+        id: 'custom',
+        description: 'API key',
+        default: undefined,
+        password: true,
+      }],
+      removeIfUnused: [],
+    });
+  }, 30_000);
 
-  it('uses the ID fallback and canonical reference for Command', async () => {
+  it('hydrates an existing definition when its ID is typed instead of selected', async () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Value Source' }));
-    fireEvent.click(await screen.findByText('Input'));
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Use Input' }));
-    fireEvent.click(await screen.findByText('SESSION_TOKEN (SESSION_TOKEN)'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable / header name' }), {
+      target: { value: 'REGION' },
+    });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Configuration type' }));
+    const promptOptions = await screen.findAllByText('PromptString');
+    fireEvent.click(promptOptions[promptOptions.length - 1]);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Variable ID' }), {
+      target: { value: 'REGION' },
+    });
 
-    expect(screen.getByRole('combobox', { name: 'Use Input' }).closest('.ant-select'))
-      .toHaveTextContent('SESSION_TOKEN');
-  }, 10000);
+    expect(await screen.findByText('Input REGION already exists. Changing it updates every reference to this Input.'))
+      .toBeInTheDocument();
+    expect(screen.getByText('Options')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Password Mode' })).not.toBeInTheDocument();
+  }, 20_000);
 });

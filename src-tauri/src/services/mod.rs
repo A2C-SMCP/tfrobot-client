@@ -9,6 +9,7 @@ pub mod connection_targets;
 pub mod input_references;
 pub mod input_resolver;
 pub mod input_value_index;
+pub mod input_value_store;
 pub mod keychain;
 pub mod manager_client;
 pub mod manager_context;

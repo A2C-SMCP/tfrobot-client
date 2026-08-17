@@ -1,15 +1,13 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Space, Modal, Typography, Alert, Table, Tag, Popconfirm } from 'antd';
+import { App, Button, Space, Modal, Typography, Alert, Table, Popconfirm } from 'antd';
 import {
-  PlusOutlined,
   ReloadOutlined,
+  ClearOutlined,
   DeleteOutlined,
   EditOutlined,
-  ClearOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useInputStore, type InputDefinition } from '@/stores/inputStore';
-import { InputForm } from './InputForm';
 import { InputValueEditor } from './InputValueEditor';
 
 const { Title } = Typography;
@@ -26,43 +24,36 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     values,
     loading,
     error,
+    valuesLoading,
+    valuesLoadedInstanceId,
+    valuesError,
     fetchInputs,
     fetchValues,
-    addOrUpdateInput,
-    removeInput,
     setValue,
+    removeValue,
     clearValues,
   } = useInputStore();
 
-  const [formVisible, setFormVisible] = useState(false);
-  const [editingInput, setEditingInput] = useState<InputDefinition | undefined>();
   const [valueEditorVisible, setValueEditorVisible] = useState(false);
   const [editingValueId, setEditingValueId] = useState('');
+  const valuesReady = valuesLoadedInstanceId === instanceId && !valuesLoading && !valuesError;
 
   useEffect(() => {
     fetchInputs(instanceId);
     fetchValues(instanceId);
   }, [fetchInputs, fetchValues, instanceId]);
 
-  const handleAdd = () => {
-    setEditingInput(undefined);
-    setFormVisible(true);
-  };
+  useEffect(() => {
+    setValueEditorVisible(false);
+    setEditingValueId('');
+  }, [instanceId]);
 
-  const handleEdit = (input: InputDefinition) => {
-    setEditingInput(input);
-    setFormVisible(true);
-  };
-
-  const handleFormSubmit = async (input: InputDefinition) => {
-    try {
-      await addOrUpdateInput(instanceId, input);
-      message.success(t('inputs.messages.saved'));
-      setFormVisible(false);
-    } catch (e) {
-      message.error(String(e));
+  useEffect(() => {
+    if (!valuesReady) {
+      setValueEditorVisible(false);
+      setEditingValueId('');
     }
-  };
+  }, [valuesReady]);
 
   const handleSetValue = (id: string) => {
     setEditingValueId(id);
@@ -70,6 +61,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
   };
 
   const handleValueSubmit = async (value: string) => {
+    if (!valuesReady || !editingValueId) return;
     try {
       await setValue(instanceId, editingValueId, value);
       message.success(t('inputs.messages.valueSet'));
@@ -88,10 +80,13 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     }
   };
 
-  const typeColors: Record<string, string> = {
-    PromptString: 'blue',
-    PickString: 'green',
-    Command: 'orange',
+  const handleRemoveValue = async (id: string) => {
+    try {
+      await removeValue(instanceId, id);
+      message.success(t('inputs.messages.valueCleared'));
+    } catch (e) {
+      message.error(String(e));
+    }
   };
 
   const columns = [
@@ -102,17 +97,20 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
       width: 150,
     },
     {
-      title: t('inputs.table.type'),
-      key: 'type',
-      width: 120,
-      render: (_: unknown, record: InputDefinition) => (
-        <Tag color={typeColors[record.type]}>{record.type}</Tag>
-      ),
-    },
-    {
       title: t('inputs.table.label'),
       key: 'label',
       render: (_: unknown, record: InputDefinition) => record.label || record.id,
+    },
+    {
+      title: t('inputs.table.storageMode'),
+      key: 'storageMode',
+      width: 190,
+      render: (_: unknown, record: InputDefinition) => {
+        if (record.type === 'Command') return '—';
+        return record.type === 'PromptString' && record.password
+          ? t('inputs.secretMode')
+          : t('inputs.nonSecretMode');
+      },
     },
     {
       title: t('inputs.table.currentValue'),
@@ -120,6 +118,8 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
       width: 200,
       render: (_: unknown, record: InputDefinition) => {
         if (record.type === 'Command') return t('inputs.runtimeCommand');
+        if (valuesLoading) return t('inputs.valuesLoading');
+        if (!valuesReady) return t('inputs.valuesUnavailable');
         const stored = values[record.id];
         let displayValue: string;
         switch (stored?.status) {
@@ -140,51 +140,49 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           default:
             displayValue = t('inputs.notConfigured');
         }
-        return (
-          <Button
-            type="link"
-            size="small"
-            aria-label={t('inputs.setValueFor', { id: record.id })}
-            onClick={() => handleSetValue(record.id)}
-          >
-            {stored?.status === 'configured' && displayValue.length > 30
-              ? `${displayValue.substring(0, 30)}...`
-              : displayValue}
-          </Button>
-        );
+        return stored?.status === 'configured' && displayValue.length > 30
+          ? `${displayValue.substring(0, 30)}...`
+          : displayValue;
       },
     },
     {
       title: t('inputs.table.actions'),
       key: 'actions',
-      width: 150,
-      render: (_: unknown, record: InputDefinition) => (
-        <Space>
-          <Button
-            type="text"
-            size="small"
-            icon={<EditOutlined />}
-            aria-label={t('inputs.editInputFor', { id: record.id })}
-            title={t('inputs.editInputFor', { id: record.id })}
-            onClick={() => handleEdit(record)}
-          />
-          <Popconfirm
-            title={t('inputs.confirmRemove')}
-            onConfirm={() => {
-              removeInput(instanceId, record.id).catch((e) => message.error(String(e)));
-            }}
-          >
+      width: 210,
+      render: (_: unknown, record: InputDefinition) => {
+        if (record.type === 'Command') return '—';
+        const configured = valuesReady && values[record.id]?.configured === true;
+        return (
+          <Space size="small">
             <Button
-              type="text"
+              type="link"
               size="small"
-              danger
-              icon={<DeleteOutlined />}
-              aria-label={t('inputs.removeInputFor', { id: record.id })}
-              title={t('inputs.removeInputFor', { id: record.id })}
-            />
-          </Popconfirm>
-        </Space>
-      ),
+              icon={<EditOutlined />}
+              aria-label={t('inputs.setValueFor', { id: record.id })}
+              disabled={!valuesReady}
+              onClick={() => handleSetValue(record.id)}
+            >
+              {configured ? t('inputs.editValue') : t('inputs.setValue')}
+            </Button>
+            <Popconfirm
+              title={t('inputs.confirmClearValue', { id: record.id })}
+              onConfirm={() => handleRemoveValue(record.id)}
+              disabled={!configured}
+            >
+              <Button
+                type="link"
+                size="small"
+                danger
+                disabled={!configured}
+                icon={<DeleteOutlined />}
+                aria-label={t('inputs.clearValueFor', { id: record.id })}
+              >
+                {t('inputs.clearValue')}
+              </Button>
+            </Popconfirm>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -205,71 +203,51 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           <Button icon={<ReloadOutlined />} onClick={() => {
             fetchInputs(instanceId);
             fetchValues(instanceId);
-          }} loading={loading}>
+          }} loading={loading || valuesLoading}>
             {t('common.refresh')}
           </Button>
           <Popconfirm title={t('inputs.confirmClearValues')} onConfirm={handleClearAll}>
-            <Button icon={<ClearOutlined />} danger>
+            <Button icon={<ClearOutlined />} danger disabled={!valuesReady}>
               {t('inputs.clearValues')}
             </Button>
           </Popconfirm>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            aria-label={t('inputs.addInput')}
-            onClick={handleAdd}
-          >
-            {t('inputs.addInput')}
-          </Button>
         </Space>
       </div>
 
-      {error && (
-        <Alert message={t('common.error')} description={error} type="error" showIcon closable style={{ marginBottom: 16 }} />
+      {(error || valuesError) && (
+        <Alert message={t('common.error')} description={error || valuesError} type="error" showIcon closable style={{ marginBottom: 16 }} />
       )}
 
       <Table
         dataSource={inputs}
         columns={columns}
         rowKey="id"
-        loading={loading}
+        loading={loading || valuesLoading}
         pagination={false}
         size="middle"
         scroll={{ x: 'max-content' }}
       />
 
-      <Modal
-        title={editingInput ? t('inputs.editInput') : t('inputs.addInput')}
-        open={formVisible}
-        onCancel={() => setFormVisible(false)}
-        footer={null}
-        destroyOnHidden
-        width={600}
-      >
-        <InputForm
-          initialValues={editingInput}
-          onSubmit={handleFormSubmit}
-          onCancel={() => setFormVisible(false)}
-          loading={loading}
-        />
-      </Modal>
-
-      <Modal
-        title={t('inputs.setValueFor', { id: editingValueId })}
-        open={valueEditorVisible}
-        onCancel={() => setValueEditorVisible(false)}
-        footer={null}
-        destroyOnHidden
-        width={400}
-      >
-        <InputValueEditor
-          inputId={editingValueId}
-          inputs={inputs}
-          currentValue={values[editingValueId]?.value}
-          onSubmit={handleValueSubmit}
+      {valueEditorVisible && (
+        <Modal
+          title={t('inputs.setValueFor', { id: editingValueId })}
+          open
           onCancel={() => setValueEditorVisible(false)}
-        />
-      </Modal>
+          footer={null}
+          destroyOnHidden
+          width={400}
+        >
+          <InputValueEditor
+            key={`${instanceId}:${editingValueId}`}
+            inputId={editingValueId}
+            inputs={inputs}
+            currentValue={values[editingValueId]?.value}
+            disabled={!valuesReady}
+            onSubmit={handleValueSubmit}
+            onCancel={() => setValueEditorVisible(false)}
+          />
+        </Modal>
+      )}
 
     </div>
   );

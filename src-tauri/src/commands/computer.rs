@@ -11,7 +11,8 @@ use crate::services::computer::{
     ConnectionStateSummary, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
-use crate::services::input_value_index;
+use crate::services::input_value_index::{self, InputValueStorageKind};
+use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
@@ -466,35 +467,57 @@ pub async fn delete_computer_instance_core(
 }
 
 #[derive(Debug)]
-struct ComputerInputStorageSnapshot {
-    id: String,
-    value: Option<serde_json::Value>,
-    secret: Option<String>,
+enum ComputerInputStorageSnapshot {
+    Value {
+        id: String,
+        value: Option<serde_json::Value>,
+    },
+    Secret {
+        id: String,
+        secret: Option<String>,
+    },
 }
 
 fn snapshot_computer_input_storage(
     state: &AppState,
     instance: &ComputerInstance,
 ) -> Result<Vec<ComputerInputStorageSnapshot>, String> {
-    let mut ids = input_value_index::load(state.config.as_ref(), &instance.id)?;
-    ids.extend(
-        state
-            .sdk_config
-            .load_input_definitions(&instance.id)
-            .iter()
-            .map(|input| input.id().to_string()),
-    );
-    ids.into_iter()
-        .map(|id| {
-            Ok(ComputerInputStorageSnapshot {
-                value: keychain::get_input_value(state.secret_store.as_ref(), &instance.id, &id)
+    let mut entries = input_value_index::load(state.config.as_ref(), &instance.id)?;
+    for input in state.sdk_config.load_input_definitions(&instance.id) {
+        if input.supports_persistent_value() {
+            let kind = if input.is_secret() {
+                InputValueStorageKind::Secret
+            } else {
+                InputValueStorageKind::Value
+            };
+            entries
+                .entry(input.id().to_string())
+                .or_default()
+                .insert(kind);
+        }
+    }
+    let mut snapshots = Vec::new();
+    for (id, kinds) in entries {
+        for kind in kinds {
+            snapshots.push(match kind {
+                InputValueStorageKind::Value => ComputerInputStorageSnapshot::Value {
+                    value: InputValueStore::for_computer(state.config.as_ref(), &instance.id)
+                        .get(&id)?,
+                    id: id.clone(),
+                },
+                InputValueStorageKind::Secret => ComputerInputStorageSnapshot::Secret {
+                    secret: keychain::get_input_secret(
+                        state.secret_store.as_ref(),
+                        &instance.id,
+                        &id,
+                    )
                     .map_err(|error| error.to_string())?,
-                secret: keychain::get_input_secret(state.secret_store.as_ref(), &instance.id, &id)
-                    .map_err(|error| error.to_string())?,
-                id,
-            })
-        })
-        .collect()
+                    id: id.clone(),
+                },
+            });
+        }
+    }
+    Ok(snapshots)
 }
 
 fn delete_computer_input_storage(
@@ -503,10 +526,15 @@ fn delete_computer_input_storage(
     snapshots: &[ComputerInputStorageSnapshot],
 ) -> Result<(), String> {
     for snapshot in snapshots {
-        keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &snapshot.id)
-            .map_err(|error| error.to_string())?;
-        keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, &snapshot.id)
-            .map_err(|error| error.to_string())?;
+        match snapshot {
+            ComputerInputStorageSnapshot::Value { id, .. } => {
+                InputValueStore::for_computer(state.config.as_ref(), instance_id).delete(id)?;
+            }
+            ComputerInputStorageSnapshot::Secret { id, .. } => {
+                keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
     }
     Ok(())
 }
@@ -517,32 +545,23 @@ fn restore_computer_input_storage(
     snapshots: &[ComputerInputStorageSnapshot],
 ) -> Result<(), String> {
     for snapshot in snapshots {
-        match &snapshot.value {
-            Some(value) => keychain::set_input_value(
-                state.secret_store.as_ref(),
-                instance_id,
-                &snapshot.id,
-                value,
-            ),
-            None => {
-                keychain::delete_input_value(state.secret_store.as_ref(), instance_id, &snapshot.id)
+        match snapshot {
+            ComputerInputStorageSnapshot::Value { id, value } => match value {
+                Some(value) => {
+                    InputValueStore::for_computer(state.config.as_ref(), instance_id).set(id, value)
+                }
+                None => {
+                    InputValueStore::for_computer(state.config.as_ref(), instance_id).delete(id)
+                }
+            },
+            ComputerInputStorageSnapshot::Secret { id, secret } => match secret {
+                Some(secret) => {
+                    keychain::set_input_secret(state.secret_store.as_ref(), instance_id, id, secret)
+                }
+                None => keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, id),
             }
-        }
-        .map_err(|error| error.to_string())?;
-        match &snapshot.secret {
-            Some(secret) => keychain::set_input_secret(
-                state.secret_store.as_ref(),
-                instance_id,
-                &snapshot.id,
-                secret,
-            ),
-            None => keychain::delete_input_secret(
-                state.secret_store.as_ref(),
-                instance_id,
-                &snapshot.id,
-            ),
-        }
-        .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string()),
+        }?;
     }
     Ok(())
 }

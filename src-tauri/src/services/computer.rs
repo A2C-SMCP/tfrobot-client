@@ -12,6 +12,7 @@ use crate::services::computer_runtime_events::{
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_references::referenced_input_ids;
 use crate::services::input_resolver::RuntimeInputResolver;
+use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
 use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
@@ -915,7 +916,13 @@ impl ComputerInstanceRuntime {
             instance.id.clone(),
             secret_store.clone(),
         ));
-        let input_resolver = Arc::new(RuntimeInputResolver::new(instance.id.clone(), secret_store));
+        let input_resolver = Arc::new(RuntimeInputResolver::new(
+            instance.id.clone(),
+            InputValueStore::from_storage_root(
+                skill_home_base.join(instance_storage_dir_name(&instance.id)),
+            ),
+            secret_store,
+        ));
         let (computer, sdk_servers, inputs) = build_sdk_computer(
             &instance,
             HandleDeclarations {
@@ -2730,14 +2737,16 @@ pub(crate) fn configured_skill_home_for_instance(
 fn resolve_instance_settings(
     context: &InstanceConfigContext,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let policy = resolve_policy_settings(Some(context.env()), None, None);
-    resolve_settings(ResolveSettingsArgs {
-        cwd: Some(context.project_anchor()),
-        env: Some(context.env()),
-        flag_settings_path: None,
-        policy_settings: Some(&policy),
+    context.with_read(|| {
+        let policy = resolve_policy_settings(Some(context.env()), None, None);
+        resolve_settings(ResolveSettingsArgs {
+            cwd: Some(context.project_anchor()),
+            env: Some(context.env()),
+            flag_settings_path: None,
+            policy_settings: Some(&policy),
+        })
+        .settings
     })
-    .settings
 }
 
 pub(crate) fn sdk_managed_by_to_client(managed_by: McpOwnership) -> Option<McpServerManagedBy> {

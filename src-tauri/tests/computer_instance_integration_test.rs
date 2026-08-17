@@ -22,6 +22,7 @@ use tfrobot_client_lib::services::computer::{
 };
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::SettingsService;
@@ -1327,18 +1328,12 @@ async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
     let second_servers = mcp::get_mcp_servers_core(&state, &second.id).await.unwrap();
     let default_inputs = state.sdk_config.load_input_definitions(LEGACY_INSTANCE_ID);
     let second_inputs = state.sdk_config.load_input_definitions(&second.id);
-    let default_value = tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        LEGACY_INSTANCE_ID,
-        "token",
-    )
-    .unwrap();
-    let second_value = tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        &second.id,
-        "token",
-    )
-    .unwrap();
+    let default_value = InputValueStore::for_computer(state.config.as_ref(), LEGACY_INSTANCE_ID)
+        .get("token")
+        .unwrap();
+    let second_value = InputValueStore::for_computer(state.config.as_ref(), &second.id)
+        .get("token")
+        .unwrap();
 
     assert_eq!(default_servers[0].name, "default-only");
     assert_eq!(second_servers[0].name, "second-only");

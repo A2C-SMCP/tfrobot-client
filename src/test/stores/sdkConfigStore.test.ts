@@ -171,6 +171,49 @@ describe('sdkConfigStore', () => {
     expect(useSdkConfigStore.getState().snapshot?.revision).toBe('sha256:updated');
   });
 
+  it('uses the atomic Client adapter when the MCP draft changes Input definitions', async () => {
+    const config = {
+      type: 'Stdio' as const,
+      name: 'with-input',
+      disabled: false,
+      forbidden_tools: [],
+      tool_meta: {},
+      server_parameters: {
+        command: 'node',
+        args: [],
+        env: { TOKEN: '${input:token}' },
+      },
+    };
+    const inputChanges = {
+      upsert: [{ type: 'PromptString' as const, id: 'token', password: true }],
+      removeIfUnused: ['legacy-token'],
+    };
+    mockedInvoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        snapshot: {
+          version: 1,
+          revision: 'sha256:atomic',
+          mcp: { servers: [] },
+          provenance: {},
+        },
+        validation: { valid: true, errors: [] },
+      });
+
+    await useSdkConfigStore.getState().upsertServer('computer-a', config, inputChanges);
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(
+      1,
+      'upsert_computer_mcp_config_with_inputs',
+      {
+        instanceId: 'computer-a',
+        config,
+        inputDefinitions: inputChanges.upsert,
+        removeInputIdsIfUnused: inputChanges.removeIfUnused,
+      },
+    );
+  });
+
   it('refreshes committed config after a runtime-side mutation error', async () => {
     const config = {
       type: 'Stdio' as const,

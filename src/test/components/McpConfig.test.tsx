@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { McpConfig } from '@/components/McpConfig';
+import { save } from '@tauri-apps/plugin-dialog';
 
 const mockSdkStore = {
   snapshot: null,
@@ -149,6 +150,30 @@ describe('McpConfig', () => {
     expect(screen.queryByText('Start All')).not.toBeInTheDocument();
     expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
   });
+
+  it('requires explicit acknowledgement before exporting plaintext constants', async () => {
+    vi.mocked(save).mockResolvedValue('/tmp/mcp-config.json');
+    mockSdkStore.exportConfig.mockResolvedValue(undefined);
+    render(<McpConfig instanceId={instanceId} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export Config' }));
+
+    expect((await screen.findAllByText('Export configuration with plaintext constants?')).length)
+      .toBeGreaterThan(0);
+    expect(save).not.toHaveBeenCalled();
+    expect(mockSdkStore.exportConfig).not.toHaveBeenCalled();
+
+    const confirmButtons = screen.getAllByRole('button', {
+      name: 'Export plaintext configuration',
+    });
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(mockSdkStore.exportConfig).toHaveBeenCalledWith(
+      instanceId,
+      '/tmp/mcp-config.json',
+    );
+  }, 15_000);
 
   it('renders a safe error alert without exposing the stored technical value', () => {
     mockUseSdkConfigStore.mockReturnValue({

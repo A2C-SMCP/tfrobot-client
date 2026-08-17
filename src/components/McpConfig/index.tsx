@@ -17,6 +17,7 @@ import {
   type McpServerManagedBy,
 } from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
+import type { InputDefinitionChanges } from '@/stores/inputStore';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   isMissingRuntimeInputError,
@@ -33,7 +34,7 @@ interface McpConfigProps {
 
 export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const {
     snapshot,
     validation,
@@ -68,6 +69,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
   const [inputPrompt, setInputPrompt] = useState<{
     config: McpServerConfig;
+    inputChanges?: InputDefinitionChanges;
     error: MissingRuntimeInputError;
   } | null>(null);
 
@@ -101,10 +103,14 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     setFormVisible(true);
   };
 
-  const handleFormSubmit = async (config: McpServerConfig) => {
+  const handleFormSubmit = async (
+    config: McpServerConfig,
+    inputChanges?: InputDefinitionChanges,
+  ) => {
     if (!ownershipReady) return;
     try {
-      await upsertServer(instanceId, config);
+      if (inputChanges) await upsertServer(instanceId, config, inputChanges);
+      else await upsertServer(instanceId, config);
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
         name: config.name,
       }));
@@ -112,7 +118,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
       setFormVisible(false);
     } catch (cause) {
       if (isMissingRuntimeInputError(cause)) {
-        setInputPrompt({ config, error: cause });
+        setInputPrompt({ config, inputChanges, error: cause });
         return;
       }
       message.error(t('mcp.messages.operationFailed'));
@@ -175,7 +181,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     }
   };
 
-  const handleExport = async () => {
+  const exportToFile = async () => {
     try {
       const { save } = await import('@tauri-apps/plugin-dialog');
       const path = await save({
@@ -189,6 +195,16 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     } catch {
       message.error(t('mcp.messages.operationFailed'));
     }
+  };
+
+  const handleExport = () => {
+    modal.confirm({
+      title: t('mcp.exportWarning.title'),
+      content: t('mcp.exportWarning.description'),
+      okText: t('mcp.exportWarning.confirm'),
+      okButtonProps: { danger: true },
+      onOk: exportToFile,
+    });
   };
 
   const columns = [
@@ -482,7 +498,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           instanceId={instanceId}
           error={inputPrompt.error}
           onCancel={() => setInputPrompt(null)}
-          onSubmitted={() => handleFormSubmit(inputPrompt.config)}
+          onSubmitted={() => handleFormSubmit(inputPrompt.config, inputPrompt.inputChanges)}
         />
       )}
     </div>

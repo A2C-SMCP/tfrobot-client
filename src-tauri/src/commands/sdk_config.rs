@@ -1,3 +1,4 @@
+use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::input_references;
@@ -331,6 +332,111 @@ pub async fn upsert_computer_mcp_config_core(
     Ok(())
 }
 
+/// Commits one Client editor draft as the SDK's top-level Input definitions plus canonical
+/// server references. The SDK remains the persistence/parser boundary; this command only makes
+/// the Client's two projections one atomic user operation.
+#[tauri::command]
+pub async fn upsert_computer_mcp_config_with_inputs(
+    state: State<'_, AppState>,
+    instance_id: String,
+    config: MCPServerConfig,
+    input_definitions: Vec<InputDefinition>,
+    remove_input_ids_if_unused: Vec<String>,
+) -> Result<(), RuntimeActionError> {
+    upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        &instance_id,
+        config,
+        input_definitions,
+        remove_input_ids_if_unused,
+    )
+    .await
+}
+
+pub async fn upsert_computer_mcp_config_with_inputs_core(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+    input_definitions: Vec<InputDefinition>,
+    remove_input_ids_if_unused: Vec<String>,
+) -> Result<(), RuntimeActionError> {
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _input_guard = state.input_mutation_lock.lock().await;
+    let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
+    if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        return Err(RuntimeActionError::runtime(
+            "bundleId 'client_control' is reserved for the built-in Client Control provider",
+        ));
+    }
+
+    let input_definitions = prepare_portable_input_definitions(&input_definitions)
+        .map_err(RuntimeActionError::runtime)?;
+    let edited_input_ids = input_definitions
+        .iter()
+        .map(|definition| definition.id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let mut project_inputs = state
+        .sdk_config
+        .load_project_input_definitions(instance_id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    for definition in &input_definitions {
+        project_inputs.retain(|item| item.id() != definition.id());
+        project_inputs.push(definition.clone());
+    }
+
+    let mut available_inputs = state.sdk_config.load_input_definitions(instance_id);
+    // Only the submitted definitions are candidates for this operation. Replacing the merged
+    // view with every Project definition would incorrectly override Local/Policy precedence.
+    for definition in &input_definitions {
+        available_inputs.retain(|item| item.id() != definition.id());
+        available_inputs.push(definition.clone());
+    }
+    if let Some(input_id) = referenced_input_ids(&config)?
+        .into_iter()
+        .find(|id| !available_inputs.iter().any(|input| input.id() == id))
+    {
+        return Err(missing_input_definition_error(input_id));
+    }
+
+    let previous_config = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
+        .map(|server| server.config);
+    let runtime = state.computer_registry.runtime(instance_id).await;
+    let oauth_identity_change = previous_config
+        .as_ref()
+        .filter(|previous| oauth_credential_identity_changed(previous, &config));
+    let _oauth_admission_guard = if oauth_identity_change.is_some() {
+        match runtime.as_ref() {
+            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(previous) = oauth_identity_change {
+        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, previous.clone())
+            .await
+            .map_err(RuntimeActionError::runtime)?;
+    }
+
+    state
+        .sdk_config
+        .upsert_mcp_config_with_inputs_atomically(
+            instance_id,
+            &config,
+            &project_inputs,
+            &edited_input_ids,
+            &remove_input_ids_if_unused.into_iter().collect(),
+        )
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    Ok(())
+}
+
 fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServerConfig) -> bool {
     let Some(previous) =
         crate::services::oauth_credential_store::oauth_cleanup_config(previous.clone())
@@ -404,6 +510,7 @@ pub async fn remove_computer_mcp_config_core(
     name: &str,
 ) -> Result<(), String> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _input_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
     let name = name.trim();
     if name.is_empty() {
@@ -425,9 +532,17 @@ pub async fn remove_computer_mcp_config_core(
     if let Some(config) = previous_config.clone() {
         clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
     }
+    let input_candidates = previous_config
+        .as_ref()
+        .map(referenced_input_ids)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     state
         .sdk_config
-        .remove_mcp_config(instance_id, name)
+        .remove_mcp_config_with_input_gc_atomically(instance_id, name, &input_candidates)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
