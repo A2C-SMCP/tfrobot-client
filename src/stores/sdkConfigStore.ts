@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import type { McpServerConfig } from './mcpStore';
+import type { InputDefinitionChanges } from './inputStore';
 
 type SdkConfigError = 'operation_failed';
 
@@ -56,7 +57,11 @@ interface SdkConfigState {
   pendingMutations: Record<string, number>;
   fetchConfig: (instanceId: string) => Promise<void>;
   validateConfig: (instanceId: string) => Promise<void>;
-  upsertServer: (instanceId: string, config: McpServerConfig) => Promise<void>;
+  upsertServer: (
+    instanceId: string,
+    config: McpServerConfig,
+    inputChanges?: InputDefinitionChanges,
+  ) => Promise<void>;
   removeServer: (instanceId: string, name: string) => Promise<void>;
   importConfig: (instanceId: string, path: string) => Promise<ImportResult>;
   exportConfig: (instanceId: string, path: string, serverNames?: string[]) => Promise<void>;
@@ -184,10 +189,25 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
     }
   },
 
-  upsertServer: async (instanceId: string, config: McpServerConfig) => {
+  upsertServer: async (
+    instanceId: string,
+    config: McpServerConfig,
+    inputChanges?: InputDefinitionChanges,
+  ) => {
     beginMutation(set, get, instanceId);
     try {
-      await invoke('upsert_computer_mcp_config', { instanceId, config });
+      const hasInputChanges = inputChanges
+        && (inputChanges.upsert.length > 0 || inputChanges.removeIfUnused.length > 0);
+      if (hasInputChanges) {
+        await invoke('upsert_computer_mcp_config_with_inputs', {
+          instanceId,
+          config,
+          inputDefinitions: inputChanges.upsert,
+          removeInputIdsIfUnused: inputChanges.removeIfUnused,
+        });
+      } else {
+        await invoke('upsert_computer_mcp_config', { instanceId, config });
+      }
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
       if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);

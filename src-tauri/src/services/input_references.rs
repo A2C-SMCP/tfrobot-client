@@ -17,11 +17,18 @@ pub struct InputReferenceLocation {
 pub fn referenced_input_ids(value: &Value) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
     visit_value(value, &mut Vec::new(), &mut |text, _| {
-        for (id, _, _) in input_references(text) {
+        if let Some(id) = exact_input_reference(text) {
             ids.insert(id.to_string());
         }
     });
     ids
+}
+
+/// Returns the Input id only when the complete string is one canonical reference.
+/// Composite strings are editor literals and must not participate in definition validation/GC.
+pub fn exact_input_reference(value: &str) -> Option<&str> {
+    let id = value.strip_prefix("${input:")?.strip_suffix('}')?;
+    (!id.is_empty() && !id.contains('}')).then_some(id)
 }
 
 pub fn find_project_input_references(document: &ProjectConfigDoc) -> Vec<InputReferenceLocation> {
@@ -45,7 +52,7 @@ pub fn find_project_input_references(document: &ProjectConfigDoc) -> Vec<InputRe
                     field,
                     &mut vec![field_name.to_string()],
                     &mut |text, path| {
-                        for (input_id, _, _) in input_references(text) {
+                        if let Some(input_id) = exact_input_reference(text) {
                             locations.push(InputReferenceLocation {
                                 input_id: input_id.to_string(),
                                 server_name: server_name.clone(),
@@ -270,5 +277,22 @@ mod tests {
         let serialized = serde_json::to_string(&(&document.mcp, &document.mcp_local)).unwrap();
         assert!(serialized.contains("${input:b}"));
         assert!(serialized.contains("literal-b"));
+    }
+
+    #[test]
+    fn validation_and_gc_only_accept_complete_canonical_references() {
+        let value = json!({
+            "exact": "${input:region}",
+            "prefix": "prefix-${input:ignored}",
+            "suffix": "${input:ignored}-suffix",
+            "empty": "${input:}",
+        });
+
+        assert_eq!(
+            referenced_input_ids(&value),
+            BTreeSet::from(["region".to_string()])
+        );
+        assert_eq!(exact_input_reference("${input:region}"), Some("region"));
+        assert_eq!(exact_input_reference("prefix-${input:region}"), None);
     }
 }

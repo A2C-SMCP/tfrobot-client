@@ -182,14 +182,13 @@ async fn import_servers_and_inputs(
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
     let servers = state
         .sdk_config
-        .prepare_portable_mcp_configs(&servers)
+        .prepare_literal_preserving_mcp_configs(&servers)
         .map_err(|error| error.to_string())?;
     let transaction_inputs = inputs.clone();
 
     recover_pending_config_import_for_instance(
         state.config.as_ref(),
         state.sdk_config.as_ref(),
-        state.secret_store.as_ref(),
         instance_id,
     )?;
     let inputs_imported = inputs.len();
@@ -235,12 +234,12 @@ async fn import_servers_and_inputs(
     };
     persist_config_import_transaction(state.config.as_ref(), &transaction)?;
 
-    // The durable, secret-free transaction makes a crash between the two stores recoverable.
+    // The durable transaction makes a crash between the two stores recoverable. It shares the
+    // Computer's trusted local storage boundary because user-authored constants may be plaintext.
     let mut transaction = transaction;
     let input_snapshot = if let Some(merged_inputs) = &merged_inputs {
         match crate::commands::inputs::replace_input_definitions_config_only_locked(
             state.sdk_config.as_ref(),
-            state.secret_store.as_ref(),
             instance_id,
             merged_inputs,
         ) {
@@ -271,7 +270,6 @@ async fn import_servers_and_inputs(
         let rollback_error = input_snapshot.as_ref().and_then(|snapshot| {
             crate::commands::inputs::restore_input_definitions_config_only_locked(
                 state.sdk_config.as_ref(),
-                state.secret_store.as_ref(),
                 instance_id,
                 snapshot,
             )
@@ -437,7 +435,6 @@ fn load_config_import_transaction(
 fn recover_pending_config_import_for_instance(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_id: &str,
 ) -> Result<RecoveredConfigImport, String> {
     let Some(mut transaction) = load_config_import_transaction(config, instance_id)? else {
@@ -454,7 +451,7 @@ fn recover_pending_config_import_for_instance(
 
     transaction.inputs = super::inputs::prepare_portable_input_definitions(&transaction.inputs)?;
     transaction.servers = sdk_config
-        .prepare_portable_mcp_configs(&transaction.servers)
+        .prepare_literal_preserving_mcp_configs(&transaction.servers)
         .map_err(|error| error.to_string())?;
     sdk_config
         .preflight_import_mcp_configs(instance_id, &transaction.servers)
@@ -472,7 +469,6 @@ fn recover_pending_config_import_for_instance(
         }
         crate::commands::inputs::replace_input_definitions_config_only_locked(
             sdk_config,
-            secret_store,
             instance_id,
             &merged_inputs,
         )
@@ -493,19 +489,15 @@ fn recover_pending_config_import_for_instance(
 pub(crate) fn recover_pending_config_imports(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
     for instance_id in instance_ids {
-        let _recovered = recover_pending_config_import_for_instance(
-            config,
-            sdk_config,
-            secret_store,
-            &instance_id,
-        )
-        .map_err(|error| {
-            format!("Failed to recover config import for Computer '{instance_id}': {error}")
-        })?;
+        let _recovered =
+            recover_pending_config_import_for_instance(config, sdk_config, &instance_id).map_err(
+                |error| {
+                    format!("Failed to recover config import for Computer '{instance_id}': {error}")
+                },
+            )?;
     }
     Ok(())
 }
@@ -667,11 +659,9 @@ pub async fn export_config_core(
             "Cannot export invalid portable SDK configuration: {details}"
         ));
     }
-    let servers = SdkConfigService::mcp_configs_from_portable_document(portable)
+    let inputs = SdkConfigService::input_definitions_from_portable_document(&portable)
         .map_err(|error| error.to_string())?;
-    let inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
+    let servers = SdkConfigService::mcp_configs_from_portable_document(portable)
         .map_err(|error| error.to_string())?;
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
 

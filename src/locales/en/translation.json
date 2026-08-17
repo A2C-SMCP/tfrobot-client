@@ -178,7 +178,7 @@
         },
         "inputs": {
           "title": "Inputs",
-          "description": "Manage user-created definitions, values, and Secrets for this Computer."
+          "description": "Manage resolved values for this Computer's MCP Input definitions; Secrets are stored in the system Keychain."
         },
         "connection": {
           "title": "Connection Policy",
@@ -557,6 +557,11 @@
     "confirmRemove": "Are you sure you want to remove this server?",
     "importConfig": "Import Config",
     "exportConfig": "Export Config",
+    "exportWarning": {
+      "title": "Export configuration with plaintext constants?",
+      "description": "Constant MCP values are exported exactly as configured and may contain passwords, tokens, or other credentials. Input values saved on this Computer are not exported. Store and share the file securely.",
+      "confirm": "Export plaintext configuration"
+    },
     "validateConfig": "Validate Schema",
     "bundledConfigHint": "This declaration shares a name with an installed plugin bundle; its config declaration remains editable.",
     "readOnlyConfigHint": "This declaration comes from the read-only {{origin}} scope and cannot be edited here.",
@@ -662,6 +667,20 @@
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
       "addHeader": "Add Header",
+      "addConfigItem": "Add configuration item",
+      "editConfigItem": "Edit configuration item",
+      "editConfigItemFor": "Edit configuration item {{key}}",
+      "removeConfigItemFor": "Remove configuration item {{key}}",
+      "configKey": "Environment variable / header name",
+      "configKeyRequired": "Enter an environment variable or header name",
+      "configKeyDuplicate": "This name is already used in the current list",
+      "configItemType": "Configuration type",
+      "inputIdPlaceholder": "Enter a new Input ID or choose an existing one",
+      "sharedInputHint": "Input {{id}} already exists. Changing it updates every reference to this Input.",
+      "unresolvedInput": "Input definition is missing; edit this item to define it",
+      "inputDefinitionRequired": "Define Input {{id}} before saving",
+      "inputDefinitionsLoadFailed": "Input definitions could not be loaded. Editing is disabled to protect existing configuration.",
+      "inputDefinitionConflict": "Input {{id}} has conflicting definitions in this server",
       "oauthAuthorizationConflict": "Remove the static Authorization header: this server has an explicit OAuth configuration.",
       "advancedSettings": "Advanced Settings",
       "disabled": "Disabled",
@@ -701,6 +720,12 @@
     "editInputFor": "Edit variable {{id}}",
     "removeInputFor": "Remove variable {{id}}",
     "setValue": "Set Value",
+    "editValue": "Edit Value",
+    "clearValue": "Clear Value",
+    "clearValueFor": "Clear the saved value for {{id}}",
+    "confirmClearValue": "Clear the saved value for {{id}}?",
+    "secretMode": "Secret (System Keychain)",
+    "nonSecretMode": "Non-secret",
     "selectValue": "Select a value",
     "enterValue": "Enter value",
     "clearValues": "Clear All Values",
@@ -709,6 +734,8 @@
     "setValueFor": "Set value for: {{id}}",
     "configuredSecret": "Configured secret",
     "notConfigured": "Not configured",
+    "valuesLoading": "Loading saved value…",
+    "valuesUnavailable": "Saved value unavailable",
     "runtimeCommand": "Executed at runtime",
     "status": {
       "usingDefault": "Using default",
@@ -733,6 +760,7 @@
       "type": "Type",
       "label": "Label",
       "currentValue": "Current Value",
+      "storageMode": "Storage Mode",
       "actions": "Actions"
     },
     "form": {
@@ -757,6 +785,7 @@
       "saved": "Variable saved; restart Runtime to apply it",
       "removed": "Variable removed; restart Runtime to apply it",
       "valueSet": "Value saved; restart Runtime to apply it",
+      "valueCleared": "Saved value cleared; restart Runtime to apply it",
       "valuesCleared": "All saved values cleared; restart Runtime to apply it"
     }
   },

@@ -4,6 +4,8 @@ use crate::services::connection_targets::{
     manual_target_keychain_id, GlobalManualSmcpTarget, GlobalManualTargetsConfig,
     MANUAL_TARGETS_SCHEMA_VERSION,
 };
+#[cfg(test)]
+use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain::{KeychainError, SecretStore};
 use crate::services::sdk_config::{normalize_mcp_input_references, SdkConfigService};
 use crate::services::settings::{ManagerSessionConfig, ManagerSessionConfigError, SettingsService};
@@ -585,7 +587,7 @@ mod tests {
     use crate::commands::inputs::InputDefinition;
     use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
     use crate::services::config::DirectoryRenameTestAction;
-    use crate::services::keychain::{self, InMemorySecretStore};
+    use crate::services::keychain::InMemorySecretStore;
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use tempfile::tempdir;
 
@@ -666,7 +668,9 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            keychain::get_input_value(&secrets, "one", "token").unwrap(),
+            InputValueStore::for_computer(config.as_ref(), "one")
+                .get("token")
+                .unwrap(),
             None
         );
     }

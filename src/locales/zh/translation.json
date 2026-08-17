@@ -178,7 +178,7 @@
         },
         "inputs": {
           "title": "输入项",
-          "description": "管理当前 Computer 中用户创建的定义、值和 Secret。"
+          "description": "为当前 Computer 的 MCP Input 定义管理实际值；Secret 安全保存到系统 Keychain。"
         },
         "connection": {
           "title": "连接策略",
@@ -557,6 +557,11 @@
     "confirmRemove": "确定要删除此服务器吗？",
     "importConfig": "导入配置",
     "exportConfig": "导出配置",
+    "exportWarning": {
+      "title": "导出包含明文字面量的配置？",
+      "description": "MCP Constant 值会完全按配置原样导出，其中可能包含密码、令牌或其他凭据。保存在当前 Computer 上的 Input 实际值不会导出。请安全保存和分享该文件。",
+      "confirm": "导出明文配置"
+    },
     "validateConfig": "校验 Schema",
     "bundledConfigHint": "该声明与已安装插件的 bundled server 同名，但配置声明仍可编辑。",
     "readOnlyConfigHint": "该声明来自只读的 {{origin}} scope，无法在此处编辑。",
@@ -662,6 +667,20 @@
       "urlRequired": "请输入 URL",
       "headers": "HTTP 请求头",
       "addHeader": "添加请求头",
+      "addConfigItem": "添加配置项",
+      "editConfigItem": "编辑配置项",
+      "editConfigItemFor": "编辑配置项 {{key}}",
+      "removeConfigItemFor": "删除配置项 {{key}}",
+      "configKey": "环境变量 / 请求头名称",
+      "configKeyRequired": "请输入环境变量或请求头名称",
+      "configKeyDuplicate": "当前列表中已存在同名配置项",
+      "configItemType": "配置类型",
+      "inputIdPlaceholder": "输入新的 Input ID，或选择已有 Input",
+      "sharedInputHint": "Input {{id}} 已存在；修改后会影响所有引用该 Input 的配置项。",
+      "unresolvedInput": "Input 定义缺失，请编辑此项补全定义",
+      "inputDefinitionRequired": "保存前请定义 Input {{id}}",
+      "inputDefinitionsLoadFailed": "Input 定义加载失败。为保护现有配置，当前禁止编辑。",
+      "inputDefinitionConflict": "当前服务器内的 Input {{id}} 存在冲突定义",
       "oauthAuthorizationConflict": "请移除静态 Authorization 请求头：此服务器包含显式 OAuth 配置。",
       "advancedSettings": "高级设置",
       "disabled": "禁用",
@@ -701,6 +720,12 @@
     "editInputFor": "编辑变量 {{id}}",
     "removeInputFor": "删除变量 {{id}}",
     "setValue": "设置值",
+    "editValue": "编辑值",
+    "clearValue": "清除值",
+    "clearValueFor": "清除 {{id}} 的已保存值",
+    "confirmClearValue": "确定要清除 {{id}} 的已保存值吗？",
+    "secretMode": "Secret（系统 Keychain）",
+    "nonSecretMode": "非 Secret",
     "selectValue": "请选择一个值",
     "enterValue": "请输入值",
     "clearValues": "清空所有值",
@@ -709,6 +734,8 @@
     "setValueFor": "设置变量值：{{id}}",
     "configuredSecret": "密钥已配置",
     "notConfigured": "未配置",
+    "valuesLoading": "正在加载已保存的值…",
+    "valuesUnavailable": "暂时无法读取已保存的值",
     "runtimeCommand": "运行时执行",
     "status": {
       "usingDefault": "使用默认值",
@@ -733,6 +760,7 @@
       "type": "类型",
       "label": "标签",
       "currentValue": "当前值",
+      "storageMode": "存储模式",
       "actions": "操作"
     },
     "form": {
@@ -757,6 +785,7 @@
       "saved": "变量已保存，重启 Runtime 后生效",
       "removed": "变量已删除，重启 Runtime 后生效",
       "valueSet": "值已保存，重启 Runtime 后生效",
+      "valueCleared": "已保存值已清除，重启 Runtime 后生效",
       "valuesCleared": "所有已保存值已清空，重启 Runtime 后生效"
     }
   },

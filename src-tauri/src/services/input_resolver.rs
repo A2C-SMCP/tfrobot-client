@@ -1,3 +1,4 @@
+use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain::{self, SecretStore};
 use a2c_smcp::smcp_computer::inputs::{
     InputResolutionError, InputValueResolver, SecretValueResolver,
@@ -14,14 +15,20 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct RuntimeInputResolver {
     instance_id: Arc<str>,
-    store: Arc<dyn SecretStore>,
+    value_store: InputValueStore,
+    secret_store: Arc<dyn SecretStore>,
 }
 
 impl RuntimeInputResolver {
-    pub fn new(instance_id: impl Into<Arc<str>>, store: Arc<dyn SecretStore>) -> Self {
+    pub fn new(
+        instance_id: impl Into<Arc<str>>,
+        value_store: InputValueStore,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            store,
+            value_store,
+            secret_store,
         }
     }
 }
@@ -36,12 +43,10 @@ impl InputValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<Value>, InputResolutionError> {
-        let value = keychain::get_input_value(
-            self.store.as_ref(),
-            self.instance_id.as_ref(),
-            definition.id(),
-        )
-        .map_err(|error| resolver_failed(definition.id(), error))?;
+        let value = self
+            .value_store
+            .get(definition.id())
+            .map_err(|error| resolver_failed(definition.id(), error))?;
         if let (MCPServerInput::PickString(input), Some(Value::String(selected))) =
             (definition, value.as_ref())
         {
@@ -63,7 +68,7 @@ impl SecretValueResolver for RuntimeInputResolver {
         definition: &MCPServerInput,
     ) -> Result<Option<String>, InputResolutionError> {
         keychain::get_input_secret(
-            self.store.as_ref(),
+            self.secret_store.as_ref(),
             self.instance_id.as_ref(),
             definition.id(),
         )
@@ -106,16 +111,12 @@ mod tests {
 
     #[tokio::test]
     async fn value_and_secret_resolvers_use_isolated_namespaces() {
-        let store = Arc::new(InMemorySecretStore::default());
-        keychain::set_input_value(
-            store.as_ref(),
-            "computer-a",
-            "token",
-            &serde_json::json!("value"),
-        )
-        .unwrap();
-        keychain::set_input_secret(store.as_ref(), "computer-a", "token", "secret").unwrap();
-        let resolver = RuntimeInputResolver::new("computer-a", store);
+        let directory = tempfile::tempdir().unwrap();
+        let values = InputValueStore::from_storage_root(directory.path());
+        let secrets = Arc::new(InMemorySecretStore::default());
+        values.set("token", &serde_json::json!("value")).unwrap();
+        keychain::set_input_secret(secrets.as_ref(), "computer-a", "token", "secret").unwrap();
+        let resolver = RuntimeInputResolver::new("computer-a", values, secrets);
 
         assert_eq!(
             InputValueResolver::resolve_input(&resolver, &definition("token", false))
@@ -134,8 +135,12 @@ mod tests {
 
     #[tokio::test]
     async fn missing_values_remain_unresolved_for_sdk_fallbacks() {
-        let resolver =
-            RuntimeInputResolver::new("computer-a", Arc::new(InMemorySecretStore::default()));
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = RuntimeInputResolver::new(
+            "computer-a",
+            InputValueStore::from_storage_root(directory.path()),
+            Arc::new(InMemorySecretStore::default()),
+        );
 
         assert_eq!(
             InputValueResolver::resolve_input(&resolver, &definition("value", false))
@@ -153,15 +158,14 @@ mod tests {
 
     #[tokio::test]
     async fn stale_pick_value_returns_structured_invalid_selection_without_deleting_it() {
-        let store = Arc::new(InMemorySecretStore::default());
-        keychain::set_input_value(
-            store.as_ref(),
+        let directory = tempfile::tempdir().unwrap();
+        let values = InputValueStore::from_storage_root(directory.path());
+        values.set("region", &serde_json::json!("retired")).unwrap();
+        let resolver = RuntimeInputResolver::new(
             "computer-a",
-            "region",
-            &serde_json::json!("retired"),
-        )
-        .unwrap();
-        let resolver = RuntimeInputResolver::new("computer-a", store.clone());
+            values.clone(),
+            Arc::new(InMemorySecretStore::default()),
+        );
         let definition = MCPServerInput::PickString(PickStringInput {
             id: "region".to_string(),
             description: "Region".to_string(),
@@ -178,30 +182,25 @@ mod tests {
                 if id == "region" && value == "retired"
         ));
         assert_eq!(
-            keychain::get_input_value(store.as_ref(), "computer-a", "region").unwrap(),
+            values.get("region").unwrap(),
             Some(serde_json::json!("retired"))
         );
     }
 
     #[tokio::test]
     async fn resolvers_are_isolated_by_computer_instance() {
-        let store = Arc::new(InMemorySecretStore::default());
-        keychain::set_input_value(
-            store.as_ref(),
-            "computer-a",
-            "shared",
-            &serde_json::json!("value-a"),
-        )
-        .unwrap();
-        keychain::set_input_value(
-            store.as_ref(),
-            "computer-b",
-            "shared",
-            &serde_json::json!("value-b"),
-        )
-        .unwrap();
-        let resolver_a = RuntimeInputResolver::new("computer-a", store.clone());
-        let resolver_b = RuntimeInputResolver::new("computer-b", store);
+        let directory = tempfile::tempdir().unwrap();
+        let values_a = InputValueStore::from_storage_root(directory.path().join("computer-a"));
+        let values_b = InputValueStore::from_storage_root(directory.path().join("computer-b"));
+        values_a
+            .set("shared", &serde_json::json!("value-a"))
+            .unwrap();
+        values_b
+            .set("shared", &serde_json::json!("value-b"))
+            .unwrap();
+        let secrets = Arc::new(InMemorySecretStore::default());
+        let resolver_a = RuntimeInputResolver::new("computer-a", values_a, secrets.clone());
+        let resolver_b = RuntimeInputResolver::new("computer-b", values_b, secrets);
 
         assert_eq!(
             InputValueResolver::resolve_input(&resolver_a, &definition("shared", false))
@@ -220,14 +219,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_store_failures_remain_structured_resolver_errors() {
-        let resolver = RuntimeInputResolver::new("computer-a", Arc::new(FailingSecretStore));
+    async fn secret_store_failures_do_not_affect_plain_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = RuntimeInputResolver::new(
+            "computer-a",
+            InputValueStore::from_storage_root(directory.path()),
+            Arc::new(FailingSecretStore),
+        );
 
-        assert!(matches!(
-            InputValueResolver::resolve_input(&resolver, &definition("value", false)).await,
-            Err(InputResolutionError::ResolverFailed { id, reason })
-                if id == "value" && reason.contains("keychain unavailable")
-        ));
+        assert_eq!(
+            InputValueResolver::resolve_input(&resolver, &definition("value", false))
+                .await
+                .unwrap(),
+            None
+        );
         assert!(matches!(
             SecretValueResolver::resolve_secret(&resolver, &definition("secret", true)).await,
             Err(InputResolutionError::ResolverFailed { id, reason })

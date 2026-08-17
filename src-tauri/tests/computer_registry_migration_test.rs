@@ -15,6 +15,7 @@ use tfrobot_client_lib::services::config_migration::{migrate_legacy_config, Migr
 use tfrobot_client_lib::services::connection_targets::{
     manual_target_keychain_id, ConnectionTargetsConfig, ManualSmcpTarget,
 };
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{self, InMemorySecretStore, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::{
@@ -164,7 +165,9 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
         .unwrap()
         .is_empty());
     assert_eq!(
-        keychain::get_input_value(secrets.as_ref(), "computer-a", "api-token").unwrap(),
+        InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+            .get("api-token")
+            .unwrap(),
         None
     );
 
@@ -264,7 +267,9 @@ async fn startup_does_not_import_legacy_global_inputs_or_read_unscoped_keychain_
         .unwrap()
         .is_empty());
     assert_eq!(
-        keychain::get_input_value(secrets.as_ref(), "computer-a", "shared-token").unwrap(),
+        InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+            .get("shared-token")
+            .unwrap(),
         None
     );
     assert_eq!(

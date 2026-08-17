@@ -1,7 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { InputVariables } from '@/components/InputVariables';
-import { InputForm } from '@/components/InputVariables/InputForm';
 
 const mockStore = {
   inputs: [],
@@ -9,6 +8,9 @@ const mockStore = {
   referenceIssues: [],
   loading: false,
   error: null,
+  valuesLoading: false,
+  valuesLoadedInstanceId: 'computer-a',
+  valuesError: null,
   fetchInputs: vi.fn().mockResolvedValue(undefined),
   fetchValues: vi.fn().mockResolvedValue(undefined),
   fetchReferenceIssues: vi.fn().mockResolvedValue(undefined),
@@ -16,6 +18,7 @@ const mockStore = {
   saveInput: vi.fn().mockResolvedValue(undefined),
   removeInput: vi.fn().mockResolvedValue(undefined),
   setValue: vi.fn().mockResolvedValue(undefined),
+  removeValue: vi.fn().mockResolvedValue(undefined),
   clearValues: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -44,11 +47,11 @@ describe('InputVariables', () => {
     expect(mockStore.fetchValues).toHaveBeenCalledWith('computer-a');
   }, 10000);
 
-  it('renders title and action buttons', () => {
+  it('renders only value-management page actions', () => {
     render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('Input Variables')).toBeInTheDocument();
-    expect(screen.getByText('Add Variable')).toBeInTheDocument();
     expect(screen.getByText('Clear All Values')).toBeInTheDocument();
+    expect(screen.queryByText('Add Variable')).not.toBeInTheDocument();
   });
 
   it('renders inputs table with data', () => {
@@ -59,12 +62,12 @@ describe('InputVariables', () => {
     expect(screen.getByText('cmd')).toBeInTheDocument();
   });
 
-  it('renders type tags', () => {
+  it('does not expose definition type management', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, inputs: mockInputs } as any);
     render(<InputVariables instanceId="computer-a" />);
-    expect(screen.getByText('PromptString')).toBeInTheDocument();
-    expect(screen.getByText('PickString')).toBeInTheDocument();
-    expect(screen.getByText('Command')).toBeInTheDocument();
+    expect(screen.queryByText('PromptString')).not.toBeInTheDocument();
+    expect(screen.queryByText('PickString')).not.toBeInTheDocument();
+    expect(screen.queryByText('Command')).not.toBeInTheDocument();
   });
 
   it('renders current values', () => {
@@ -83,20 +86,91 @@ describe('InputVariables', () => {
     expect(screen.getByText('Not set; first option will be used')).toBeInTheDocument();
     expect(screen.getByText('Executed at runtime')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /Set value for:/ })).toHaveLength(2);
+    expect(screen.getByText('Secret (System Keychain)')).toBeInTheDocument();
+    expect(screen.getByText('Non-secret')).toBeInTheDocument();
   });
 
-  it('gives every row action an accessible name', () => {
+  it('clears one saved Input value without deleting its MCP definition', async () => {
+    mockUseInputStore.mockReturnValue({
+      ...mockStore,
+      inputs: [mockInputs[0]],
+      values: { 'api-key': { configured: true, status: 'configured' } },
+    } as any);
+    render(<InputVariables instanceId="computer-a" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear the saved value for api-key' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'OK' }));
+
+    await waitFor(() => {
+      expect(mockStore.removeValue).toHaveBeenCalledWith('computer-a', 'api-key');
+    });
+    expect(mockStore.removeInput).not.toHaveBeenCalled();
+  });
+
+  it('does not expose definition edit or removal actions', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, inputs: [mockInputs[0]] } as any);
     render(<InputVariables instanceId="computer-a" />);
 
-    expect(screen.getByRole('button', { name: 'Edit variable api-key' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Remove variable api-key' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Edit variable api-key' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove variable api-key' })).not.toBeInTheDocument();
   });
 
   it('renders error alert', () => {
     mockUseInputStore.mockReturnValue({ ...mockStore, error: 'Load failed' } as any);
     render(<InputVariables instanceId="computer-a" />);
     expect(screen.getByText('Load failed')).toBeInTheDocument();
+  });
+
+  it('does not present an unloaded value as not configured', () => {
+    mockUseInputStore.mockReturnValue({
+      ...mockStore,
+      inputs: [mockInputs[0]],
+      valuesLoading: true,
+      valuesLoadedInstanceId: null,
+    } as any);
+    render(<InputVariables instanceId="computer-a" />);
+
+    expect(screen.getByText('Loading saved value…')).toBeInTheDocument();
+    expect(screen.queryByText('Not configured')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set value for: api-key' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Clear All Values/ })).toBeDisabled();
+  });
+
+  it('shows saved values as unavailable when their load fails', () => {
+    mockUseInputStore.mockReturnValue({
+      ...mockStore,
+      inputs: [mockInputs[0]],
+      valuesLoadedInstanceId: null,
+      valuesError: 'Keychain unavailable',
+    } as any);
+    render(<InputVariables instanceId="computer-a" />);
+
+    expect(screen.getByText('Saved value unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Keychain unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Not configured')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set value for: api-key' })).toBeDisabled();
+  });
+
+  it('closes an open value editor when switching Computers', async () => {
+    mockUseInputStore.mockReturnValue({
+      ...mockStore,
+      inputs: [mockInputs[0]],
+      values: { 'api-key': { configured: true, status: 'configured' } },
+    } as any);
+    const view = render(<InputVariables instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Set value for: api-key' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    mockUseInputStore.mockReturnValue({
+      ...mockStore,
+      inputs: [mockInputs[0]],
+      valuesLoadedInstanceId: 'computer-b',
+      values: { 'api-key': { configured: false, status: 'missing' } },
+    } as any);
+    view.rerender(<InputVariables instanceId="computer-b" />);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockStore.setValue).not.toHaveBeenCalled();
   });
 
   it('falls back to the ID when the display label is absent', () => {
@@ -107,67 +181,4 @@ describe('InputVariables', () => {
     render(<InputVariables instanceId="computer-a" />);
     expect(screen.getAllByText('fallback-id').length).toBeGreaterThan(1);
   });
-
-});
-
-describe('InputForm runtime-value semantics', () => {
-  it('submits a Prompt definition with its default separate from the actual value store', async () => {
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(<InputForm onSubmit={onSubmit} onCancel={() => {}} />);
-
-    fireEvent.change(screen.getByRole('textbox', { name: 'Variable ID' }), {
-      target: { value: 'token' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Default Value' }), {
-      target: { value: 'fallback' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
-      type: 'PromptString',
-      id: 'token',
-      label: undefined,
-      description: undefined,
-      default: 'fallback',
-      password: undefined,
-    }));
-  }, 15_000);
-
-  it('never asks for or serializes a plaintext default for password definitions', async () => {
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(
-      <InputForm
-        initialValues={{ type: 'PromptString', id: 'token', password: true }}
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-      />,
-    );
-
-    expect(screen.queryByLabelText('Default Value')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
-      type: 'PromptString',
-      id: 'token',
-      label: undefined,
-      description: undefined,
-      default: undefined,
-      password: true,
-    }));
-  });
-
-  it('requires at least one PickString option', async () => {
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(
-      <InputForm
-        initialValues={{ type: 'PickString', id: 'region', options: [] }}
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByText('Add at least one option.')).toBeInTheDocument();
-    expect(onSubmit).not.toHaveBeenCalled();
-  }, 10000);
 });

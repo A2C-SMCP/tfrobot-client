@@ -67,7 +67,7 @@ pub enum AppStateInitError {
     Migration(#[from] MigrationError),
     #[error("failed to discover Computer profiles: {0}")]
     Config(#[from] services::config::ConfigError),
-    #[error("failed to load Computer input values from Keychain: {0}")]
+    #[error("failed to access the system Keychain: {0}")]
     Keychain(#[from] services::keychain::KeychainError),
     #[error("failed to recover an interrupted configuration import: {0}")]
     ConfigImportRecovery(String),
@@ -165,7 +165,6 @@ impl AppState {
         commands::config_io::recover_pending_config_imports(
             config.as_ref(),
             sdk_config.as_ref(),
-            secret_store.as_ref(),
             stored_instances
                 .instances
                 .iter()
@@ -434,6 +433,7 @@ pub fn run() {
             commands::mcp::clear_mcp_authorization,
             commands::sdk_config::get_computer_config_state,
             commands::sdk_config::upsert_computer_mcp_config,
+            commands::sdk_config::upsert_computer_mcp_config_with_inputs,
             commands::sdk_config::remove_computer_mcp_config,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
