@@ -1026,6 +1026,7 @@ mod tests {
         println!("ATLASSIAN_E2E: PASS automatic-discovery-empty-scopes");
     }
 
+    #[cfg(target_os = "macos")]
     fn extract_atlassian_cloud_id(result: &CallToolResult) -> Option<String> {
         if let Some(value) = result.structured_content.as_ref() {
             if let Some(id) = find_atlassian_cloud_id(value) {
@@ -1043,6 +1044,7 @@ mod tests {
             })
     }
 
+    #[cfg(target_os = "macos")]
     fn find_atlassian_cloud_id(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::Array(items) => items.iter().find_map(find_atlassian_cloud_id),
