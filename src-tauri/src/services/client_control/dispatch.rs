@@ -115,13 +115,11 @@ fn safe_audit_parameters(tool: ToolId, mut parameters: serde_json::Value) -> ser
                 );
             }
         }
-        ToolId::SkillUpdate => {
-            if object.contains_key("changes") {
-                object.insert(
-                    "changes".to_string(),
-                    serde_json::Value::String("[CONTENT_OMITTED]".to_string()),
-                );
-            }
+        ToolId::SkillUpdate if object.contains_key("changes") => {
+            object.insert(
+                "changes".to_string(),
+                serde_json::Value::String("[CONTENT_OMITTED]".to_string()),
+            );
         }
         _ => {}
     }
