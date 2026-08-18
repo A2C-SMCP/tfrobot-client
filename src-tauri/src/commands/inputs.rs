@@ -1,7 +1,6 @@
+use crate::services::input_entry_store::{InputEntryStorageKind, InputEntryStore, InputEntryView};
 use crate::services::input_references::{find_project_input_references, InputReferenceLocation};
 use crate::services::input_value_index::{self, InputValueStorageKind};
-use crate::services::input_value_store::InputValueStore;
-use crate::services::keychain;
 use crate::services::sdk_config::{ensure_portable_cli_arguments, SdkConfigService};
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::{run_command, InputKind};
@@ -312,31 +311,107 @@ pub enum InputValueStatus {
     RuntimeCommand,
 }
 
-#[derive(Debug, Clone)]
-enum StoredInputSnapshot {
-    Value {
-        id: String,
-        value: Option<serde_json::Value>,
-    },
-    Secret {
-        id: String,
-        secret: Option<String>,
-    },
+#[tauri::command]
+pub async fn list_input_entries(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<Vec<InputEntryView>, String> {
+    list_input_entries_core(&state, &instance_id)
 }
 
-impl StoredInputSnapshot {
-    fn id(&self) -> &str {
-        match self {
-            Self::Value { id, .. } | Self::Secret { id, .. } => id,
-        }
-    }
+pub fn list_input_entries_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<InputEntryView>, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    require_existing_instance(state, instance_id)?;
+    let store = migrated_input_entry_store(state, instance_id)?;
+    store.list()
+}
 
-    fn secret(&self) -> Option<&str> {
-        match self {
-            Self::Secret { secret, .. } => secret.as_deref(),
-            Self::Value { .. } => None,
-        }
-    }
+/// Create or update a client-owned InputEntry. A missing value preserves the current value, which
+/// allows UI to move an existing secret between backends without reading its plaintext.
+#[tauri::command]
+pub async fn upsert_input_entry(
+    state: State<'_, AppState>,
+    instance_id: String,
+    key: String,
+    value: Option<String>,
+    secret: bool,
+) -> Result<(), String> {
+    upsert_input_entry_core(&state, &instance_id, &key, value, secret).await
+}
+
+pub async fn upsert_input_entry_core(
+    state: &AppState,
+    instance_id: &str,
+    key: &str,
+    value: Option<String>,
+    secret: bool,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(state, instance_id)?;
+    migrated_input_entry_store(state, instance_id)?.upsert(
+        key,
+        value.map(serde_json::Value::String),
+        secret,
+    )
+}
+
+#[tauri::command]
+pub async fn delete_input_entry(
+    state: State<'_, AppState>,
+    instance_id: String,
+    key: String,
+) -> Result<(), String> {
+    delete_input_entry_core(&state, &instance_id, &key).await
+}
+
+pub async fn delete_input_entry_core(
+    state: &AppState,
+    instance_id: &str,
+    key: &str,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _mutation_guard = state.input_mutation_lock.lock().await;
+    require_existing_instance(state, instance_id)?;
+    migrated_input_entry_store(state, instance_id)?.delete(key)
+}
+
+fn input_entry_store(state: &AppState, instance_id: &str) -> InputEntryStore {
+    InputEntryStore::for_computer(
+        state.config.as_ref(),
+        instance_id.to_string(),
+        state.secret_store.clone(),
+    )
+}
+
+fn migrated_input_entry_store(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<InputEntryStore, String> {
+    let store = input_entry_store(state, instance_id);
+    let preferred = state
+        .sdk_config
+        .load_input_definitions(instance_id)
+        .into_iter()
+        .filter_map(|definition| {
+            definition.storage_kind().map(|kind| {
+                (
+                    definition.id().to_string(),
+                    InputEntryStorageKind::from(kind),
+                )
+            })
+        })
+        .collect();
+    store.migrate_legacy(
+        input_value_index::load_with_provenance(state.config.as_ref(), instance_id)?,
+        &preferred,
+    )?;
+    Ok(store)
 }
 
 pub(crate) struct InputDefinitionsConfigSnapshot {
@@ -405,6 +480,33 @@ pub fn get_input_core(
     Ok(inputs.into_iter().find(|i| i.id() == id))
 }
 
+/// Returns the exact definition currently used by the runtime, including plugin-owned inputs.
+/// This is definition context for PickString/PromptString rendering only; it has no storage
+/// authority over client-owned InputEntries.
+#[tauri::command]
+pub async fn get_runtime_input(
+    state: State<'_, AppState>,
+    instance_id: String,
+    id: String,
+) -> Result<Option<InputDefinition>, String> {
+    get_runtime_input_core(&state, &instance_id, &id).await
+}
+
+pub async fn get_runtime_input_core(
+    state: &AppState,
+    instance_id: &str,
+    id: &str,
+) -> Result<Option<InputDefinition>, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    require_existing_instance(state, instance_id)?;
+    if let Some(runtime) = state.computer_registry.runtime(instance_id).await {
+        if let Some(definition) = runtime.runtime_input_definition(id).await {
+            return Ok(Some(input_definition_from_sdk(&definition)));
+        }
+    }
+    get_input_core(state, instance_id, id)
+}
+
 /// Add or update an input variable definition
 #[tauri::command]
 pub async fn add_or_update_input(
@@ -449,157 +551,11 @@ pub async fn add_or_update_input_core(
             state,
             instance_id,
             Some(&previous_config),
-            &[],
             error.to_string(),
         )
         .await);
     }
 
-    Ok(())
-}
-
-/// Saves one Input definition and, when supplied, its client-owned value in the namespace selected
-/// by the new definition. Historical values in other namespaces are deliberately preserved.
-#[tauri::command]
-pub async fn save_input(
-    state: State<'_, AppState>,
-    instance_id: String,
-    input: InputDefinition,
-    value: Option<String>,
-    keep_existing_value: bool,
-) -> Result<(), String> {
-    save_input_core(&state, &instance_id, input, value, keep_existing_value).await
-}
-
-pub async fn save_input_core(
-    state: &AppState,
-    instance_id: &str,
-    input: InputDefinition,
-    value: Option<String>,
-    keep_existing_value: bool,
-) -> Result<(), String> {
-    let input = prepare_portable_input_definitions(std::slice::from_ref(&input))?
-        .into_iter()
-        .next()
-        .expect("one input definition was prepared");
-    let instance_id = require_instance_id(instance_id)?;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
-    require_existing_instance(state, instance_id)?;
-
-    let previous_config = state
-        .sdk_config
-        .load_project_input_document(instance_id)
-        .map_err(|error| error.to_string())?;
-    let mut inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
-        .map_err(|error| error.to_string())?;
-    let id = input.id().to_string();
-    let storage_kind = input.storage_kind();
-    let previous_value = storage_kind
-        .map(|kind| snapshot_input_storage(state, instance_id, &id, kind))
-        .transpose()?;
-
-    match &input {
-        InputDefinition::PromptString { password, .. } => {
-            if keep_existing_value {
-                if *password != Some(true) {
-                    return Err("Keeping an existing value is only supported for password PromptString inputs".to_string());
-                }
-                if previous_value
-                    .as_ref()
-                    .and_then(StoredInputSnapshot::secret)
-                    .is_none()
-                {
-                    return Err(format!(
-                        "PromptString input '{id}' has no existing secret to keep"
-                    ));
-                }
-            }
-        }
-        InputDefinition::PickString { options, .. } => {
-            if keep_existing_value {
-                return Err(
-                    "Keeping an existing value is only supported for password PromptString inputs"
-                        .to_string(),
-                );
-            }
-            if let Some(value) = value.as_ref() {
-                validate_pick_selection(&id, options, value)?;
-            }
-        }
-        InputDefinition::Command { .. } if value.is_some() || keep_existing_value => {
-            return Err(format!(
-                "{} inputs do not support persistent values",
-                input_type_name(&input)
-            ));
-        }
-        _ => {}
-    }
-
-    inputs.retain(|item| item.id() != id);
-    inputs.push(input.clone());
-    if let Err(error) = state
-        .sdk_config
-        .replace_input_definitions(instance_id, &inputs)
-    {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            Some(&previous_config),
-            &[],
-            error.to_string(),
-        )
-        .await);
-    }
-
-    if keep_existing_value || value.is_some() {
-        let kind = storage_kind.expect("a value-bearing Input has a storage kind");
-        if let Err(error) = input_value_index::record(state.config.as_ref(), instance_id, &id, kind)
-        {
-            return Err(rollback_input_mutation(
-                state,
-                instance_id,
-                Some(&previous_config),
-                previous_value
-                    .as_ref()
-                    .map(std::slice::from_ref)
-                    .unwrap_or(&[]),
-                error,
-            )
-            .await);
-        }
-    }
-
-    let mutation = (|| {
-        if keep_existing_value {
-            return Ok(());
-        }
-        let Some(value) = value else {
-            return Ok(());
-        };
-        if input.is_secret() {
-            keychain::set_input_secret(state.secret_store.as_ref(), instance_id, &id, &value)
-                .map_err(|error| error.to_string())
-        } else {
-            InputValueStore::for_computer(state.config.as_ref(), instance_id)
-                .set(&id, &serde_json::Value::String(value))
-        }
-    })();
-    if let Err(error) = mutation {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            Some(&previous_config),
-            previous_value
-                .as_ref()
-                .map(std::slice::from_ref)
-                .unwrap_or(&[]),
-            error.to_string(),
-        )
-        .await);
-    }
     Ok(())
 }
 
@@ -690,7 +646,6 @@ pub async fn remove_input_core(
             state,
             instance_id,
             Some(&previous_config),
-            &[],
             error.to_string(),
         )
         .await);
@@ -804,36 +759,18 @@ pub async fn set_input_value_core(
     if let InputDefinition::PickString { options, .. } = definition {
         validate_pick_selection(&id, options, string_value)?;
     }
-    let storage_kind = definition
-        .storage_kind()
-        .expect("persistent Input has a storage kind");
-    input_value_index::record(state.config.as_ref(), instance_id, &id, storage_kind)?;
-    let previous_value = snapshot_input_storage(state, instance_id, &id, storage_kind)?;
-    let mutation = if definition.is_secret() {
-        keychain::set_input_secret(state.secret_store.as_ref(), instance_id, &id, string_value)
-            .map_err(|error| error.to_string())
-    } else {
-        InputValueStore::for_computer(state.config.as_ref(), instance_id).set(&id, &value)
-    };
-    if let Err(error) = mutation {
-        let primary_error = error.to_string();
-        return match restore_input_storage(state, instance_id, &previous_value) {
-            Ok(()) => Err(format!(
-                "Failed to store input value; changes were reverted: {primary_error}"
-            )),
-            Err(rollback_error) => Err(format!(
-                "Failed to store input value: {primary_error}; rollback also failed: {rollback_error}"
-            )),
-        };
-    }
-    Ok(())
+    let store = migrated_input_entry_store(state, instance_id)?;
+    let secret = store
+        .storage_kind(&id)?
+        .map(InputEntryStorageKind::is_secret)
+        .unwrap_or_else(|| definition.is_secret());
+    store.upsert(&id, Some(value), secret)
 }
 
-/// Stores a value for an exact definition already present in the SDK runtime InputPool.
+/// Stores a Computer-level InputEntry for an exact definition present in the SDK runtime InputPool.
 ///
-/// Plugin definitions remain runtime-only: this command never writes the per-Computer definition
-/// document and returns `false` when the exact runtime definition does not exist. The caller may
-/// then use the normal Computer Input CRUD path for an unbound/global definition.
+/// The SDK definition remains runtime-only, while the resulting Entry is visible to normal
+/// InputEntry management. Returns `false` when the exact runtime definition does not exist.
 #[tauri::command]
 pub async fn set_runtime_input_value(
     state: State<'_, AppState>,
@@ -862,41 +799,20 @@ pub async fn set_runtime_input_value_core(
     };
 
     log::info!(
-        "Setting runtime-only {} input value for instance {}: {}",
+        "Setting Computer InputEntry requested by runtime {} input for instance {}: {}",
         kind,
         instance_id,
         id
     );
-    let storage_kind = match kind {
-        InputKind::Secret => InputValueStorageKind::Secret,
-        InputKind::Value => InputValueStorageKind::Value,
-    };
-    input_value_index::record(state.config.as_ref(), instance_id, &id, storage_kind)?;
-    let previous_value = snapshot_input_storage(state, instance_id, &id, storage_kind)?;
-    let mutation = match kind {
-        InputKind::Secret => {
-            let secret = value
-                .as_str()
-                .ok_or_else(|| format!("Secret input '{id}' must be a string"))?;
-            keychain::set_input_secret(state.secret_store.as_ref(), instance_id, &id, secret)
-                .map_err(|error| error.to_string())
-        }
-        InputKind::Value => {
-            InputValueStore::for_computer(state.config.as_ref(), instance_id).set(&id, &value)
-        }
-    };
-    if let Err(error) = mutation {
-        let primary_error = error.to_string();
-        return match restore_input_storage(state, instance_id, &previous_value) {
-            Ok(()) => Err(format!(
-                "Failed to store runtime input value; changes were reverted: {primary_error}"
-            )),
-            Err(rollback_error) => Err(format!(
-                "Failed to store runtime input value: {primary_error}; rollback also failed: {rollback_error}"
-            )),
-        };
+    if !value.is_string() {
+        return Err(format!("Runtime input '{id}' must be a string"));
     }
-
+    let store = migrated_input_entry_store(state, instance_id)?;
+    let secret = store
+        .storage_kind(&id)?
+        .map(InputEntryStorageKind::is_secret)
+        .unwrap_or(matches!(kind, InputKind::Secret));
+    store.upsert(&id, Some(value), secret)?;
     Ok(true)
 }
 
@@ -919,34 +835,7 @@ pub async fn remove_input_value_core(
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
-    let definition = state
-        .sdk_config
-        .load_input_definitions(instance_id)
-        .into_iter()
-        .find(|input| input.id() == id)
-        .ok_or_else(|| format!("Input not found: {id}"))?;
-    if !definition.supports_persistent_value() {
-        return Err(format!(
-            "{} inputs do not support persistent values",
-            input_type_name(&definition)
-        ));
-    }
-    let storage_kind = definition
-        .storage_kind()
-        .expect("persistent Input has a storage kind");
-    let previous_value = snapshot_input_storage(state, instance_id, id, storage_kind)?;
-    let deletion = delete_input_storage(state, instance_id, id, storage_kind);
-    if let Err(error) = deletion {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            None,
-            &[previous_value],
-            error.to_string(),
-        )
-        .await);
-    }
-    Ok(())
+    migrated_input_entry_store(state, instance_id)?.delete(id)
 }
 
 /// Clear all cached input values
@@ -963,42 +852,9 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
-    let inputs = state.sdk_config.load_input_definitions(instance_id);
-    let stored_inputs = inputs
-        .iter()
-        .filter(|input| input.supports_persistent_value())
-        .collect::<Vec<_>>();
-    let previous_values = stored_inputs
-        .iter()
-        .map(|input| {
-            snapshot_input_storage(
-                state,
-                instance_id,
-                input.id(),
-                input
-                    .storage_kind()
-                    .expect("filtered Input has storage kind"),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for input in stored_inputs {
-        if let Err(error) = delete_input_storage(
-            state,
-            instance_id,
-            input.id(),
-            input
-                .storage_kind()
-                .expect("filtered Input has storage kind"),
-        ) {
-            return Err(rollback_input_mutation(
-                state,
-                instance_id,
-                None,
-                &previous_values,
-                error.to_string(),
-            )
-            .await);
-        }
+    let store = migrated_input_entry_store(state, instance_id)?;
+    for entry in store.list()? {
+        store.delete(&entry.key)?;
     }
     Ok(())
 }
@@ -1092,7 +948,6 @@ pub async fn import_inputs_core(
             state,
             instance_id,
             Some(&previous_config),
-            &[],
             error.to_string(),
         )
         .await);
@@ -1158,7 +1013,6 @@ async fn rollback_input_mutation(
     state: &AppState,
     instance_id: &str,
     previous_inputs: Option<&ProjectConfigDoc>,
-    previous_values: &[StoredInputSnapshot],
     primary_error: String,
 ) -> String {
     let mut rollback_errors = Vec::new();
@@ -1168,12 +1022,6 @@ async fn rollback_input_mutation(
             .restore_project_input_document(instance_id, inputs)
         {
             rollback_errors.push(format!("restore Computer input definitions: {error}"));
-        }
-    }
-    for snapshot in previous_values {
-        let result = restore_input_storage(state, instance_id, snapshot);
-        if let Err(error) = result {
-            rollback_errors.push(format!("restore input '{}': {error}", snapshot.id()));
         }
     }
     if rollback_errors.is_empty() {
@@ -1229,31 +1077,19 @@ fn input_value_view(
             value: None,
         });
     }
-
-    if definition.is_secret() {
-        let configured =
-            keychain::get_input_secret(state.secret_store.as_ref(), instance_id, definition.id())
-                .map_err(|error| error.to_string())?
-                .is_some();
-        return Ok(InputValueView {
-            configured,
-            status: if configured {
-                InputValueStatus::Configured
-            } else {
-                InputValueStatus::Missing
-            },
-            value: None,
-        });
-    }
-
-    let stored =
-        InputValueStore::for_computer(state.config.as_ref(), instance_id).get(definition.id())?;
+    let legacy_preference = if definition.is_secret() {
+        InputEntryStorageKind::Secret
+    } else {
+        InputEntryStorageKind::Value
+    };
+    let stored = migrated_input_entry_store(state, instance_id)?
+        .resolve_entry(definition.id(), legacy_preference)?;
     match definition {
         InputDefinition::PromptString { default, .. } => Ok(match stored {
-            Some(value) => InputValueView {
+            Some(entry) => InputValueView {
                 configured: true,
                 status: InputValueStatus::Configured,
-                value: Some(value),
+                value: (!entry.storage_kind.is_secret()).then_some(entry.value),
             },
             None if default.is_some() => InputValueView {
                 configured: false,
@@ -1269,21 +1105,21 @@ fn input_value_view(
         InputDefinition::PickString {
             options, default, ..
         } => Ok(match stored {
-            Some(value)
-                if value.as_str().is_some_and(|selected| {
+            Some(entry)
+                if entry.value.as_str().is_some_and(|selected| {
                     options.iter().any(|option| option.value == selected)
                 }) =>
             {
                 InputValueView {
                     configured: true,
                     status: InputValueStatus::Configured,
-                    value: Some(value),
+                    value: (!entry.storage_kind.is_secret()).then_some(entry.value),
                 }
             }
-            Some(value) => InputValueView {
+            Some(entry) => InputValueView {
                 configured: true,
                 status: InputValueStatus::InvalidSelection,
-                value: Some(value),
+                value: (!entry.storage_kind.is_secret()).then_some(entry.value),
             },
             None if default.is_some() => InputValueView {
                 configured: false,
@@ -1292,69 +1128,11 @@ fn input_value_view(
             },
             None => InputValueView {
                 configured: false,
-                status: InputValueStatus::FirstOption,
+                status: InputValueStatus::Missing,
                 value: None,
             },
         }),
         InputDefinition::Command { .. } => unreachable!("handled above"),
-    }
-}
-
-fn snapshot_input_storage(
-    state: &AppState,
-    instance_id: &str,
-    id: &str,
-    kind: InputValueStorageKind,
-) -> Result<StoredInputSnapshot, String> {
-    match kind {
-        InputValueStorageKind::Value => Ok(StoredInputSnapshot::Value {
-            id: id.to_string(),
-            value: InputValueStore::for_computer(state.config.as_ref(), instance_id).get(id)?,
-        }),
-        InputValueStorageKind::Secret => Ok(StoredInputSnapshot::Secret {
-            id: id.to_string(),
-            secret: keychain::get_input_secret(state.secret_store.as_ref(), instance_id, id)
-                .map_err(|error| error.to_string())?,
-        }),
-    }
-}
-
-fn delete_input_storage(
-    state: &AppState,
-    instance_id: &str,
-    id: &str,
-    kind: InputValueStorageKind,
-) -> Result<(), String> {
-    match kind {
-        InputValueStorageKind::Value => {
-            InputValueStore::for_computer(state.config.as_ref(), instance_id).delete(id)
-        }
-        InputValueStorageKind::Secret => {
-            keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, id)
-                .map_err(|error| error.to_string())
-        }
-    }
-}
-
-fn restore_input_storage(
-    state: &AppState,
-    instance_id: &str,
-    snapshot: &StoredInputSnapshot,
-) -> Result<(), String> {
-    match snapshot {
-        StoredInputSnapshot::Value { id, value } => match value {
-            Some(value) => {
-                InputValueStore::for_computer(state.config.as_ref(), instance_id).set(id, value)
-            }
-            None => InputValueStore::for_computer(state.config.as_ref(), instance_id).delete(id),
-        },
-        StoredInputSnapshot::Secret { id, secret } => match secret {
-            Some(secret) => {
-                keychain::set_input_secret(state.secret_store.as_ref(), instance_id, id, secret)
-            }
-            None => keychain::delete_input_secret(state.secret_store.as_ref(), instance_id, id),
-        }
-        .map_err(|error| error.to_string()),
     }
 }
 
@@ -1363,6 +1141,7 @@ mod tests {
     use super::*;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
+    use crate::services::input_value_store::InputValueStore;
     use crate::services::keychain::{self, InMemorySecretStore, KeychainError, SecretStore};
     use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
@@ -1654,7 +1433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_definition_and_value_save_atomically_and_blank_secret_edit_keeps_value() {
+    async fn definition_edit_does_not_change_the_independent_secret_entry() {
         let (state, store, _dir) = test_state();
         let definition = InputDefinition::PromptString {
             id: "api-key".to_string(),
@@ -1663,16 +1442,19 @@ mod tests {
             default: None,
             password: Some(true),
         };
-        save_input_core(
+        add_or_update_input_core(&state, "computer-a", definition.clone())
+            .await
+            .unwrap();
+        upsert_input_entry_core(
             &state,
             "computer-a",
-            definition.clone(),
+            "api-key",
             Some("top-secret".to_string()),
-            false,
+            true,
         )
         .await
         .unwrap();
-        save_input_core(
+        add_or_update_input_core(
             &state,
             "computer-a",
             InputDefinition::PromptString {
@@ -1682,8 +1464,6 @@ mod tests {
                 default: None,
                 password: Some(true),
             },
-            None,
-            true,
         )
         .await
         .unwrap();
@@ -1702,11 +1482,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_replace_definition_write_failure_restores_prompt_definition_and_value() {
+    async fn post_replace_definition_write_failure_restores_prompt_definition() {
         let (state, store, _dir) = test_state();
         state.sdk_config.inject_raw_restore_failure();
 
-        let error = save_input_core(
+        let error = add_or_update_input_core(
             &state,
             "computer-a",
             InputDefinition::PromptString {
@@ -1716,8 +1496,6 @@ mod tests {
                 default: None,
                 password: None,
             },
-            Some("must-not-be-committed".to_string()),
-            false,
         )
         .await
         .unwrap_err();
@@ -1739,10 +1517,17 @@ mod tests {
     #[tokio::test]
     async fn recreated_password_definition_can_reuse_retained_secret() {
         let (state, store, _dir) = test_state();
-        keychain::set_input_secret(store.as_ref(), "computer-a", "api-key", "stale-secret")
-            .unwrap();
+        upsert_input_entry_core(
+            &state,
+            "computer-a",
+            "api-key",
+            Some("stale-secret".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
 
-        save_input_core(
+        add_or_update_input_core(
             &state,
             "computer-a",
             InputDefinition::PromptString {
@@ -1752,8 +1537,6 @@ mod tests {
                 default: None,
                 password: Some(true),
             },
-            None,
-            true,
         )
         .await
         .unwrap();
@@ -1923,7 +1706,7 @@ mod tests {
         assert!(remove_input_value_core(&state, "computer-a", "whoami")
             .await
             .unwrap_err()
-            .contains("do not support persistent values"));
+            .contains("InputEntry not found"));
     }
 
     #[test]
@@ -1973,7 +1756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_only_plugin_input_stays_out_of_computer_crud() {
+    async fn plugin_runtime_definition_creates_a_managed_computer_input_entry() {
         let (state, store, _dir) = test_state();
         let instance = state.config.get_computer_instance("computer-a").unwrap();
         let runtime = state
@@ -2008,6 +1791,14 @@ mod tests {
         assert!(list_input_values_core(&state, "computer-a")
             .unwrap()
             .is_empty());
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap(),
+            vec![InputEntryView {
+                key: "audit@acme/api-key".to_string(),
+                secret: true,
+                value: None,
+            }]
+        );
         assert_eq!(
             keychain::get_input_secret(store.as_ref(), "computer-a", "audit@acme/api-key")
                 .unwrap()
@@ -2107,7 +1898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_value_definition_to_secret_preserves_normal_history() {
+    async fn changing_definition_password_does_not_move_a_plain_entry() {
         let (state, store, _dir) = test_state();
         let value_definition = InputDefinition::PromptString {
             id: "credential".to_string(),
@@ -2154,9 +1945,12 @@ mod tests {
         assert_eq!(
             get_input_value_core(&state, "computer-a", "credential")
                 .unwrap()
-                .unwrap()
-                .status,
-            InputValueStatus::Missing
+                .unwrap(),
+            InputValueView {
+                configured: true,
+                status: InputValueStatus::Configured,
+                value: Some(serde_json::json!("legacy-secret")),
+            }
         );
 
         add_or_update_input_core(&state, "computer-a", value_definition.clone())
@@ -2175,7 +1969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_secret_definition_to_value_preserves_secret_history() {
+    async fn changing_definition_password_does_not_move_a_secret_entry() {
         let (state, store, _dir) = test_state();
         let secret_definition = InputDefinition::PromptString {
             id: "credential".to_string(),
@@ -2224,9 +2018,12 @@ mod tests {
             list_input_values_core(&state, "computer-a")
                 .unwrap()
                 .get("credential")
-                .unwrap()
-                .status,
-            InputValueStatus::Missing
+                .unwrap(),
+            &InputValueView {
+                configured: true,
+                status: InputValueStatus::Configured,
+                value: None,
+            }
         );
 
         add_or_update_input_core(&state, "computer-a", secret_definition)
@@ -2304,6 +2101,141 @@ mod tests {
                 .get("credential")
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn management_list_migrates_singleton_secret_index_over_a_stale_plain_copy() {
+        let (state, secrets, _dir) = test_state();
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: Some("Credential".to_string()),
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        keychain::set_input_secret(
+            secrets.as_ref(),
+            "computer-a",
+            "credential",
+            "current-secret",
+        )
+        .unwrap();
+        InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+            .set("credential", &serde_json::json!("stale-plain"))
+            .unwrap();
+        input_value_index::record(
+            state.config.as_ref(),
+            "computer-a",
+            "credential",
+            InputValueStorageKind::Secret,
+        )
+        .unwrap();
+
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap(),
+            vec![InputEntryView {
+                key: "credential".to_string(),
+                secret: true,
+                value: None,
+            }]
+        );
+        assert_eq!(
+            InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+                .get("credential")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_secret(secrets.as_ref(), "computer-a", "credential")
+                .unwrap()
+                .as_deref(),
+            Some("current-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn input_entry_crud_is_independent_of_sdk_definitions() {
+        let (state, _secrets, _dir) = test_state();
+
+        upsert_input_entry_core(
+            &state,
+            "computer-a",
+            "name",
+            Some("zhangsan".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap(),
+            vec![InputEntryView {
+                key: "name".to_string(),
+                secret: false,
+                value: Some(serde_json::json!("zhangsan")),
+            }]
+        );
+
+        delete_input_entry_core(&state, "computer-a", "name")
+            .await
+            .unwrap();
+        assert!(list_input_entries_core(&state, "computer-a")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn input_entry_secret_switch_moves_value_and_redacts_list_projection() {
+        let (state, secrets, _dir) = test_state();
+        upsert_input_entry_core(
+            &state,
+            "computer-a",
+            "credential",
+            Some("top-secret".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        upsert_input_entry_core(&state, "computer-a", "credential", None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+                .get("credential")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            keychain::get_input_secret(secrets.as_ref(), "computer-a", "credential")
+                .unwrap()
+                .as_deref(),
+            Some("top-secret")
+        );
+        let entries = list_input_entries_core(&state, "computer-a").unwrap();
+        assert_eq!(entries[0].value, None);
+        assert!(!serde_json::to_string(&entries)
+            .unwrap()
+            .contains("top-secret"));
+
+        upsert_input_entry_core(&state, "computer-a", "credential", None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            keychain::get_input_secret(secrets.as_ref(), "computer-a", "credential").unwrap(),
+            None
+        );
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap()[0].value,
+            Some(serde_json::json!("top-secret"))
         );
     }
 }

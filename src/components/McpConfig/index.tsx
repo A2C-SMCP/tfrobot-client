@@ -20,6 +20,7 @@ import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore
 import type { InputDefinitionChanges } from '@/stores/inputStore';
 import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
+  isMissingInputDefinitionError,
   isMissingRuntimeInputError,
   type MissingRuntimeInputError,
 } from '@/utils/runtimeActionError';
@@ -117,6 +118,14 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
       setInputPrompt(null);
       setFormVisible(false);
     } catch (cause) {
+      if (isMissingInputDefinitionError(cause)) {
+        setInputPrompt(null);
+        message.error(t('mcp.messages.missingInputDefinition', {
+          id: cause.input_id,
+          name: cause.requesting_mcp?.name ?? config.name,
+        }));
+        return;
+      }
       if (isMissingRuntimeInputError(cause)) {
         setInputPrompt({ config, inputChanges, error: cause });
         return;
@@ -148,6 +157,14 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
         name: record.name,
       }));
     } catch (cause) {
+      if (isMissingInputDefinitionError(cause)) {
+        setInputPrompt(null);
+        message.error(t('mcp.messages.missingInputDefinition', {
+          id: cause.input_id,
+          name: cause.requesting_mcp?.name ?? config.name,
+        }));
+        return;
+      }
       if (isMissingRuntimeInputError(cause)) {
         setInputPrompt({ config, error: cause });
         return;

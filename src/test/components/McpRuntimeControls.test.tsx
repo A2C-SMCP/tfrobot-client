@@ -149,7 +149,7 @@ describe('McpRuntimeControls', () => {
       })
       .mockReturnValueOnce(startup.promise);
     mockedInvoke.mockImplementation(async (command, args) => {
-      if (command === 'get_input') {
+      if (command === 'get_runtime_input') {
         const inputId = (args as { id: string }).id;
         return {
           type: 'PromptString',
@@ -158,8 +158,8 @@ describe('McpRuntimeControls', () => {
           password: false,
         };
       }
-      if (command === 'set_input_value') return undefined;
-      if (command === 'list_input_values') return {};
+      if (command === 'list_input_entries') return [];
+      if (command === 'upsert_input_entry') return undefined;
       throw new Error(`Unexpected invoke command: ${command}`);
     });
 
@@ -188,6 +188,18 @@ describe('McpRuntimeControls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(3));
+    expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
+      instanceId: 'computer-a',
+      key: 'openrouterkey',
+      value: 'test-openrouter-key',
+      secret: false,
+    });
+    expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
+      instanceId: 'computer-a',
+      key: 'zhipukey',
+      value: 'test-zhipu-key',
+      secret: false,
+    });
     expect(screen.queryByText(
       "Required value input 'zhipukey' is unresolved",
     )).not.toBeInTheDocument();

@@ -669,7 +669,7 @@ describe('Computer', () => {
           runtime: runtimeSnapshot({ snapshot_revision: 2 }),
         };
       }
-      if (cmd === 'get_input') {
+      if (cmd === 'get_runtime_input') {
         const inputId = (args as { id?: string } | undefined)?.id;
         return inputId === 'secret-a' ? {
           type: 'PromptString',
@@ -683,8 +683,8 @@ describe('Computer', () => {
           password: false,
         };
       }
-      if (cmd === 'set_input_value') return null;
-      if (cmd === 'list_input_values') return { 'api-key': { configured: true } };
+      if (cmd === 'list_input_entries') return [];
+      if (cmd === 'upsert_input_entry') return null;
       return null;
     });
 
@@ -707,15 +707,17 @@ describe('Computer', () => {
 
     await waitFor(() => expect(startAttempts).toBe(3));
     expect(await screen.findByText('Running')).toBeInTheDocument();
-    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
+    expect(mockInvoke).toHaveBeenCalledWith('upsert_input_entry', {
       instanceId: 'computer-a',
-      id: 'secret-a',
+      key: 'secret-a',
       value: 'secret-a-value',
+      secret: true,
     });
-    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
+    expect(mockInvoke).toHaveBeenCalledWith('upsert_input_entry', {
       instanceId: 'computer-a',
-      id: 'value-b',
+      key: 'value-b',
       value: 'value-b-value',
+      secret: false,
     });
   }, 80000);
 });

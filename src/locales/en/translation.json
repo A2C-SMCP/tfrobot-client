@@ -710,6 +710,7 @@
       "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
       "operationFailed": "The MCP operation failed. View Runtime diagnostics or logs for details.",
+      "missingInputDefinition": "MCP {{name}} references Input {{id}}, but its definition is missing. Define it in the MCP editor before saving.",
       "statusLoadFailed": "MCP status could not be loaded. Retry or view logs for details.",
       "allStarted": "All servers started",
       "allStopped": "All servers stopped",
@@ -719,16 +720,16 @@
     }
   },
   "inputs": {
-    "title": "Input Variables",
+    "title": "Input Entries",
     "addInput": "Add Variable",
     "editInput": "Edit Variable",
     "editInputFor": "Edit variable {{id}}",
     "removeInputFor": "Remove variable {{id}}",
     "setValue": "Set Value",
     "editValue": "Edit Value",
-    "clearValue": "Clear Value",
-    "clearValueFor": "Clear the saved value for {{id}}",
-    "confirmClearValue": "Clear the saved value for {{id}}?",
+    "deleteValue": "Delete Value",
+    "deleteValueFor": "Delete the saved value for {{id}}",
+    "confirmDeleteValue": "Delete the saved value for {{id}}?",
     "secretMode": "Secret (System Keychain)",
     "nonSecretMode": "Non-secret",
     "selectValue": "Select a value",
@@ -742,10 +743,24 @@
     "valuesLoading": "Loading saved value…",
     "valuesUnavailable": "Saved value unavailable",
     "runtimeCommand": "Executed at runtime",
+    "entry": {
+      "add": "Add Input",
+      "edit": "Edit Input",
+      "empty": "No saved inputs",
+      "key": "Key",
+      "keyPlaceholder": "Enter the key used by ${input:key}",
+      "value": "Value",
+      "storeAsSecret": "Store securely in the system Keychain",
+      "secretUnchanged": "Leave blank to keep the current secret",
+      "editFor": "Edit input {{key}}",
+      "deleteFor": "Delete input {{key}}",
+      "confirmDelete": "Delete input {{key}} and its saved value?"
+    },
     "status": {
       "usingDefault": "Using default",
       "firstOption": "Not set; first option will be used",
-      "invalidSelection": "Invalid selection: {{value}}"
+      "invalidSelection": "Invalid selection: {{value}}",
+      "invalidSecretSelection": "Stored secret is no longer a valid selection"
     },
     "referenceIssues": {
       "title": "Some legacy PickString references need attention",
@@ -757,6 +772,10 @@
       "envHint": "You can save it here or provide it through {{env}}.",
       "definitionMissing": "Input {{id}} is not configured yet. Saving will create it for this Computer.",
       "createAsSecret": "Store this Input as a Secret",
+      "entryMissing": "No saved InputEntry exists for {{id}}. Saving will create it for this Computer.",
+      "definitionUnavailable": "The runtime definition for Input {{id}} is unavailable. Edit the MCP configuration or retry the MCP action.",
+      "storeAsSecret": "Store this InputEntry in the system Keychain",
+      "requestedBy": "Requested by MCP {{name}} ({{id}})",
       "loadFailed": "The Input could not be loaded. Retry or view logs for details.",
       "submitFailed": "The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs."
     },
@@ -790,8 +809,11 @@
       "saved": "Variable saved; restart Runtime to apply it",
       "removed": "Variable removed; restart Runtime to apply it",
       "valueSet": "Value saved; restart Runtime to apply it",
-      "valueCleared": "Saved value cleared; restart Runtime to apply it",
-      "valuesCleared": "All saved values cleared; restart Runtime to apply it"
+      "valueDeleted": "Saved value deleted; restart Runtime to apply it",
+      "valuesCleared": "All saved values cleared; restart Runtime to apply it",
+      "entryCreated": "Input created; it will be used on the next actual MCP start",
+      "entryUpdated": "Input updated; it will be used on the next actual MCP start",
+      "entryDeleted": "Input deleted"
     }
   },
   "connection": {

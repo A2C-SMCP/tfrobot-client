@@ -583,7 +583,7 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
   });
 
-  it('stores a runtime-only plugin input and automatically retries enable', async () => {
+  it('stores a plugin-requested Computer input entry and automatically retries enable', async () => {
     const governance = {
       capabilities: supportedCapabilities,
       marketplaces: [
@@ -605,23 +605,39 @@ describe('MarketplaceTab', () => {
         },
       ],
     };
-    mockedInvoke
-      .mockResolvedValueOnce(governance)
-      .mockResolvedValueOnce([])
-      .mockRejectedValueOnce({
-        code: 'missing_secret',
-        input_id: 'audit@acme/api_token',
-        env_hint: 'A2C_SMCP_audit_acme_api_token',
-        message: 'Required plugin secret is unresolved',
-      })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        ...governance,
-        plugins: [{ ...governance.plugins[0], enabled: true, status: 'enabled' }],
-      })
-      .mockResolvedValueOnce([]);
+    let enableAttempts = 0;
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') {
+        return enableAttempts < 2 ? governance : {
+          ...governance,
+          plugins: [{ ...governance.plugins[0], enabled: true, status: 'enabled' }],
+        };
+      }
+      if (command === 'list_skills') return [];
+      if (command === 'enable_plugin') {
+        enableAttempts += 1;
+        if (enableAttempts === 1) {
+          throw {
+            code: 'missing_secret',
+            input_id: 'audit@acme/api_token',
+            env_hint: 'A2C_SMCP_audit_acme_api_token',
+            message: 'Required plugin secret is unresolved',
+          };
+        }
+        return undefined;
+      }
+      if (command === 'get_runtime_input') {
+        return {
+          type: 'PromptString',
+          id: 'audit@acme/api_token',
+          label: 'API token',
+          password: true,
+        };
+      }
+      if (command === 'list_input_entries') return [];
+      if (command === 'upsert_input_entry') return undefined;
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
@@ -633,12 +649,12 @@ describe('MarketplaceTab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('set_runtime_input_value', {
+      expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
         instanceId: 'computer-a',
-        id: 'audit@acme/api_token',
+        key: 'audit@acme/api_token',
         value: 'plugin-secret',
+        secret: true,
       });
-      expect(mockedInvoke).toHaveBeenCalledTimes(8);
     });
     expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(2);
     expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();

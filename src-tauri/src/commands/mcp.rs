@@ -275,10 +275,10 @@ pub async fn start_mcp_server_core(
         std::slice::from_ref(bundle_id),
     )
     .await?;
-    runtime
-        .start_mcp_server(bundle_id)
-        .await
-        .map_err(RuntimeActionError::from)?;
+    runtime.start_mcp_server(bundle_id).await.map_err(|error| {
+        RuntimeActionError::from(error)
+            .with_requesting_mcp(bundle_id.to_string(), server_name.to_string())
+    })?;
 
     log::info!(
         "MCP server started for instance {}: {}",
@@ -416,13 +416,17 @@ pub async fn start_all_servers_core(
         )
         .await
         .into_iter()
-        .map(|(bundle_id, error)| McpBatchFailure {
-            name: names
+        .map(|(bundle_id, error)| {
+            let name = names
                 .get(&bundle_id)
                 .cloned()
-                .unwrap_or_else(|| bundle_id.to_string()),
-            bundle_id,
-            error: RuntimeActionError::from(error),
+                .unwrap_or_else(|| bundle_id.to_string());
+            McpBatchFailure {
+                error: RuntimeActionError::from(error)
+                    .with_requesting_mcp(bundle_id.to_string(), name.clone()),
+                name,
+                bundle_id,
+            }
         })
         .collect::<Vec<_>>();
     let result = McpBatchOperationResult {
@@ -455,15 +459,24 @@ async fn materialize_missing_configured_inputs_for_retry(
         return Ok(());
     }
     let bundle_ids = bundle_ids.iter().collect::<std::collections::HashSet<_>>();
-    let referenced_inputs = state
+    let selected_servers = state
         .sdk_config
         .load(instance_id)
         .mcp
         .servers
         .into_iter()
         .filter(|server| bundle_ids.contains(&resolve_bundle_id(&server.config)))
-        .filter_map(|server| serde_json::to_value(server.config).ok())
-        .flat_map(|config| referenced_input_ids(&config))
+        .filter_map(|server| {
+            let bundle_id = resolve_bundle_id(&server.config);
+            let referenced = serde_json::to_value(server.config)
+                .ok()
+                .map(|config| referenced_input_ids(&config))?;
+            Some((bundle_id, server.name, referenced))
+        })
+        .collect::<Vec<_>>();
+    let referenced_inputs = selected_servers
+        .iter()
+        .flat_map(|(_, _, referenced)| referenced.iter().cloned())
         .collect::<std::collections::HashSet<_>>();
     if referenced_inputs.is_empty() {
         return Ok(());
@@ -479,7 +492,21 @@ async fn materialize_missing_configured_inputs_for_retry(
     runtime
         .materialize_missing_configured_inputs_for_retry(definitions)
         .await
-        .map_err(RuntimeActionError::runtime)
+        .map_err(RuntimeActionError::runtime)?;
+    for (bundle_id, name, referenced) in selected_servers {
+        for input_id in referenced {
+            if runtime.runtime_input_definition(&input_id).await.is_some() {
+                continue;
+            }
+            return Err(RuntimeActionError::MissingInputDefinition {
+                message: format!("Required input '{input_id}' is not defined for this Computer"),
+                input_id,
+                requesting_mcp: None,
+            }
+            .with_requesting_mcp(bundle_id.to_string(), name));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

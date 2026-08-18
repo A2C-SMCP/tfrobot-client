@@ -6,6 +6,7 @@ pub mod computer_runtime_events;
 pub mod config;
 pub mod config_migration;
 pub mod connection_targets;
+pub mod input_entry_store;
 pub mod input_references;
 pub mod input_resolver;
 pub mod input_value_index;

@@ -5,7 +5,6 @@ use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
 use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
-use a2c_smcp::smcp_computer::inputs::env_var_name;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
@@ -287,7 +286,9 @@ pub async fn upsert_computer_mcp_config_core(
 ) -> Result<(), RuntimeActionError> {
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
+    let bundle_id = resolve_bundle_id(&config);
+    let server_name = config.name().to_string();
+    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
         return Err(RuntimeActionError::runtime(
             "bundleId 'client_control' is reserved for the built-in Client Control provider",
         ));
@@ -327,7 +328,8 @@ pub async fn upsert_computer_mcp_config_core(
         .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     if let Some(input_id) = missing_input_id {
-        return Err(missing_input_definition_error(input_id));
+        return Err(missing_input_definition_error(input_id)
+            .with_requesting_mcp(bundle_id.to_string(), server_name));
     }
     Ok(())
 }
@@ -363,7 +365,9 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _input_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
+    let bundle_id = resolve_bundle_id(&config);
+    let server_name = config.name().to_string();
+    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
         return Err(RuntimeActionError::runtime(
             "bundleId 'client_control' is reserved for the built-in Client Control provider",
         ));
@@ -395,7 +399,8 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
         .into_iter()
         .find(|id| !available_inputs.iter().any(|input| input.id() == id))
     {
-        return Err(missing_input_definition_error(input_id));
+        return Err(missing_input_definition_error(input_id)
+            .with_requesting_mcp(bundle_id.to_string(), server_name));
     }
 
     let previous_config = state
@@ -472,10 +477,10 @@ async fn clear_oauth_before_config_change(
 }
 
 fn missing_input_definition_error(input_id: String) -> RuntimeActionError {
-    RuntimeActionError::MissingInput {
-        env_hint: env_var_name(&input_id),
+    RuntimeActionError::MissingInputDefinition {
         message: format!("Required input '{input_id}' is not defined for this Computer"),
         input_id,
+        requesting_mcp: None,
     }
 }
 

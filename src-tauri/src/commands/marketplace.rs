@@ -564,7 +564,14 @@ async fn start_registered_plugin_servers_if_running(
     let mut input_resolution_error = None;
     for (bundle_id, error) in failures {
         if input_resolution_error.is_none() && matches!(&error, ComputerError::InputResolution(_)) {
-            input_resolution_error = Some(RuntimeActionError::from(error));
+            let name = runtime
+                .mcp_server_display_name(&bundle_id)
+                .await
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| bundle_id.to_string());
+            input_resolution_error = Some(
+                RuntimeActionError::from(error).with_requesting_mcp(bundle_id.to_string(), name),
+            );
             continue;
         }
         log::warn!(
@@ -907,13 +914,18 @@ impl MarketplaceMcpHooks {
         runtime: &crate::services::computer::ComputerInstanceRuntime,
         config: MCPServerConfig,
     ) -> Result<(), McpHookError> {
+        let bundle_id = resolve_bundle_id(&config);
+        let name = config.name().to_string();
         match runtime.add_or_update_plugin_server(config).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
                 let mut first_error = self.first_runtime_action_error.lock().await;
                 if first_error.is_none() {
-                    *first_error = Some(RuntimeActionError::from(error));
+                    *first_error = Some(
+                        RuntimeActionError::from(error)
+                            .with_requesting_mcp(bundle_id.to_string(), name),
+                    );
                 }
                 Err(McpHookError(message))
             }

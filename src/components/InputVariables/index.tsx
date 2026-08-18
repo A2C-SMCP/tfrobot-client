@@ -1,14 +1,9 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Space, Modal, Typography, Alert, Table, Popconfirm } from 'antd';
-import {
-  ReloadOutlined,
-  ClearOutlined,
-  DeleteOutlined,
-  EditOutlined,
-} from '@ant-design/icons';
+import { App, Alert, Button, Modal, Popconfirm, Space, Table, Typography } from 'antd';
+import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useInputStore, type InputDefinition } from '@/stores/inputStore';
-import { InputValueEditor } from './InputValueEditor';
+import { useInputStore, type InputEntry } from '@/stores/inputStore';
+import { InputEntryEditor } from './InputEntryEditor';
 
 const { Title } = Typography;
 
@@ -20,235 +15,143 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
-    inputs,
-    values,
-    loading,
-    error,
-    valuesLoading,
-    valuesLoadedInstanceId,
-    valuesError,
-    fetchInputs,
-    fetchValues,
-    setValue,
-    removeValue,
-    clearValues,
+    entries,
+    entriesLoading,
+    entriesLoadedInstanceId,
+    entriesError,
+    fetchEntries,
+    upsertEntry,
+    deleteEntry,
   } = useInputStore();
-
-  const [valueEditorVisible, setValueEditorVisible] = useState(false);
-  const [editingValueId, setEditingValueId] = useState('');
-  const valuesReady = valuesLoadedInstanceId === instanceId && !valuesLoading && !valuesError;
-
-  useEffect(() => {
-    fetchInputs(instanceId);
-    fetchValues(instanceId);
-  }, [fetchInputs, fetchValues, instanceId]);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<InputEntry>();
+  const ready = entriesLoadedInstanceId === instanceId && !entriesLoading && !entriesError;
 
   useEffect(() => {
-    setValueEditorVisible(false);
-    setEditingValueId('');
+    fetchEntries(instanceId);
+  }, [fetchEntries, instanceId]);
+
+  useEffect(() => {
+    setEditorOpen(false);
+    setEditing(undefined);
   }, [instanceId]);
 
-  useEffect(() => {
-    if (!valuesReady) {
-      setValueEditorVisible(false);
-      setEditingValueId('');
-    }
-  }, [valuesReady]);
-
-  const handleSetValue = (id: string) => {
-    setEditingValueId(id);
-    setValueEditorVisible(true);
+  const openCreate = () => {
+    setEditing(undefined);
+    setEditorOpen(true);
   };
-
-  const handleValueSubmit = async (value: string) => {
-    if (!valuesReady || !editingValueId) return;
-    try {
-      await setValue(instanceId, editingValueId, value);
-      message.success(t('inputs.messages.valueSet'));
-      setValueEditorVisible(false);
-    } catch (e) {
-      message.error(String(e));
-    }
+  const openEdit = (entry: InputEntry) => {
+    setEditing(entry);
+    setEditorOpen(true);
   };
-
-  const handleClearAll = async () => {
-    try {
-      await clearValues(instanceId);
-      message.success(t('inputs.messages.valuesCleared'));
-    } catch (e) {
-      message.error(String(e));
-    }
+  const handleSubmit = async (key: string, value: string | undefined, secret: boolean) => {
+    await upsertEntry(instanceId, key, value, secret);
+    message.success(t(editing ? 'inputs.messages.entryUpdated' : 'inputs.messages.entryCreated'));
+    setEditorOpen(false);
   };
-
-  const handleRemoveValue = async (id: string) => {
+  const handleDelete = async (key: string) => {
     try {
-      await removeValue(instanceId, id);
-      message.success(t('inputs.messages.valueCleared'));
-    } catch (e) {
-      message.error(String(e));
+      await deleteEntry(instanceId, key);
+      message.success(t('inputs.messages.entryDeleted'));
+    } catch (cause) {
+      message.error(String(cause));
     }
   };
 
   const columns = [
     {
-      title: t('inputs.table.id'),
-      dataIndex: 'id',
-      key: 'id',
-      width: 150,
-    },
-    {
-      title: t('inputs.table.label'),
-      key: 'label',
-      render: (_: unknown, record: InputDefinition) => record.label || record.id,
+      title: t('inputs.entry.key'),
+      dataIndex: 'key',
+      key: 'key',
     },
     {
       title: t('inputs.table.storageMode'),
       key: 'storageMode',
-      width: 190,
-      render: (_: unknown, record: InputDefinition) => {
-        if (record.type === 'Command') return '—';
-        return record.type === 'PromptString' && record.password
-          ? t('inputs.secretMode')
-          : t('inputs.nonSecretMode');
-      },
+      width: 220,
+      render: (_: unknown, entry: InputEntry) => entry.secret
+        ? t('inputs.secretMode')
+        : t('inputs.nonSecretMode'),
     },
     {
-      title: t('inputs.table.currentValue'),
+      title: t('inputs.entry.value'),
       key: 'value',
-      width: 200,
-      render: (_: unknown, record: InputDefinition) => {
-        if (record.type === 'Command') return t('inputs.runtimeCommand');
-        if (valuesLoading) return t('inputs.valuesLoading');
-        if (!valuesReady) return t('inputs.valuesUnavailable');
-        const stored = values[record.id];
-        let displayValue: string;
-        switch (stored?.status) {
-          case 'configured':
-            displayValue = record.type === 'PromptString' && record.password
-              ? t('inputs.configuredSecret')
-              : String(stored.value ?? '');
-            break;
-          case 'using_default':
-            displayValue = t('inputs.status.usingDefault');
-            break;
-          case 'first_option':
-            displayValue = t('inputs.status.firstOption');
-            break;
-          case 'invalid_selection':
-            displayValue = t('inputs.status.invalidSelection', { value: String(stored.value ?? '') });
-            break;
-          default:
-            displayValue = t('inputs.notConfigured');
-        }
-        return stored?.status === 'configured' && displayValue.length > 30
-          ? `${displayValue.substring(0, 30)}...`
-          : displayValue;
-      },
+      render: (_: unknown, entry: InputEntry) => entry.secret
+        ? t('inputs.configuredSecret')
+        : String(entry.value ?? ''),
     },
     {
       title: t('inputs.table.actions'),
       key: 'actions',
-      width: 210,
-      render: (_: unknown, record: InputDefinition) => {
-        if (record.type === 'Command') return '—';
-        const configured = valuesReady && values[record.id]?.configured === true;
-        return (
-          <Space size="small">
+      width: 190,
+      render: (_: unknown, entry: InputEntry) => (
+        <Space size="small">
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            aria-label={t('inputs.entry.editFor', { key: entry.key })}
+            onClick={() => openEdit(entry)}
+          >
+            {t('common.edit')}
+          </Button>
+          <Popconfirm
+            title={t('inputs.entry.confirmDelete', { key: entry.key })}
+            onConfirm={() => handleDelete(entry.key)}
+          >
             <Button
               type="link"
               size="small"
-              icon={<EditOutlined />}
-              aria-label={t('inputs.setValueFor', { id: record.id })}
-              disabled={!valuesReady}
-              onClick={() => handleSetValue(record.id)}
+              danger
+              icon={<DeleteOutlined />}
+              aria-label={t('inputs.entry.deleteFor', { key: entry.key })}
             >
-              {configured ? t('inputs.editValue') : t('inputs.setValue')}
+              {t('common.delete')}
             </Button>
-            <Popconfirm
-              title={t('inputs.confirmClearValue', { id: record.id })}
-              onConfirm={() => handleRemoveValue(record.id)}
-              disabled={!configured}
-            >
-              <Button
-                type="link"
-                size="small"
-                danger
-                disabled={!configured}
-                icon={<DeleteOutlined />}
-                aria-label={t('inputs.clearValueFor', { id: record.id })}
-              >
-                {t('inputs.clearValue')}
-              </Button>
-            </Popconfirm>
-          </Space>
-        );
-      },
+          </Popconfirm>
+        </Space>
+      ),
     },
   ];
 
   return (
     <div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
         <Space wrap>
-          <Button icon={<ReloadOutlined />} onClick={() => {
-            fetchInputs(instanceId);
-            fetchValues(instanceId);
-          }} loading={loading || valuesLoading}>
+          <Button icon={<ReloadOutlined />} loading={entriesLoading} onClick={() => fetchEntries(instanceId)}>
             {t('common.refresh')}
           </Button>
-          <Popconfirm title={t('inputs.confirmClearValues')} onConfirm={handleClearAll}>
-            <Button icon={<ClearOutlined />} danger disabled={!valuesReady}>
-              {t('inputs.clearValues')}
-            </Button>
-          </Popconfirm>
+          <Button type="primary" icon={<PlusOutlined />} disabled={!ready} onClick={openCreate}>
+            {t('inputs.entry.add')}
+          </Button>
         </Space>
       </div>
 
-      {(error || valuesError) && (
-        <Alert message={t('common.error')} description={error || valuesError} type="error" showIcon closable style={{ marginBottom: 16 }} />
+      {entriesError && (
+        <Alert message={t('common.error')} description={entriesError} type="error" showIcon style={{ marginBottom: 16 }} />
       )}
 
       <Table
-        dataSource={inputs}
+        dataSource={entries}
         columns={columns}
-        rowKey="id"
-        loading={loading || valuesLoading}
+        rowKey="key"
+        loading={entriesLoading}
         pagination={false}
-        size="middle"
-        scroll={{ x: 'max-content' }}
+        locale={{ emptyText: t('inputs.entry.empty') }}
       />
 
-      {valueEditorVisible && (
+      {editorOpen && (
         <Modal
-          title={t('inputs.setValueFor', { id: editingValueId })}
+          title={t(editing ? 'inputs.entry.edit' : 'inputs.entry.add')}
           open
-          onCancel={() => setValueEditorVisible(false)}
+          onCancel={() => setEditorOpen(false)}
           footer={null}
           destroyOnHidden
-          width={400}
+          width={440}
         >
-          <InputValueEditor
-            key={`${instanceId}:${editingValueId}`}
-            inputId={editingValueId}
-            inputs={inputs}
-            currentValue={values[editingValueId]?.value}
-            disabled={!valuesReady}
-            onSubmit={handleValueSubmit}
-            onCancel={() => setValueEditorVisible(false)}
-          />
+          <InputEntryEditor entry={editing} onSubmit={handleSubmit} onCancel={() => setEditorOpen(false)} />
         </Modal>
       )}
-
     </div>
   );
 }

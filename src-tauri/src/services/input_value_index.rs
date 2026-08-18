@@ -3,7 +3,7 @@ use crate::services::storage::write_json_atomically;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "input_value_ids.json";
 const SCHEMA_VERSION: u32 = 2;
@@ -13,6 +13,29 @@ const SCHEMA_VERSION: u32 = 2;
 pub enum InputValueStorageKind {
     Value,
     Secret,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputValueIndexProvenance {
+    Missing,
+    LegacyV1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedInputValueIndex {
+    pub provenance: InputValueIndexProvenance,
+    pub entries: BTreeMap<String, BTreeSet<InputValueStorageKind>>,
+}
+
+impl LoadedInputValueIndex {
+    #[cfg(test)]
+    pub fn v2(entries: BTreeMap<String, BTreeSet<InputValueStorageKind>>) -> Self {
+        Self {
+            provenance: InputValueIndexProvenance::V2,
+            entries,
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -41,9 +64,25 @@ pub fn load(
     config: &ConfigService,
     instance_id: &str,
 ) -> Result<BTreeMap<String, BTreeSet<InputValueStorageKind>>, String> {
-    let path = path(config, instance_id);
+    Ok(load_with_provenance(config, instance_id)?.entries)
+}
+
+pub fn load_with_provenance(
+    config: &ConfigService,
+    instance_id: &str,
+) -> Result<LoadedInputValueIndex, String> {
+    load_with_provenance_from_storage_root(config.computer_instance_storage_root(instance_id))
+}
+
+pub fn load_with_provenance_from_storage_root(
+    storage_root: impl AsRef<Path>,
+) -> Result<LoadedInputValueIndex, String> {
+    let path = storage_root.as_ref().join(FILE_NAME);
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(LoadedInputValueIndex {
+            provenance: InputValueIndexProvenance::Missing,
+            entries: BTreeMap::new(),
+        });
     }
     let bytes = fs::read(&path).map_err(|error| {
         format!(
@@ -69,14 +108,16 @@ pub fn load(
             )
         })?;
         debug_assert_eq!(legacy.schema_version, 1);
-        // V1 did not record a storage kind. Treat its IDs as plain values so a non-secret
-        // lifecycle never acquires Keychain authority. Current Secret definitions add their
-        // precise Secret kind at the Computer lifecycle boundary.
-        return Ok(legacy
-            .ids
-            .into_iter()
-            .map(|id| (id, BTreeSet::from([InputValueStorageKind::Value])))
-            .collect());
+        // V1 did not record a storage kind. Treat its IDs as plain values so neither a current
+        // SDK definition nor any lifecycle operation can grant Keychain authority retroactively.
+        return Ok(LoadedInputValueIndex {
+            provenance: InputValueIndexProvenance::LegacyV1,
+            entries: legacy
+                .ids
+                .into_iter()
+                .map(|id| (id, BTreeSet::from([InputValueStorageKind::Value])))
+                .collect(),
+        });
     }
     let index: InputValueIdIndex = serde_json::from_value(value).map_err(|error| {
         format!(
@@ -91,7 +132,10 @@ pub fn load(
             path.display()
         ));
     }
-    Ok(index.entries)
+    Ok(LoadedInputValueIndex {
+        provenance: InputValueIndexProvenance::V2,
+        entries: index.entries,
+    })
 }
 
 /// Records only the non-sensitive logical ID. Historical IDs are deliberately retained so a

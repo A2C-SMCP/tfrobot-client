@@ -723,7 +723,6 @@ export function MarketplaceTab({
         <RuntimeInputPrompt
           instanceId={instanceId}
           error={runtimeInputPrompt.error}
-          allowPersistentDefinitionCreation={false}
           onCancel={() => setRuntimeInputPrompt(null)}
           onSubmitted={() => handlePluginAction(
             runtimeInputPrompt.action,

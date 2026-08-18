@@ -41,6 +41,10 @@ impl InputValueStore {
         Ok(self.load()?.values.get(input_id).cloned())
     }
 
+    pub fn list(&self) -> Result<BTreeMap<String, Value>, String> {
+        Ok(self.load()?.values)
+    }
+
     pub fn set(&self, input_id: &str, value: &Value) -> Result<(), String> {
         let mut document = self.load()?;
         document.values.insert(input_id.to_string(), value.clone());

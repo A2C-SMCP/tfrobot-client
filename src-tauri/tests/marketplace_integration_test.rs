@@ -32,6 +32,7 @@ use tfrobot_client_lib::commands::{
         update_marketplace_core, AddMarketplaceRequest, PluginLifecycleRequest,
         UpdateMarketplaceRequest,
     },
+    runtime_error::RuntimeActionError,
     sdk_config, skills,
 };
 use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
@@ -651,7 +652,49 @@ async fn plugin_missing_input_does_not_block_computer_across_retry_and_cold_star
 }
 
 #[tokio::test]
-async fn plugin_runtime_input_is_excluded_from_client_crud_import_and_export() {
+async fn running_plugin_with_multiple_mcps_reports_the_exact_input_requester() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("requesting-mcp-marketplace");
+    build_runtime_input_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let error = enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap_err();
+    let serialized = serde_json::to_value(&error).unwrap();
+    assert!(matches!(error, RuntimeActionError::MissingSecret { .. }));
+    assert_eq!(
+        serialized["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "audit-mcp",
+            "name": "audit-mcp"
+        })
+    );
+}
+
+#[tokio::test]
+async fn plugin_runtime_definition_stays_out_of_sdk_export_while_its_entry_is_managed() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("runtime-input-import-export-marketplace");
@@ -688,6 +731,11 @@ async fn plugin_runtime_input_is_excluded_from_client_crud_import_and_export() {
     assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
+    let entries = inputs::list_input_entries_core(&state, TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "audit@acme/api_token");
+    assert!(entries[0].secret);
+    assert_eq!(entries[0].value, None);
 
     let import_path = tmp.path().join("client-owned-input.json");
     fs::write(
@@ -2317,6 +2365,7 @@ fn build_runtime_input_marketplace_repo(repo: &Path) {
     let servers = repo.join("plugins/audit/mcp-servers");
     fs::create_dir_all(&servers).unwrap();
     let server_path = echo_server_path();
+    write_mcp_server_config(&servers.join("00-healthy-mcp.json"), "00-healthy-mcp");
     fs::write(
         servers.join("audit-mcp.json"),
         serde_json::to_vec(&serde_json::json!({

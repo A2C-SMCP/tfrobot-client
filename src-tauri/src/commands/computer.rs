@@ -11,14 +11,15 @@ use crate::services::computer::{
     ConnectionStateSummary, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
-use crate::services::input_value_index::{self, InputValueStorageKind};
+use crate::services::input_entry_store::{InputEntryStorageKind, InputEntryStore};
+use crate::services::input_value_index;
 use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
@@ -368,9 +369,14 @@ pub async fn delete_computer_instance_core(
         .config
         .get_computer_instance(&id)
         .map_err(|error| error.to_string())?;
+    // Retire and drain the runtime before reading or mutating InputEntry storage. This prevents
+    // an in-flight SDK resolver from adopting legacy metadata or reading a value while Computer
+    // deletion snapshots and removes the authoritative Entry set.
+    let prepared_removal = state.computer_registry.prepare_runtime_removal(&id).await?;
     let input_storage = snapshot_computer_input_storage(state, &persisted_instance)?;
     if let Err(error) = delete_computer_input_storage(state, &id, &input_storage) {
         let rollback = restore_computer_input_storage(state, &id, &input_storage);
+        drop(prepared_removal);
         return match rollback {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(format!(
@@ -378,17 +384,6 @@ pub async fn delete_computer_instance_core(
             )),
         };
     }
-    let prepared_removal = match state.computer_registry.prepare_runtime_removal(&id).await {
-        Ok(prepared_removal) => prepared_removal,
-        Err(error) => {
-            return match restore_computer_input_storage(state, &id, &input_storage) {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(format!(
-                "{error}; additionally failed to restore Computer input storage: {rollback_error}"
-            )),
-            }
-        }
-    };
     let quarantined_storage = match quarantine_computer_instance_storage(&instance_storage_root)
         .await
     {
@@ -482,40 +477,52 @@ fn snapshot_computer_input_storage(
     state: &AppState,
     instance: &ComputerInstance,
 ) -> Result<Vec<ComputerInputStorageSnapshot>, String> {
-    let mut entries = input_value_index::load(state.config.as_ref(), &instance.id)?;
-    for input in state.sdk_config.load_input_definitions(&instance.id) {
-        if input.supports_persistent_value() {
-            let kind = if input.is_secret() {
-                InputValueStorageKind::Secret
-            } else {
-                InputValueStorageKind::Value
-            };
-            entries
-                .entry(input.id().to_string())
-                .or_default()
-                .insert(kind);
-        }
-    }
+    let store = InputEntryStore::for_computer(
+        state.config.as_ref(),
+        instance.id.clone(),
+        state.secret_store.clone(),
+    );
+    let preferred: BTreeMap<_, _> = state
+        .sdk_config
+        .load_input_definitions(&instance.id)
+        .into_iter()
+        .filter(|input| input.supports_persistent_value())
+        .map(|input| {
+            (
+                input.id().to_string(),
+                if input.is_secret() {
+                    InputEntryStorageKind::Secret
+                } else {
+                    InputEntryStorageKind::Value
+                },
+            )
+        })
+        .collect();
+    // Reconcile legacy storage with provenance intact, then let InputEntry metadata alone define
+    // which backends this Computer owns. In particular, a current password definition must not
+    // grant Keychain authority over a V1 index entry, which was always plain.
+    store.migrate_legacy(
+        input_value_index::load_with_provenance(state.config.as_ref(), &instance.id)?,
+        &preferred,
+    )?;
     let mut snapshots = Vec::new();
-    for (id, kinds) in entries {
-        for kind in kinds {
-            snapshots.push(match kind {
-                InputValueStorageKind::Value => ComputerInputStorageSnapshot::Value {
-                    value: InputValueStore::for_computer(state.config.as_ref(), &instance.id)
-                        .get(&id)?,
-                    id: id.clone(),
-                },
-                InputValueStorageKind::Secret => ComputerInputStorageSnapshot::Secret {
-                    secret: keychain::get_input_secret(
-                        state.secret_store.as_ref(),
-                        &instance.id,
-                        &id,
-                    )
-                    .map_err(|error| error.to_string())?,
-                    id: id.clone(),
-                },
-            });
-        }
+    for entry in store.list()? {
+        snapshots.push(if entry.secret {
+            ComputerInputStorageSnapshot::Secret {
+                secret: keychain::get_input_secret(
+                    state.secret_store.as_ref(),
+                    &instance.id,
+                    &entry.key,
+                )
+                .map_err(|error| error.to_string())?,
+                id: entry.key,
+            }
+        } else {
+            ComputerInputStorageSnapshot::Value {
+                value: entry.value,
+                id: entry.key,
+            }
+        });
     }
     Ok(snapshots)
 }
@@ -1244,12 +1251,71 @@ mod tests {
     use super::*;
     use crate::services::computer::ComputerRuntimeState;
     use crate::services::config::ConfigService;
+    use crate::services::input_entry_store::InputEntryStorageKind;
+    use crate::services::keychain::{InMemorySecretStore, KeychainError, SecretStore};
     use crate::services::manager_context::ManagerContextKey;
     use crate::services::manager_environment::ManagerEnvironment;
     use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
+    use crate::services::storage::write_json_atomically;
     use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct FailNextDeleteSecretStore {
+        inner: InMemorySecretStore,
+        fail_next_delete: AtomicBool,
+    }
+
+    impl SecretStore for FailNextDeleteSecretStore {
+        fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+            self.inner.set_secret(key, secret)
+        }
+
+        fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+            self.inner.get_secret(key)
+        }
+
+        fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+            if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+                return Err(KeychainError::Store("injected delete failure".to_string()));
+            }
+            self.inner.delete_secret(key)
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSecretStore {
+        inner: InMemorySecretStore,
+        get_calls: AtomicUsize,
+        delete_calls: AtomicUsize,
+    }
+
+    impl CountingSecretStore {
+        fn peek_input(&self, instance_id: &str, input_id: &str) -> Option<String> {
+            self.inner
+                .get_secret(&keychain::input_secret_key(instance_id, input_id))
+                .unwrap()
+        }
+    }
+
+    impl SecretStore for CountingSecretStore {
+        fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+            self.inner.set_secret(key, secret)
+        }
+
+        fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_secret(key)
+        }
+
+        fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.delete_secret(key)
+        }
+    }
 
     fn test_state() -> (AppState, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -1260,6 +1326,179 @@ mod tests {
         let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
+    }
+
+    #[tokio::test]
+    async fn deleting_computer_removes_definitionless_plain_and_secret_entries() {
+        let (state, _dir) = test_state();
+        let storage_root = state.config.computer_instance_storage_root("computer-a");
+        let entries = InputEntryStore::for_computer(
+            state.config.as_ref(),
+            "computer-a".to_string(),
+            state.secret_store.clone(),
+        );
+        entries
+            .upsert("plain", Some(serde_json::json!("value")), false)
+            .unwrap();
+        entries
+            .upsert("token", Some(serde_json::json!("top-secret")), true)
+            .unwrap();
+        assert!(state
+            .sdk_config
+            .load_input_definitions("computer-a")
+            .is_empty());
+
+        delete_computer_instance_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+
+        assert!(!storage_root.exists());
+        assert_eq!(
+            keychain::get_input_secret(state.secret_store.as_ref(), "computer-a", "token").unwrap(),
+            None
+        );
+        assert!(state.config.get_computer_instance("computer-a").is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_computer_never_grants_v1_plain_entries_keychain_authority() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
+            .unwrap();
+        let secrets = Arc::new(CountingSecretStore::default());
+        let state = AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            secrets.clone(),
+        );
+        crate::commands::inputs::add_or_update_input_core(
+            &state,
+            "computer-a",
+            crate::commands::inputs::InputDefinition::PromptString {
+                id: "credential".to_string(),
+                label: Some("Credential".to_string()),
+                description: None,
+                default: None,
+                password: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        let storage_root = state.config.computer_instance_storage_root("computer-a");
+        InputValueStore::from_storage_root(&storage_root)
+            .set("credential", &serde_json::json!("owned-plain"))
+            .unwrap();
+        write_json_atomically(
+            &storage_root.join("input_value_ids.json"),
+            &serde_json::json!({
+                "schema_version": 1,
+                "ids": ["credential"]
+            }),
+        )
+        .unwrap();
+        keychain::set_input_secret(
+            secrets.as_ref(),
+            "computer-a",
+            "credential",
+            "unowned-secret",
+        )
+        .unwrap();
+
+        delete_computer_instance_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(secrets.get_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.delete_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            secrets.peek_input("computer-a", "credential").as_deref(),
+            Some("unowned-secret")
+        );
+        assert!(state.config.get_computer_instance("computer-a").is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_computer_cleans_entry_metadata_when_backend_values_are_missing() {
+        let (state, _dir) = test_state();
+        let storage_root = state.config.computer_instance_storage_root("computer-a");
+        let entries = InputEntryStore::for_computer(
+            state.config.as_ref(),
+            "computer-a".to_string(),
+            state.secret_store.clone(),
+        );
+        entries
+            .upsert("plain", Some(serde_json::json!("value")), false)
+            .unwrap();
+        entries
+            .upsert("secret", Some(serde_json::json!("top-secret")), true)
+            .unwrap();
+        InputValueStore::from_storage_root(&storage_root)
+            .delete("plain")
+            .unwrap();
+        keychain::delete_input_secret(state.secret_store.as_ref(), "computer-a", "secret").unwrap();
+
+        delete_computer_instance_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+
+        assert!(!storage_root.exists());
+        assert!(state.config.get_computer_instance("computer-a").is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_entry_cleanup_restores_computer_profile_and_all_entry_values() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "Computer A"))
+            .unwrap();
+        let secrets = Arc::new(FailNextDeleteSecretStore::default());
+        let state = AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            secrets.clone(),
+        );
+        let instance = state.config.get_computer_instance("computer-a").unwrap();
+        state
+            .computer_registry
+            .upsert_runtime(instance)
+            .await
+            .unwrap();
+        let entries = InputEntryStore::for_computer(
+            state.config.as_ref(),
+            "computer-a".to_string(),
+            secrets.clone(),
+        );
+        entries
+            .upsert("plain", Some(serde_json::json!("value")), false)
+            .unwrap();
+        entries
+            .upsert("token", Some(serde_json::json!("top-secret")), true)
+            .unwrap();
+        secrets.fail_next_delete.store(true, Ordering::SeqCst);
+
+        let error = delete_computer_instance_core(&state, "computer-a".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("injected delete failure"));
+        assert!(state.config.get_computer_instance("computer-a").is_ok());
+        assert_eq!(
+            entries
+                .resolve("plain", InputEntryStorageKind::Value)
+                .unwrap(),
+            Some(serde_json::json!("value"))
+        );
+        assert_eq!(
+            entries
+                .resolve("token", InputEntryStorageKind::Secret)
+                .unwrap(),
+            Some(serde_json::json!("top-secret"))
+        );
     }
 
     #[tokio::test]

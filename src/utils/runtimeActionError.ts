@@ -4,9 +4,23 @@ export type MissingRuntimeInputError = {
   env_hint?: string;
   value?: string;
   message: string;
+  requesting_mcp?: {
+    bundle_id: string;
+    name: string;
+  };
 };
 
-export type RuntimeActionError = MissingRuntimeInputError | {
+export type MissingInputDefinitionError = {
+  code: 'missing_input_definition';
+  input_id: string;
+  message: string;
+  requesting_mcp?: {
+    bundle_id: string;
+    name: string;
+  };
+};
+
+export type RuntimeActionError = MissingRuntimeInputError | MissingInputDefinitionError | {
   code: 'resolver_failed' | 'runtime_error';
   input_id?: string;
   message: string;
@@ -26,6 +40,14 @@ export function isMissingRuntimeInputError(error: unknown): error is MissingRunt
     || candidate.code === 'invalid_selection')
     && typeof candidate.input_id === 'string'
     && (candidate.code === 'invalid_selection' || typeof candidate.env_hint === 'string')
+    && typeof candidate.message === 'string';
+}
+
+export function isMissingInputDefinitionError(error: unknown): error is MissingInputDefinitionError {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as Partial<MissingInputDefinitionError>;
+  return candidate.code === 'missing_input_definition'
+    && typeof candidate.input_id === 'string'
     && typeof candidate.message === 'string';
 }
 

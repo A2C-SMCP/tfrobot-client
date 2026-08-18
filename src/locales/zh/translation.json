@@ -710,6 +710,7 @@
       "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
       "operationFailed": "MCP 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "missingInputDefinition": "MCP {{name}} 引用了 Input {{id}}，但缺少定义。请先在 MCP 编辑器中补全定义再保存。",
       "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
@@ -719,16 +720,16 @@
     }
   },
   "inputs": {
-    "title": "输入变量",
+    "title": "输入项",
     "addInput": "添加变量",
     "editInput": "编辑变量",
     "editInputFor": "编辑变量 {{id}}",
     "removeInputFor": "删除变量 {{id}}",
     "setValue": "设置值",
     "editValue": "编辑值",
-    "clearValue": "清除值",
-    "clearValueFor": "清除 {{id}} 的已保存值",
-    "confirmClearValue": "确定要清除 {{id}} 的已保存值吗？",
+    "deleteValue": "删除值",
+    "deleteValueFor": "删除 {{id}} 的已保存值",
+    "confirmDeleteValue": "确定要删除 {{id}} 的已保存值吗？",
     "secretMode": "Secret（系统 Keychain）",
     "nonSecretMode": "非 Secret",
     "selectValue": "请选择一个值",
@@ -742,10 +743,24 @@
     "valuesLoading": "正在加载已保存的值…",
     "valuesUnavailable": "暂时无法读取已保存的值",
     "runtimeCommand": "运行时执行",
+    "entry": {
+      "add": "新增输入项",
+      "edit": "编辑输入项",
+      "empty": "暂无已保存的输入项",
+      "key": "Key",
+      "keyPlaceholder": "请输入 ${input:key} 使用的 key",
+      "value": "值",
+      "storeAsSecret": "安全保存到系统 Keychain",
+      "secretUnchanged": "留空将保留当前 Secret",
+      "editFor": "编辑输入项 {{key}}",
+      "deleteFor": "删除输入项 {{key}}",
+      "confirmDelete": "确定要删除输入项 {{key}} 及其已保存值吗？"
+    },
     "status": {
       "usingDefault": "使用默认值",
       "firstOption": "未设置，将使用第一项",
-      "invalidSelection": "已失效：{{value}}"
+      "invalidSelection": "已失效：{{value}}",
+      "invalidSecretSelection": "已保存的 Secret 不再是有效选项"
     },
     "referenceIssues": {
       "title": "部分旧 PickString 引用需要处理",
@@ -757,6 +772,10 @@
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
       "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
       "createAsSecret": "将此 Input 作为 Secret 保存",
+      "entryMissing": "尚未保存 {{id}} 对应的输入项，保存后会为当前 Computer 新增。",
+      "definitionUnavailable": "无法获取 Input {{id}} 的运行时定义。请编辑 MCP 配置或重试 MCP 操作。",
+      "storeAsSecret": "将此输入项保存到系统 Keychain",
+      "requestedBy": "由 MCP {{name}}（{{id}}）请求",
       "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
       "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
     },
@@ -790,8 +809,11 @@
       "saved": "变量已保存，重启 Runtime 后生效",
       "removed": "变量已删除，重启 Runtime 后生效",
       "valueSet": "值已保存，重启 Runtime 后生效",
-      "valueCleared": "已保存值已清除，重启 Runtime 后生效",
-      "valuesCleared": "所有已保存值已清空，重启 Runtime 后生效"
+      "valueDeleted": "已保存值已删除，重启 Runtime 后生效",
+      "valuesCleared": "所有已保存值已清空，重启 Runtime 后生效",
+      "entryCreated": "输入项已新增，将在 MCP 下次实际启动时使用",
+      "entryUpdated": "输入项已更新，将在 MCP 下次实际启动时使用",
+      "entryDeleted": "输入项已删除"
     }
   },
   "connection": {

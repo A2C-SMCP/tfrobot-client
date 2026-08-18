@@ -292,15 +292,13 @@ describe('McpConfig', () => {
     expect(mockMcpStore.fetchServers).toHaveBeenLastCalledWith(instanceId);
   });
 
-  it('prompts for a missing Input when enabling a declaration and retries it', async () => {
-    mockSdkStore.upsertServer
-      .mockRejectedValueOnce({
-        code: 'missing_input',
-        input_id: 'api-key',
-        env_hint: 'A2C_SMCP_api_key',
-        message: 'Required input is unresolved',
-      })
-      .mockResolvedValueOnce(undefined);
+  it('keeps a missing definition in the MCP editing flow when enabling a declaration', async () => {
+    mockSdkStore.upsertServer.mockRejectedValueOnce({
+      code: 'missing_input_definition',
+      input_id: 'api-key',
+      message: 'Required input definition is missing',
+      requesting_mcp: { bundle_id: 'test-stdio', name: 'test-stdio' },
+    });
     mockUseSdkConfigStore.mockReturnValue({
       ...mockSdkStore,
       snapshot: {
@@ -315,12 +313,10 @@ describe('McpConfig', () => {
     fireEvent.click(screen.getByRole('switch', {
       name: 'Toggle server test-stdio enabled state',
     }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Configure api-key' }));
 
-    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
-    expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
-      mockSdkStore.upsertServer.mock.calls[0],
-    );
+    expect(await screen.findByText(/test-stdio.*api-key.*definition is missing/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configure api-key' })).not.toBeInTheDocument();
+    expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(1);
   }, 10000);
 
   it('keys same-name server rows by BundleId', () => {
@@ -547,6 +543,29 @@ describe('McpConfig', () => {
       name: 'runtime-server',
     }));
     expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
+  }, 10000);
+
+  it('keeps the MCP form open for a missing definition and succeeds after the corrected resubmit', async () => {
+    mockSdkStore.upsertServer
+      .mockRejectedValueOnce({
+        code: 'missing_input_definition',
+        input_id: 'api-key',
+        message: 'Required input definition is missing',
+        requesting_mcp: { bundle_id: 'runtime-server', name: 'runtime-server' },
+      })
+      .mockResolvedValueOnce(undefined);
+    render(<McpConfig instanceId={instanceId} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+
+    expect(await screen.findByText(/runtime-server.*api-key.*definition is missing/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configure api-key' })).not.toBeInTheDocument();
+    const resubmit = screen.getByRole('button', { name: 'Submit mocked server' });
+    expect(resubmit).toBeInTheDocument();
+
+    fireEvent.click(resubmit);
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Server saved; restart Runtime to apply it')).toBeInTheDocument();
   }, 10000);
 
   it('opens the Input configuration prompt and retries the saved MCP declaration', async () => {

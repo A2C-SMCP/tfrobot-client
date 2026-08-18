@@ -12,14 +12,13 @@ use crate::services::computer_runtime_events::{
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_references::referenced_input_ids;
 use crate::services::input_resolver::RuntimeInputResolver;
-use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
 use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
-use a2c_smcp::smcp_computer::inputs::{env_var_name, run_command};
+use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
@@ -621,18 +620,26 @@ impl InstanceSession {
 impl Session for InstanceSession {
     async fn resolve_input(&self, input: &MCPServerInput) -> ComputerResult<serde_json::Value> {
         match input {
-            MCPServerInput::PromptString(input) => Ok(serde_json::Value::String(
-                input.default.clone().unwrap_or_default(),
-            )),
-            MCPServerInput::PickString(input) => Ok(serde_json::Value::String(
-                input.default.clone().unwrap_or_else(|| {
-                    input
-                        .options
-                        .first()
-                        .map(|option| option.value.clone())
-                        .unwrap_or_default()
+            MCPServerInput::PromptString(prompt) => prompt
+                .default
+                .clone()
+                .map(serde_json::Value::String)
+                .ok_or_else(|| {
+                    ComputerError::InputResolution(InputResolutionError::missing(
+                        input.id(),
+                        InputKind::of(input),
+                    ))
                 }),
-            )),
+            MCPServerInput::PickString(pick) => pick
+                .default
+                .clone()
+                .map(serde_json::Value::String)
+                .ok_or_else(|| {
+                    ComputerError::InputResolution(InputResolutionError::missing(
+                        input.id(),
+                        InputKind::of(input),
+                    ))
+                }),
             MCPServerInput::Command(input) => {
                 let args: Vec<String> = input
                     .args
@@ -918,9 +925,7 @@ impl ComputerInstanceRuntime {
         ));
         let input_resolver = Arc::new(RuntimeInputResolver::new(
             instance.id.clone(),
-            InputValueStore::from_storage_root(
-                skill_home_base.join(instance_storage_dir_name(&instance.id)),
-            ),
+            skill_home_base.join(instance_storage_dir_name(&instance.id)),
             secret_store,
         ));
         let (computer, sdk_servers, inputs) = build_sdk_computer(
@@ -1184,6 +1189,10 @@ impl ComputerInstanceRuntime {
             .await
             .get(input_id)
             .and_then(runtime_stored_input_kind)
+    }
+
+    pub async fn runtime_input_definition(&self, input_id: &str) -> Option<MCPServerInput> {
+        self.inputs.read().await.get(input_id).cloned()
     }
 
     /// Applies an already-persisted user MCP declaration to this runtime without rebuilding the
@@ -1565,10 +1574,13 @@ impl ComputerInstanceRuntime {
 
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
-        if let Some(error) = self.missing_configured_input_definition(bundle_id).await {
+        if let Some(input_id) = self.missing_configured_input_definition(bundle_id).await {
+            let error = ComputerError::InvalidConfiguration(format!(
+                "Required input '{input_id}' is not defined for this Computer"
+            ));
             self.record_mcp_start_diagnostic(bundle_id.clone(), format!("Start failed: {error}"))
                 .await;
-            return Err(ComputerError::InputResolution(error));
+            return Err(error);
         }
         let result = self.computer.read().await.start_mcp_client(bundle_id).await;
         if Self::is_expected_oauth_required(&result) {
@@ -1594,10 +1606,7 @@ impl ComputerInstanceRuntime {
         result
     }
 
-    async fn missing_configured_input_definition(
-        &self,
-        bundle_id: &BundleId,
-    ) -> Option<InputResolutionError> {
+    async fn missing_configured_input_definition(&self, bundle_id: &BundleId) -> Option<String> {
         let config = self.sdk_mcp_server_config_map().await.remove(bundle_id)?;
         let config = serde_json::to_value(config).ok()?;
         let referenced = referenced_input_ids(&config);
@@ -1608,11 +1617,6 @@ impl ComputerInstanceRuntime {
         referenced
             .into_iter()
             .find(|input_id| !defined.contains_key(input_id))
-            .map(|id| InputResolutionError::Missing {
-                env_hint: env_var_name(&id),
-                id,
-                kind: InputKind::Value,
-            })
     }
 
     /// True when a start result means "this OAuth server is awaiting authorization" rather than a
@@ -3334,14 +3338,15 @@ mod tests {
         let inputs = runtime.inputs.read().await;
         let input = inputs.get("api-key").unwrap();
 
-        assert_eq!(
-            runtime.session.resolve_input(input).await.unwrap(),
-            serde_json::json!("")
-        );
+        assert!(matches!(
+            runtime.session.resolve_input(input).await,
+            Err(ComputerError::InputResolution(InputResolutionError::Missing { id, .. }))
+                if id == "api-key"
+        ));
     }
 
     #[tokio::test]
-    async fn instance_session_falls_back_to_sdk_input_semantics() {
+    async fn instance_session_never_auto_selects_pick_and_executes_command() {
         let session = InstanceSession::new("one");
         let pick = MCPServerInput::PickString(PickStringInput {
             id: "runtime".to_string(),
@@ -3368,10 +3373,11 @@ mod tests {
             ])),
         });
 
-        assert_eq!(
-            session.resolve_input(&pick).await.unwrap(),
-            serde_json::json!("node")
-        );
+        assert!(matches!(
+            session.resolve_input(&pick).await,
+            Err(ComputerError::InputResolution(InputResolutionError::Missing { id, .. }))
+                if id == "runtime"
+        ));
         assert_eq!(
             session.resolve_input(&command).await.unwrap(),
             serde_json::json!("hello world")

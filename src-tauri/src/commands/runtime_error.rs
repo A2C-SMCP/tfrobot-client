@@ -3,29 +3,51 @@ use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
 use serde::Serialize;
 
+use crate::services::input_resolver::REDACTED_SECRET_SELECTION;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RequestingMcp {
+    pub bundle_id: String,
+    pub name: String,
+}
+
 /// Stable Tauri error contract for runtime actions that may resolve client-owned inputs.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum RuntimeActionError {
     #[error("{message}")]
+    MissingInputDefinition {
+        input_id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requesting_mcp: Option<RequestingMcp>,
+    },
+    #[error("{message}")]
     MissingInput {
         input_id: String,
         env_hint: String,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requesting_mcp: Option<RequestingMcp>,
     },
     #[error("{message}")]
     MissingSecret {
         input_id: String,
         env_hint: String,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requesting_mcp: Option<RequestingMcp>,
     },
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
     #[error("{message}")]
     InvalidSelection {
         input_id: String,
-        value: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requesting_mcp: Option<RequestingMcp>,
     },
     #[error("{message}")]
     ActionUnavailable {
@@ -60,7 +82,8 @@ impl RuntimeActionError {
     pub fn append_context(mut self, context: impl std::fmt::Display) -> Self {
         let suffix = context.to_string();
         match &mut self {
-            Self::MissingInput { message, .. }
+            Self::MissingInputDefinition { message, .. }
+            | Self::MissingInput { message, .. }
             | Self::MissingSecret { message, .. }
             | Self::ResolverFailed { message, .. }
             | Self::InvalidSelection { message, .. }
@@ -70,6 +93,37 @@ impl RuntimeActionError {
             Self::ActionUnavailable { .. } => {
                 return Self::runtime(format!("{self}; {suffix}"));
             }
+        }
+        self
+    }
+
+    pub fn with_requesting_mcp(
+        mut self,
+        bundle_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        let requesting_mcp = Some(RequestingMcp {
+            bundle_id: bundle_id.into(),
+            name: name.into(),
+        });
+        match &mut self {
+            Self::MissingInputDefinition {
+                requesting_mcp: target,
+                ..
+            }
+            | Self::MissingInput {
+                requesting_mcp: target,
+                ..
+            }
+            | Self::MissingSecret {
+                requesting_mcp: target,
+                ..
+            }
+            | Self::InvalidSelection {
+                requesting_mcp: target,
+                ..
+            } => *target = requesting_mcp,
+            _ => {}
         }
         self
     }
@@ -87,11 +141,13 @@ impl From<ComputerError> for RuntimeActionError {
                     message: format!("Required value input '{id}' is unresolved"),
                     input_id: id,
                     env_hint,
+                    requesting_mcp: None,
                 },
                 InputKind::Secret => Self::MissingSecret {
                     message: format!("Required secret input '{id}' is unresolved"),
                     input_id: id,
                     env_hint,
+                    requesting_mcp: None,
                 },
             },
             ComputerError::InputResolution(InputResolutionError::ResolverFailed { id, reason }) => {
@@ -104,11 +160,14 @@ impl From<ComputerError> for RuntimeActionError {
                 id,
                 value,
             }) => Self::InvalidSelection {
-                message: format!(
-                    "Stored value for PickString input '{id}' is not one of its current options"
-                ),
+                message: if value == REDACTED_SECRET_SELECTION {
+                    format!("Stored secret for PickString input '{id}' is not one of its current options")
+                } else {
+                    format!("Stored value for PickString input '{id}' is not one of its current options")
+                },
                 input_id: id,
-                value,
+                value: (value != REDACTED_SECRET_SELECTION).then_some(value),
+                requesting_mcp: None,
             },
             other => Self::runtime(other.to_string()),
         }
@@ -189,6 +248,27 @@ mod tests {
                 "message": "Stored value for PickString input 'region' is not one of its current options"
             })
         );
+    }
+
+    #[test]
+    fn redacts_secret_pick_selection_from_the_tauri_error_contract() {
+        let error = RuntimeActionError::from(ComputerError::InputResolution(
+            InputResolutionError::InvalidSelection {
+                id: "region".to_string(),
+                value: REDACTED_SECRET_SELECTION.to_string(),
+            },
+        ));
+        let serialized = serde_json::to_value(error).unwrap();
+
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "code": "invalid_selection",
+                "input_id": "region",
+                "message": "Stored secret for PickString input 'region' is not one of its current options"
+            })
+        );
+        assert!(!serialized.to_string().contains(REDACTED_SECRET_SELECTION));
     }
 
     #[test]

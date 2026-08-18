@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useInputStore, type InputDefinition, type InputValueView } from '@/stores/inputStore';
+import { useInputStore, type InputDefinition, type InputEntry, type InputValueView } from '@/stores/inputStore';
 
 const mockedInvoke = vi.mocked(invoke);
 const instanceId = 'computer-a';
@@ -7,6 +7,7 @@ const instanceId = 'computer-a';
 function resetStore() {
   useInputStore.setState({
     inputs: [],
+    entries: [],
     values: {},
     loading: false,
     error: null,
@@ -16,6 +17,10 @@ function resetStore() {
     activeInstanceId: null,
     inputsRequestId: 0,
     valuesRequestId: 0,
+    entriesLoading: false,
+    entriesLoadedInstanceId: null,
+    entriesError: null,
+    entriesRequestId: 0,
   });
 }
 
@@ -81,6 +86,58 @@ describe('inputStore', () => {
       expect(useInputStore.getState().inputs).toEqual(inputsB);
       expect(useInputStore.getState().activeInstanceId).toBe('computer-b');
       expect(useInputStore.getState().loading).toBe(false);
+    });
+  });
+
+  describe('InputEntry management', () => {
+    it('loads only actual saved entries', async () => {
+      const entries: InputEntry[] = [
+        { key: 'name', secret: false, value: 'zhangsan' },
+        { key: 'api-key', secret: true },
+      ];
+      mockedInvoke.mockResolvedValueOnce(entries);
+
+      await useInputStore.getState().fetchEntries(instanceId);
+
+      expect(mockedInvoke).toHaveBeenCalledWith('list_input_entries', { instanceId });
+      expect(useInputStore.getState().entries).toEqual(entries);
+    });
+
+    it('upserts an entry without an SDK definition and refreshes entries', async () => {
+      useInputStore.setState({ activeInstanceId: instanceId });
+      mockedInvoke.mockResolvedValueOnce(undefined);
+      mockedInvoke.mockResolvedValueOnce([{ key: 'name', secret: false, value: 'zhangsan' }]);
+
+      await useInputStore.getState().upsertEntry(instanceId, 'name', 'zhangsan', false);
+
+      expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
+        instanceId,
+        key: 'name',
+        value: 'zhangsan',
+        secret: false,
+      });
+    });
+
+    it('sends null when editing a secret without replacing its plaintext', async () => {
+      mockedInvoke.mockResolvedValueOnce(undefined);
+      await useInputStore.getState().upsertEntry(instanceId, 'api-key', undefined, true);
+      expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
+        instanceId,
+        key: 'api-key',
+        value: null,
+        secret: true,
+      });
+    });
+
+    it('deletes one entry and refreshes the actual-entry list', async () => {
+      useInputStore.setState({ activeInstanceId: instanceId });
+      mockedInvoke.mockResolvedValueOnce(undefined);
+      mockedInvoke.mockResolvedValueOnce([]);
+      await useInputStore.getState().deleteEntry(instanceId, 'name');
+      expect(mockedInvoke).toHaveBeenCalledWith('delete_input_entry', {
+        instanceId,
+        key: 'name',
+      });
     });
   });
 
@@ -167,26 +224,6 @@ describe('inputStore', () => {
       ).rejects.toBe('save failed');
 
       expect(useInputStore.getState().error).toBe('save failed');
-    });
-  });
-
-  describe('saveInput', () => {
-    it('atomically saves a Prompt definition and value before refreshing projections', async () => {
-      const input: InputDefinition = { type: 'PromptString', id: 'token', password: true };
-      mockedInvoke
-        .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce([input])
-        .mockResolvedValueOnce({ token: { configured: true } })
-        .mockResolvedValueOnce([]);
-
-      await useInputStore.getState().saveInput(instanceId, input, 'secret', false);
-
-      expect(mockedInvoke).toHaveBeenCalledWith('save_input', {
-        instanceId,
-        input,
-        value: 'secret',
-        keepExistingValue: false,
-      });
     });
   });
 

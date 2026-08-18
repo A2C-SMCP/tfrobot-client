@@ -39,6 +39,8 @@ use tfrobot_client_lib::services::computer_runtime_events::{
     ComputerRuntimeStatusEvent,
 };
 use tfrobot_client_lib::services::config::ConfigService;
+use tfrobot_client_lib::services::input_value_index::{self, InputValueStorageKind};
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::SettingsService;
@@ -1181,9 +1183,17 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
         sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, missing_input_server)
             .await
             .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&config_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "picture",
+            "name": "picture"
+        })
+    );
     assert!(matches!(
         config_error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "openrouterkey"
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "openrouterkey"
     ));
     sdk_config::upsert_computer_mcp_config_core(
         &state,
@@ -1218,12 +1228,20 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
     let start_error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
         .await
         .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&start_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "picture",
+            "name": "picture"
+        })
+    );
     assert!(matches!(
         start_error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "openrouterkey"
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "openrouterkey"
     ));
 
-    inputs::save_input_core(
+    inputs::add_or_update_input_core(
         &state,
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
@@ -1233,21 +1251,19 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
             default: None,
             password: Some(true),
         },
-        Some("test-secret".to_string()),
-        false,
     )
     .await
     .unwrap();
-
-    let second_start_error =
+    let second_definition_error =
         mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
             .await
             .unwrap_err();
     assert!(matches!(
-        second_start_error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "zhipukey"
+        second_definition_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "zhipukey"
     ));
-    inputs::save_input_core(
+    inputs::add_or_update_input_core(
         &state,
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
@@ -1257,8 +1273,46 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
             default: None,
             password: Some(true),
         },
+    )
+    .await
+    .unwrap();
+    let missing_openrouter_entry =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &missing_openrouter_entry,
+            RuntimeActionError::MissingSecret { input_id, .. } if input_id == "openrouterkey"
+        ),
+        "unexpected error after defining both inputs: {missing_openrouter_entry:?}"
+    );
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "openrouterkey",
+        Some("test-secret".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+    let missing_zhipu_entry =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &missing_zhipu_entry,
+            RuntimeActionError::MissingSecret { input_id, .. } if input_id == "zhipukey"
+        ),
+        "unexpected error after defining zhipukey: {missing_zhipu_entry:?}"
+    );
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "zhipukey",
         Some("second-test-secret".to_string()),
-        false,
+        true,
     )
     .await
     .unwrap();
@@ -1639,6 +1693,44 @@ async fn client_mcp_draft_preserves_user_provenance_and_cross_scope_input_refere
 }
 
 #[tokio::test]
+async fn client_mcp_draft_missing_definition_reports_the_exact_requester() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "profile-editor",
+        "bundle_id": "profile-editor-bundle",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"NAME": "${input:missing-name}"}
+        }
+    }))
+    .unwrap();
+
+    let error = sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        server,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingInputDefinition {
+            input_id,
+            requesting_mcp: Some(requester),
+            ..
+        } if input_id == "missing-name"
+            && requester.bundle_id == "profile-editor-bundle"
+            && requester.name == "profile-editor"
+    ));
+}
+
+#[tokio::test]
 async fn client_mcp_draft_rejects_project_definition_shadowed_by_local_scope() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1730,21 +1822,23 @@ async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
         .await
         .unwrap();
 
-    let first_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+    let definition_error = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
         .await
-        .unwrap();
-    assert_eq!(first_batch.candidate_count, 2);
-    assert_eq!(first_batch.actual_operation_count, 0);
-    assert_eq!(first_batch.unchanged_count, 1);
+        .unwrap_err();
     assert!(matches!(
-        first_batch.failures.as_slice(),
-        [mcp::McpBatchFailure {
-            error: RuntimeActionError::MissingInput { input_id, .. },
-            ..
-        }] if input_id == "batch-openrouterkey"
+        &definition_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "batch-openrouterkey"
     ));
+    assert_eq!(
+        serde_json::to_value(&definition_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "batch-picture",
+            "name": "batch-picture"
+        })
+    );
 
-    inputs::save_input_core(
+    inputs::add_or_update_input_core(
         &state,
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
@@ -1754,8 +1848,28 @@ async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
             default: None,
             password: Some(true),
         },
+    )
+    .await
+    .unwrap();
+    let missing_entry_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(missing_entry_batch.candidate_count, 2);
+    assert_eq!(missing_entry_batch.actual_operation_count, 0);
+    assert_eq!(missing_entry_batch.unchanged_count, 1);
+    assert!(matches!(
+        missing_entry_batch.failures.as_slice(),
+        [mcp::McpBatchFailure {
+            error: RuntimeActionError::MissingSecret { input_id, .. },
+            ..
+        }] if input_id == "batch-openrouterkey"
+    ));
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "batch-openrouterkey",
         Some("batch-test-secret".to_string()),
-        false,
+        true,
     )
     .await
     .unwrap();
@@ -5912,6 +6026,91 @@ async fn test_mcp_runtime_materializes_literal_and_input_sources_on_each_actual_
 }
 
 #[tokio::test]
+async fn test_mcp_runtime_migrates_legacy_secret_before_any_management_read() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "region".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_secret(
+        state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
+        "region",
+        "cn",
+    )
+    .unwrap();
+    input_value_index::record(
+        state.config.as_ref(),
+        TEST_INSTANCE_ID,
+        "region",
+        InputValueStorageKind::Secret,
+    )
+    .unwrap();
+    let legacy_plain_values =
+        InputValueStore::for_computer(state.config.as_ref(), TEST_INSTANCE_ID);
+    legacy_plain_values
+        .set("region", &serde_json::json!("stale-plain"))
+        .unwrap();
+    let entry_metadata = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("input_entries.json");
+    assert!(!entry_metadata.exists());
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "entry-storage-authority",
+        "bundle_id": "entry-storage-authority",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [env_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bundle = bundle_id("entry-storage-authority");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+
+    let response = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "entry-storage-authority__read_env",
+        serde_json::json!({}),
+        Some(10.0),
+    )
+    .await
+    .unwrap();
+    let result = serde_json::to_value(response.result.unwrap()).unwrap();
+    let env: serde_json::Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(env["REGION"], "cn");
+    assert!(entry_metadata.exists());
+    assert_eq!(legacy_plain_values.get("region").unwrap(), None);
+    let entries = inputs::list_input_entries_core(&state, TEST_INSTANCE_ID).unwrap();
+    assert!(entries[0].secret);
+    assert_eq!(entries[0].value, None);
+}
+
+#[tokio::test]
 async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -5935,7 +6134,7 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
 
     assert!(matches!(
         error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "OPENAI_KEY"
+        RuntimeActionError::MissingInputDefinition { input_id, .. } if input_id == "OPENAI_KEY"
     ));
     let persisted = state
         .sdk_config
@@ -6133,13 +6332,90 @@ async fn test_mcp_start_preserves_structured_invalid_pick_selection_and_stored_v
             ref input_id,
             ref value,
             ..
-        } if input_id == "region" && value == "eu"
+        } if input_id == "region" && value.as_deref() == Some("eu")
     ));
     let view = inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "region")
         .unwrap()
         .unwrap();
     assert_eq!(view.status, inputs::InputValueStatus::InvalidSelection);
     assert_eq!(view.value, Some(serde_json::json!("eu")));
+}
+
+#[tokio::test]
+async fn test_secret_pick_invalid_selection_never_leaves_keychain_plaintext() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PickString {
+            id: "region".to_string(),
+            label: None,
+            description: Some("Region".to_string()),
+            default: None,
+            options: vec![inputs::PickOption {
+                label: "China".to_string(),
+                value: "cn".to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region",
+        Some("private-retired-region".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "invalid-secret-pick",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("invalid-secret-pick"))
+            .await
+            .unwrap_err();
+    let error_json = serde_json::to_string(&error).unwrap();
+    assert!(matches!(
+        error,
+        RuntimeActionError::InvalidSelection {
+            ref input_id,
+            value: None,
+            ..
+        } if input_id == "region"
+    ));
+    assert!(!error_json.contains("private-retired-region"));
+    assert!(!error_json.contains("redacted secret selection"));
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let diagnostics = serde_json::to_string(&runtime.runtime_snapshot().await).unwrap();
+    assert!(!diagnostics.contains("private-retired-region"));
+    assert!(!serde_json::to_string(
+        &inputs::list_input_entries_core(&state, TEST_INSTANCE_ID).unwrap()
+    )
+    .unwrap()
+    .contains("private-retired-region"));
 }
 
 #[tokio::test]
