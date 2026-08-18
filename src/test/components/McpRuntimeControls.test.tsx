@@ -166,21 +166,17 @@ describe('McpRuntimeControls', () => {
     render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
     fireEvent.click(screen.getByTitle('Start'));
 
-    expect(await screen.findByText(
-      "Required value input 'openrouterkey' is unresolved",
-    )).toBeInTheDocument();
+    expect(await screen.findByText('Input required to start')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Key' })).toHaveValue('openrouterkey');
     fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
       target: { value: 'test-openrouter-key' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(2));
-    expect(screen.queryByText(
-      "Required value input 'openrouterkey' is unresolved",
-    )).not.toBeInTheDocument();
-    expect(await screen.findByText(
-      "Required value input 'zhipukey' is unresolved",
-    )).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('textbox', { name: 'Key' })).toHaveValue('zhipukey');
+    });
 
     fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
       target: { value: 'test-zhipu-key' },
@@ -200,9 +196,7 @@ describe('McpRuntimeControls', () => {
       value: 'test-zhipu-key',
       secret: false,
     });
-    expect(screen.queryByText(
-      "Required value input 'zhipukey' is unresolved",
-    )).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Key' })).not.toBeInTheDocument();
 
     await act(async () => {
       startup.resolve();

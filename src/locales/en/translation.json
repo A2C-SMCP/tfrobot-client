@@ -178,7 +178,7 @@
         },
         "inputs": {
           "title": "Inputs",
-          "description": "Manage resolved values for this Computer's MCP Input definitions; Secrets are stored in the system Keychain."
+          "description": "Manage resolved values for this Computer's MCP Input definitions; secret values are stored securely and hidden in the interface."
         },
         "connection": {
           "title": "Connection Policy",
@@ -730,8 +730,8 @@
     "deleteValue": "Delete Value",
     "deleteValueFor": "Delete the saved value for {{id}}",
     "confirmDeleteValue": "Delete the saved value for {{id}}?",
-    "secretMode": "Secret (System Keychain)",
-    "nonSecretMode": "Non-secret",
+    "secretMode": "Secret",
+    "nonSecretMode": "Regular value",
     "selectValue": "Select a value",
     "enterValue": "Enter value",
     "clearValues": "Clear All Values",
@@ -750,8 +750,10 @@
       "key": "Key",
       "keyPlaceholder": "Enter the key used by ${input:key}",
       "value": "Value",
-      "storeAsSecret": "Store securely in the system Keychain",
+      "storeAsSecret": "Save as secret",
+      "secretHelp": "Secret values are stored securely and hidden in the interface.",
       "secretUnchanged": "Leave blank to keep the current secret",
+      "saveFailed": "The input could not be saved. Please try again.",
       "editFor": "Edit input {{key}}",
       "deleteFor": "Delete input {{key}}",
       "confirmDelete": "Delete input {{key}} and its saved value?"
@@ -769,12 +771,13 @@
     "runtime": {
       "missingInput": "Input required to start",
       "missingSecret": "Secret required to start",
+      "description": "Complete this input to continue starting the MCP.",
       "envHint": "You can save it here or provide it through {{env}}.",
       "definitionMissing": "Input {{id}} is not configured yet. Saving will create it for this Computer.",
       "createAsSecret": "Store this Input as a Secret",
       "entryMissing": "No saved InputEntry exists for {{id}}. Saving will create it for this Computer.",
       "definitionUnavailable": "The runtime definition for Input {{id}} is unavailable. Edit the MCP configuration or retry the MCP action.",
-      "storeAsSecret": "Store this InputEntry in the system Keychain",
+      "storeAsSecret": "Save as secret",
       "requestedBy": "Requested by MCP {{name}} ({{id}})",
       "loadFailed": "The Input could not be loaded. Retry or view logs for details.",
       "submitFailed": "The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs."

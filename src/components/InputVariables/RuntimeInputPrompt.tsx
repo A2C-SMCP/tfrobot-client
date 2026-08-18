@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Modal, Spin, Switch, Typography } from 'antd';
+import { Alert, Modal, Spin, Typography } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useInputStore, type InputDefinition, type InputEntry } from '@/stores/inputStore';
 import type { MissingRuntimeInputError } from '@/utils/runtimeActionError';
-import { InputValueEditor } from './InputValueEditor';
+import { InputEntryEditor } from './InputEntryEditor';
 
 interface RuntimeInputPromptProps {
   instanceId: string;
@@ -27,7 +27,6 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
   const [context, setContext] = useState<LoadedContext>();
   const [loadError, setLoadError] = useState(false);
   const [submitError, setSubmitError] = useState(false);
-  const [storeAsSecret, setStoreAsSecret] = useState(error.code === 'missing_secret');
   const submittingRef = useRef(false);
 
   useEffect(() => {
@@ -42,7 +41,6 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
       .then(([definition, entry]) => {
         if (!active) return;
         setContext({ key: promptKey, definition, entry });
-        setStoreAsSecret(entry?.secret ?? error.code === 'missing_secret');
       })
       .catch(() => {
         if (active) setLoadError(true);
@@ -54,13 +52,19 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
 
   const loaded = context?.key === promptKey ? context : undefined;
   const definition = loaded?.definition;
+  const editorEntry = loaded?.entry
+    ? {
+      ...loaded.entry,
+      value: error.code === 'invalid_selection' ? undefined : loaded.entry.value,
+    }
+    : undefined;
 
-  const handleSubmit = async (value: string) => {
+  const handleSubmit = async (key: string, value: string | undefined, secret: boolean) => {
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitError(false);
     try {
-      await upsertEntry(instanceId, error.input_id, value, storeAsSecret);
+      await upsertEntry(instanceId, key, value, secret);
       await onSubmitted();
     } catch {
       setSubmitError(true);
@@ -83,7 +87,9 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
       destroyOnHidden
       width={440}
     >
-      <Typography.Paragraph>{error.message}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">
+        {t('inputs.runtime.description')}
+      </Typography.Paragraph>
       {error.requesting_mcp && (
         <Alert
           type="info"
@@ -94,11 +100,6 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
           })}
           style={{ marginBottom: 16 }}
         />
-      )}
-      {error.env_hint && (
-        <Typography.Paragraph type="secondary">
-          {t('inputs.runtime.envHint', { env: error.env_hint })}
-        </Typography.Paragraph>
       )}
       {loadError && <Alert type="error" showIcon message={t('inputs.runtime.loadFailed')} />}
       {submitError && <Alert type="error" showIcon message={t('inputs.runtime.submitFailed')} />}
@@ -111,26 +112,14 @@ export function RuntimeInputPrompt({ instanceId, error, onCancel, onSubmitted }:
           style={{ marginBottom: 16 }}
         />
       )}
-      {loaded?.definition && !loaded.entry && (
-        <Alert
-          type="info"
-          showIcon
-          message={t('inputs.runtime.entryMissing', { id: error.input_id })}
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {loaded && (
-        <Typography.Paragraph>
-          <Switch checked={storeAsSecret} onChange={setStoreAsSecret} style={{ marginRight: 8 }} />
-          {t('inputs.runtime.storeAsSecret')}
-        </Typography.Paragraph>
-      )}
       {definition && (
-        <InputValueEditor
+        <InputEntryEditor
           key={promptKey}
-          inputId={error.input_id}
-          inputs={[definition]}
-          currentValue={error.code === 'invalid_selection' ? undefined : loaded?.entry?.value}
+          entry={editorEntry}
+          fixedKey={error.input_id}
+          definition={definition}
+          initialSecret={error.code === 'missing_secret'}
+          requireValue={Boolean(editorEntry && editorEntry.value === undefined)}
           onSubmit={handleSubmit}
           onCancel={onCancel}
         />

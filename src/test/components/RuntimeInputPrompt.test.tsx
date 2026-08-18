@@ -47,11 +47,74 @@ describe('RuntimeInputPrompt', () => {
       />,
     );
 
+    expect(await screen.findByRole('textbox', { name: 'Key' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Key' })).toHaveValue('api-key');
+    expect(screen.getByRole('switch', { name: 'Save as secret' })).toBeChecked();
+    expect(screen.queryByText(/Keychain/i)).not.toBeInTheDocument();
     const input = await screen.findByPlaceholderText('Enter value');
     fireEvent.change(input, { target: { value: 'top-secret' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
       expect(upsertEntry).toHaveBeenCalledWith('computer-a', 'api-key', 'top-secret', true);
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('allows an empty PromptString when creating an Entry for the first time', async () => {
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_input',
+          input_id: 'optional-prefix',
+          env_hint: 'A2C_SMCP_optional_prefix',
+          message: 'Required value input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    const save = await screen.findByRole('button', { name: 'Save' });
+    expect(save).not.toBeDisabled();
+    fireEvent.click(save);
+
+    await waitFor(() => {
+      expect(upsertEntry).toHaveBeenCalledWith('computer-a', 'optional-prefix', '', false);
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('requires an explicit replacement when Entry metadata exists but its value is missing', async () => {
+    getEntry.mockResolvedValue({ key: 'api-key', secret: true });
+    const onSubmitted = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RuntimeInputPrompt
+        instanceId="computer-a"
+        error={{
+          code: 'missing_secret',
+          input_id: 'api-key',
+          env_hint: 'A2C_SMCP_api_key',
+          message: 'Required secret input is unresolved',
+        }}
+        onCancel={vi.fn()}
+        onSubmitted={onSubmitted}
+      />,
+    );
+
+    const save = await screen.findByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(upsertEntry).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByPlaceholderText('Leave blank to keep the current secret'), {
+      target: { value: 'replacement' },
+    });
+    expect(save).not.toBeDisabled();
+    fireEvent.click(save);
+
+    await waitFor(() => {
+      expect(upsertEntry).toHaveBeenCalledWith('computer-a', 'api-key', 'replacement', true);
       expect(onSubmitted).toHaveBeenCalledTimes(1);
     });
   });
@@ -178,7 +241,12 @@ describe('RuntimeInputPrompt', () => {
       />,
     );
     expect(await screen.findByText(/Profile Tools.*profile-tools/)).toBeInTheDocument();
-    expect(screen.getAllByText(/name/).length).toBeGreaterThan(0);
+    const key = screen.getByRole('textbox', { name: 'Key' });
+    expect(key).toHaveValue('name');
+    expect(key).toBeDisabled();
+    expect(screen.getByText('Value')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Save as secret' })).toBeInTheDocument();
+    expect(screen.queryByText("Required value input 'name' is unresolved")).not.toBeInTheDocument();
   });
 
   it('does not expose storage errors or secret values', async () => {

@@ -70,6 +70,8 @@ describe('InputVariables', () => {
   it('creates an arbitrary pre-provisioned entry', async () => {
     render(<InputVariables instanceId="computer-a" />);
     fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    expect(screen.getByRole('switch', { name: 'Save as secret' })).not.toBeChecked();
+    expect(screen.queryByText(/Keychain/i)).not.toBeInTheDocument();
     const inputs = screen.getAllByRole('textbox');
     fireEvent.change(inputs[0], { target: { value: 'name' } });
     fireEvent.change(inputs[1], { target: { value: 'zhangsan' } });
@@ -83,6 +85,36 @@ describe('InputVariables', () => {
         false,
       );
     });
+  });
+
+  it('lets a user mark a new InputEntry as secret without exposing storage details', async () => {
+    render(<InputVariables instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Key' }), { target: { value: 'api-key' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Value' }), { target: { value: 'top-secret' } });
+    fireEvent.click(screen.getByRole('switch', { name: 'Save as secret' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockStore.upsertEntry).toHaveBeenCalledWith(
+        'computer-a',
+        'api-key',
+        'top-secret',
+        true,
+      );
+    });
+  });
+
+  it('does not expose storage implementation errors when saving an entry fails', async () => {
+    mockStore.upsertEntry.mockRejectedValueOnce(new Error('keychain /secret/path failed token=private'));
+    render(<InputVariables instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Key' }), { target: { value: 'api-key' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Value' }), { target: { value: 'top-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('The input could not be saved. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/keychain|secret\/path|token=private/i)).not.toBeInTheDocument();
   });
 
   it('edits a secret without reading or resubmitting its plaintext', async () => {

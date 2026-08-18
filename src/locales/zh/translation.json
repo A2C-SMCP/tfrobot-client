@@ -178,7 +178,7 @@
         },
         "inputs": {
           "title": "输入项",
-          "description": "为当前 Computer 的 MCP Input 定义管理实际值；Secret 安全保存到系统 Keychain。"
+          "description": "为当前 Computer 的 MCP Input 定义管理实际值；密钥内容会被安全保存并在界面中隐藏。"
         },
         "connection": {
           "title": "连接策略",
@@ -730,8 +730,8 @@
     "deleteValue": "删除值",
     "deleteValueFor": "删除 {{id}} 的已保存值",
     "confirmDeleteValue": "确定要删除 {{id}} 的已保存值吗？",
-    "secretMode": "Secret（系统 Keychain）",
-    "nonSecretMode": "非 Secret",
+    "secretMode": "密钥",
+    "nonSecretMode": "普通值",
     "selectValue": "请选择一个值",
     "enterValue": "请输入值",
     "clearValues": "清空所有值",
@@ -750,8 +750,10 @@
       "key": "Key",
       "keyPlaceholder": "请输入 ${input:key} 使用的 key",
       "value": "值",
-      "storeAsSecret": "安全保存到系统 Keychain",
-      "secretUnchanged": "留空将保留当前 Secret",
+      "storeAsSecret": "设为密钥",
+      "secretHelp": "密钥内容会被安全保存，并在界面中隐藏。",
+      "secretUnchanged": "留空将保留当前密钥",
+      "saveFailed": "无法保存输入项，请重试。",
       "editFor": "编辑输入项 {{key}}",
       "deleteFor": "删除输入项 {{key}}",
       "confirmDelete": "确定要删除输入项 {{key}} 及其已保存值吗？"
@@ -769,13 +771,14 @@
     "runtime": {
       "missingInput": "启动需要补充变量",
       "missingSecret": "启动需要补充密钥",
+      "description": "请填写此输入项，保存后将继续启动 MCP。",
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
       "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
       "createAsSecret": "将此 Input 作为 Secret 保存",
       "entryMissing": "尚未保存 {{id}} 对应的输入项，保存后会为当前 Computer 新增。",
       "definitionUnavailable": "无法获取 Input {{id}} 的运行时定义。请编辑 MCP 配置或重试 MCP 操作。",
-      "storeAsSecret": "将此输入项保存到系统 Keychain",
-      "requestedBy": "由 MCP {{name}}（{{id}}）请求",
+      "storeAsSecret": "设为密钥",
+      "requestedBy": "由 MCP {{name}}（{{id}}）请求此输入项",
       "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
       "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
     },
