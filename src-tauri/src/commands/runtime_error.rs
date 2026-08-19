@@ -3,7 +3,7 @@ use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
 use serde::Serialize;
 
-use crate::services::input_resolver::REDACTED_SECRET_SELECTION;
+use crate::services::input_resolver::{REDACTED_SECRET_SELECTION, RUNTIME_INPUT_CANCELLED};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestingMcp {
@@ -40,6 +40,8 @@ pub enum RuntimeActionError {
     },
     #[error("{message}")]
     ResolverFailed { input_id: String, message: String },
+    #[error("{message}")]
+    RuntimeInputCancelled { input_id: String, message: String },
     #[error("{message}")]
     InvalidSelection {
         input_id: String,
@@ -86,6 +88,7 @@ impl RuntimeActionError {
             | Self::MissingInput { message, .. }
             | Self::MissingSecret { message, .. }
             | Self::ResolverFailed { message, .. }
+            | Self::RuntimeInputCancelled { message, .. }
             | Self::InvalidSelection { message, .. }
             | Self::RuntimeError { message } => {
                 *message = format!("{message}; {suffix}");
@@ -151,6 +154,12 @@ impl From<ComputerError> for RuntimeActionError {
                 },
             },
             ComputerError::InputResolution(InputResolutionError::ResolverFailed { id, reason }) => {
+                if reason == RUNTIME_INPUT_CANCELLED {
+                    return Self::RuntimeInputCancelled {
+                        input_id: id,
+                        message: reason,
+                    };
+                }
                 Self::ResolverFailed {
                     input_id: id,
                     message: reason,
@@ -226,6 +235,25 @@ mod tests {
                 "code": "resolver_failed",
                 "input_id": "region",
                 "message": "secret store unavailable"
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_runtime_input_cancellation_as_a_distinct_error() {
+        let error = RuntimeActionError::from(ComputerError::InputResolution(
+            InputResolutionError::ResolverFailed {
+                id: "region".to_string(),
+                reason: RUNTIME_INPUT_CANCELLED.to_string(),
+            },
+        ));
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "runtime_input_cancelled",
+                "input_id": "region",
+                "message": RUNTIME_INPUT_CANCELLED
             })
         );
     }

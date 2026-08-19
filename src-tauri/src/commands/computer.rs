@@ -1,5 +1,5 @@
 use crate::commands::connection::{
-    connect_connection_target_for_policy_core, connect_manager_robot_target_for_policy,
+    connect_connection_target_for_policy_inner, connect_manager_robot_target_for_policy,
     disconnect_smcp_core,
 };
 use crate::commands::runtime_error::RuntimeActionError;
@@ -12,6 +12,7 @@ use crate::services::computer::{
 };
 use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
 use crate::services::input_entry_store::{InputEntryStorageKind, InputEntryStore};
+use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::input_value_index;
 use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
@@ -109,7 +110,10 @@ pub async fn list_computer_instances(
 pub async fn list_computer_instances_core(
     state: &AppState,
 ) -> Result<Vec<ComputerInstanceStatus>, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    // Listing may reconcile persisted profiles into runtime membership. Serialize that write with
+    // create/duplicate publication and Manager Context cleanup so an uncommitted profile can
+    // never escape a failed creation transaction as an orphan runtime.
+    let _membership_guard = state.computer_registry.membership_lease().await;
     let config = state
         .load_hydrated_computer_instances()
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
@@ -120,16 +124,36 @@ pub async fn list_computer_instances_core(
         .collect::<HashSet<_>>();
     for runtime in state.computer_registry.list_runtimes().await {
         if !discovered_ids.contains(&runtime.instance.id) {
-            state
+            let _operation_guard = state
                 .computer_registry
-                .remove_runtime(&runtime.instance.id)
-                .await
-                .map_err(RuntimeActionError::runtime)?;
+                .operation_lease(&runtime.instance.id)
+                .await;
+            if state
+                .config
+                .get_computer_instance(&runtime.instance.id)
+                .is_err()
+            {
+                state
+                    .computer_registry
+                    .remove_runtime(&runtime.instance.id)
+                    .await
+                    .map_err(RuntimeActionError::runtime)?;
+            }
         }
     }
     let mut statuses = Vec::with_capacity(config.instances.len());
 
-    for instance in config.instances {
+    for discovered in config.instances {
+        let _operation_guard = state
+            .computer_registry
+            .operation_lease(&discovered.id)
+            .await;
+        let Ok(instance) = state.config.get_computer_instance(&discovered.id) else {
+            continue;
+        };
+        let instance = state
+            .hydrate_computer_instance(instance)
+            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
         // Listing is observational and must not trigger SDK governance reconciliation. A
         // lifecycle command or the instance-scoped status command performs typed synchronization,
         // where a missing input can be associated with the exact Computer and retried safely.
@@ -159,6 +183,7 @@ pub async fn get_computer_instance_status_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(&id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let config = state
         .load_hydrated_computer_instances()
@@ -189,6 +214,7 @@ pub async fn create_computer_instance_core(
     state: &AppState,
     request: CreateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _membership_guard = state.computer_registry.membership_lease().await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let instance = ComputerInstance {
@@ -242,6 +268,7 @@ pub async fn rename_computer_instance_core(
     state: &AppState,
     request: RenameComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let previous = state
@@ -272,6 +299,14 @@ pub async fn duplicate_computer_instance_core(
     state: &AppState,
     request: DuplicateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    // A duplicate can inherit an active Manager binding. Publish it in the same membership
+    // transaction used by Manager Context cleanup so a departing Context cannot miss a runtime
+    // created after its snapshot. Membership must precede the per-Computer operation gate.
+    let _membership_guard = state.computer_registry.membership_lease().await;
+    let _operation_guard = state
+        .computer_registry
+        .operation_lease(&request.source_id)
+        .await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let mut instance = state
@@ -363,6 +398,7 @@ pub async fn delete_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(&id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_storage_root = state.config.computer_instance_storage_root(&id);
     let persisted_instance = state
@@ -579,7 +615,16 @@ pub async fn start_computer_instance(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    start_computer_instance_core(Some(&app), &state, id).await
+    start_computer_instance_interactive_core(Some(&app), &state, id).await
+}
+
+pub async fn start_computer_instance_interactive_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    start_computer_instance_core_with_mode(app, state, id, RuntimeInputInteractionMode::Interactive)
+        .await
 }
 
 pub async fn start_computer_instance_core(
@@ -587,7 +632,22 @@ pub async fn start_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    start_computer_instance_core_with_mode(
+        app,
+        state,
+        id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn start_computer_instance_core_with_mode(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -608,8 +668,27 @@ pub async fn start_computer_instance_core(
         .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
-    runtime.start().await.map_err(RuntimeActionError::from)?;
-    drop(lifecycle_guard);
+    let runtime_lifecycle = runtime.lifecycle_lease().await;
+    // The operation lease serializes this Computer without occupying the cross-Computer
+    // coordinator while Runtime Input may wait on the user indefinitely.
+    let start_result = match interaction_mode {
+        RuntimeInputInteractionMode::Interactive => {
+            runtime
+                .with_runtime_input_interaction(
+                    interaction_mode,
+                    runtime_lifecycle.start_interactive(),
+                )
+                .await
+        }
+        RuntimeInputInteractionMode::NonInteractive => {
+            runtime
+                .with_runtime_input_interaction(interaction_mode, runtime_lifecycle.start())
+                .await
+        }
+    };
+    start_result.map_err(RuntimeActionError::from)?;
+    drop(runtime_lifecycle);
+    drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             if let Err(error) =
@@ -651,7 +730,7 @@ pub async fn stop_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -676,7 +755,21 @@ pub async fn restart_computer_instance(
     state: State<'_, AppState>,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    restart_computer_instance_core(Some(&app), &state, id).await
+    restart_computer_instance_interactive_core(Some(&app), &state, id).await
+}
+
+pub async fn restart_computer_instance_interactive_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    restart_computer_instance_core_with_mode(
+        app,
+        state,
+        id,
+        RuntimeInputInteractionMode::Interactive,
+    )
+    .await
 }
 
 pub async fn restart_computer_instance_core(
@@ -684,7 +777,22 @@ pub async fn restart_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    restart_computer_instance_core_with_mode(
+        app,
+        state,
+        id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn restart_computer_instance_core_with_mode(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -705,8 +813,27 @@ pub async fn restart_computer_instance_core(
         .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
-    runtime.restart().await.map_err(RuntimeActionError::from)?;
-    drop(lifecycle_guard);
+    let runtime_lifecycle = runtime.lifecycle_lease().await;
+    // See the start path above: foreground confirmation holds only this Computer's operation and
+    // runtime lifecycle leases.
+    let restart_result = match interaction_mode {
+        RuntimeInputInteractionMode::Interactive => {
+            runtime
+                .with_runtime_input_interaction(
+                    interaction_mode,
+                    runtime_lifecycle.restart_interactive(),
+                )
+                .await
+        }
+        RuntimeInputInteractionMode::NonInteractive => {
+            runtime
+                .with_runtime_input_interaction(interaction_mode, runtime_lifecycle.restart())
+                .await
+        }
+    };
+    restart_result.map_err(RuntimeActionError::from)?;
+    drop(runtime_lifecycle);
+    drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             connect_computer_connection_target_by_policy(app, state, &id, target)
@@ -763,6 +890,7 @@ async fn persist_computer_connection_policy(
     state: &AppState,
     request: UpdateComputerConnectionPolicyRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     validate_connection_target_reference(state, request.target.as_ref())?;
     let previous = state
@@ -831,6 +959,7 @@ pub async fn update_computer_skill_home_core(
     state: &AppState,
     request: UpdateComputerSkillHomeRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let previous = state
         .config
@@ -892,7 +1021,7 @@ async fn connect_computer_connection_target_by_policy(
 ) -> Result<(), String> {
     match target {
         ComputerConnectionTarget::ManualSmcp { .. } => {
-            connect_connection_target_for_policy_core(state, id, target).await
+            connect_connection_target_for_policy_inner(state, id, target).await
         }
         ComputerConnectionTarget::ManagerRobot {
             context_key,
@@ -1326,6 +1455,45 @@ mod tests {
         let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
+    }
+
+    #[tokio::test]
+    async fn list_cannot_publish_an_uncommitted_creation_profile() {
+        let (state, _dir) = test_state();
+        let state = Arc::new(state);
+        let creation_membership = state.computer_registry.membership_lease().await;
+        state
+            .config
+            .add_computer_instance(ComputerInstance::new(
+                "computer-pending",
+                "Computer Pending",
+            ))
+            .unwrap();
+
+        let list_state = state.clone();
+        let list = tokio::spawn(async move { list_computer_instances_core(&list_state).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !list.is_finished(),
+            "list must not observe a profile before its membership transaction commits"
+        );
+
+        // Model create/duplicate rollback after its profile write but before runtime publication.
+        state
+            .config
+            .remove_computer_instance("computer-pending")
+            .unwrap();
+        drop(creation_membership);
+
+        let statuses = list.await.unwrap().unwrap();
+        assert!(statuses
+            .iter()
+            .all(|status| status.id != "computer-pending"));
+        assert!(state
+            .computer_registry
+            .runtime("computer-pending")
+            .await
+            .is_none());
     }
 
     #[tokio::test]

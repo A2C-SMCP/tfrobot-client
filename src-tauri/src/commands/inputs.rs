@@ -350,6 +350,7 @@ pub async fn upsert_input_entry_core(
     secret: bool,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
@@ -375,6 +376,7 @@ pub async fn delete_input_entry_core(
     key: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
@@ -527,6 +529,7 @@ pub async fn add_or_update_input_core(
         .next()
         .expect("one input definition was prepared");
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let id = input.id().to_string();
@@ -593,6 +596,7 @@ pub async fn remove_input_core(
     id: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Removing input for instance {}: {}", instance_id, id);
@@ -735,6 +739,7 @@ pub async fn set_input_value_core(
     value: serde_json::Value,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Setting input value: {}", id);
@@ -788,6 +793,7 @@ pub async fn set_runtime_input_value_core(
     value: serde_json::Value,
 ) -> Result<bool, String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
@@ -832,6 +838,7 @@ pub async fn remove_input_value_core(
     id: &str,
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
@@ -849,6 +856,7 @@ pub async fn clear_input_values(
 
 pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
@@ -918,6 +926,7 @@ pub async fn import_inputs_core(
     path: &str,
 ) -> Result<usize, String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;

@@ -1,6 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { invoke } from '@tauri-apps/api/core';
 import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 import type { McpServerStatus } from '@/stores/mcpStore';
 
@@ -25,7 +24,6 @@ const mockStore = {
   startAll: vi.fn(),
   stopAll: vi.fn(),
 };
-const mockedInvoke = vi.mocked(invoke);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -44,7 +42,6 @@ vi.mock('@/stores/mcpStore', () => ({
 describe('McpRuntimeControls', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedInvoke.mockReset();
     mockStore.servers = [userServer];
   });
 
@@ -132,70 +129,14 @@ describe('McpRuntimeControls', () => {
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   });
 
-  it('advances through missing inputs and closes the prompt while MCP startup continues', async () => {
+  it('keeps one MCP start pending while the global runtime input bridge owns prompting', async () => {
     const startup = deferred<void>();
-    mockStore.startServer
-      .mockRejectedValueOnce({
-        code: 'missing_input',
-        input_id: 'openrouterkey',
-        env_hint: 'A2C_SMCP_openrouterkey',
-        message: "Required value input 'openrouterkey' is unresolved",
-      })
-      .mockRejectedValueOnce({
-        code: 'missing_input',
-        input_id: 'zhipukey',
-        env_hint: 'A2C_SMCP_zhipukey',
-        message: "Required value input 'zhipukey' is unresolved",
-      })
-      .mockReturnValueOnce(startup.promise);
-    mockedInvoke.mockImplementation(async (command, args) => {
-      if (command === 'get_runtime_input') {
-        const inputId = (args as { id: string }).id;
-        return {
-          type: 'PromptString',
-          id: inputId,
-          label: inputId,
-          password: false,
-        };
-      }
-      if (command === 'list_input_entries') return [];
-      if (command === 'upsert_input_entry') return undefined;
-      throw new Error(`Unexpected invoke command: ${command}`);
-    });
+    mockStore.startServer.mockReturnValueOnce(startup.promise);
 
     render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
     fireEvent.click(screen.getByTitle('Start'));
 
-    expect(await screen.findByText('Input required to start')).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Key' })).toHaveValue('openrouterkey');
-    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
-      target: { value: 'test-openrouter-key' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(2));
-    await waitFor(() => {
-      expect(screen.getByRole('textbox', { name: 'Key' })).toHaveValue('zhipukey');
-    });
-
-    fireEvent.change(await screen.findByPlaceholderText('Enter value'), {
-      target: { value: 'test-zhipu-key' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(3));
-    expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
-      instanceId: 'computer-a',
-      key: 'openrouterkey',
-      value: 'test-openrouter-key',
-      secret: false,
-    });
-    expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
-      instanceId: 'computer-a',
-      key: 'zhipukey',
-      value: 'test-zhipu-key',
-      secret: false,
-    });
+    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('textbox', { name: 'Key' })).not.toBeInTheDocument();
 
     await act(async () => {
@@ -203,6 +144,7 @@ describe('McpRuntimeControls', () => {
       await startup.promise;
     });
     expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
+    expect(mockStore.startServer).toHaveBeenCalledTimes(1);
   });
 
   it('shows Plugin-owned diagnostics without lifecycle buttons and opens the matching Plugin', () => {

@@ -19,18 +19,19 @@ use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::{
     computer::{
         duplicate_computer_instance_core, get_computer_instance_status_core,
-        restart_computer_instance_core, start_computer_instance_core, stop_computer_instance_core,
-        DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
+        restart_computer_instance_core, restart_computer_instance_interactive_core,
+        start_computer_instance_core, start_computer_instance_interactive_core,
+        stop_computer_instance_core, DuplicateComputerInstanceRequest, DuplicateSkillHomeMode,
     },
     config_io,
     dashboard::get_dashboard_data_core,
     inputs,
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
-        get_marketplace_capabilities_core, get_marketplace_governance_core, install_plugin_core,
-        refresh_marketplace_core, remove_marketplace_core, uninstall_plugin_core,
-        update_marketplace_core, AddMarketplaceRequest, PluginLifecycleRequest,
-        UpdateMarketplaceRequest,
+        enable_plugin_interactive_core, get_marketplace_capabilities_core,
+        get_marketplace_governance_core, install_plugin_core, refresh_marketplace_core,
+        remove_marketplace_core, uninstall_plugin_core, update_marketplace_core,
+        AddMarketplaceRequest, PluginLifecycleRequest, UpdateMarketplaceRequest,
     },
     runtime_error::RuntimeActionError,
     sdk_config, skills,
@@ -40,11 +41,27 @@ use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::oauth_credential_store::KeychainOAuthCredentialStore;
 use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::runtime_input_bridge::{
+    RuntimeInputCompletion, RuntimeInputRequest, RuntimeInputRequestSink,
+};
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
+use tokio::time::{timeout, Duration};
 
 const TEST_INSTANCE_ID: &str = "computer-a";
 const TEST_SECOND_INSTANCE_ID: &str = "computer-b";
+
+struct RecordingRuntimeInputSink {
+    sender: tokio::sync::mpsc::UnboundedSender<RuntimeInputRequest>,
+}
+
+impl RuntimeInputRequestSink for RecordingRuntimeInputSink {
+    fn emit(&self, request: &RuntimeInputRequest) -> Result<(), String> {
+        self.sender
+            .send(request.clone())
+            .map_err(|error| error.to_string())
+    }
+}
 
 fn file_url(path: &Path) -> String {
     url::Url::from_file_path(path)
@@ -652,7 +669,7 @@ async fn plugin_missing_input_does_not_block_computer_across_retry_and_cold_star
 }
 
 #[tokio::test]
-async fn running_plugin_with_multiple_mcps_reports_the_exact_input_requester() {
+async fn running_plugin_with_multiple_mcps_fails_closed_without_requester_context() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let repo = tmp.path().join("requesting-mcp-marketplace");
@@ -683,14 +700,249 @@ async fn running_plugin_with_multiple_mcps_reports_the_exact_input_requester() {
         .await
         .unwrap_err();
     let serialized = serde_json::to_value(&error).unwrap();
-    assert!(matches!(error, RuntimeActionError::MissingSecret { .. }));
+    assert!(matches!(
+        error,
+        RuntimeActionError::ResolverFailed { ref input_id, .. }
+            if input_id == "audit@acme/api_token"
+    ));
+    assert_eq!(serialized["code"], "resolver_failed");
     assert_eq!(
-        serialized["requesting_mcp"],
-        serde_json::json!({
-            "bundle_id": "audit-mcp",
-            "name": "audit-mcp"
-        })
+        serialized["message"],
+        "InputEntry is missing and user confirmation is required"
     );
+    assert!(serialized.get("requesting_mcp").is_none());
+}
+
+#[tokio::test]
+async fn foreground_plugin_enable_confirms_runtime_secret_and_continues_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("interactive-runtime-input-marketplace");
+    build_runtime_input_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let state = Arc::new(state);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("plugin-enable-test", true);
+    let enable_state = state.clone();
+    let enable = tokio::spawn(async move {
+        enable_plugin_interactive_core(enable_state.as_ref(), TEST_INSTANCE_ID, request).await
+    });
+    let prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground plugin enable must request its missing runtime input")
+        .unwrap();
+    assert_eq!(prompt.definition.id(), "audit@acme/api_token");
+    assert!(prompt.secret);
+
+    let completion = bridge.complete(
+        &prompt.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "plugin-runtime-secret".to_string(),
+        },
+    );
+    let (completion, enable) = tokio::join!(completion, enable);
+    completion.unwrap();
+    enable.unwrap().unwrap();
+
+    let entries = inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "audit@acme/api_token");
+    assert!(entries[0].secret);
+    assert_eq!(entries[0].value, None);
+}
+
+#[tokio::test]
+async fn foreground_plugin_enable_stops_after_first_input_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("fail-fast-runtime-input-marketplace");
+    build_two_runtime_input_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let state = Arc::new(state);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("plugin-fail-fast-test", true);
+    let enable_state = state.clone();
+    let enable = tokio::spawn(async move {
+        enable_plugin_interactive_core(enable_state.as_ref(), TEST_INSTANCE_ID, request).await
+    });
+    let first = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground plugin enable must request its first missing input")
+        .unwrap();
+
+    let completion = bridge.complete(&first.request_id, RuntimeInputCompletion::Cancelled);
+    let (completion, enable) = tokio::join!(completion, enable);
+    completion.unwrap();
+    assert!(matches!(
+        enable.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "foreground plugin enable must not request another input after cancellation"
+    );
+    let servers = mcp::get_mcp_servers_core(state.as_ref(), TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .filter(|server| server.name.ends_with("-fail-fast"))
+        .all(|server| !server.running));
+}
+
+#[tokio::test]
+async fn foreground_computer_start_and_restart_fail_fast_for_enabled_plugin_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp
+        .path()
+        .join("enabled-plugin-fail-fast-runtime-input-marketplace");
+    build_two_runtime_input_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            git_url: format!("file://{}", repo.display()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".to_string(),
+        plugin: "audit".to_string(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    drop(state);
+
+    // Recreate AppState so Computer start must restore the already-enabled plugin through SDK
+    // governance before the client-owned desired-server loop runs.
+    let state = Arc::new(create_test_app_state(tmp.path()));
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("computer-plugin-fail-fast-test", true);
+
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        start_computer_instance_interactive_core(
+            None,
+            start_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let first_start_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground Computer start must request the first enabled-plugin input")
+        .unwrap();
+    let completion = bridge.complete(
+        &first_start_prompt.request_id,
+        RuntimeInputCompletion::Cancelled,
+    );
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    assert!(matches!(
+        start.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "foreground Computer start must not request another enabled-plugin input after cancellation"
+    );
+
+    // A background start keeps its existing best-effort behavior and leaves both unresolved MCPs
+    // stopped. Restart must again prompt exactly once and abort at the first cancellation.
+    let started = start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(started.running);
+    assert!(requests.try_recv().is_err());
+
+    let restart_state = state.clone();
+    let restart = tokio::spawn(async move {
+        restart_computer_instance_interactive_core(
+            None,
+            restart_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let first_restart_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground Computer restart must request the first enabled-plugin input")
+        .unwrap();
+    let completion = bridge.complete(
+        &first_restart_prompt.request_id,
+        RuntimeInputCompletion::Cancelled,
+    );
+    let (completion, restart) = tokio::join!(completion, restart);
+    completion.unwrap();
+    assert!(matches!(
+        restart.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "foreground Computer restart must not request another enabled-plugin input after cancellation"
+    );
+
+    let servers = mcp::get_mcp_servers_core(state.as_ref(), TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .filter(|server| server.name.ends_with("-fail-fast"))
+        .all(|server| !server.running));
 }
 
 #[tokio::test]
@@ -2385,6 +2637,56 @@ fn build_runtime_input_marketplace_repo(repo: &Path) {
     fs::write(
         servers.join("inputs.json"),
         r#"{"inputs":[{"type":"PromptString","id":"api_token","description":"API Token","password":true}]}"#,
+    )
+    .unwrap();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+}
+
+fn build_two_runtime_input_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"audit","source":"./plugins/audit"}]}"#,
+    )
+    .unwrap();
+    let servers = repo.join("plugins/audit/mcp-servers");
+    fs::create_dir_all(&servers).unwrap();
+    let server_path = echo_server_path();
+    for (ordinal, input_id) in [("00", "first_token"), ("01", "second_token")] {
+        fs::write(
+            servers.join(format!("{ordinal}-fail-fast.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "stdio",
+                "name": format!("{ordinal}-fail-fast"),
+                "server_parameters": {
+                    "command": "node",
+                    "args": [server_path.clone()],
+                    "env": {
+                        "TOKEN": format!("${{input:audit@acme/{input_id}}}")
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    fs::write(
+        servers.join("inputs.json"),
+        r#"{"inputs":[{"type":"PromptString","id":"first_token","description":"First token"},{"type":"PromptString","id":"second_token","description":"Second token"}]}"#,
     )
     .unwrap();
 

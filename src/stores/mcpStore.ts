@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
-import { formatRuntimeActionError, type RuntimeActionError } from '@/utils/runtimeActionError';
+import {
+  formatRuntimeActionError,
+  isRuntimeInputCancelledError,
+  type RuntimeActionError,
+} from '@/utils/runtimeActionError';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -302,7 +306,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
         await get().fetchServers(instanceId);
       }
     } catch (e) {
-      const actionError = formatRuntimeActionError(e);
+      const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
       if (isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
@@ -339,7 +343,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
       }
       return result;
     } catch (e) {
-      const actionError = formatRuntimeActionError(e);
+      const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
       if (isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }

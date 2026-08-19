@@ -121,6 +121,7 @@ pub async fn import_config_core(
     instance_id: String,
     format: Option<ConfigFormat>,
 ) -> Result<ImportResult, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?.to_string();
@@ -641,6 +642,7 @@ pub async fn export_config_core(
     instance_id: String,
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?;

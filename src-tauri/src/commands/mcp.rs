@@ -7,6 +7,7 @@ use crate::services::computer::{
 };
 use crate::services::computer_runtime_events::PublicOAuthStatus;
 use crate::services::input_references::referenced_input_ids;
+use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -243,7 +244,26 @@ pub async fn start_mcp_server(
     instance_id: String,
     bundle_id: BundleId,
 ) -> Result<(), RuntimeActionError> {
-    start_mcp_server_core(&state, &instance_id, &bundle_id).await
+    start_mcp_server_interactive_core(&state, &instance_id, &bundle_id).await
+}
+
+/// Executes the user-initiated start path without requiring a Tauri `State` wrapper.
+///
+/// Kept separate from `start_mcp_server_core` so background and Client Control callers remain
+/// non-interactive while integration tests can exercise the same path as the UI command.
+#[doc(hidden)]
+pub async fn start_mcp_server_interactive_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), RuntimeActionError> {
+    start_mcp_server_core_with_mode(
+        state,
+        instance_id,
+        bundle_id,
+        RuntimeInputInteractionMode::Interactive,
+    )
+    .await
 }
 
 pub async fn start_mcp_server_core(
@@ -251,8 +271,23 @@ pub async fn start_mcp_server_core(
     instance_id: &str,
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    start_mcp_server_core_with_mode(
+        state,
+        instance_id,
+        bundle_id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn start_mcp_server_core_with_mode(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Starting MCP server for instance {}: {}",
         instance_id,
@@ -262,23 +297,28 @@ pub async fn start_mcp_server_core(
     let runtime = require_runtime(state, instance_id)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    ensure_computer_started(&runtime)
-        .await
-        .map_err(RuntimeActionError::from)?;
-    let server_name = ensure_user_managed_server(bundle_id, &runtime)
-        .await
-        .map_err(RuntimeActionError::runtime)?;
-    materialize_missing_configured_inputs_for_retry(
-        state,
-        instance_id,
-        &runtime,
-        std::slice::from_ref(bundle_id),
-    )
-    .await?;
-    runtime.start_mcp_server(bundle_id).await.map_err(|error| {
-        RuntimeActionError::from(error)
-            .with_requesting_mcp(bundle_id.to_string(), server_name.to_string())
-    })?;
+    let server_name = runtime
+        .with_runtime_input_interaction(interaction_mode, async {
+            ensure_computer_started(&runtime)
+                .await
+                .map_err(RuntimeActionError::from)?;
+            let server_name = ensure_user_managed_server(bundle_id, &runtime)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
+            materialize_missing_configured_inputs_for_retry(
+                state,
+                instance_id,
+                &runtime,
+                std::slice::from_ref(bundle_id),
+            )
+            .await?;
+            runtime.start_mcp_server(bundle_id).await.map_err(|error| {
+                RuntimeActionError::from(error)
+                    .with_requesting_mcp(bundle_id.to_string(), server_name.to_string())
+            })?;
+            Ok::<_, RuntimeActionError>(server_name)
+        })
+        .await?;
 
     log::info!(
         "MCP server started for instance {}: {}",
@@ -317,8 +357,8 @@ pub async fn stop_mcp_server_core(
     instance_id: &str,
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Stopping MCP server for instance {}: {}",
         instance_id,
@@ -367,86 +407,118 @@ pub async fn start_all_servers(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    start_all_servers_core(&state, &instance_id).await
+    start_all_servers_interactive_core(&state, &instance_id).await
+}
+
+/// Executes the foreground start-all path without requiring a Tauri `State` wrapper.
+#[doc(hidden)]
+pub async fn start_all_servers_interactive_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<McpBatchOperationResult, RuntimeActionError> {
+    start_all_servers_core_with_mode(state, instance_id, RuntimeInputInteractionMode::Interactive)
+        .await
 }
 
 pub async fn start_all_servers_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    start_all_servers_core_with_mode(
+        state,
+        instance_id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn start_all_servers_core_with_mode(
+    state: &AppState,
+    instance_id: &str,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
     let runtime = require_runtime(state, instance_id)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    ensure_computer_started(&runtime)
-        .await
-        .map_err(RuntimeActionError::from)?;
-    let inventory = mcp_batch_inventory(&runtime).await;
-    let candidate_count = inventory.candidates.len();
-    let unchanged_count = inventory
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.started)
-        .count();
-    let operation_candidates: Vec<_> = inventory
-        .candidates
-        .into_iter()
-        .filter(|candidate| !candidate.started)
-        .collect();
-    let operation_count = operation_candidates.len();
-    let operation_ids: Vec<_> = operation_candidates
-        .iter()
-        .map(|candidate| candidate.bundle_id.clone())
-        .collect();
-    materialize_missing_configured_inputs_for_retry(state, instance_id, &runtime, &operation_ids)
-        .await?;
-    let names: std::collections::HashMap<_, _> = operation_candidates
-        .iter()
-        .map(|candidate| (candidate.bundle_id.clone(), candidate.name.clone()))
-        .collect();
-    let failures = runtime
-        .start_mcp_servers_best_effort(
-            operation_candidates
+    runtime
+        .with_runtime_input_interaction(interaction_mode, async {
+            ensure_computer_started(&runtime)
+                .await
+                .map_err(RuntimeActionError::from)?;
+            let inventory = mcp_batch_inventory(&runtime).await;
+            let candidate_count = inventory.candidates.len();
+            let unchanged_count = inventory
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.started)
+                .count();
+            let operation_candidates: Vec<_> = inventory
+                .candidates
                 .into_iter()
-                .map(|candidate| candidate.bundle_id)
-                .collect(),
-        )
-        .await
-        .into_iter()
-        .map(|(bundle_id, error)| {
-            let name = names
-                .get(&bundle_id)
-                .cloned()
-                .unwrap_or_else(|| bundle_id.to_string());
-            McpBatchFailure {
-                error: RuntimeActionError::from(error)
-                    .with_requesting_mcp(bundle_id.to_string(), name.clone()),
-                name,
-                bundle_id,
-            }
-        })
-        .collect::<Vec<_>>();
-    let result = McpBatchOperationResult {
-        candidate_count,
-        actual_operation_count: operation_count.saturating_sub(failures.len()),
-        unchanged_count,
-        excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
-        failures,
-    };
+                .filter(|candidate| !candidate.started)
+                .collect();
+            let operation_count = operation_candidates.len();
+            let operation_ids: Vec<_> = operation_candidates
+                .iter()
+                .map(|candidate| candidate.bundle_id.clone())
+                .collect();
+            materialize_missing_configured_inputs_for_retry(
+                state,
+                instance_id,
+                &runtime,
+                &operation_ids,
+            )
+            .await?;
+            let names: std::collections::HashMap<_, _> = operation_candidates
+                .iter()
+                .map(|candidate| (candidate.bundle_id.clone(), candidate.name.clone()))
+                .collect();
+            let failures = runtime
+                .start_mcp_servers_best_effort(
+                    operation_candidates
+                        .into_iter()
+                        .map(|candidate| candidate.bundle_id)
+                        .collect(),
+                )
+                .await
+                .into_iter()
+                .map(|(bundle_id, error)| {
+                    let name = names
+                        .get(&bundle_id)
+                        .cloned()
+                        .unwrap_or_else(|| bundle_id.to_string());
+                    McpBatchFailure {
+                        error: RuntimeActionError::from(error)
+                            .with_requesting_mcp(bundle_id.to_string(), name.clone()),
+                        name,
+                        bundle_id,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let result = McpBatchOperationResult {
+                candidate_count,
+                actual_operation_count: operation_count.saturating_sub(failures.len()),
+                unchanged_count,
+                excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
+                failures,
+            };
 
-    log::info!(
-        "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
-        instance_id,
-        result.candidate_count,
-        result.actual_operation_count,
-        result.unchanged_count,
-        result.excluded_plugin_owned_count,
-        result.failures.len()
-    );
-    Ok(result)
+            log::info!(
+                "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
+                instance_id,
+                result.candidate_count,
+                result.actual_operation_count,
+                result.unchanged_count,
+                result.excluded_plugin_owned_count,
+                result.failures.len()
+            );
+            Ok(result)
+        })
+        .await
 }
 
 async fn materialize_missing_configured_inputs_for_retry(
@@ -521,8 +593,8 @@ pub async fn stop_all_servers_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Stopping all MCP servers for instance {}", instance_id);
 
     let runtime = require_runtime(state, instance_id)

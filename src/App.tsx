@@ -8,7 +8,7 @@ import {
   ApiOutlined,
   MessageOutlined,
 } from '@ant-design/icons';
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
@@ -29,6 +29,9 @@ import { useThemeStore } from './stores/themeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
 import { initializeManagerTokenBridge } from './services/managerTokenBridge';
+import { initializeRuntimeInputBridge } from './services/runtimeInputBridge';
+import { RuntimeInputPrompt } from './components/InputVariables/RuntimeInputPrompt';
+import { useRuntimeInputStore } from './stores/runtimeInputStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -53,6 +56,33 @@ function App() {
   const disposeRuntimeEvents = useRuntimeStore((state) => state.dispose);
   const recoverRuntimeEvents = useRuntimeStore((state) => state.recover);
   const runtimeEventsError = useRuntimeStore((state) => state.error);
+  const runtimeInputCompletionFailed = useRuntimeInputStore((state) => state.completionFailed);
+  const clearRuntimeInputCompletionFailure = useRuntimeInputStore(
+    (state) => state.clearCompletionFailure,
+  );
+  const [runtimeInputBridgeError, setRuntimeInputBridgeError] = useState<string | null>(null);
+  const runtimeInputBridgeDisposeRef = useRef<(() => Promise<void>) | null>(null);
+  const runtimeInputBridgeEpochRef = useRef(0);
+
+  const startRuntimeInputBridge = useCallback(async () => {
+    const epoch = ++runtimeInputBridgeEpochRef.current;
+    setRuntimeInputBridgeError(null);
+    try {
+      const dispose = await initializeRuntimeInputBridge();
+      if (epoch !== runtimeInputBridgeEpochRef.current) {
+        await dispose();
+        return;
+      }
+      const previous = runtimeInputBridgeDisposeRef.current;
+      runtimeInputBridgeDisposeRef.current = dispose;
+      if (previous) await previous();
+    } catch (error) {
+      if (epoch === runtimeInputBridgeEpochRef.current) {
+        setRuntimeInputBridgeError(String(error));
+      }
+      throw error;
+    }
+  }, []);
 
   // Initialize theme from persisted settings
   useEffect(() => {
@@ -62,24 +92,29 @@ function App() {
   useEffect(() => {
     let disposed = false;
     let disposeTokenBridge: (() => Promise<void>) | null = null;
-    const initialize = async () => {
-      const disposeBridge = await initializeManagerTokenBridge();
+    void initializeManagerTokenBridge().then(async (disposeBridge) => {
       if (disposed) {
         await disposeBridge();
-        return;
+      } else {
+        disposeTokenBridge = disposeBridge;
       }
-      disposeTokenBridge = disposeBridge;
-      await initializeRuntimeEvents();
-    };
-    void initialize().catch(() => {
-      /* runtime errors are stored in runtimeStore; token actions fail closed until bridge ready */
+    }).catch(() => {
+      /* token actions fail closed until the bridge is ready */
     });
+    // These event channels recover independently: a failed Runtime Input listener must never
+    // prevent ordinary runtime snapshots from initializing.
+    void startRuntimeInputBridge().catch(() => undefined);
+    void initializeRuntimeEvents().catch(() => undefined);
     return () => {
       disposed = true;
+      runtimeInputBridgeEpochRef.current += 1;
       void disposeRuntimeEvents();
+      const disposeRuntimeInputBridge = runtimeInputBridgeDisposeRef.current;
+      runtimeInputBridgeDisposeRef.current = null;
+      if (disposeRuntimeInputBridge) void disposeRuntimeInputBridge();
       if (disposeTokenBridge) void disposeTokenBridge();
     };
-  }, [disposeRuntimeEvents, initializeRuntimeEvents]);
+  }, [disposeRuntimeEvents, initializeRuntimeEvents, startRuntimeInputBridge]);
 
   // Manager authentication is app-wide state: restore it before any page-level
   // connection action can need the Manager JWT.
@@ -294,10 +329,39 @@ function App() {
                 style={{ marginBottom: 16 }}
               />
             )}
+            {runtimeInputBridgeError && (
+              <Alert
+                type="error"
+                showIcon
+                message={t('app.runtimeInputUnavailable')}
+                description={runtimeInputBridgeError}
+                action={(
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => { void startRuntimeInputBridge().catch(() => undefined); }}
+                  >
+                    {t('app.retryRuntimeInput')}
+                  </Button>
+                )}
+                style={{ marginBottom: 16 }}
+              />
+            )}
+            {runtimeInputCompletionFailed && (
+              <Alert
+                type="error"
+                showIcon
+                closable
+                message={t('inputs.runtime.completionFailed')}
+                onClose={clearRuntimeInputCompletionFailure}
+                style={{ marginBottom: 16 }}
+              />
+            )}
             {renderContent()}
           </div>
         </Content>
       </Layout>
+      <RuntimeInputPrompt />
     </Layout>
   );
 }

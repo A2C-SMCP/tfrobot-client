@@ -378,6 +378,7 @@ pub fn run() {
             tauri::async_runtime::block_on(state.manager_context.set_token_bridge_sink(Arc::new(
                 commands::manager::TauriManagerTokenBridgeSink::new(app.handle().clone()),
             )));
+            commands::runtime_input::install_runtime_input_sink(app.handle().clone(), &state);
 
             // Write startup log and cleanup old entries
             if let Err(error) = state
@@ -474,6 +475,8 @@ pub fn run() {
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,
             commands::inputs::preview_command_input,
+            commands::runtime_input::runtime_input_bridge_ready,
+            commands::runtime_input::complete_runtime_input_request,
             // SMCP connection management
             commands::connection::list_manual_smcp_targets,
             commands::connection::save_manual_smcp_target,

@@ -28,8 +28,20 @@ const runtimeStoreMock = vi.hoisted(() => ({
   recover: vi.fn().mockResolvedValue(undefined),
 }));
 
+const runtimeInputBridgeMock = vi.hoisted(() => ({
+  initialize: vi.fn<() => Promise<() => Promise<void>>>().mockResolvedValue(
+    vi.fn().mockResolvedValue(undefined),
+  ),
+}));
+
 vi.mock('@/stores/runtimeStore', () => ({
   useRuntimeStore: (selector: (state: typeof runtimeStoreMock) => unknown) => selector(runtimeStoreMock),
+}));
+
+vi.mock('@/services/runtimeInputBridge', () => ({
+  initializeRuntimeInputBridge: runtimeInputBridgeMock.initialize,
+  completeRuntimeInputRequest: vi.fn(),
+  RuntimeInputCompletionError: class RuntimeInputCompletionError extends Error {},
 }));
 
 vi.mock('@/stores/themeStore', () => ({
@@ -161,6 +173,7 @@ describe('App', () => {
     runtimeStoreMock.initialize.mockResolvedValue(undefined);
     runtimeStoreMock.dispose.mockResolvedValue(undefined);
     runtimeStoreMock.recover.mockResolvedValue(undefined);
+    runtimeInputBridgeMock.initialize.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
   });
 
   it('shows runtime event initialization failures and retries recovery', async () => {
@@ -172,6 +185,23 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(runtimeStoreMock.recover).toHaveBeenCalledOnce());
+  });
+
+  it('keeps runtime events available when Runtime Input initialization fails and retries it', async () => {
+    runtimeInputBridgeMock.initialize.mockRejectedValueOnce(new Error('input bridge unavailable'));
+    render(<App />);
+
+    await waitFor(() => {
+      expect(runtimeStoreMock.initialize).toHaveBeenCalledOnce();
+      expect(screen.getByText('Runtime Input prompts are unavailable')).toBeInTheDocument();
+      expect(screen.getByText('Error: input bridge unavailable')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry prompts' }));
+    await waitFor(() => expect(runtimeInputBridgeMock.initialize).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.queryByText('Runtime Input prompts are unavailable')).not.toBeInTheDocument();
+    });
   });
 
   it('restores Manager session at app startup', async () => {

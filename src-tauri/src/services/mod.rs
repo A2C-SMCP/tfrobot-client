@@ -19,6 +19,7 @@ pub mod manager_token_bridge;
 pub mod oauth_credential_store;
 pub mod observability;
 pub mod runtime;
+pub mod runtime_input_bridge;
 pub mod sdk_config;
 pub(crate) mod serde_compat;
 pub mod settings;

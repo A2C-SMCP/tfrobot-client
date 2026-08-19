@@ -46,7 +46,23 @@ async fn project_oauth_required_scope(
 
 impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
+        self.lifecycle_lease()
+            .await
+            .start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn lifecycle_lease(&self) -> ComputerRuntimeLifecycleLease<'_> {
+        ComputerRuntimeLifecycleLease {
+            runtime: self,
+            _lifecycle: self.lifecycle_lock.lock().await,
+        }
+    }
+
+    async fn start_with_failure_policy_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         let lifecycle = self.runtime_state().await;
@@ -61,17 +77,26 @@ impl ComputerInstanceRuntime {
                 false,
                 "start_with_persisted_configuration",
                 HandleReplacementConfig::ReloadPersisted,
+                failure_policy,
             )
             .await?;
         } else if matches!(
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
         ) {
-            self.reconcile_governance_for_computer_start("idempotent Computer startup")
-                .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
-            let failures = self.start_desired_mcp_servers_inner().await;
-            self.log_mcp_start_failures(&failures, "idempotent Computer startup");
+            self.reconcile_governance_for_computer_start(
+                "idempotent Computer startup",
+                failure_policy,
+            )
+            .await
+            .map_err(ComputerRuntimeStartError::Sdk)?;
+            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            self.handle_desired_mcp_start_failures(
+                failures,
+                "idempotent Computer startup",
+                failure_policy,
+            )
+            .map_err(ComputerRuntimeStartError::Sdk)?;
             return Ok(());
         } else if matches!(
             lifecycle,
@@ -91,7 +116,7 @@ impl ComputerInstanceRuntime {
             return Err(ComputerRuntimeStartError::Sdk(error));
         }
         if let Err(error) = self
-            .reconcile_governance_for_computer_start("Computer startup")
+            .reconcile_governance_for_computer_start("Computer startup", failure_policy)
             .await
         {
             // boot_up has already moved the SDK lifecycle to Started. A governance failure is
@@ -106,8 +131,18 @@ impl ComputerInstanceRuntime {
             }
             return Err(start_error);
         }
-        let failures = self.start_desired_mcp_servers_inner().await;
-        self.log_mcp_start_failures(&failures, "Computer startup");
+        let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+        if let Err(error) =
+            self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
+        {
+            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                start_error = start_error.append_context(format!(
+                    "failed to roll back the partially started Computer: {cleanup_error}"
+                ));
+            }
+            return Err(start_error);
+        }
         Ok(())
     }
 
@@ -366,11 +401,25 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
+        self.lifecycle_lease()
+            .await
+            .restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    async fn restart_with_failure_policy_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(true, "restart", HandleReplacementConfig::ReloadPersisted)
-            .await
+        self.replace_sdk_computer(
+            true,
+            "restart",
+            HandleReplacementConfig::ReloadPersisted,
+            failure_policy,
+        )
+        .await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {
@@ -576,6 +625,48 @@ impl ComputerInstanceRuntime {
         } else {
             Ok(guard)
         }
+    }
+}
+
+impl ComputerRuntimeLifecycleLease<'_> {
+    pub(crate) async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures)
+            .await
+    }
+
+    async fn start_with_failure_policy(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        self.runtime
+            .start_with_failure_policy_inner(failure_policy)
+            .await
+    }
+
+    pub(crate) async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn restart_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.restart_with_failure_policy(
+            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures,
+        )
+        .await
+    }
+
+    async fn restart_with_failure_policy(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        self.runtime
+            .restart_with_failure_policy_inner(failure_policy)
+            .await
     }
 }
 

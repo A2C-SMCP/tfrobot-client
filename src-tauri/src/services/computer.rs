@@ -11,10 +11,11 @@ use crate::services::computer_runtime_events::{
 };
 use crate::services::config::instance_storage_dir_name;
 use crate::services::input_references::referenced_input_ids;
-use crate::services::input_resolver::RuntimeInputResolver;
+use crate::services::input_resolver::{RuntimeInputInteractionMode, RuntimeInputResolver};
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
 use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
+use crate::services::runtime_input_bridge::RuntimeInputBridge;
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
@@ -50,6 +51,7 @@ use a2c_smcp::A2CSkillRef;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -716,6 +718,18 @@ enum HandleReplacementConfig {
     RetainCurrentGeneration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeMcpStartFailurePolicy {
+    BestEffort,
+    PropagateRuntimeInputFailures,
+}
+
+impl RuntimeMcpStartFailurePolicy {
+    fn propagates_runtime_input_failures(self) -> bool {
+        matches!(self, Self::PropagateRuntimeInputFailures)
+    }
+}
+
 struct HandleDeclarations<'a> {
     injected_inputs: &'a HashMap<String, MCPServerInput>,
     retained_inputs: Option<&'a HashMap<String, MCPServerInput>>,
@@ -786,6 +800,14 @@ pub(crate) struct SdkSkillMutationLease {
     runtime: ComputerInstanceRuntime,
     _activity: RuntimeActivityGuard,
     _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Keeps one Computer generation lifecycle-locked while an application-wide transaction guard is
+/// released. Foreground commands use this hand-off before entering Runtime Input so another
+/// Computer remains independent without allowing same-Computer replacement to slip into the gap.
+pub(crate) struct ComputerRuntimeLifecycleLease<'a> {
+    runtime: &'a ComputerInstanceRuntime,
+    _lifecycle: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl SdkSkillMutationLease {
@@ -886,6 +908,19 @@ pub struct ComputerInstanceRuntime {
 }
 
 impl ComputerInstanceRuntime {
+    pub async fn with_runtime_input_interaction<F, T>(
+        &self,
+        mode: RuntimeInputInteractionMode,
+        future: F,
+    ) -> T
+    where
+        F: Future<Output = T>,
+    {
+        self.input_resolver
+            .with_interaction_mode(mode, future)
+            .await
+    }
+
     /// Builds isolated runtime handles for an instance. MCP runtime ownership lives in SDK
     /// Computer; the client keeps only instance-scoped state and lifecycle handles here.
     pub fn new(instance: ComputerInstance, skill_home_base: PathBuf) -> Self {
@@ -906,6 +941,7 @@ impl ComputerInstanceRuntime {
             skill_home_base,
             secret_store,
             Arc::new(RwLock::new(None)),
+            Arc::new(RuntimeInputBridge::new()),
             ClientControlBinding::default(),
         )
     }
@@ -915,6 +951,7 @@ impl ComputerInstanceRuntime {
         skill_home_base: PathBuf,
         secret_store: Arc<dyn SecretStore>,
         runtime_event_sink: SharedRuntimeEventSink,
+        runtime_input_bridge: Arc<RuntimeInputBridge>,
         client_control_binding: ClientControlBinding,
     ) -> Self {
         let injected_inputs = HashMap::new();
@@ -923,10 +960,11 @@ impl ComputerInstanceRuntime {
             instance.id.clone(),
             secret_store.clone(),
         ));
-        let input_resolver = Arc::new(RuntimeInputResolver::new(
+        let input_resolver = Arc::new(RuntimeInputResolver::new_with_bridge(
             instance.id.clone(),
             skill_home_base.join(instance_storage_dir_name(&instance.id)),
             secret_store,
+            runtime_input_bridge,
         ));
         let (computer, sdk_servers, inputs) = build_sdk_computer(
             &instance,
@@ -1128,6 +1166,7 @@ impl ComputerInstanceRuntime {
                 was_running,
                 "Client Control policy changed",
                 HandleReplacementConfig::RetainCurrentGeneration,
+                RuntimeMcpStartFailurePolicy::BestEffort,
             )
             .await?;
             return Ok(());
@@ -1477,7 +1516,9 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(|error| error.to_string())?;
         if computer_running {
-            let failures = self.start_desired_mcp_servers_inner().await;
+            let failures = self
+                .start_desired_mcp_servers_inner(RuntimeMcpStartFailurePolicy::BestEffort)
+                .await;
             self.log_mcp_start_failures(&failures, "user MCP removal");
         }
         Ok(())
@@ -1706,20 +1747,52 @@ impl ComputerInstanceRuntime {
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
+    pub async fn start_mcp_servers_until_input_failure(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, ComputerError)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.start_mcp_servers_with_failure_policy_inner(
+            bundle_ids,
+            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures,
+        )
+        .await
+    }
+
     async fn start_mcp_servers_best_effort_inner(
         &self,
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, ComputerError)> {
+        self.start_mcp_servers_with_failure_policy_inner(
+            bundle_ids,
+            RuntimeMcpStartFailurePolicy::BestEffort,
+        )
+        .await
+    }
+
+    async fn start_mcp_servers_with_failure_policy_inner(
+        &self,
+        bundle_ids: Vec<BundleId>,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Vec<(BundleId, ComputerError)> {
         let mut failures = Vec::new();
         for bundle_id in bundle_ids {
             if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
+                let stop = failure_policy.propagates_runtime_input_failures()
+                    && matches!(error, ComputerError::InputResolution(_));
                 failures.push((bundle_id, error));
+                if stop {
+                    break;
+                }
             }
         }
         failures
     }
 
-    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
+    pub(super) async fn start_desired_mcp_servers_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership_internal()
             .await
@@ -1729,7 +1802,8 @@ impl ComputerInstanceRuntime {
             })
             .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok())
             .collect();
-        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+        self.start_mcp_servers_with_failure_policy_inner(bundle_ids, failure_policy)
+            .await
     }
 
     pub(super) fn log_mcp_start_failures(
@@ -1748,12 +1822,52 @@ impl ComputerInstanceRuntime {
         }
     }
 
+    pub(super) fn handle_desired_mcp_start_failures(
+        &self,
+        failures: Vec<(BundleId, ComputerError)>,
+        cause: &str,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> ComputerResult<()> {
+        self.log_mcp_start_failures(&failures, cause);
+        if failure_policy.propagates_runtime_input_failures() {
+            if let Some((_, error)) = failures
+                .into_iter()
+                .find(|(_, error)| matches!(error, ComputerError::InputResolution(_)))
+            {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn reconcile_governance_for_computer_start(
         &self,
         cause: &str,
+        failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> ComputerResult<()> {
-        match self.reconcile_sdk_governance_inner().await {
+        // SDK governance recovery owns its own best-effort bundled MCP start loop. Keep that
+        // loop non-interactive for foreground Computer actions so it can mount every enabled
+        // plugin server without prompting (or continuing after a cancelled prompt). The client
+        // then starts the complete desired inventory below with its foreground fail-fast policy.
+        // Reconciliation is a large SDK future. Box it before wrapping it in the task-local
+        // interaction scope so Computer lifecycle commands do not inflate their async stack frame.
+        let reconcile = Box::pin(self.reconcile_sdk_governance_inner());
+        let reconcile_result = if failure_policy.propagates_runtime_input_failures() {
+            self.with_runtime_input_interaction(
+                RuntimeInputInteractionMode::NonInteractive,
+                reconcile,
+            )
+            .await
+        } else {
+            reconcile.await
+        };
+        match reconcile_result {
             Ok(_) => Ok(()),
+            Err(error @ ComputerError::InputResolution(_))
+                if failure_policy.propagates_runtime_input_failures() =>
+            {
+                Err(error)
+            }
             Err(ComputerError::InputResolution(error)) => {
                 log::warn!(
                     "Plugin MCP input resolution failed for Computer instance {} during {}: {}",
@@ -2254,6 +2368,7 @@ impl ComputerInstanceRuntime {
         was_running: bool,
         reason: &str,
         config_mode: HandleReplacementConfig,
+        failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> Result<(), ComputerRuntimeStartError> {
         let injected_inputs = self.plugin_runtime_inputs.read().await.clone();
         let (retained_inputs, retained_mcp_servers) = match config_mode {
@@ -2339,11 +2454,30 @@ impl ComputerInstanceRuntime {
                 .boot_up()
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
-            self.reconcile_governance_for_computer_start(reason)
+            if let Err(error) = self
+                .reconcile_governance_for_computer_start(reason, failure_policy)
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
-            let failures = self.start_desired_mcp_servers_inner().await;
-            self.log_mcp_start_failures(&failures, reason);
+            {
+                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                    start_error = start_error.append_context(format!(
+                        "failed to roll back the partially restarted Computer: {cleanup_error}"
+                    ));
+                }
+                return Err(start_error);
+            }
+            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            if let Err(error) =
+                self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
+            {
+                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                    start_error = start_error.append_context(format!(
+                        "failed to roll back the partially restarted Computer: {cleanup_error}"
+                    ));
+                }
+                return Err(start_error);
+            }
         }
         Ok(())
     }

@@ -72,6 +72,12 @@ pub struct ResolvedInputEntry {
     pub storage_kind: InputEntryStorageKind,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputEntryResolution {
+    pub value: Option<Value>,
+    pub storage_kind: InputEntryStorageKind,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct InputEntriesDocument {
@@ -168,11 +174,29 @@ impl InputEntryStore {
         key: &str,
         legacy_preference: InputEntryStorageKind,
     ) -> Result<Option<ResolvedInputEntry>, String> {
+        Ok(self
+            .resolve_entry_state(key, legacy_preference)?
+            .and_then(|entry| {
+                entry.value.map(|value| ResolvedInputEntry {
+                    value,
+                    storage_kind: entry.storage_kind,
+                })
+            }))
+    }
+
+    /// Resolves authoritative metadata together with an optional backing value. Unlike
+    /// `resolve_entry`, this preserves dangling InputEntry metadata so callers never silently
+    /// change a Secret entry's storage kind merely because its Keychain value disappeared.
+    pub fn resolve_entry_state(
+        &self,
+        key: &str,
+        legacy_preference: InputEntryStorageKind,
+    ) -> Result<Option<InputEntryResolution>, String> {
         let operation_lock = self.operation_lock()?;
         let _guard = lock_repository(&operation_lock)?;
         if let Some(kind) = self.load()?.entries.get(key).copied() {
             return self.read_value(key, kind).map(|value| {
-                value.map(|value| ResolvedInputEntry {
+                Some(InputEntryResolution {
                     value,
                     storage_kind: kind,
                 })
@@ -185,8 +209,8 @@ impl InputEntryStore {
                 return Ok(None);
             };
             self.adopt_legacy_locked(key, legacy_preference, true)?;
-            return Ok(Some(ResolvedInputEntry {
-                value,
+            return Ok(Some(InputEntryResolution {
+                value: Some(value),
                 storage_kind: legacy_preference,
             }));
         };
@@ -203,8 +227,8 @@ impl InputEntryStore {
             legacy_kind,
             legacy_index.provenance != InputValueIndexProvenance::LegacyV1,
         )?;
-        Ok(Some(ResolvedInputEntry {
-            value,
+        Ok(Some(InputEntryResolution {
+            value: Some(value),
             storage_kind: legacy_kind,
         }))
     }

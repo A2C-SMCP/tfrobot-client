@@ -12,7 +12,6 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   formatInvokeError,
   useSkillStore,
@@ -21,10 +20,7 @@ import {
   type SkillRef,
   type SkillResource,
 } from '@/stores/skillStore';
-import {
-  isMissingRuntimeInputError,
-  type MissingRuntimeInputError,
-} from '@/utils/runtimeActionError';
+import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import styles from './MarketplaceTab.module.css';
 
 const { Text, Title, Paragraph } = Typography;
@@ -101,11 +97,6 @@ export function MarketplaceTab({
   const [loadingSkillPreview, setLoadingSkillPreview] = useState(false);
   const [skillPreviewError, setSkillPreviewError] = useState<string | null>(null);
   const currentInstanceIdRef = useRef<string | null>(instanceId);
-  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
-    error: MissingRuntimeInputError;
-    action: 'install' | 'enable' | 'disable' | 'uninstall';
-    plugin: PluginSummary;
-  } | null>(null);
   const {
     recordsByInstanceId,
     fetchMarketplaceGovernance,
@@ -302,14 +293,10 @@ export function MarketplaceTab({
       if (action === 'disable') await disablePlugin(instanceId, request);
       if (action === 'uninstall') await uninstallPlugin(instanceId, request);
       if (currentInstanceIdRef.current !== instanceId) return;
-      setRuntimeInputPrompt(null);
       message.success(t(`marketplace.messages.${action}`));
     } catch (e) {
       if (currentInstanceIdRef.current !== instanceId) return;
-      if (isMissingRuntimeInputError(e)) {
-        setRuntimeInputPrompt({ error: e, action, plugin });
-        return;
-      }
+      if (isRuntimeInputCancelledError(e)) return;
       message.error(formatInvokeError(e));
     }
   };
@@ -719,17 +706,6 @@ export function MarketplaceTab({
           </Form.Item>
         </Form>
       </Modal>
-      {runtimeInputPrompt && (
-        <RuntimeInputPrompt
-          instanceId={instanceId}
-          error={runtimeInputPrompt.error}
-          onCancel={() => setRuntimeInputPrompt(null)}
-          onSubmitted={() => handlePluginAction(
-            runtimeInputPrompt.action,
-            runtimeInputPrompt.plugin,
-          )}
-        />
-      )}
     </Space>
   );
 }

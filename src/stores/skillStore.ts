@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import { isMissingRuntimeInputError } from '@/utils/runtimeActionError';
+import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 
 export interface SkillRef {
   name: string;
@@ -513,7 +513,7 @@ async function runMarketplaceLifecycle(
     if (isCurrentMarketplaceOperation(get(), instanceId, requestId)) {
       setInstanceRecord(set, instanceId, (record) => ({
         ...record,
-        marketplaceError: isMissingRuntimeInputError(e) ? null : formatInvokeError(e),
+        marketplaceError: isRuntimeInputCancelledError(e) ? null : formatInvokeError(e),
       }), get().activeInstanceId === instanceId);
     }
     throw e;

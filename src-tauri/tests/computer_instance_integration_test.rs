@@ -17,6 +17,7 @@ use tfrobot_client_lib::commands::connection::{
     connect_connection_target_core, connect_connection_target_for_policy_core, disconnect_smcp_core,
 };
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
+use tfrobot_client_lib::commands::sdk_config;
 use tfrobot_client_lib::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ManagerRobotBindingState, RobotBindingMetadata,
 };
@@ -462,6 +463,69 @@ async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
     drop(guard);
 
     operation.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let created = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Config Delete Race".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let storage_root = state.config.computer_instance_storage_root(&created.id);
+
+    // Hold the global transaction lock so the SDK config writer stops after acquiring the
+    // per-Computer gate. This makes the formerly split coordination domains deterministic.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let upsert_state = state.clone();
+    let upsert_id = created.id.clone();
+    let upsert = tokio::spawn(async move {
+        sdk_config::upsert_computer_mcp_config_core(
+            upsert_state.as_ref(),
+            &upsert_id,
+            common::echo_server_config("serialized-before-delete"),
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.computer_registry.operation_lease(&created.id),
+        )
+        .await
+        .is_err(),
+        "SDK config writer must own the per-Computer operation gate before its global commit"
+    );
+
+    let delete_state = state.clone();
+    let delete_id = created.id.clone();
+    let mut delete = tokio::spawn(async move {
+        delete_computer_instance_core(delete_state.as_ref(), delete_id).await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut delete)
+            .await
+            .is_err(),
+        "Computer deletion must wait for the in-flight SDK config mutation"
+    );
+
+    drop(lifecycle_guard);
+    upsert.await.unwrap().unwrap();
+    delete.await.unwrap().unwrap();
+
+    assert!(state.config.get_computer_instance(&created.id).is_err());
+    assert!(state.computer_registry.runtime(&created.id).await.is_none());
+    assert!(
+        !storage_root.exists(),
+        "serialized deletion must not leave an orphan SDK config directory"
+    );
 }
 
 #[tokio::test]

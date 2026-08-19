@@ -14,6 +14,7 @@ pub mod manager;
 pub mod marketplace;
 pub mod mcp;
 pub mod runtime_error;
+pub mod runtime_input;
 pub mod runtime_sync;
 pub mod sdk_config;
 pub mod settings;

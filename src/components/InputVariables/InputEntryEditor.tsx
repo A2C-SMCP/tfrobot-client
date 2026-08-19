@@ -9,6 +9,8 @@ interface InputEntryEditorProps {
   fixedKey?: string;
   definition?: InputDefinition;
   initialSecret?: boolean;
+  initialValue?: string;
+  lockSecret?: boolean;
   requireValue?: boolean;
   onSubmit: (key: string, value: string | undefined, secret: boolean) => Promise<void>;
   onCancel: () => void;
@@ -19,6 +21,8 @@ export function InputEntryEditor({
   fixedKey,
   definition,
   initialSecret = false,
+  initialValue,
+  lockSecret = false,
   requireValue = false,
   onSubmit,
   onCancel,
@@ -27,10 +31,12 @@ export function InputEntryEditor({
   const [key, setKey] = useState(fixedKey ?? entry?.key ?? '');
   const [value, setValue] = useState<string | undefined>(
     entry?.value === undefined
-      ? (definition?.type === 'PickString' ? undefined : '')
+      ? (initialValue ?? (definition?.type === 'PickString' ? undefined : ''))
       : String(entry.value),
   );
-  const [valueTouched, setValueTouched] = useState(entry?.value !== undefined);
+  const [valueTouched, setValueTouched] = useState(
+    entry?.value !== undefined || initialValue !== undefined,
+  );
   const [secret, setSecret] = useState(entry?.secret ?? initialSecret);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +111,7 @@ export function InputEntryEditor({
         <Switch
           aria-label={t('inputs.entry.storeAsSecret')}
           checked={secret}
-          disabled={submitting}
+          disabled={submitting || lockSecret}
           onChange={setSecret}
         />
         <Space direction="vertical" size={0}>

@@ -66,20 +66,6 @@ vi.mock('@/components/McpConfig/McpServerForm', () => ({
   ),
 }));
 
-vi.mock('@/components/InputVariables/RuntimeInputPrompt', () => ({
-  RuntimeInputPrompt: ({
-    error,
-    onSubmitted,
-  }: {
-    error: { input_id: string };
-    onSubmitted: () => Promise<void>;
-  }) => (
-    <button onClick={() => onSubmitted()}>
-      Configure {error.input_id}
-    </button>
-  ),
-}));
-
 import { useSdkConfigStore } from '@/stores/sdkConfigStore';
 const mockUseSdkConfigStore = vi.mocked(useSdkConfigStore);
 
@@ -568,26 +554,22 @@ describe('McpConfig', () => {
     expect(await screen.findByText('Server saved; restart Runtime to apply it')).toBeInTheDocument();
   }, 10000);
 
-  it('opens the Input configuration prompt and retries the saved MCP declaration', async () => {
-    mockSdkStore.upsertServer
-      .mockRejectedValueOnce({
-        code: 'missing_secret',
-        input_id: 'api-key',
-        env_hint: 'A2C_SMCP_api_key',
-        message: 'Required secret input is unresolved',
-      })
-      .mockResolvedValueOnce(undefined);
+  it('does not synthesize a local retry when the backend reports a legacy missing input', async () => {
+    mockSdkStore.upsertServer.mockRejectedValueOnce({
+      code: 'missing_secret',
+      input_id: 'api-key',
+      env_hint: 'A2C_SMCP_api_key',
+      message: 'Required secret input is unresolved',
+    });
     render(<McpConfig instanceId={instanceId} />);
     fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
 
-    const configure = await screen.findByRole('button', { name: 'Configure api-key' });
-    fireEvent.click(configure);
-
-    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
-    expect(mockSdkStore.upsertServer.mock.calls[1]).toEqual(
-      mockSdkStore.upsertServer.mock.calls[0],
-    );
+    expect(await screen.findByText(
+      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+    )).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configure api-key' })).not.toBeInTheDocument();
+    expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(1);
   });
 
   it('does not expose technical errors when adding a server fails at runtime', async () => {

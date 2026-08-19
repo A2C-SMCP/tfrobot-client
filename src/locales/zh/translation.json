@@ -2,6 +2,8 @@
   "app": {
     "name": "TFRobot 客户端",
     "runtimeEventsUnavailable": "运行时状态更新不可用",
+    "runtimeInputUnavailable": "运行时输入提示暂不可用",
+    "retryRuntimeInput": "重试输入提示",
     "retryRuntimeEvents": "重试"
   },
   "common": {
@@ -771,6 +773,7 @@
     "runtime": {
       "missingInput": "启动需要补充变量",
       "missingSecret": "启动需要补充密钥",
+      "invalidSelection": "请选择当前有效值后继续",
       "description": "请填写此输入项，保存后将继续启动 MCP。",
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
       "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
@@ -780,7 +783,8 @@
       "storeAsSecret": "设为密钥",
       "requestedBy": "由 MCP {{name}}（{{id}}）请求此输入项",
       "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
-      "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
+      "submitFailed": "无法保存变量值，请重试或查看 Runtime 诊断或日志。",
+      "completionFailed": "运行时输入请求已结束，未能完成处理。请重试原操作。"
     },
     "table": {
       "id": "ID",

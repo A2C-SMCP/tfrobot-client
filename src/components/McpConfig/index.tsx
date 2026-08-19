@@ -18,11 +18,9 @@ import {
 } from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
 import type { InputDefinitionChanges } from '@/stores/inputStore';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   isMissingInputDefinitionError,
-  isMissingRuntimeInputError,
-  type MissingRuntimeInputError,
+  isRuntimeInputCancelledError,
 } from '@/utils/runtimeActionError';
 import { McpServerForm } from './McpServerForm';
 
@@ -68,11 +66,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
-  const [inputPrompt, setInputPrompt] = useState<{
-    config: McpServerConfig;
-    inputChanges?: InputDefinitionChanges;
-    error: MissingRuntimeInputError;
-  } | null>(null);
 
   useEffect(() => {
     void fetchConfig(instanceId);
@@ -115,21 +108,16 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
         name: config.name,
       }));
-      setInputPrompt(null);
       setFormVisible(false);
     } catch (cause) {
       if (isMissingInputDefinitionError(cause)) {
-        setInputPrompt(null);
         message.error(t('mcp.messages.missingInputDefinition', {
           id: cause.input_id,
           name: cause.requesting_mcp?.name ?? config.name,
         }));
         return;
       }
-      if (isMissingRuntimeInputError(cause)) {
-        setInputPrompt({ config, inputChanges, error: cause });
-        return;
-      }
+      if (isRuntimeInputCancelledError(cause)) return;
       message.error(t('mcp.messages.operationFailed'));
     } finally {
       await fetchManagedServers(instanceId);
@@ -158,17 +146,13 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
       }));
     } catch (cause) {
       if (isMissingInputDefinitionError(cause)) {
-        setInputPrompt(null);
         message.error(t('mcp.messages.missingInputDefinition', {
           id: cause.input_id,
           name: cause.requesting_mcp?.name ?? config.name,
         }));
         return;
       }
-      if (isMissingRuntimeInputError(cause)) {
-        setInputPrompt({ config, error: cause });
-        return;
-      }
+      if (isRuntimeInputCancelledError(cause)) return;
       message.error(t('mcp.messages.operationFailed'));
     } finally {
       await fetchManagedServers(instanceId);
@@ -509,15 +493,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           loading={configLoading}
         />
       </Modal>
-      {inputPrompt && (
-        <RuntimeInputPrompt
-          key={`${instanceId}:${inputPrompt.error.input_id}`}
-          instanceId={instanceId}
-          error={inputPrompt.error}
-          onCancel={() => setInputPrompt(null)}
-          onSubmitted={() => handleFormSubmit(inputPrompt.config, inputPrompt.inputChanges)}
-        />
-      )}
     </div>
   );
 }

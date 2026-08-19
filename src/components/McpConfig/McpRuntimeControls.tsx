@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Space, Typography } from 'antd';
 import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   useMcpStore,
   type McpBatchOperationResult,
@@ -258,15 +257,6 @@ export function McpRuntimeControls({
         }}
       />
 
-      {runtimeActions.pending && (
-        <RuntimeInputPrompt
-          key={`${instanceId}:${runtimeActions.pending.error.input_id}`}
-          instanceId={instanceId}
-          error={runtimeActions.pending.error}
-          onCancel={runtimeActions.cancel}
-          onSubmitted={runtimeActions.retry}
-        />
-      )}
     </div>
   );
 }

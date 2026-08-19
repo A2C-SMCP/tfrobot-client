@@ -21,7 +21,7 @@ export type MissingInputDefinitionError = {
 };
 
 export type RuntimeActionError = MissingRuntimeInputError | MissingInputDefinitionError | {
-  code: 'resolver_failed' | 'runtime_error';
+  code: 'resolver_failed' | 'runtime_input_cancelled' | 'runtime_error';
   input_id?: string;
   message: string;
 } | {
@@ -31,6 +31,11 @@ export type RuntimeActionError = MissingRuntimeInputError | MissingInputDefiniti
   disabled_reason: string;
   message: string;
 };
+
+export function isRuntimeInputCancelledError(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object'
+    && (error as Partial<RuntimeActionError>).code === 'runtime_input_cancelled');
+}
 
 export function isMissingRuntimeInputError(error: unknown): error is MissingRuntimeInputError {
   if (!error || typeof error !== 'object') return false;

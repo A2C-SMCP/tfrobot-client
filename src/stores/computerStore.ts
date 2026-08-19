@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import { formatRuntimeActionError } from '@/utils/runtimeActionError';
+import { formatRuntimeActionError, isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import {
   getClientConnectionAuthority,
   legacyClientConnectionState,
@@ -672,7 +672,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       }));
       return requireInstance(get().instances, started.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
+      set({ error: isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e) });
       throw e;
     } finally {
       set((state) => {
@@ -728,7 +728,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       }));
       return requireInstance(get().instances, restarted.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
+      set({ error: isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e) });
       throw e;
     } finally {
       set((state) => {

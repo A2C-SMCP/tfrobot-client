@@ -21,7 +21,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "bfa94047a476529fea9177a5e1865e9a9fb04142", features = ["computer"] }
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "07d7cc04dfce51ec9c0951ee94e3556f4c99b585", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -66,6 +66,7 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 tempfile = "3"
+futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -73,7 +74,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
-futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }

@@ -43,6 +43,9 @@ use tfrobot_client_lib::services::input_value_index::{self, InputValueStorageKin
 use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::runtime_input_bridge::{
+    RuntimeInputCompletion, RuntimeInputRequest, RuntimeInputRequestReason, RuntimeInputRequestSink,
+};
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -59,6 +62,18 @@ const SERVER_UPDATE_TOOL_LIST: &str = "server:update_tool_list";
 
 fn bundle_id(value: &str) -> BundleId {
     BundleId::try_from(value).unwrap()
+}
+
+struct RecordingRuntimeInputSink {
+    sender: tokio::sync::mpsc::UnboundedSender<RuntimeInputRequest>,
+}
+
+impl RuntimeInputRequestSink for RecordingRuntimeInputSink {
+    fn emit(&self, request: &RuntimeInputRequest) -> Result<(), String> {
+        self.sender
+            .send(request.clone())
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
@@ -128,6 +143,24 @@ impl SecretStore for FailingOAuthDeleteStore {
 
     fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
         Err(KeychainError::Store("delete unavailable".to_string()))
+    }
+}
+
+struct FailingInputWriteStore;
+
+impl SecretStore for FailingInputWriteStore {
+    fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
+        Err(KeychainError::Store(
+            "input secret write unavailable".to_string(),
+        ))
+    }
+
+    fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+        Ok(None)
+    }
+
+    fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
+        Ok(())
     }
 }
 
@@ -1283,7 +1316,9 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
     assert!(
         matches!(
             &missing_openrouter_entry,
-            RuntimeActionError::MissingSecret { input_id, .. } if input_id == "openrouterkey"
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "openrouterkey"
+                    && message.contains("user confirmation is required")
         ),
         "unexpected error after defining both inputs: {missing_openrouter_entry:?}"
     );
@@ -1303,7 +1338,9 @@ async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing()
     assert!(
         matches!(
             &missing_zhipu_entry,
-            RuntimeActionError::MissingSecret { input_id, .. } if input_id == "zhipukey"
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "zhipukey"
+                    && message.contains("user confirmation is required")
         ),
         "unexpected error after defining zhipukey: {missing_zhipu_entry:?}"
     );
@@ -1860,9 +1897,10 @@ async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
     assert!(matches!(
         missing_entry_batch.failures.as_slice(),
         [mcp::McpBatchFailure {
-            error: RuntimeActionError::MissingSecret { input_id, .. },
+            error: RuntimeActionError::ResolverFailed { input_id, message },
             ..
         }] if input_id == "batch-openrouterkey"
+            && message.contains("user confirmation is required")
     ));
     inputs::upsert_input_entry_core(
         &state,
@@ -5902,8 +5940,8 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     assert!(
         matches!(
             &error,
-            RuntimeActionError::MissingInput { input_id, env_hint, .. }
-                if input_id == "runtime-token" && env_hint == "A2C_SMCP_runtime_token"
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "runtime-token" && message.contains("user confirmation is required")
         ),
         "unexpected MCP start error: {error:?}"
     );
@@ -5929,6 +5967,644 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
         .sdk_mcp_server_ids()
         .await
         .contains(&bundle_id("runtime-input-apply")));
+}
+
+#[tokio::test]
+async fn test_user_mcp_start_prompts_in_place_and_continues_without_retry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: Some("Runtime token".to_string()),
+            description: Some("Token supplied during start".to_string()),
+            default: Some("definition-default-must-not-auto-resolve".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "runtime-input-interactive",
+        "bundle_id": "runtime-input-interactive",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "RUNTIME_TOKEN": "${input:runtime-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("integration-test", true);
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        mcp::start_mcp_server_interactive_core(
+            start_state.as_ref(),
+            TEST_INSTANCE_ID,
+            &bundle_id("runtime-input-interactive"),
+        )
+        .await
+    });
+
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("interactive start must emit a runtime input request")
+        .expect("runtime input bridge must remain connected");
+    assert_eq!(request.instance_id, TEST_INSTANCE_ID);
+    assert_eq!(request.reason, RuntimeInputRequestReason::Missing);
+    assert!(!request.secret);
+    assert!(matches!(
+        &request.definition,
+        a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
+            if prompt.id == "runtime-token"
+                && prompt.default.as_deref() == Some("definition-default-must-not-auto-resolve")
+    ));
+    assert!(
+        inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID)
+            .unwrap()
+            .is_empty()
+    );
+
+    let completion = bridge.complete(
+        &request.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "confirmed-at-start".to_string(),
+        },
+    );
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    start.unwrap().unwrap();
+
+    let entries = inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "runtime-token");
+    assert_eq!(
+        entries[0].value,
+        Some(serde_json::json!("confirmed-at-start"))
+    );
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("runtime-input-interactive")));
+}
+
+#[tokio::test]
+async fn test_pending_foreground_prompt_does_not_block_another_computer_background_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: Some("Runtime token".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let waiting_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "waiting-server",
+        "bundle_id": "waiting-server",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "RUNTIME_TOKEN": "${input:runtime-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, waiting_server)
+        .await
+        .unwrap();
+
+    const SECOND_INSTANCE_ID: &str = "computer-b";
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(SECOND_INSTANCE_ID, "Computer B"))
+        .unwrap();
+    let independent_server =
+        echo_server_config_with_bundle_id("independent-server", "independent-server");
+    sdk_config::upsert_computer_mcp_config_core(&state, SECOND_INSTANCE_ID, independent_server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("cross-computer-test", true);
+
+    let waiting_state = state.clone();
+    let waiting_start = tokio::spawn(async move {
+        mcp::start_mcp_server_interactive_core(
+            waiting_state.as_ref(),
+            TEST_INSTANCE_ID,
+            &bundle_id("waiting-server"),
+        )
+        .await
+    });
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer A must reach its foreground prompt")
+        .expect("prompt bridge must remain available");
+
+    let stop_state = state.clone();
+    let same_computer_stop = tokio::spawn(async move {
+        computer::stop_computer_instance_core(stop_state.as_ref(), TEST_INSTANCE_ID.to_string())
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !same_computer_stop.is_finished(),
+        "Computer A stop must wait behind its foreground Runtime Input operation"
+    );
+
+    timeout(
+        Duration::from_secs(5),
+        start_computer_instance_core(None, state.as_ref(), SECOND_INSTANCE_ID.to_string()),
+    )
+    .await
+    .expect("Computer B background start must not wait behind Computer A's queued stop")
+    .unwrap();
+
+    let completion = bridge.complete(&request.request_id, RuntimeInputCompletion::Cancelled);
+    let (completion, waiting_start) = tokio::join!(completion, waiting_start);
+    completion.unwrap();
+    assert!(matches!(
+        waiting_start.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    timeout(Duration::from_secs(5), same_computer_stop)
+        .await
+        .expect("Computer A stop must resume after its prompt is cancelled")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_interactive_start_all_serializes_distinct_inputs_and_reuses_shared_entry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    for input_id in ["shared-token", "region"] {
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: input_id.to_string(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for (name, input_id) in [
+        ("shared-one", "shared-token"),
+        ("region-server", "region"),
+        ("shared-two", "shared-token"),
+    ] {
+        let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": name,
+            "bundle_id": name,
+            "disabled": false,
+            "server_parameters": {
+                "command": "node",
+                "args": [common::echo_server_path().to_str().unwrap()],
+                "env": { "VALUE": format!("${{input:{input_id}}}") }
+            }
+        }))
+        .unwrap();
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+            .await
+            .unwrap();
+    }
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("start-all-test", true);
+    let start_state = state.clone();
+    let start_all = tokio::spawn(async move {
+        mcp::start_all_servers_interactive_core(start_state.as_ref(), TEST_INSTANCE_ID).await
+    });
+
+    let first = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("start-all must request its first missing input")
+        .unwrap();
+    let first_id = first.definition.id().to_string();
+    let first_value = format!("confirmed-{first_id}");
+    let completion_bridge = bridge.clone();
+    let first_completion = tokio::spawn(async move {
+        completion_bridge
+            .complete(
+                &first.request_id,
+                RuntimeInputCompletion::Confirmed { value: first_value },
+            )
+            .await
+    });
+    let second = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("start-all must serialize its second distinct input")
+        .unwrap();
+    first_completion.await.unwrap().unwrap();
+    let second_id = second.definition.id().to_string();
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        [first_id.as_str(), second_id.as_str()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        ["shared-token", "region"]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+    );
+
+    let completion = bridge.complete(
+        &second.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: format!("confirmed-{second_id}"),
+        },
+    );
+    let (completion, result) = tokio::join!(completion, start_all);
+    completion.unwrap();
+    let result = result.unwrap().unwrap();
+    assert!(
+        result.failures.is_empty(),
+        "unexpected failures: {:?}",
+        result.failures
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "shared input must not prompt twice"
+    );
+    let entries = inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 2);
+}
+
+#[tokio::test]
+async fn test_computer_start_and_restart_share_the_foreground_runtime_input_contract() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "lifecycle-token".to_string(),
+            label: None,
+            description: None,
+            default: Some("prefill-only".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "computer-lifecycle-input",
+        "bundle_id": "computer-lifecycle-input",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:lifecycle-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("computer-lifecycle-test", true);
+
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        computer::start_computer_instance_interactive_core(
+            None,
+            start_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let start_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer start must prompt")
+        .unwrap();
+    let completion = bridge.complete(
+        &start_prompt.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "start-value".to_string(),
+        },
+    );
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    assert!(start.unwrap().unwrap().running);
+
+    inputs::delete_input_entry_core(state.as_ref(), TEST_INSTANCE_ID, "lifecycle-token")
+        .await
+        .unwrap();
+    let restart_state = state.clone();
+    let restart = tokio::spawn(async move {
+        computer::restart_computer_instance_interactive_core(
+            None,
+            restart_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let restart_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer restart must prompt again after the entry is deleted")
+        .unwrap();
+    let completion = bridge.complete(
+        &restart_prompt.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "restart-value".to_string(),
+        },
+    );
+    let (completion, restart) = tokio::join!(completion, restart);
+    completion.unwrap();
+    assert!(restart.unwrap().unwrap().running);
+}
+
+#[tokio::test]
+async fn test_foreground_computer_start_propagates_runtime_input_bridge_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "start-token".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "start-bridge-failure",
+        "bundle_id": "start-bridge-failure",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:start-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let error = computer::start_computer_instance_interactive_core(
+        None,
+        &state,
+        TEST_INSTANCE_ID.to_string(),
+    )
+    .await
+    .expect_err("foreground start must not swallow an unavailable Runtime Input bridge");
+    assert!(matches!(
+        error,
+        RuntimeActionError::ResolverFailed { input_id, .. } if input_id == "start-token"
+    ));
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await,
+        "failed foreground start must roll back the partially started runtime"
+    );
+}
+
+#[tokio::test]
+async fn test_foreground_computer_start_stops_after_first_input_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    for input_id in ["first-token", "second-token"] {
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: input_id.to_string(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": format!("server-{input_id}"),
+            "bundle_id": format!("server-{input_id}"),
+            "disabled": false,
+            "server_parameters": {
+                "command": "node",
+                "args": [common::echo_server_path().to_str().unwrap()],
+                "env": { "TOKEN": format!("${{input:{input_id}}}") }
+            }
+        }))
+        .unwrap();
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+            .await
+            .unwrap();
+    }
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("computer-fail-fast-test", true);
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        computer::start_computer_instance_interactive_core(
+            None,
+            start_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let first = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground Computer start must request its first missing input")
+        .unwrap();
+
+    let completion = bridge.complete(&first.request_id, RuntimeInputCompletion::Cancelled);
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    assert!(matches!(
+        start.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "foreground Computer start must not request another input after cancellation"
+    );
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await
+    );
+}
+
+#[tokio::test]
+async fn test_foreground_computer_restart_propagates_secret_persistence_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(create_config_only_state_with_store(
+        tmp.path(),
+        Arc::new(FailingInputWriteStore),
+    ));
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(TEST_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    inputs::add_or_update_input_core(
+        state.as_ref(),
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "restart-secret".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "restart-persistence-failure",
+        "bundle_id": "restart-persistence-failure",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:restart-secret}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(state.as_ref(), TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("restart-persistence-test", true);
+    let restart_state = state.clone();
+    let restart = tokio::spawn(async move {
+        computer::restart_computer_instance_interactive_core(
+            None,
+            restart_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground restart must request its missing secret")
+        .unwrap();
+    assert!(request.secret);
+
+    let completion = bridge.complete(
+        &request.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "must-not-persist".to_string(),
+        },
+    );
+    let (completion, restart) = tokio::join!(completion, restart);
+    assert!(
+        completion.is_err(),
+        "native persistence failure must reject completion"
+    );
+    assert!(matches!(
+        restart.unwrap().unwrap_err(),
+        RuntimeActionError::ResolverFailed { input_id, .. } if input_id == "restart-secret"
+    ));
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await,
+        "failed foreground restart must not leave a partially restarted runtime"
+    );
 }
 
 #[tokio::test]
@@ -6268,8 +6944,9 @@ async fn test_restart_is_not_blocked_and_mcp_start_preserves_missing_input_error
     assert!(
         matches!(
             error,
-            RuntimeActionError::MissingInput { ref input_id, .. }
+            RuntimeActionError::ResolverFailed { ref input_id, ref message }
                 if input_id == "runtime-token"
+                    && message.contains("user confirmation is required")
         ),
         "MCP start returned an unexpected error after restart: {error:?}"
     );

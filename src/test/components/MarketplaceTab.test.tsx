@@ -583,7 +583,7 @@ describe('MarketplaceTab', () => {
     expect(screen.getByText('Add').closest('button')).toBeDisabled();
   });
 
-  it('stores a plugin-requested Computer input entry and automatically retries enable', async () => {
+  it('keeps one plugin enable pending while the global runtime input bridge owns prompting', async () => {
     const governance = {
       capabilities: supportedCapabilities,
       marketplaces: [
@@ -606,9 +606,11 @@ describe('MarketplaceTab', () => {
       ],
     };
     let enableAttempts = 0;
+    let enableCompleted = false;
+    const enable = deferred<void>();
     mockedInvoke.mockImplementation(async (command) => {
       if (command === 'get_marketplace_governance') {
-        return enableAttempts < 2 ? governance : {
+        return !enableCompleted ? governance : {
           ...governance,
           plugins: [{ ...governance.plugins[0], enabled: true, status: 'enabled' }],
         };
@@ -616,48 +618,29 @@ describe('MarketplaceTab', () => {
       if (command === 'list_skills') return [];
       if (command === 'enable_plugin') {
         enableAttempts += 1;
-        if (enableAttempts === 1) {
-          throw {
-            code: 'missing_secret',
-            input_id: 'audit@acme/api_token',
-            env_hint: 'A2C_SMCP_audit_acme_api_token',
-            message: 'Required plugin secret is unresolved',
-          };
-        }
+        await enable.promise;
+        enableCompleted = true;
         return undefined;
       }
-      if (command === 'get_runtime_input') {
-        return {
-          type: 'PromptString',
-          id: 'audit@acme/api_token',
-          label: 'API token',
-          password: true,
-        };
-      }
-      if (command === 'list_input_entries') return [];
-      if (command === 'upsert_input_entry') return undefined;
       throw new Error(`Unexpected invoke command: ${command}`);
     });
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
     fireEvent.click((await screen.findByText('Enable Plugin')).closest('button')!);
-    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText('Enter value'), {
-      target: { value: 'plugin-secret' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
     await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('upsert_input_entry', {
-        instanceId: 'computer-a',
-        key: 'audit@acme/api_token',
-        value: 'plugin-secret',
-        secret: true,
-      });
+      expect(enableAttempts).toBe(1);
     });
-    expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(2);
     expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('upsert_input_entry', expect.anything());
+    await act(async () => {
+      enable.resolve();
+      await enable.promise;
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText('enabled').length).toBeGreaterThan(0);
+    });
+    expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(1);
   });
 
   it('previews an enabled plugin skill from the details pane', async () => {
