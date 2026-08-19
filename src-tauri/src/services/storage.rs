@@ -12,7 +12,7 @@ pub fn write_json_atomically<T: Serialize + ?Sized>(
     Ok(())
 }
 
-fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

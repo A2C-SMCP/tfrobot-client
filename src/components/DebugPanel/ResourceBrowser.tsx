@@ -33,7 +33,7 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
   const runningServers = useMemo(
     () => (
       serversBelongToInstance
-        ? servers.filter((server) => server.running && !server.disabled)
+        ? servers.filter((server) => server.connection_state === 'connected' && !server.disabled)
         : []
     ),
     [servers, serversBelongToInstance],

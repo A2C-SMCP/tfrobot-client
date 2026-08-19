@@ -1,16 +1,9 @@
 import { useEffect, useState } from 'react';
-import { App, Button, Space, Modal, Typography, Alert, Table, Tag, Popconfirm } from 'antd';
-import {
-  PlusOutlined,
-  ReloadOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  ClearOutlined,
-} from '@ant-design/icons';
+import { App, Alert, Button, Modal, Popconfirm, Space, Table, Typography } from 'antd';
+import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useInputStore, type InputDefinition } from '@/stores/inputStore';
-import { InputForm } from './InputForm';
-import { InputValueEditor } from './InputValueEditor';
+import { useInputStore, type InputEntry } from '@/stores/inputStore';
+import { InputEntryEditor } from './InputEntryEditor';
 
 const { Title } = Typography;
 
@@ -22,159 +15,98 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
-    inputs,
-    values,
-    loading,
-    error,
-    fetchInputs,
-    fetchValues,
-    addOrUpdateInput,
-    removeInput,
-    setValue,
-    clearValues,
+    entries,
+    entriesLoading,
+    entriesLoadedInstanceId,
+    entriesError,
+    fetchEntries,
+    upsertEntry,
+    deleteEntry,
   } = useInputStore();
-
-  const [formVisible, setFormVisible] = useState(false);
-  const [editingInput, setEditingInput] = useState<InputDefinition | undefined>();
-  const [valueEditorVisible, setValueEditorVisible] = useState(false);
-  const [editingValueId, setEditingValueId] = useState<string>('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<InputEntry>();
+  const ready = entriesLoadedInstanceId === instanceId && !entriesLoading && !entriesError;
 
   useEffect(() => {
-    fetchInputs(instanceId);
-    fetchValues(instanceId);
-  }, [fetchInputs, fetchValues, instanceId]);
+    fetchEntries(instanceId);
+  }, [fetchEntries, instanceId]);
 
-  const handleAdd = () => {
-    setEditingInput(undefined);
-    setFormVisible(true);
+  useEffect(() => {
+    setEditorOpen(false);
+    setEditing(undefined);
+  }, [instanceId]);
+
+  const openCreate = () => {
+    setEditing(undefined);
+    setEditorOpen(true);
   };
-
-  const handleEdit = (input: InputDefinition) => {
-    setEditingInput(input);
-    setFormVisible(true);
+  const openEdit = (entry: InputEntry) => {
+    setEditing(entry);
+    setEditorOpen(true);
   };
-
-  const handleFormSubmit = async (input: InputDefinition) => {
+  const handleSubmit = async (key: string, value: string | undefined, secret: boolean) => {
+    await upsertEntry(instanceId, key, value, secret);
+    message.success(t(editing ? 'inputs.messages.entryUpdated' : 'inputs.messages.entryCreated'));
+    setEditorOpen(false);
+  };
+  const handleDelete = async (key: string) => {
     try {
-      await addOrUpdateInput(instanceId, input);
-      message.success(t('inputs.messages.saved'));
-      setFormVisible(false);
-    } catch (e) {
-      message.error(String(e));
+      await deleteEntry(instanceId, key);
+      message.success(t('inputs.messages.entryDeleted'));
+    } catch (cause) {
+      message.error(String(cause));
     }
-  };
-
-  const handleSetValue = (id: string) => {
-    setEditingValueId(id);
-    setValueEditorVisible(true);
-  };
-
-  const handleValueSubmit = async (value: string) => {
-    try {
-      await setValue(instanceId, editingValueId, value);
-      message.success(t('inputs.messages.valueSet'));
-      setValueEditorVisible(false);
-    } catch (e) {
-      message.error(String(e));
-    }
-  };
-
-  const handleClearAll = async () => {
-    try {
-      await clearValues(instanceId);
-      message.success(t('inputs.messages.valuesCleared'));
-    } catch (e) {
-      message.error(String(e));
-    }
-  };
-
-  const typeColors: Record<string, string> = {
-    PromptString: 'blue',
-    PickString: 'green',
-    Command: 'orange',
   };
 
   const columns = [
     {
-      title: t('inputs.table.id'),
-      dataIndex: 'id',
-      key: 'id',
-      width: 150,
+      title: t('inputs.entry.key'),
+      dataIndex: 'key',
+      key: 'key',
     },
     {
-      title: t('inputs.table.type'),
-      key: 'type',
-      width: 120,
-      render: (_: unknown, record: InputDefinition) => (
-        <Tag color={typeColors[record.type]}>{record.type}</Tag>
-      ),
+      title: t('inputs.table.storageMode'),
+      key: 'storageMode',
+      width: 220,
+      render: (_: unknown, entry: InputEntry) => entry.secret
+        ? t('inputs.secretMode')
+        : t('inputs.nonSecretMode'),
     },
     {
-      title: t('inputs.table.label'),
-      dataIndex: 'label',
-      key: 'label',
-    },
-    {
-      title: t('inputs.table.currentValue'),
+      title: t('inputs.entry.value'),
       key: 'value',
-      width: 200,
-      render: (_: unknown, record: InputDefinition) => {
-        const stored = values[record.id];
-        if (stored?.configured) {
-          const displayValue = record.type === 'PromptString' && record.password
-            ? t('inputs.configuredSecret')
-            : String(stored.value ?? '');
-          return (
-            <Button
-              type="link"
-              size="small"
-              aria-label={t('inputs.setValueFor', { id: record.id })}
-              onClick={() => handleSetValue(record.id)}
-            >
-              {displayValue.length > 30 ? displayValue.substring(0, 30) + '...' : displayValue}
-            </Button>
-          );
-        }
-        return (
-          <Button
-            type="link"
-            size="small"
-            aria-label={t('inputs.setValueFor', { id: record.id })}
-            onClick={() => handleSetValue(record.id)}
-          >
-            {t('inputs.setValue')}
-          </Button>
-        );
-      },
+      render: (_: unknown, entry: InputEntry) => entry.secret
+        ? t('inputs.configuredSecret')
+        : String(entry.value ?? ''),
     },
     {
       title: t('inputs.table.actions'),
       key: 'actions',
-      width: 150,
-      render: (_: unknown, record: InputDefinition) => (
-        <Space>
+      width: 190,
+      render: (_: unknown, entry: InputEntry) => (
+        <Space size="small">
           <Button
-            type="text"
+            type="link"
             size="small"
             icon={<EditOutlined />}
-            aria-label={t('inputs.editInputFor', { id: record.id })}
-            title={t('inputs.editInputFor', { id: record.id })}
-            onClick={() => handleEdit(record)}
-          />
+            aria-label={t('inputs.entry.editFor', { key: entry.key })}
+            onClick={() => openEdit(entry)}
+          >
+            {t('common.edit')}
+          </Button>
           <Popconfirm
-            title={t('inputs.confirmRemove')}
-            onConfirm={() => {
-              removeInput(instanceId, record.id).catch((e) => message.error(String(e)));
-            }}
+            title={t('inputs.entry.confirmDelete', { key: entry.key })}
+            onConfirm={() => handleDelete(entry.key)}
           >
             <Button
-              type="text"
+              type="link"
               size="small"
               danger
               icon={<DeleteOutlined />}
-              aria-label={t('inputs.removeInputFor', { id: record.id })}
-              title={t('inputs.removeInputFor', { id: record.id })}
-            />
+              aria-label={t('inputs.entry.deleteFor', { key: entry.key })}
+            >
+              {t('common.delete')}
+            </Button>
           </Popconfirm>
         </Space>
       ),
@@ -183,83 +115,43 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
 
   return (
     <div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
         <Space wrap>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchInputs(instanceId); fetchValues(instanceId); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} loading={entriesLoading} onClick={() => fetchEntries(instanceId)}>
             {t('common.refresh')}
           </Button>
-          <Popconfirm title={t('inputs.confirmClearValues')} onConfirm={handleClearAll}>
-            <Button icon={<ClearOutlined />} danger>
-              {t('inputs.clearValues')}
-            </Button>
-          </Popconfirm>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            aria-label={t('inputs.addInput')}
-            onClick={handleAdd}
-          >
-            {t('inputs.addInput')}
+          <Button type="primary" icon={<PlusOutlined />} disabled={!ready} onClick={openCreate}>
+            {t('inputs.entry.add')}
           </Button>
         </Space>
       </div>
 
-      {error && (
-        <Alert message={t('common.error')} description={error} type="error" showIcon closable style={{ marginBottom: 16 }} />
+      {entriesError && (
+        <Alert message={t('common.error')} description={entriesError} type="error" showIcon style={{ marginBottom: 16 }} />
       )}
 
       <Table
-        dataSource={inputs}
+        dataSource={entries}
         columns={columns}
-        rowKey="id"
-        loading={loading}
+        rowKey="key"
+        loading={entriesLoading}
         pagination={false}
-        size="middle"
-        scroll={{ x: 'max-content' }}
+        locale={{ emptyText: t('inputs.entry.empty') }}
       />
 
-      <Modal
-        title={editingInput ? t('inputs.editInput') : t('inputs.addInput')}
-        open={formVisible}
-        onCancel={() => setFormVisible(false)}
-        footer={null}
-        destroyOnHidden
-        width={600}
-      >
-        <InputForm
-          initialValues={editingInput}
-          onSubmit={handleFormSubmit}
-          onCancel={() => setFormVisible(false)}
-          loading={loading}
-        />
-      </Modal>
-
-      <Modal
-        title={t('inputs.setValueFor', { id: editingValueId })}
-        open={valueEditorVisible}
-        onCancel={() => setValueEditorVisible(false)}
-        footer={null}
-        destroyOnHidden
-        width={400}
-      >
-        <InputValueEditor
-          inputId={editingValueId}
-          inputs={inputs}
-          currentValue={values[editingValueId]?.value}
-          onSubmit={handleValueSubmit}
-          onCancel={() => setValueEditorVisible(false)}
-        />
-      </Modal>
+      {editorOpen && (
+        <Modal
+          title={t(editing ? 'inputs.entry.edit' : 'inputs.entry.add')}
+          open
+          onCancel={() => setEditorOpen(false)}
+          footer={null}
+          destroyOnHidden
+          width={440}
+        >
+          <InputEntryEditor entry={editing} onSubmit={handleSubmit} onCancel={() => setEditorOpen(false)} />
+        </Modal>
+      )}
     </div>
   );
 }

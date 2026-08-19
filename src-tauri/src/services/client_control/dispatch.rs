@@ -608,7 +608,7 @@ pub(super) async fn dispatch(
         }
         ToolId::McpConfigGetState => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
-            sdk_config::get_computer_config_state_core(&state, &args.computer_id)
+            sdk_config::get_computer_config_state_for_client_control_core(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }

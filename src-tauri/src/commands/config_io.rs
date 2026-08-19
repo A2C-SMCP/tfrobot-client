@@ -2,11 +2,9 @@ use crate::services::sdk_config::SdkConfigService;
 use crate::services::storage::write_json_atomically;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    HttpAuthPolicy, HttpServerConfig, HttpServerParameters, StdioServerConfig,
-    StdioServerParameters,
+    HttpServerConfig, HttpServerParameters, StdioServerConfig, StdioServerParameters,
 };
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
-use a2c_smcp::smcp_computer::oauth::{OAuthClientMode, OAuthClientRegistration, OAuthOptions};
 use a2c_smcp::smcp_computer::settings::config::ValidationReport;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -45,10 +43,7 @@ struct ConfigImportTransaction {
 }
 
 #[derive(Debug, Default)]
-struct RecoveredConfigImport {
-    servers: Vec<MCPServerConfig>,
-    inputs_changed: bool,
-}
+struct RecoveredConfigImport;
 
 /// Detected config format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +121,7 @@ pub async fn import_config_core(
     instance_id: String,
     format: Option<ConfigFormat>,
 ) -> Result<ImportResult, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?.to_string();
@@ -187,14 +183,13 @@ async fn import_servers_and_inputs(
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
     let servers = state
         .sdk_config
-        .prepare_portable_mcp_configs(&servers)
+        .prepare_literal_preserving_mcp_configs(&servers)
         .map_err(|error| error.to_string())?;
     let transaction_inputs = inputs.clone();
 
-    let recovered_import = recover_pending_config_import_for_instance(
+    recover_pending_config_import_for_instance(
         state.config.as_ref(),
         state.sdk_config.as_ref(),
-        state.secret_store.as_ref(),
         instance_id,
     )?;
     let inputs_imported = inputs.len();
@@ -204,9 +199,9 @@ async fn import_servers_and_inputs(
         None
     } else {
         let mut existing = state
-            .config
-            .load_inputs_for_instance(instance_id)
-            .map_err(|e| e.to_string())?;
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
         for input in inputs {
             let id = input.id().to_string();
             existing.retain(|item| item.id() != id);
@@ -214,19 +209,6 @@ async fn import_servers_and_inputs(
         }
         Some(existing)
     };
-
-    if !recovered_import.servers.is_empty() || recovered_import.inputs_changed {
-        // Recovery is a completed prior transaction. Synchronize it independently so a
-        // preflight failure in this new import cannot leave recovered declarations stale in an
-        // already-created runtime.
-        synchronize_imported_runtime(
-            state,
-            instance_id,
-            &recovered_import.servers,
-            recovered_import.inputs_changed,
-        )
-        .await?;
-    }
 
     if servers.is_empty() && merged_inputs.is_none() {
         return Ok(ImportResult {
@@ -253,12 +235,12 @@ async fn import_servers_and_inputs(
     };
     persist_config_import_transaction(state.config.as_ref(), &transaction)?;
 
-    // The durable, secret-free transaction makes a crash between the two stores recoverable.
+    // The durable transaction makes a crash between the two stores recoverable. It shares the
+    // Computer's trusted local storage boundary because user-authored constants may be plaintext.
     let mut transaction = transaction;
     let input_snapshot = if let Some(merged_inputs) = &merged_inputs {
         match crate::commands::inputs::replace_input_definitions_config_only_locked(
-            state.config.as_ref(),
-            state.secret_store.as_ref(),
+            state.sdk_config.as_ref(),
             instance_id,
             merged_inputs,
         ) {
@@ -288,8 +270,7 @@ async fn import_servers_and_inputs(
     {
         let rollback_error = input_snapshot.as_ref().and_then(|snapshot| {
             crate::commands::inputs::restore_input_definitions_config_only_locked(
-                state.config.as_ref(),
-                state.secret_store.as_ref(),
+                state.sdk_config.as_ref(),
                 instance_id,
                 snapshot,
             )
@@ -315,55 +296,11 @@ async fn import_servers_and_inputs(
 
     finish_config_import_transaction(state.config.as_ref(), &mut transaction);
 
-    synchronize_imported_runtime(state, instance_id, &servers, merged_inputs.is_some()).await?;
-
     Ok(ImportResult {
         servers_imported,
         inputs_imported,
         servers_skipped: Vec::new(),
     })
-}
-
-async fn synchronize_imported_runtime(
-    state: &AppState,
-    instance_id: &str,
-    servers: &[MCPServerConfig],
-    inputs_changed: bool,
-) -> Result<(), String> {
-    let Some(mut runtime) = state.computer_registry.runtime(instance_id).await else {
-        return Ok(());
-    };
-
-    if inputs_changed {
-        let instance = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|error| error.to_string())?;
-        runtime = state
-            .computer_registry
-            .update_runtime_instance(instance)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Configuration was imported, but the target Computer runtime could not synchronize its Inputs: {error}"
-                )
-            })?;
-    }
-
-    for server in servers {
-        if let Err(error) = runtime.apply_user_mcp_server_config(server.clone()).await {
-            // The SDK declaration is already committed. A runtime may still be unable to mount
-            // it until a required input, secret, or authorization is supplied; the runtime keeps
-            // that failure as a per-server diagnostic, but import remains a configuration success.
-            log::warn!(
-                "Imported MCP config for instance {}, but active runtime application is pending for {}: {}",
-                instance_id,
-                server.name(),
-                error
-            );
-        }
-    }
-    Ok(())
 }
 
 fn config_import_transaction_path(
@@ -499,11 +436,10 @@ fn load_config_import_transaction(
 fn recover_pending_config_import_for_instance(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_id: &str,
 ) -> Result<RecoveredConfigImport, String> {
     let Some(mut transaction) = load_config_import_transaction(config, instance_id)? else {
-        return Ok(RecoveredConfigImport::default());
+        return Ok(RecoveredConfigImport);
     };
 
     if matches!(
@@ -511,12 +447,12 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Aborted | ConfigImportTransactionPhase::Committed
     ) {
         clear_terminal_config_import_transaction(config, instance_id);
-        return Ok(RecoveredConfigImport::default());
+        return Ok(RecoveredConfigImport);
     }
 
     transaction.inputs = super::inputs::prepare_portable_input_definitions(&transaction.inputs)?;
     transaction.servers = sdk_config
-        .prepare_portable_mcp_configs(&transaction.servers)
+        .prepare_literal_preserving_mcp_configs(&transaction.servers)
         .map_err(|error| error.to_string())?;
     sdk_config
         .preflight_import_mcp_configs(instance_id, &transaction.servers)
@@ -524,8 +460,8 @@ fn recover_pending_config_import_for_instance(
 
     let inputs_changed = !transaction.inputs.is_empty();
     if inputs_changed {
-        let mut merged_inputs = config
-            .load_inputs_for_instance(instance_id)
+        let mut merged_inputs = sdk_config
+            .load_project_input_definitions(instance_id)
             .map_err(|error| error.to_string())?;
         for input in &transaction.inputs {
             let id = input.id().to_string();
@@ -533,8 +469,7 @@ fn recover_pending_config_import_for_instance(
             merged_inputs.push(input.clone());
         }
         crate::commands::inputs::replace_input_definitions_config_only_locked(
-            config,
-            secret_store,
+            sdk_config,
             instance_id,
             &merged_inputs,
         )
@@ -549,28 +484,21 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Committed,
     )?;
     clear_terminal_config_import_transaction(config, instance_id);
-    Ok(RecoveredConfigImport {
-        servers: transaction.servers,
-        inputs_changed,
-    })
+    Ok(RecoveredConfigImport)
 }
 
 pub(crate) fn recover_pending_config_imports(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
     for instance_id in instance_ids {
-        let _recovered = recover_pending_config_import_for_instance(
-            config,
-            sdk_config,
-            secret_store,
-            &instance_id,
-        )
-        .map_err(|error| {
-            format!("Failed to recover config import for Computer '{instance_id}': {error}")
-        })?;
+        let _recovered =
+            recover_pending_config_import_for_instance(config, sdk_config, &instance_id).map_err(
+                |error| {
+                    format!("Failed to recover config import for Computer '{instance_id}': {error}")
+                },
+            )?;
     }
     Ok(())
 }
@@ -631,40 +559,24 @@ fn build_external_mcp_config(
                 .headers
                 .keys()
                 .any(|header| header.eq_ignore_ascii_case("authorization"));
-            let oauth_enabled = server.oauth.unwrap_or(!has_authorization);
-            if oauth_enabled && has_authorization {
+            if server.oauth == Some(true) && has_authorization {
                 return Err(format!(
                     "MCP server '{name}' cannot enable OAuth while providing an Authorization header"
                 ));
             }
+            if server.oauth == Some(false) && !has_authorization {
+                return Err(format!(
+                    "MCP server '{name}' requests oauth=false, but the rust-sdk now uses automatic-only OAuth negotiation and cannot preserve that opt-out"
+                ));
+            }
 
-            let mut config = HttpServerConfig::new(
+            let config = HttpServerConfig::new(
                 name,
                 HttpServerParameters {
                     url,
                     headers: server.headers,
                 },
             );
-            if oauth_enabled {
-                config.oauth = Some(OAuthOptions {
-                    resource: None,
-                    scopes: Vec::new(),
-                    client_name: Some("TFRobot".to_string()),
-                    mode: OAuthClientMode::AuthorizationCode {
-                        registration: OAuthClientRegistration::Dynamic,
-                    },
-                });
-                config.auth_policy = Some(if server.oauth == Some(true) {
-                    HttpAuthPolicy::OAuth
-                } else {
-                    HttpAuthPolicy::Auto
-                });
-            } else {
-                // `oauth: false` is an explicit opt-out. With the new SDK an omitted policy and
-                // no OAuth block means anonymous-first automatic discovery, so persist Disabled
-                // to preserve the user's intent (and make static Authorization remain static-only).
-                config.auth_policy = Some(HttpAuthPolicy::Disabled);
-            }
             Ok(MCPServerConfig::Http(config))
         }
         (Some(_), Some(_)) => Err(format!(
@@ -730,6 +642,7 @@ pub async fn export_config_core(
     instance_id: String,
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?;
@@ -748,12 +661,10 @@ pub async fn export_config_core(
             "Cannot export invalid portable SDK configuration: {details}"
         ));
     }
+    let inputs = SdkConfigService::input_definitions_from_portable_document(&portable)
+        .map_err(|error| error.to_string())?;
     let servers = SdkConfigService::mcp_configs_from_portable_document(portable)
         .map_err(|error| error.to_string())?;
-    let inputs = state
-        .config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
 
     let filtered_servers = match server_names {
@@ -808,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn official_remote_url_maps_to_automatic_dynamic_oauth_http() {
+    fn official_remote_url_maps_to_automatic_oauth_http_without_legacy_fields() {
         let config = build_external_mcp_config(
             "atlassian",
             parse_external_server(serde_json::json!({
@@ -824,35 +735,22 @@ mod tests {
             http.server_parameters.url,
             "https://mcp.atlassian.com/v1/mcp/authv2"
         );
-        assert_eq!(http.auth_policy, Some(HttpAuthPolicy::Auto));
-        let oauth = http.oauth.expect("remote URL defaults to dynamic OAuth");
-        assert!(oauth.resource.is_none());
-        assert!(oauth.scopes.is_empty());
-        assert!(matches!(
-            oauth.mode,
-            OAuthClientMode::AuthorizationCode {
-                registration: OAuthClientRegistration::Dynamic
-            }
-        ));
+        let encoded = serde_json::to_value(http).unwrap();
+        assert!(encoded.get("authPolicy").is_none());
+        assert!(encoded.get("oauth").is_none());
     }
 
     #[test]
-    fn server_url_alias_and_explicit_oauth_opt_out_map_to_public_http() {
-        let config = build_external_mcp_config(
+    fn server_url_alias_and_explicit_oauth_opt_out_is_rejected() {
+        let error = build_external_mcp_config(
             "public",
             parse_external_server(serde_json::json!({
                 "serverUrl": "https://public.example.com/mcp",
                 "oauth": false
             })),
         )
-        .unwrap();
-
-        let MCPServerConfig::Http(http) = config else {
-            panic!("serverUrl entry must import as Streamable HTTP");
-        };
-        assert_eq!(http.server_parameters.url, "https://public.example.com/mcp");
-        assert!(http.oauth.is_none());
-        assert_eq!(http.auth_policy, Some(HttpAuthPolicy::Disabled));
+        .unwrap_err();
+        assert!(error.contains("cannot preserve that opt-out"));
     }
 
     #[test]
@@ -868,8 +766,29 @@ mod tests {
         let MCPServerConfig::Http(static_auth) = static_auth else {
             panic!("URL entry must import as Streamable HTTP");
         };
-        assert!(static_auth.oauth.is_none());
-        assert_eq!(static_auth.auth_policy, Some(HttpAuthPolicy::Disabled));
+        assert!(static_auth
+            .server_parameters
+            .headers
+            .keys()
+            .any(|header| header.eq_ignore_ascii_case("authorization")));
+
+        let static_opt_out = build_external_mcp_config(
+            "static-opt-out",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "oauth": false,
+                "headers": {"Authorization": "Bearer ${input:token}"}
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Http(static_opt_out) = static_opt_out else {
+            panic!("static opt-out entry must import as Streamable HTTP");
+        };
+        assert!(static_opt_out
+            .server_parameters
+            .headers
+            .keys()
+            .any(|header| header.eq_ignore_ascii_case("authorization")));
 
         let proactive = build_external_mcp_config(
             "proactive",
@@ -882,7 +801,9 @@ mod tests {
         let MCPServerConfig::Http(proactive) = proactive else {
             panic!("URL entry must import as Streamable HTTP");
         };
-        assert_eq!(proactive.auth_policy, Some(HttpAuthPolicy::OAuth));
+        let proactive = serde_json::to_value(proactive).unwrap();
+        assert!(proactive.get("authPolicy").is_none());
+        assert!(proactive.get("oauth").is_none());
 
         let conflict = build_external_mcp_config(
             "conflict",

@@ -1,22 +1,20 @@
+use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
+use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
-use crate::services::sdk_config::{is_writable_provenance, normalize_mcp_input_references};
+use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
-use a2c_smcp::smcp_computer::inputs::env_var_name;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
 use a2c_smcp::smcp_computer::settings::SettingsValidationError;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tauri::State;
 
 /// Client-facing projection of SDK-owned configuration.
-///
-/// SDK input definitions are intentionally omitted: tfrobot-client owns per-Computer input
-/// definitions, values, and secrets, so the SDK snapshot must not become their UI source of truth.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SdkConfigSnapshotView {
@@ -222,16 +220,48 @@ pub async fn get_computer_config_state_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<SdkConfigStateView, String> {
+    get_computer_config_state_for_projection(state, instance_id, ConfigStateProjection::LocalRaw)
+        .await
+}
+
+/// Returns the API-safe configuration projection used by Client Control. Unlike the trusted
+/// same-machine editor projection, this boundary must not expose plaintext configuration values.
+pub async fn get_computer_config_state_for_client_control_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<SdkConfigStateView, String> {
+    get_computer_config_state_for_projection(
+        state,
+        instance_id,
+        ConfigStateProjection::ClientControlRedacted,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfigStateProjection {
+    LocalRaw,
+    ClientControlRedacted,
+}
+
+async fn get_computer_config_state_for_projection(
+    state: &AppState,
+    instance_id: &str,
+    projection: ConfigStateProjection,
+) -> Result<SdkConfigStateView, String> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
-    let (snapshot, report) = state
+    let (mut snapshot, report) = state
         .sdk_config
         .load_with_validation(instance_id)
         .map_err(|error| error.to_string())?;
-    let snapshot = state
-        .sdk_config
-        .sanitize_snapshot_for_view(snapshot)
-        .map_err(|error| error.to_string())?;
+    if matches!(projection, ConfigStateProjection::ClientControlRedacted) {
+        snapshot = state
+            .sdk_config
+            .sanitize_snapshot_for_client_control(snapshot)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(SdkConfigStateView {
         snapshot: snapshot.into(),
         validation: validation_view(report),
@@ -255,19 +285,19 @@ pub async fn upsert_computer_mcp_config_core(
     instance_id: &str,
     config: MCPServerConfig,
 ) -> Result<(), RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    let config = normalize_mcp_input_references(config).map_err(RuntimeActionError::runtime)?;
-    if resolve_bundle_id(&config).as_str() == CLIENT_CONTROL_BUNDLE_ID {
+    let bundle_id = resolve_bundle_id(&config);
+    let server_name = config.name().to_string();
+    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
         return Err(RuntimeActionError::runtime(
             "bundleId 'client_control' is reserved for the built-in Client Control provider",
         ));
     }
-    let defined_inputs = state
-        .config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let missing_input_id = referenced_input_ids(&config)?
+    let defined_inputs = state.sdk_config.load_input_definitions(instance_id);
+    let referenced_input_ids = referenced_input_ids(&config)?;
+    let missing_input_id = referenced_input_ids
         .into_iter()
         .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
     let previous_config = state
@@ -278,7 +308,6 @@ pub async fn upsert_computer_mcp_config_core(
         .into_iter()
         .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
         .map(|server| server.config);
-    let next_bundle_id = resolve_bundle_id(&config);
     let runtime = state.computer_registry.runtime(instance_id).await;
     let oauth_identity_change = previous_config
         .as_ref()
@@ -300,37 +329,119 @@ pub async fn upsert_computer_mcp_config_core(
         .sdk_config
         .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    if let Some(runtime) = runtime {
-        if let Some(previous_bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
-            if previous_bundle_id != next_bundle_id {
-                if let Err(error) = runtime
-                    .remove_user_mcp_server_config(&previous_bundle_id)
-                    .await
-                {
-                    runtime
-                        .record_mcp_config_apply_diagnostic(
-                            previous_bundle_id.clone(),
-                            format!(
-                                "Configuration saved, but the previous MCP runtime identity could not be removed: {error}. Restart Runtime or inspect the logs before retrying."
-                            ),
-                        )
-                        .await;
-                    return Err(RuntimeActionError::runtime(format!(
-                        "MCP config was saved, but the previous runtime identity could not be removed: {error}"
-                    )));
-                }
-            }
-        }
-        if let Some(input_id) = missing_input_id {
-            return Err(missing_input_definition_error(input_id));
-        }
-        runtime
-            .apply_user_mcp_server_config(config)
-            .await
-            .map_err(RuntimeActionError::from)?;
-    } else if let Some(input_id) = missing_input_id {
-        return Err(missing_input_definition_error(input_id));
+    if let Some(input_id) = missing_input_id {
+        return Err(missing_input_definition_error(input_id)
+            .with_requesting_mcp(bundle_id.to_string(), server_name));
     }
+    Ok(())
+}
+
+/// Commits one Client editor draft as the SDK's top-level Input definitions plus canonical
+/// server references. The SDK remains the persistence/parser boundary; this command only makes
+/// the Client's two projections one atomic user operation.
+#[tauri::command]
+pub async fn upsert_computer_mcp_config_with_inputs(
+    state: State<'_, AppState>,
+    instance_id: String,
+    config: MCPServerConfig,
+    input_definitions: Vec<InputDefinition>,
+    remove_input_ids_if_unused: Vec<String>,
+) -> Result<(), RuntimeActionError> {
+    upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        &instance_id,
+        config,
+        input_definitions,
+        remove_input_ids_if_unused,
+    )
+    .await
+}
+
+pub async fn upsert_computer_mcp_config_with_inputs_core(
+    state: &AppState,
+    instance_id: &str,
+    config: MCPServerConfig,
+    input_definitions: Vec<InputDefinition>,
+    remove_input_ids_if_unused: Vec<String>,
+) -> Result<(), RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _input_guard = state.input_mutation_lock.lock().await;
+    let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
+    let bundle_id = resolve_bundle_id(&config);
+    let server_name = config.name().to_string();
+    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        return Err(RuntimeActionError::runtime(
+            "bundleId 'client_control' is reserved for the built-in Client Control provider",
+        ));
+    }
+
+    let input_definitions = prepare_portable_input_definitions(&input_definitions)
+        .map_err(RuntimeActionError::runtime)?;
+    let edited_input_ids = input_definitions
+        .iter()
+        .map(|definition| definition.id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let mut project_inputs = state
+        .sdk_config
+        .load_project_input_definitions(instance_id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    for definition in &input_definitions {
+        project_inputs.retain(|item| item.id() != definition.id());
+        project_inputs.push(definition.clone());
+    }
+
+    let mut available_inputs = state.sdk_config.load_input_definitions(instance_id);
+    // Only the submitted definitions are candidates for this operation. Replacing the merged
+    // view with every Project definition would incorrectly override Local/Policy precedence.
+    for definition in &input_definitions {
+        available_inputs.retain(|item| item.id() != definition.id());
+        available_inputs.push(definition.clone());
+    }
+    if let Some(input_id) = referenced_input_ids(&config)?
+        .into_iter()
+        .find(|id| !available_inputs.iter().any(|input| input.id() == id))
+    {
+        return Err(missing_input_definition_error(input_id)
+            .with_requesting_mcp(bundle_id.to_string(), server_name));
+    }
+
+    let previous_config = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
+        .map(|server| server.config);
+    let runtime = state.computer_registry.runtime(instance_id).await;
+    let oauth_identity_change = previous_config
+        .as_ref()
+        .filter(|previous| oauth_credential_identity_changed(previous, &config));
+    let _oauth_admission_guard = if oauth_identity_change.is_some() {
+        match runtime.as_ref() {
+            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(previous) = oauth_identity_change {
+        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, previous.clone())
+            .await
+            .map_err(RuntimeActionError::runtime)?;
+    }
+
+    state
+        .sdk_config
+        .upsert_mcp_config_with_inputs_atomically(
+            instance_id,
+            &config,
+            &project_inputs,
+            &edited_input_ids,
+            &remove_input_ids_if_unused.into_iter().collect(),
+        )
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
     Ok(())
 }
 
@@ -350,27 +461,9 @@ fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServe
     let MCPServerConfig::Http(next) = next else {
         unreachable!("OAuth cleanup config is always HTTP");
     };
-    let previous_oauth = previous
-        .oauth
-        .as_ref()
-        .expect("OAuth cleanup config materializes options");
-    let Some(next_oauth) = next.oauth.as_ref() else {
-        unreachable!("OAuth cleanup config materializes options");
-    };
-    let previous_resource = previous_oauth
-        .resource
-        .as_deref()
-        .unwrap_or(&previous.server_parameters.url);
-    let next_resource = next_oauth
-        .resource
-        .as_deref()
-        .unwrap_or(&next.server_parameters.url);
     resolve_bundle_id(&MCPServerConfig::Http(previous.clone()))
         != resolve_bundle_id(&MCPServerConfig::Http(next.clone()))
-        || previous_resource != next_resource
-        || previous_oauth.mode != next_oauth.mode
-        || previous_oauth.scopes != next_oauth.scopes
-        || previous_oauth.client_name != next_oauth.client_name
+        || previous.server_parameters.url != next.server_parameters.url
 }
 
 async fn clear_oauth_before_config_change(
@@ -387,52 +480,26 @@ async fn clear_oauth_before_config_change(
 }
 
 fn missing_input_definition_error(input_id: String) -> RuntimeActionError {
-    RuntimeActionError::MissingInput {
-        env_hint: env_var_name(&input_id),
+    RuntimeActionError::MissingInputDefinition {
         message: format!("Required input '{input_id}' is not defined for this Computer"),
         input_id,
+        requesting_mcp: None,
     }
 }
 
-fn referenced_input_ids(config: &MCPServerConfig) -> Result<BTreeSet<String>, RuntimeActionError> {
+fn referenced_input_ids(
+    config: &MCPServerConfig,
+) -> Result<std::collections::BTreeSet<String>, RuntimeActionError> {
     let value = serde_json::to_value(config)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let mut references = BTreeSet::new();
-    if let Some(parameters) = value.get("server_parameters") {
-        collect_input_references_in_value(parameters, &mut references);
-    }
-    if let Some(env_file) = value.get("envFile") {
-        collect_input_references_in_value(env_file, &mut references);
+    let mut references = std::collections::BTreeSet::new();
+    for field in [value.get("server_parameters"), value.get("envFile")]
+        .into_iter()
+        .flatten()
+    {
+        references.extend(input_references::referenced_input_ids(field));
     }
     Ok(references)
-}
-
-fn collect_input_references_in_value(value: &Value, references: &mut BTreeSet<String>) {
-    match value {
-        Value::String(text) => collect_input_references_in_string(text, references),
-        Value::Array(values) => values
-            .iter()
-            .for_each(|value| collect_input_references_in_value(value, references)),
-        Value::Object(values) => values
-            .values()
-            .for_each(|value| collect_input_references_in_value(value, references)),
-        _ => {}
-    }
-}
-
-fn collect_input_references_in_string(value: &str, references: &mut BTreeSet<String>) {
-    let mut remaining = value;
-    while let Some(start) = remaining.find("${input:") {
-        let candidate = &remaining[start + "${input:".len()..];
-        let Some(end) = candidate.find('}') else {
-            return;
-        };
-        let id = &candidate[..end];
-        if !id.is_empty() {
-            references.insert(id.to_string());
-        }
-        remaining = &candidate[end + 1..];
-    }
 }
 
 /// Removes one SDK-owned MCP declaration without stopping or reloading runtime state.
@@ -450,7 +517,9 @@ pub async fn remove_computer_mcp_config_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _input_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
     let name = name.trim();
     if name.is_empty() {
@@ -472,27 +541,18 @@ pub async fn remove_computer_mcp_config_core(
     if let Some(config) = previous_config.clone() {
         clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
     }
+    let input_candidates = previous_config
+        .as_ref()
+        .map(referenced_input_ids)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     state
         .sdk_config
-        .remove_mcp_config(instance_id, name)
+        .remove_mcp_config_with_input_gc_atomically(instance_id, name, &input_candidates)
         .map_err(|error| error.to_string())?;
-    if let Some(runtime) = runtime {
-        if let Some(bundle_id) = previous_config.as_ref().map(resolve_bundle_id) {
-            if let Err(error) = runtime.remove_user_mcp_server_config(&bundle_id).await {
-                runtime
-                    .record_mcp_config_apply_diagnostic(
-                        bundle_id.clone(),
-                        format!(
-                            "Configuration removed, but the active MCP runtime could not be cleaned up: {error}. Restart Runtime or inspect the logs before retrying."
-                        ),
-                    )
-                    .await;
-                return Err(format!(
-                    "MCP config was removed, but runtime cleanup failed: {error}"
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -528,28 +588,21 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn oauth_http_config(resource: Option<&str>, disabled: bool) -> MCPServerConfig {
+    fn oauth_http_config(endpoint: Option<&str>, disabled: bool) -> MCPServerConfig {
         serde_json::from_value(json!({
             "type": "streamable",
             "name": "protected",
             "bundle_id": "protected",
             "disabled": disabled,
-            "oauth": {
-                "resource": resource,
-                "scopes": [],
-                "clientName": "TFRobot",
-                "mode": {
-                    "type": "authorizationCode",
-                    "registration": "dynamic"
-                }
-            },
-            "server_parameters": { "url": "https://mcp.example.com/mcp" }
+            "server_parameters": {
+                "url": endpoint.unwrap_or("https://mcp.example.com/mcp")
+            }
         }))
         .unwrap()
     }
 
     #[test]
-    fn oauth_identity_change_ignores_disable_but_detects_resource_or_oauth_removal() {
+    fn oauth_identity_change_ignores_disable_but_detects_endpoint_or_static_auth() {
         let enabled = oauth_http_config(None, false);
         let disabled = oauth_http_config(None, true);
         let different_resource = oauth_http_config(Some("https://resource.example.com"), false);
@@ -557,11 +610,6 @@ mod tests {
         if let MCPServerConfig::Http(http) = &mut different_implicit_resource {
             http.server_parameters.url = "https://new-mcp.example.com/mcp".to_string();
         }
-        let mut oauth_off = enabled.clone();
-        if let MCPServerConfig::Http(http) = &mut oauth_off {
-            http.oauth = None;
-        }
-
         assert!(!oauth_credential_identity_changed(&enabled, &disabled));
         assert!(oauth_credential_identity_changed(
             &enabled,
@@ -571,8 +619,6 @@ mod tests {
             &enabled,
             &different_implicit_resource
         ));
-        assert!(oauth_credential_identity_changed(&enabled, &oauth_off));
-
         let legacy_auto: MCPServerConfig = serde_json::from_value(json!({
             "type": "streamable",
             "name": "legacy-auto",
@@ -709,48 +755,6 @@ mod tests {
         ] {
             assert!(!is_writable_provenance(origin));
         }
-    }
-
-    #[test]
-    fn normalizes_mustache_input_references_to_sdk_canonical_syntax() {
-        let config: MCPServerConfig = serde_json::from_value(json!({
-            "type": "stdio",
-            "name": "openai-{{STAGE}}",
-            "vrl": "{{VRL_TEMPLATE}}",
-            "server_parameters": {
-                "command": "node",
-                "args": ["--token={{ OPENAI_KEY }}", "{{not {an id}}}"],
-                "env": {
-                    "OPENAI_API_KEY": "{{OPENAI_KEY}}",
-                    "UNICODE": "{{地区 key}}",
-                    "EXISTING": "${input:EXISTING}"
-                }
-            }
-        }))
-        .unwrap();
-
-        let normalized = normalize_mcp_input_references(config).unwrap();
-        let value = serde_json::to_value(normalized).unwrap();
-
-        assert_eq!(
-            value["server_parameters"]["env"]["OPENAI_API_KEY"],
-            "${input:OPENAI_KEY}"
-        );
-        assert_eq!(
-            value["server_parameters"]["args"][0],
-            "--token=${input:OPENAI_KEY}"
-        );
-        assert_eq!(value["server_parameters"]["args"][1], "{{not {an id}}}");
-        assert_eq!(
-            value["server_parameters"]["env"]["UNICODE"],
-            "${input:地区 key}"
-        );
-        assert_eq!(
-            value["server_parameters"]["env"]["EXISTING"],
-            "${input:EXISTING}"
-        );
-        assert_eq!(value["name"], "openai-{{STAGE}}");
-        assert_eq!(value["vrl"], "{{VRL_TEMPLATE}}");
     }
 
     #[test]

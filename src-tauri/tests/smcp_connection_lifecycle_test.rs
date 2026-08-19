@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use futures_util::FutureExt;
 use http_body_util::Full;
@@ -945,15 +944,15 @@ async fn delete_succeeds_while_socket_reference_is_shared() {
     .await
     .expect("register MCP server");
     runtime
-        .start_mcp_server(&BundleId::try_from("commit-echo").unwrap())
+        .restart()
         .await
-        .expect("start MCP server");
+        .expect("restart runtime with saved MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "commit-echo" && *running),
+            .any(|status| status.name == "commit-echo" && status.is_connected()),
         "commit MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1029,15 +1028,15 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
     .await
     .expect("register cleanup MCP server");
     runtime
-        .start_mcp_server(&BundleId::try_from("cleanup-echo").unwrap())
+        .restart()
         .await
-        .expect("start cleanup MCP server");
+        .expect("restart runtime with saved cleanup MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "cleanup-echo" && *running),
+            .any(|status| status.name == "cleanup-echo" && status.is_connected()),
         "cleanup MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1102,7 +1101,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         ComputerRuntimeState::Shutdown
     );
     assert!(
-        runtime.mcp_server_statuses().await.is_empty(),
+        runtime.mcp_server_runtime_statuses().await.is_empty(),
         "committed deletion retained SDK MCP runtime state"
     );
     wait_for("committed deletion left the SMCP socket active", || {

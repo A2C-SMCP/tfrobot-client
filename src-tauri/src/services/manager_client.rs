@@ -1,8 +1,9 @@
 //! TFRSManager HTTP 客户端。
 //!
-//! 封装桌面端与 TFRSManager 的 3 条核心 REST 调用（登录 / 列表 / connection-info），
-//! 负责 JWT/keychain transport 生命周期与 HTTP 错误分类；401 状态提交由
-//! `ManagerContextCoordinator` 统一线性化。
+//! 封装桌面端与 TFRSManager 的核心业务 REST 调用，负责 JWT/keychain transport 生命周期与
+//! HTTP 错误分类；401 状态提交由 `ManagerContextCoordinator` 统一线性化。Token endpoint 仅提供
+//! generation-bound 的受限原始 transport，OAuth wire contract 由 TypeScript
+//! `@turingfocus/tfrs-auth` 拥有。
 //!
 //! 本模块不依赖 Tauri 运行时，便于单元测试。生产调用必须经过 Manager Context coordinator。
 
@@ -28,11 +29,6 @@ const KEYCHAIN_KEY_PREFIX: &str = "manager_jwt:";
 /// 同时在响应体顶层带 `errorCode = ERR_NOT_FOUND_OR_NO_PERMISSION`。
 /// 数字 `code=404` 与 `message` 不变，仅新增此 `errorCode` 字段。
 pub const ERR_NOT_FOUND_OR_NO_PERMISSION: &str = "ERR_NOT_FOUND_OR_NO_PERMISSION";
-
-/// RFC 8693 token-exchange 的 grant type（TFRC-11 / C1）。
-const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
-/// subject_token 类型：User JWT（区别于 PAT 的 `...:token-type:access_token`）。
-const SUBJECT_TOKEN_TYPE_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 // ───────────────────────── 错误 ─────────────────────────
 
@@ -474,36 +470,6 @@ pub(crate) fn is_auth_header_name(key: &str) -> bool {
         || normalized == "x-api-key"
 }
 
-// ───────── RFC 8693 token-exchange（TFRC-11 / C1，前置 TFRM-158/M4） ─────────
-
-/// `POST /api/v1/oauth/token` 请求体（`application/x-www-form-urlencoded`）。
-/// 公开端点：subject_token 在表单里，无需 Authorization header。**不引 oauth2 crate**，手写表单。
-#[derive(Debug, Serialize)]
-struct TokenExchangeRequest<'a> {
-    grant_type: &'a str,
-    subject_token: &'a str,
-    subject_token_type: &'a str,
-    audience: String,
-    /// 空格分隔的可选 scope；None 时整字段不发送（server 缺省授予全部可用能力）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-}
-
-/// token-exchange 成功响应（OAuth 标准 JSON）。
-#[derive(Debug, Deserialize)]
-struct TokenExchangeResponse {
-    access_token: String,
-    #[serde(default)]
-    token_type: String,
-    #[serde(default)]
-    expires_in: i64,
-    #[serde(default)]
-    #[allow(dead_code)]
-    issued_token_type: Option<String>,
-    #[serde(default)]
-    scope: Option<String>,
-}
-
 /// 换取到的短 JWT 及元数据。`access_token` 是注入 Socket.IO `auth` dict（字段名 `token`）的
 /// 连接面凭据。**故意不实现 `Serialize`**——短 JWT 不应原样透传给前端。
 #[derive(Debug, Clone, PartialEq)]
@@ -513,6 +479,14 @@ pub struct ExchangedToken {
     /// 有效期秒数（server 默认 300）。上层据此计算 `expires_at - 60s` 预刷新重连。
     pub expires_in: i64,
     pub scope: Option<String>,
+}
+
+/// Sensitive input for the TypeScript token bridge. This type is deliberately not serializable;
+/// the Tauri boundary constructs its explicit event DTO at the last possible moment.
+pub(crate) struct ManagerTokenMaterial {
+    pub generation: u64,
+    pub token_url: String,
+    pub user_jwt: String,
 }
 
 /// 402 欠费响应。兼容两种形态用同一个结构：
@@ -720,6 +694,66 @@ impl ManagerClient {
             .await
             .clone()
             .ok_or(ManagerError::NoSession)
+    }
+
+    pub(crate) async fn token_material_for_generation(
+        &self,
+        expected_generation: u64,
+    ) -> Result<ManagerTokenMaterial, ManagerError> {
+        let session = self.require_session().await?;
+        if session.generation != expected_generation {
+            return Err(ManagerError::ContextChanged);
+        }
+        if session.jwt.trim().is_empty() {
+            return Err(ManagerError::NoSession);
+        }
+        Ok(ManagerTokenMaterial {
+            generation: session.generation,
+            token_url: format!("{}/api/v1/oauth/token", session.base_url),
+            user_jwt: session.jwt,
+        })
+    }
+
+    /// Restricted raw transport for the TypeScript token bridge. The bridge has already validated
+    /// the OAuth fields against its pending request; this layer derives the URL and content type
+    /// from the native session so the webview cannot turn it into a general-purpose proxy.
+    pub(crate) async fn token_bridge_http_for_generation(
+        &self,
+        expected_generation: u64,
+        body: String,
+    ) -> Result<(u16, String, Option<String>), ManagerError> {
+        let material = self
+            .token_material_for_generation(expected_generation)
+            .await?;
+        let form_content_type = "application/x-www-form-urlencoded";
+        let response = self
+            .http
+            .post(&material.token_url)
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, form_content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
+        let status = response.status().as_u16();
+        let response_content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(ManagerError::InvalidResponse(
+                "Manager token response exceeded the 1 MiB bridge limit".to_string(),
+            ));
+        }
+        let body = String::from_utf8(bytes.to_vec()).map_err(|_| {
+            ManagerError::InvalidResponse("Manager token response was not UTF-8".to_string())
+        })?;
+        Ok((status, body, response_content_type))
     }
 
     pub async fn current_environment(&self) -> Option<ManagerEnvironment> {
@@ -1135,93 +1169,6 @@ impl ManagerClient {
         Ok(ManagerRequestOutcome { generation, result })
     }
 
-    /// `POST {base}/api/v1/oauth/token` — RFC 8693 token-exchange（C1 / TFRM-153）。
-    ///
-    /// 用当前 session 的 User JWT 作 subject，换取目标机器人的短 JWT（server 默认 5min）。
-    /// 公开端点：subject_token 在 `application/x-www-form-urlencoded` 表单里，无需 Authorization
-    /// header（但本方法要求已登录以取 User JWT）。**不引 oauth2 crate**，手写表单。
-    ///
-    /// - `robot_account_id`：目标机器人账号 ID（audience = `robot:<id>`）。
-    /// - `scope`：可选、空格分隔；None 时不发该字段（server 缺省授予全部可用能力）。
-    ///
-    /// 错误归类：400 → [`ManagerError::TokenExchange`]（RFC 6749 §5.2）；503 →
-    /// [`ManagerError::SigningUnavailable`]（签名未就位，可重试）；401/402/404 等沿用通用归一化
-    /// （401 只在此层归类；session/context 清理由 Manager Context coordinator 事务提交）。
-    pub async fn exchange_token(
-        &self,
-        robot_account_id: &str,
-        scope: Option<String>,
-    ) -> Result<ExchangedToken, ManagerError> {
-        self.exchange_token_outcome(robot_account_id, scope)
-            .await?
-            .result
-    }
-
-    pub(crate) async fn exchange_token_outcome(
-        &self,
-        robot_account_id: &str,
-        scope: Option<String>,
-    ) -> Result<ManagerRequestOutcome<ExchangedToken>, ManagerError> {
-        let session = self.require_session().await?;
-        let generation = session.generation;
-        let result = async {
-            if session.jwt.is_empty() {
-                return Err(ManagerError::NoSession);
-            }
-            let url = format!("{}/api/v1/oauth/token", session.base_url);
-
-            let form = TokenExchangeRequest {
-                grant_type: GRANT_TYPE_TOKEN_EXCHANGE,
-                subject_token: &session.jwt,
-                subject_token_type: SUBJECT_TOKEN_TYPE_JWT,
-                audience: format!("robot:{robot_account_id}"),
-                scope,
-            };
-
-            let resp = self
-                .http
-                .post(&url)
-                .form(&form)
-                .send()
-                .await
-                .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
-
-            let status = resp.status();
-            if status.is_success() {
-                let body: TokenExchangeResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| ManagerError::InvalidResponse(e.to_string()))?;
-                return Ok(ExchangedToken {
-                    access_token: body.access_token,
-                    token_type: body.token_type,
-                    expires_in: body.expires_in,
-                    scope: body.scope,
-                });
-            }
-
-            // 错误分流：400 = RFC 6749 §5.2 OAuth 错误体；503 = 签名子系统未就位；其余沿用通用归一化
-            // （401 交 coordinator 清 session、402 欠费、404 等）。
-            match status {
-                StatusCode::BAD_REQUEST => {
-                    let body = resp.text().await.unwrap_or_default();
-                    let (error, description) = parse_oauth_error(&body);
-                    Err(ManagerError::TokenExchange { error, description })
-                }
-                StatusCode::SERVICE_UNAVAILABLE => {
-                    let body = resp.text().await.unwrap_or_default();
-                    let (_error, description) = parse_oauth_error(&body);
-                    Err(ManagerError::SigningUnavailable {
-                        message: description,
-                    })
-                }
-                _ => Err(self.classify_error(resp).await),
-            }
-        }
-        .await;
-        Ok(ManagerRequestOutcome { generation, result })
-    }
-
     /// 本地登出：清 keychain + 内存 session。无服务端 logout API。
     pub async fn logout(&self) -> Result<(), ManagerError> {
         let mut guard = self.session.write().await;
@@ -1280,23 +1227,6 @@ fn extract_message(body: &str) -> Option<String> {
         .ok()
         .and_then(|probe| probe.message)
         .filter(|message| !message.trim().is_empty())
-}
-
-/// 解析 OAuth / RFC 6749 §5.2 错误体 `{error, error_description}`（token-exchange 用）。
-/// 非 JSON 或缺 `error` 字段时回退 `("invalid_request", None)`。
-fn parse_oauth_error(body: &str) -> (String, Option<String>) {
-    #[derive(Deserialize)]
-    struct OAuthError {
-        #[serde(default)]
-        error: String,
-        #[serde(default)]
-        error_description: Option<String>,
-    }
-    serde_json::from_str::<OAuthError>(body)
-        .ok()
-        .filter(|e| !e.error.is_empty())
-        .map(|e| (e.error, e.error_description))
-        .unwrap_or_else(|| ("invalid_request".to_string(), None))
 }
 
 fn strip_trailing_slash(url: String) -> String {
@@ -1903,42 +1833,6 @@ mod tests {
         let e = ManagerError::Unauthorized;
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("unauthorized"));
-    }
-
-    #[test]
-    fn token_exchange_response_deserializes_oauth_json() {
-        let json = r#"{
-            "access_token": "short-robot-jwt",
-            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-            "token_type": "Bearer",
-            "expires_in": 300,
-            "scope": "smcp:connect tools:call"
-        }"#;
-        let r: TokenExchangeResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(r.access_token, "short-robot-jwt");
-        assert_eq!(r.token_type, "Bearer");
-        assert_eq!(r.expires_in, 300);
-        assert_eq!(r.scope.as_deref(), Some("smcp:connect tools:call"));
-    }
-
-    #[test]
-    fn parse_oauth_error_extracts_error_and_description_with_fallback() {
-        let (e, d) =
-            parse_oauth_error(r#"{"error":"invalid_scope","error_description":"unknown scope x"}"#);
-        assert_eq!(e, "invalid_scope");
-        assert_eq!(d.as_deref(), Some("unknown scope x"));
-
-        // 缺 description → None
-        let (e2, d2) = parse_oauth_error(r#"{"error":"invalid_grant"}"#);
-        assert_eq!(e2, "invalid_grant");
-        assert!(d2.is_none());
-
-        // 非 JSON / 空 error → 回退 invalid_request
-        let (e3, d3) = parse_oauth_error("not json at all");
-        assert_eq!(e3, "invalid_request");
-        assert!(d3.is_none());
-        let (e4, _) = parse_oauth_error(r#"{"error":""}"#);
-        assert_eq!(e4, "invalid_request");
     }
 
     #[test]

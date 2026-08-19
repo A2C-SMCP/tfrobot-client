@@ -2,6 +2,8 @@
   "app": {
     "name": "TFRobot 客户端",
     "runtimeEventsUnavailable": "运行时状态更新不可用",
+    "runtimeInputUnavailable": "运行时输入提示暂不可用",
+    "retryRuntimeInput": "重试输入提示",
     "retryRuntimeEvents": "重试"
   },
   "common": {
@@ -76,6 +78,10 @@
       "createConversationConfirm": "创建",
       "createConversationTitleLabel": "会话标题",
       "createConversationTitlePlaceholder": "输入标题",
+      "deleteConversation": "删除会话",
+      "deleteConversationCancel": "取消",
+      "deleteConversationConfirm": "删除",
+      "deleteConversationPrompt": "永久删除此会话？此操作无法撤销。",
       "disconnectedDescription": "实时更新不可用，请检查连接后重试。",
       "disconnectedTitle": "连接已断开",
       "emptyDescription": "请选择一个会话开始对话。",
@@ -98,6 +104,8 @@
       "interrupting": "正在停止",
       "jumpToLatest": "跳至最新消息",
       "loadMoreConversations": "加载更多",
+      "renameConversation": "重命名会话",
+      "renameConversationConfirm": "重命名",
       "newMessages": "条新消息",
       "noConversations": "暂无会话",
       "openEventDetail": "打开事件详情",
@@ -106,7 +114,8 @@
       "send": "发送",
       "sending": "正在发送",
       "textSendingUnavailable": "当前无法发送文本消息。",
-      "timelineLabel": "会话时间线"
+      "timelineLabel": "会话时间线",
+      "lifecycleDegraded": "连接已恢复，但仅能尽力补回历史；部分瞬时更新可能缺失。"
     }
   },
   "computer": {
@@ -171,7 +180,7 @@
         },
         "inputs": {
           "title": "输入项",
-          "description": "管理当前 Computer 中用户创建的定义、值和 Secret。"
+          "description": "为当前 Computer 的 MCP Input 定义管理实际值；密钥内容会被安全保存并在界面中隐藏。"
         },
         "connection": {
           "title": "连接策略",
@@ -550,6 +559,11 @@
     "confirmRemove": "确定要删除此服务器吗？",
     "importConfig": "导入配置",
     "exportConfig": "导出配置",
+    "exportWarning": {
+      "title": "导出包含明文字面量的配置？",
+      "description": "MCP Constant 值会完全按配置原样导出，其中可能包含密码、令牌或其他凭据。保存在当前 Computer 上的 Input 实际值不会导出。请安全保存和分享该文件。",
+      "confirm": "导出明文配置"
+    },
     "validateConfig": "校验 Schema",
     "bundledConfigHint": "该声明与已安装插件的 bundled server 同名，但配置声明仍可编辑。",
     "readOnlyConfigHint": "该声明来自只读的 {{origin}} scope，无法在此处编辑。",
@@ -564,9 +578,19 @@
       "invalid": "SDK 配置存在 {{count}} 个 Schema 错误。"
     },
     "status": {
-      "running": "运行中",
       "stopped": "已停止",
-      "error": "错误",
+      "disconnected": "已启动但未连接",
+      "connecting": "连接中",
+      "connected": "可用",
+      "authorizationRequired": "等待授权",
+      "error": "连接失败"
+    },
+    "connection": {
+      "disconnected": "未连接",
+      "connecting": "连接中",
+      "connected": "已连接",
+      "authorization_required": "等待授权",
+      "error": "连接错误",
       "pending": "等待中"
     },
     "table": {
@@ -600,6 +624,7 @@
     },
     "actions": {
       "start": "启动",
+      "retry": "重试连接",
       "stop": "停止",
       "managePlugin": "管理 {{plugin}}",
       "edit": "编辑",
@@ -632,12 +657,38 @@
       "cwd": "工作目录",
       "envVars": "环境变量",
       "addEnv": "添加变量",
+      "valueSource": "值来源",
+      "constantSource": "常量",
+      "constantValue": "常量值",
+      "constantHint": "常量以明文配置保存；敏感信息请使用密码类型的 Input。",
+      "inputSource": "Input",
       "inputReference": "引用 Input",
+      "inputRequired": "请选择一个 Input",
+      "pickInputOption": "选择选项",
       "url": "URL",
       "urlRequired": "请输入 URL",
       "headers": "HTTP 请求头",
       "addHeader": "添加请求头",
+      "addConfigItem": "添加配置项",
+      "editConfigItem": "编辑配置项",
+      "editConfigItemFor": "编辑配置项 {{key}}",
+      "removeConfigItemFor": "删除配置项 {{key}}",
+      "configKey": "环境变量 / 请求头名称",
+      "configKeyRequired": "请输入环境变量或请求头名称",
+      "configKeyDuplicate": "当前列表中已存在同名配置项",
+      "configItemType": "配置类型",
+      "inputIdPlaceholder": "输入新的 Input ID，或选择已有 Input",
+      "sharedInputHint": "Input {{id}} 已存在；修改后会影响所有引用该 Input 的配置项。",
+      "unresolvedInput": "Input 定义缺失，请编辑此项补全定义",
+      "inputDefinitionRequired": "保存前请定义 Input {{id}}",
+      "inputDefinitionsLoadFailed": "Input 定义加载失败。为保护现有配置，当前禁止编辑。",
+      "inputDefinitionConflict": "当前服务器内的 Input {{id}} 存在冲突定义",
       "oauthAuthorizationConflict": "请移除静态 Authorization 请求头：此服务器包含显式 OAuth 配置。",
+      "previewCommand": "试运行",
+      "commandPreviewSucceeded": "命令执行成功",
+      "commandPreviewFailed": "命令执行失败",
+      "commandPreviewEmpty": "命令执行成功，但没有输出。",
+      "commandPreviewTruncated": "输出过长，仅显示前 64 KiB。",
       "advancedSettings": "高级设置",
       "disabled": "禁用",
       "forbiddenTools": "禁用工具",
@@ -652,29 +703,37 @@
       "toolMetaInvalidFormat": "每个 tool_meta 的值必须是对象（如 {\"auto_apply\": true}）"
     },
     "messages": {
-      "added": "服务器添加成功",
-      "updated": "服务器更新成功",
-      "enabled": "服务器 {{name}} 已启用",
-      "disabled": "服务器 {{name}} 已禁用",
-      "removed": "服务器删除成功",
+      "added": "服务器已保存，重启 Runtime 后生效",
+      "updated": "服务器已保存，重启 Runtime 后生效",
+      "enabled": "服务器 {{name}} 已保存为启用，重启 Runtime 后生效",
+      "disabled": "服务器 {{name}} 已保存为禁用，重启 Runtime 后生效",
+      "removed": "服务器已删除，重启 Runtime 后生效",
       "started": "服务器 {{name}} 已启动",
+      "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
       "operationFailed": "MCP 操作失败，请查看 Runtime 诊断或日志了解详情。",
+      "missingInputDefinition": "MCP {{name}} 引用了 Input {{id}}，但缺少定义。请先在 MCP 编辑器中补全定义再保存。",
       "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",
       "allStarted": "所有服务器已启动",
       "allStopped": "所有服务器已停止",
       "editNotImplemented": "编辑功能即将推出",
-      "importSuccess": "已导入 {{servers}} 个服务器和 {{inputs}} 个变量",
+      "importSuccess": "已导入 {{servers}} 个服务器和 {{inputs}} 个变量，重启 Runtime 后生效",
       "exportSuccess": "配置导出成功"
     }
   },
   "inputs": {
-    "title": "输入变量",
+    "title": "输入项",
     "addInput": "添加变量",
     "editInput": "编辑变量",
     "editInputFor": "编辑变量 {{id}}",
     "removeInputFor": "删除变量 {{id}}",
     "setValue": "设置值",
+    "editValue": "编辑值",
+    "deleteValue": "删除值",
+    "deleteValueFor": "删除 {{id}} 的已保存值",
+    "confirmDeleteValue": "确定要删除 {{id}} 的已保存值吗？",
+    "secretMode": "密钥",
+    "nonSecretMode": "普通值",
     "selectValue": "请选择一个值",
     "enterValue": "请输入值",
     "clearValues": "清空所有值",
@@ -682,20 +741,57 @@
     "confirmClearValues": "确定要清空所有缓存值吗？",
     "setValueFor": "设置变量值：{{id}}",
     "configuredSecret": "密钥已配置",
+    "notConfigured": "未配置",
+    "valuesLoading": "正在加载已保存的值…",
+    "valuesUnavailable": "暂时无法读取已保存的值",
+    "runtimeCommand": "运行时执行",
+    "entry": {
+      "add": "新增输入项",
+      "edit": "编辑输入项",
+      "empty": "暂无已保存的输入项",
+      "key": "Key",
+      "keyPlaceholder": "请输入 ${input:key} 使用的 key",
+      "value": "值",
+      "storeAsSecret": "设为密钥",
+      "secretHelp": "密钥内容会被安全保存，并在界面中隐藏。",
+      "secretUnchanged": "留空将保留当前密钥",
+      "saveFailed": "无法保存输入项，请重试。",
+      "editFor": "编辑输入项 {{key}}",
+      "deleteFor": "删除输入项 {{key}}",
+      "confirmDelete": "确定要删除输入项 {{key}} 及其已保存值吗？"
+    },
+    "status": {
+      "usingDefault": "使用默认值",
+      "firstOption": "未设置，将使用第一项",
+      "invalidSelection": "已失效：{{value}}",
+      "invalidSecretSelection": "已保存的 Secret 不再是有效选项"
+    },
+    "referenceIssues": {
+      "title": "部分旧 PickString 引用需要处理",
+      "item": "{{serverName}} · {{layer}} · {{fieldPath}} 仍引用 {{inputId}}"
+    },
     "runtime": {
       "missingInput": "启动需要补充变量",
       "missingSecret": "启动需要补充密钥",
+      "invalidSelection": "请选择当前有效值后继续",
+      "description": "请填写此输入项，保存后将继续启动 MCP。",
       "envHint": "可以在此保存，或通过 {{env}} 提供。",
       "definitionMissing": "Input {{id}} 尚未配置，保存后会为当前 Computer 创建。",
       "createAsSecret": "将此 Input 作为 Secret 保存",
+      "entryMissing": "尚未保存 {{id}} 对应的输入项，保存后会为当前 Computer 新增。",
+      "definitionUnavailable": "无法获取 Input {{id}} 的运行时定义。请编辑 MCP 配置或重试 MCP 操作。",
+      "storeAsSecret": "设为密钥",
+      "requestedBy": "由 MCP {{name}}（{{id}}）请求此输入项",
       "loadFailed": "无法加载 Input，请重试或查看日志了解详情。",
-      "submitFailed": "无法保存变量值或 Runtime 重试失败，请重试或查看 Runtime 诊断或日志。"
+      "submitFailed": "无法保存变量值，请重试或查看 Runtime 诊断或日志。",
+      "completionFailed": "运行时输入请求已结束，未能完成处理。请重试原操作。"
     },
     "table": {
       "id": "ID",
       "type": "类型",
       "label": "标签",
       "currentValue": "当前值",
+      "storageMode": "存储模式",
       "actions": "操作"
     },
     "form": {
@@ -703,21 +799,28 @@
       "id": "变量 ID",
       "idRequired": "请输入变量 ID",
       "label": "显示名称",
-      "labelRequired": "请输入显示名称",
       "description": "描述",
       "defaultValue": "默认值",
+      "actualValue": "实际值",
+      "actualValueRequired": "请输入实际值",
+      "secretBlankKeeps": "留空将保留已配置的密钥。",
       "password": "密码模式",
       "options": "选项列表",
+      "optionRequired": "请至少添加一个选项。",
       "addOption": "添加选项",
       "command": "命令",
       "args": "参数",
       "addArg": "添加参数"
     },
     "messages": {
-      "saved": "变量保存成功",
-      "removed": "变量删除成功",
-      "valueSet": "值设置成功",
-      "valuesCleared": "所有缓存值已清空"
+      "saved": "变量已保存，重启 Runtime 后生效",
+      "removed": "变量已删除，重启 Runtime 后生效",
+      "valueSet": "值已保存，重启 Runtime 后生效",
+      "valueDeleted": "已保存值已删除，重启 Runtime 后生效",
+      "valuesCleared": "所有已保存值已清空，重启 Runtime 后生效",
+      "entryCreated": "输入项已新增，将在 MCP 下次实际启动时使用",
+      "entryUpdated": "输入项已更新，将在 MCP 下次实际启动时使用",
+      "entryDeleted": "输入项已删除"
     }
   },
   "connection": {

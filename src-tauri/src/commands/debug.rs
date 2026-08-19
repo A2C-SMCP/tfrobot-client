@@ -5,7 +5,7 @@ use crate::services::observability::{
 };
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    BundleId, CallToolResult, Content, Resource, ServerName, Tool,
+    BundleId, CallToolResult, Content, MCPServerRuntimeStatus, Resource, ServerName, Tool,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -80,7 +80,7 @@ pub async fn get_available_tools_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     let tools: Vec<Tool> = runtime.available_tools().await?;
-    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
+    let running_servers = connected_mcp_servers(runtime.mcp_server_runtime_statuses().await);
 
     let result = tools
         .into_iter()
@@ -217,7 +217,7 @@ pub async fn execute_tool_core(
     let start = std::time::Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
     let tools = runtime.available_tools().await.unwrap_or_default();
-    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
+    let running_servers = connected_mcp_servers(runtime.mcp_server_runtime_statuses().await);
     let fallback_server = resolve_tool_server(&tools, &running_servers, tool_name);
     let history_parameters = redact_sensitive_parameters(params.clone());
 
@@ -391,12 +391,14 @@ fn truncate_error_summary(text: &str) -> String {
     }
 }
 
-fn running_mcp_servers(
-    statuses: Vec<(BundleId, ServerName, bool, String)>,
-) -> Vec<(BundleId, ServerName)> {
+fn connected_mcp_servers(statuses: Vec<MCPServerRuntimeStatus>) -> Vec<(BundleId, ServerName)> {
     statuses
         .into_iter()
-        .filter_map(|(bundle_id, name, running, _)| running.then_some((bundle_id, name)))
+        .filter_map(|status| {
+            status
+                .is_connected()
+                .then_some((status.bundle_id, status.name))
+        })
         .collect()
 }
 

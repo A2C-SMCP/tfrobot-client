@@ -4,12 +4,16 @@
 mod common;
 
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
-use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    BundleId, MCPServerActivationState, MCPServerConnectionState,
+};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
-use a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc;
+use a2c_smcp::smcp_computer::settings::config::{
+    load_project_config_doc, ProjectConfigDoc, ProvenanceScope,
+};
 use common::{
-    create_test_app_state, echo_server_config, echo_server_path, mcp, multi_tool_server_config,
-    slow_echo_server_config, stderr_flood_server_config,
+    create_test_app_state, echo_server_config, echo_server_path, env_server_path, mcp,
+    multi_tool_server_config, slow_echo_server_config, stderr_flood_server_config,
 };
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -30,12 +34,18 @@ use tfrobot_client_lib::commands::{
 };
 use tfrobot_client_lib::services::computer::ComputerInstance;
 use tfrobot_client_lib::services::computer_runtime_events::{
-    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
-    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+    ComputerRuntimeAffectedCapability, ComputerRuntimeEventCause, ComputerRuntimeEventSink,
+    ComputerRuntimeProblemMessage, ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+    ComputerRuntimeStatusEvent,
 };
 use tfrobot_client_lib::services::config::ConfigService;
+use tfrobot_client_lib::services::input_value_index::{self, InputValueStorageKind};
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::runtime_input_bridge::{
+    RuntimeInputCompletion, RuntimeInputRequest, RuntimeInputRequestReason, RuntimeInputRequestSink,
+};
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 use tokio::net::TcpListener;
@@ -52,6 +62,18 @@ const SERVER_UPDATE_TOOL_LIST: &str = "server:update_tool_list";
 
 fn bundle_id(value: &str) -> BundleId {
     BundleId::try_from(value).unwrap()
+}
+
+struct RecordingRuntimeInputSink {
+    sender: tokio::sync::mpsc::UnboundedSender<RuntimeInputRequest>,
+}
+
+impl RuntimeInputRequestSink for RecordingRuntimeInputSink {
+    fn emit(&self, request: &RuntimeInputRequest) -> Result<(), String> {
+        self.sender
+            .send(request.clone())
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn echo_server_config_with_disabled(name: &str, disabled: bool) -> MCPServerConfig {
@@ -82,17 +104,14 @@ fn unavailable_server_config(name: &str) -> MCPServerConfig {
     serde_json::from_value(value).unwrap()
 }
 
-fn oauth_http_server_config(name: &str, resource: Option<&str>) -> MCPServerConfig {
+fn oauth_http_server_config(name: &str, endpoint: Option<&str>) -> MCPServerConfig {
     serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": name,
         "bundle_id": name,
-        "oauth": {
-            "resource": resource,
-            "scopes": [],
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
-        "server_parameters": { "url": "https://mcp.example.invalid/mcp" }
+        "server_parameters": {
+            "url": endpoint.unwrap_or("https://mcp.example.invalid/mcp")
+        }
     }))
     .unwrap()
 }
@@ -103,11 +122,6 @@ fn delayed_oauth_server_config(url: &str, disabled: bool) -> MCPServerConfig {
         "name": "oauth-delayed-discovery",
         "bundle_id": "oauth-delayed-discovery",
         "disabled": disabled,
-        "oauth": {
-            "resource": format!("{url}/mcp"),
-            "scopes": ["tools.read"],
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
         "server_parameters": {
             "url": format!("{url}/mcp"),
             "headers": {}
@@ -129,6 +143,24 @@ impl SecretStore for FailingOAuthDeleteStore {
 
     fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
         Err(KeychainError::Store("delete unavailable".to_string()))
+    }
+}
+
+struct FailingInputWriteStore;
+
+impl SecretStore for FailingInputWriteStore {
+    fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
+        Err(KeychainError::Store(
+            "input secret write unavailable".to_string(),
+        ))
+    }
+
+    fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+        Ok(None)
+    }
+
+    fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
+        Ok(())
     }
 }
 
@@ -408,76 +440,52 @@ async fn start_oauth_rejecting_mcp_server() -> String {
     url
 }
 
-async fn start_delayed_oauth_discovery_server() -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
-    let discovery_requests = Arc::new(AtomicUsize::new(0));
-    let server_url = url.clone();
-    let server_discovery_requests = Arc::clone(&discovery_requests);
-
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let request_url = server_url.clone();
-            let request_count = Arc::clone(&server_discovery_requests);
-            tokio::spawn(async move {
-                let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                    let request_url = request_url.clone();
-                    let request_count = Arc::clone(&request_count);
-                    async move {
-                        if request.method() == hyper::Method::GET
-                            && request
-                                .uri()
-                                .path()
-                                .starts_with("/.well-known/oauth-protected-resource")
-                        {
-                            request_count.fetch_add(1, Ordering::SeqCst);
-                            sleep(Duration::from_secs(5)).await;
-                            let payload = serde_json::json!({
-                                "resource": format!("{request_url}/mcp"),
-                                "authorization_servers": [&request_url],
-                                "scopes_supported": ["tools.read"]
-                            });
-                            return Ok::<_, Infallible>(
-                                hyper::Response::builder()
-                                    .status(hyper::StatusCode::OK)
-                                    .header("content-type", "application/json")
-                                    .body(Full::<Bytes>::from(
-                                        serde_json::to_vec(&payload)
-                                            .expect("serialize discovery response"),
-                                    ))
-                                    .unwrap(),
-                            );
-                        }
-
-                        Ok::<_, Infallible>(
-                            hyper::Response::builder()
-                                .status(hyper::StatusCode::NOT_FOUND)
-                                .body(Full::<Bytes>::from("not found"))
-                                .unwrap(),
-                        )
-                    }
-                });
-                let stream = hyper_util::rt::TokioIo::new(stream);
-                let service = hyper_util::service::TowerToHyperService::new(service);
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(stream, service)
-                    .await;
-            });
-        }
-    });
-
-    (url, discovery_requests)
+struct AutoOAuthMockStats {
+    discovery_requests: AtomicUsize,
+    registration_requests: AtomicUsize,
+    token_requests: AtomicUsize,
+    mcp_requests: AtomicUsize,
+    authorized_mcp_requests: AtomicUsize,
+    last_token_form: tokio::sync::Mutex<Option<HashMap<String, String>>>,
 }
 
-async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
+impl AutoOAuthMockStats {
+    fn new() -> Self {
+        Self {
+            discovery_requests: AtomicUsize::new(0),
+            registration_requests: AtomicUsize::new(0),
+            token_requests: AtomicUsize::new(0),
+            mcp_requests: AtomicUsize::new(0),
+            authorized_mcp_requests: AtomicUsize::new(0),
+            last_token_form: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+struct ChannelRuntimeEventSink {
+    sender: tokio::sync::mpsc::UnboundedSender<ComputerRuntimeStatusEvent>,
+}
+
+impl ComputerRuntimeEventSink for ChannelRuntimeEventSink {
+    fn emit(&self, event: &ComputerRuntimeStatusEvent) -> Result<(), String> {
+        self.sender
+            .send(event.clone())
+            .map_err(|_| "runtime event receiver closed".to_string())
+    }
+}
+
+async fn start_auto_oauth_challenge_server() -> (String, Arc<AutoOAuthMockStats>) {
+    start_auto_oauth_challenge_server_with_registration_delay(Duration::ZERO).await
+}
+
+async fn start_auto_oauth_challenge_server_with_registration_delay(
+    registration_delay: Duration,
+) -> (String, Arc<AutoOAuthMockStats>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("local_addr"));
-    let discovery_requests = Arc::new(AtomicUsize::new(0));
+    let stats = Arc::new(AutoOAuthMockStats::new());
     let server_url = url.clone();
-    let server_discovery_requests = Arc::clone(&discovery_requests);
+    let server_stats = Arc::clone(&stats);
 
     tokio::spawn(async move {
         loop {
@@ -485,17 +493,28 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                 break;
             };
             let request_url = server_url.clone();
-            let request_count = Arc::clone(&server_discovery_requests);
+            let stats = Arc::clone(&server_stats);
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                     let request_url = request_url.clone();
-                    let request_count = Arc::clone(&request_count);
+                    let stats = Arc::clone(&stats);
                     async move {
+                        let method = request.method().clone();
                         let path = request.uri().path().to_string();
-                        if request.method() == hyper::Method::GET
+                        let authorized = request
+                            .headers()
+                            .get(hyper::header::AUTHORIZATION)
+                            .is_some_and(|value| value == "Bearer tfrobot-auto-test-token");
+                        let body = request
+                            .into_body()
+                            .collect()
+                            .await
+                            .expect("read OAuth mock request")
+                            .to_bytes();
+                        if method == hyper::Method::GET
                             && path.starts_with("/.well-known/oauth-protected-resource")
                         {
-                            request_count.fetch_add(1, Ordering::SeqCst);
+                            stats.discovery_requests.fetch_add(1, Ordering::SeqCst);
                             let payload = serde_json::json!({
                                 "resource": format!("{request_url}/mcp"),
                                 "authorization_servers": [&request_url],
@@ -505,6 +524,7 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize protected resource metadata"),
@@ -512,28 +532,31 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::GET
+                        if method == hyper::Method::GET
                             && matches!(
                                 path.as_str(),
                                 "/.well-known/oauth-authorization-server"
                                     | "/.well-known/oauth-authorization-server/mcp"
                             )
                         {
-                            request_count.fetch_add(1, Ordering::SeqCst);
+                            stats.discovery_requests.fetch_add(1, Ordering::SeqCst);
                             let payload = serde_json::json!({
                                 "issuer": request_url,
                                 "authorization_endpoint": format!("{request_url}/authorize"),
                                 "token_endpoint": format!("{request_url}/token"),
                                 "registration_endpoint": format!("{request_url}/register"),
                                 "response_types_supported": ["code"],
-                                "grant_types_supported": ["authorization_code"],
-                                "token_endpoint_auth_methods_supported": ["none"],
-                                "code_challenge_methods_supported": ["S256"]
+                                "grant_types_supported": ["authorization_code", "client_credentials"],
+                                "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+                                "code_challenge_methods_supported": ["S256"],
+                                "client_id_metadata_document_supported": true,
+                                "authorization_response_iss_parameter_supported": true,
                             });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize authorization server metadata"),
@@ -541,25 +564,23 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::POST && path == "/register" {
-                            let body = request
-                                .into_body()
-                                .collect()
-                                .await
-                                .expect("read registration request")
-                                .to_bytes();
+                        if method == hyper::Method::POST && path == "/register" {
+                            stats.registration_requests.fetch_add(1, Ordering::SeqCst);
+                            if !registration_delay.is_zero() {
+                                sleep(registration_delay).await;
+                            }
                             let registration: serde_json::Value =
                                 serde_json::from_slice(&body).expect("parse registration request");
                             let payload = serde_json::json!({
                                 "client_id": "tfrobot-auto-test-client",
-                                "client_name": "TFRobot",
-                                "redirect_uris": registration["redirect_uris"],
-                                "token_endpoint_auth_method": "none"
+                                "client_name": "A2C Computer",
+                                "redirect_uris": registration["redirect_uris"]
                             });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
                                     .status(hyper::StatusCode::OK)
                                     .header("content-type", "application/json")
+                                    .header("connection", "close")
                                     .body(Full::<Bytes>::from(
                                         serde_json::to_vec(&payload)
                                             .expect("serialize registration response"),
@@ -567,17 +588,116 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
                                     .unwrap(),
                             );
                         }
-                        if request.method() == hyper::Method::POST && path == "/mcp" {
+                        if method == hyper::Method::POST && path == "/token" {
+                            let form: HashMap<String, String> =
+                                url::form_urlencoded::parse(&body).into_owned().collect();
+                            stats.token_requests.fetch_add(1, Ordering::SeqCst);
+                            *stats.last_token_form.lock().await = Some(form.clone());
+                            let valid = form.get("grant_type").map(String::as_str)
+                                == Some("authorization_code")
+                                && form.get("code").map(String::as_str)
+                                    == Some("authorization-code")
+                                && form.get("client_id").map(String::as_str)
+                                    == Some("tfrobot-auto-test-client")
+                                && form
+                                    .get("code_verifier")
+                                    .is_some_and(|value| !value.is_empty())
+                                && form.get("resource").map(String::as_str)
+                                    == Some(format!("{request_url}/mcp").as_str());
+                            if !valid {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::UNAUTHORIZED)
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let payload = serde_json::json!({
+                                "access_token": "tfrobot-auto-test-token",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                                "scope": "tools.read"
+                            });
                             return Ok::<_, Infallible>(
                                 hyper::Response::builder()
-                                    .status(hyper::StatusCode::UNAUTHORIZED)
-                                    .header(
-                                        "www-authenticate",
-                                        format!(
-                                            "Bearer resource_metadata=\"{request_url}/.well-known/oauth-protected-resource/mcp\""
-                                        ),
-                                    )
-                                    .body(Full::<Bytes>::from(Bytes::new()))
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize token response"),
+                                    ))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == hyper::Method::POST && path == "/mcp" {
+                            stats.mcp_requests.fetch_add(1, Ordering::SeqCst);
+                            if authorized {
+                                stats.authorized_mcp_requests.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if !authorized {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::UNAUTHORIZED)
+                                        .header(
+                                            "www-authenticate",
+                                            format!(
+                                                "Bearer resource_metadata=\"{request_url}/.well-known/oauth-protected-resource/mcp\""
+                                            ),
+                                        )
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let request: serde_json::Value =
+                                serde_json::from_slice(&body).unwrap_or_default();
+                            let rpc_method = request
+                                .get("method")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default();
+                            if rpc_method.starts_with("notifications/") {
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::ACCEPTED)
+                                        .body(Full::<Bytes>::from(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let id = request
+                                .get("id")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let result = match rpc_method {
+                                "initialize" => serde_json::json!({
+                                    "protocolVersion": "2024-11-05",
+                                    "serverInfo": { "name": "oauth-mock", "version": "0.1.0" },
+                                    "capabilities": { "tools": {} }
+                                }),
+                                "tools/list" => serde_json::json!({
+                                    "tools": [{
+                                        "name": "protected",
+                                        "description": "Requires authorization",
+                                        "inputSchema": { "type": "object" }
+                                    }]
+                                }),
+                                "tools/call" => serde_json::json!({
+                                    "content": [{ "type": "text", "text": "authorized" }]
+                                }),
+                                _ => serde_json::json!({}),
+                            };
+                            let payload = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": result
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .header("mcp-session-id", "oauth-test-session")
+                                    .body(Full::<Bytes>::from(
+                                        serde_json::to_vec(&payload)
+                                            .expect("serialize MCP response"),
+                                    ))
                                     .unwrap(),
                             );
                         }
@@ -598,7 +718,7 @@ async fn start_auto_oauth_challenge_server() -> (String, Arc<AtomicUsize>) {
         }
     });
 
-    (url, discovery_requests)
+    (url, stats)
 }
 
 async fn connect_runtime_to_mock_robot(state: &AppState, server_url: &str) {
@@ -845,12 +965,20 @@ async fn test_get_mcp_servers_uses_sdk_computer_status() {
 
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].name, "sdk-status");
+    assert_eq!(
+        statuses[0].activation_state,
+        MCPServerActivationState::Started
+    );
+    assert_eq!(
+        statuses[0].connection_state,
+        MCPServerConnectionState::Connected
+    );
     assert!(statuses[0].running);
-    assert_eq!(statuses[0].status_message, "running");
+    assert_eq!(statuses[0].status_message, "connected");
 }
 
 #[tokio::test]
-async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
+async fn disabled_user_mcp_toggle_applies_only_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -883,6 +1011,14 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
         .await
         .unwrap()
         .iter()
+        .any(|server| server.name == "toggle-server" && server.running));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
         .all(|server| server.name != "toggle-server"));
 
     sdk_config::upsert_computer_mcp_config_core(
@@ -892,6 +1028,14 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
     )
     .await
     .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .all(|server| server.name != "toggle-server"));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
     let reenabled = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
@@ -901,7 +1045,7 @@ async fn disabled_user_mcp_is_hidden_and_toggle_applies_to_running_computer() {
 }
 
 #[tokio::test]
-async fn changing_bundle_id_removes_the_previous_runtime_identity() {
+async fn changing_bundle_id_replaces_the_runtime_identity_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -923,6 +1067,16 @@ async fn changing_bundle_id_removes_the_previous_runtime_identity() {
     )
     .await
     .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime.sdk_mcp_server_ids().await.is_empty());
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
 
     let runtime = state
         .computer_registry
@@ -979,7 +1133,16 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         healthy.running,
         "healthy MCP must not be blocked by another failure"
     );
-    assert!(!broken.running);
+    assert_eq!(
+        broken.activation_state,
+        MCPServerActivationState::Started,
+        "a failed connection must not be projected as an explicit stop"
+    );
+    assert_eq!(broken.connection_state, MCPServerConnectionState::Error);
+    assert!(
+        broken.running,
+        "running remains the started-state projection"
+    );
     assert_eq!(broken.status_message, "error");
     let snapshot = state
         .computer_registry
@@ -1022,14 +1185,744 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         .unwrap();
     assert_eq!(batch.candidate_count, 2);
     assert_eq!(batch.actual_operation_count, 1);
-    assert_eq!(batch.unchanged_count, 0);
+    assert_eq!(
+        batch.unchanged_count, 1,
+        "an already-started server remains unchanged even when its connection failed"
+    );
     assert_eq!(batch.excluded_plugin_owned_count, 0);
-    assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.failures[0].name, "broken-server");
+    assert!(batch.failures.is_empty());
+}
+
+#[tokio::test]
+async fn computer_start_does_not_fail_when_one_mcp_input_definition_is_missing() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let missing_input_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "picture",
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": {
+                "OPENROUTER_API_KEY": "${input:openrouterkey}",
+                "ZHIPUAI_API_KEY": "${input:zhipukey}"
+            }
+        }
+    }))
+    .unwrap();
+
+    let config_error =
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, missing_input_server)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&config_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "picture",
+            "name": "picture"
+        })
+    );
     assert!(matches!(
-        &batch.failures[0].error,
-        tfrobot_client_lib::commands::runtime_error::RuntimeActionError::RuntimeError { .. }
+        config_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "openrouterkey"
     ));
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("healthy-server"),
+    )
+    .await
+    .unwrap();
+
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .expect("an MCP input failure must not fail Computer startup");
+    assert!(started.running);
+
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .find(|server| server.name == "healthy-server")
+        .is_some_and(|server| server.running));
+    let picture = servers
+        .iter()
+        .find(|server| server.name == "picture")
+        .expect("the failed MCP must remain visible for a targeted retry");
+    assert_eq!(picture.activation_state, MCPServerActivationState::Stopped);
+    assert_eq!(
+        picture.connection_state,
+        MCPServerConnectionState::Disconnected
+    );
+
+    let start_error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&start_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "picture",
+            "name": "picture"
+        })
+    );
+    assert!(matches!(
+        start_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "openrouterkey"
+    ));
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "openrouterkey".to_string(),
+            label: Some("openrouterkey".to_string()),
+            description: Some("OpenRouter API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let second_definition_error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        second_definition_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "zhipukey"
+    ));
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "zhipukey".to_string(),
+            label: Some("zhipukey".to_string()),
+            description: Some("Zhipu API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let missing_openrouter_entry =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &missing_openrouter_entry,
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "openrouterkey"
+                    && message.contains("user confirmation is required")
+        ),
+        "unexpected error after defining both inputs: {missing_openrouter_entry:?}"
+    );
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "openrouterkey",
+        Some("test-secret".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+    let missing_zhipu_entry =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &missing_zhipu_entry,
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "zhipukey"
+                    && message.contains("user confirmation is required")
+        ),
+        "unexpected error after defining zhipukey: {missing_zhipu_entry:?}"
+    );
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "zhipukey",
+        Some("second-test-secret".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("picture"))
+        .await
+        .expect("saving missing definitions sequentially must allow retrying the affected MCP");
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers
+        .iter()
+        .find(|server| server.name == "picture")
+        .is_some_and(|server| server.running));
+}
+
+#[tokio::test]
+async fn client_mcp_draft_atomically_projects_inputs_and_collects_only_unused_definitions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let definition = inputs::InputDefinition::PromptString {
+        id: "api-key".to_string(),
+        label: Some("API key".to_string()),
+        description: None,
+        default: None,
+        password: Some(true),
+    };
+    let first: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "first-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {
+                "LOG_LEVEL": "debug",
+                "API_KEY": "${input:api-key}"
+            }
+        }
+    }))
+    .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        first,
+        vec![definition.clone()],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        state.sdk_config.load_input_definitions(TEST_INSTANCE_ID),
+        vec![definition]
+    );
+    let first_saved = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "first-client-draft")
+        .unwrap()
+        .config;
+    let first_saved = serde_json::to_value(first_saved).unwrap();
+    assert_eq!(
+        first_saved["server_parameters"]["env"]["LOG_LEVEL"],
+        "debug"
+    );
+    assert_eq!(
+        first_saved["server_parameters"]["env"]["API_KEY"],
+        "${input:api-key}"
+    );
+
+    let shared: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "second-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"API_KEY": "${input:api-key}"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, shared)
+        .await
+        .unwrap();
+
+    let first_literal: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "first-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"API_KEY": "literal-first"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        first_literal,
+        Vec::new(),
+        vec!["api-key".to_string()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .sdk_config
+            .load_input_definitions(TEST_INSTANCE_ID)
+            .len(),
+        1
+    );
+
+    let second_literal: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "second-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"API_KEY": "literal-second"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        second_literal,
+        Vec::new(),
+        vec!["api-key".to_string()],
+    )
+    .await
+    .unwrap();
+    assert!(state
+        .sdk_config
+        .load_input_definitions(TEST_INSTANCE_ID)
+        .is_empty());
+
+    let composite_literal: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "composite-literal",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"REGION": "prefix-${input:not-a-reference}"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        composite_literal,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .expect("composite editor constants must not require an Input definition");
+    let composite_saved = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "composite-literal")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(composite_saved.config).unwrap()["server_parameters"]["env"]["REGION"],
+        "prefix-${input:not-a-reference}"
+    );
+
+    let rejected: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "rejected-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": ["--api-key=plaintext"],
+            "env": {"NEXT": "${input:next}"}
+        }
+    }))
+    .unwrap();
+    let error = sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        rejected,
+        vec![inputs::InputDefinition::PromptString {
+            id: "next".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: None,
+        }],
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, RuntimeActionError::RuntimeError { .. }));
+    assert!(state
+        .sdk_config
+        .load_input_definitions(TEST_INSTANCE_ID)
+        .is_empty());
+    assert!(!state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "rejected-client-draft"));
+
+    let removable: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "removable-client-draft",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"TOKEN": "${input:removable}"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        removable,
+        vec![inputs::InputDefinition::PromptString {
+            id: "removable".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: Some(true),
+        }],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "removable-client-draft")
+        .await
+        .unwrap();
+    assert!(state
+        .sdk_config
+        .load_input_definitions(TEST_INSTANCE_ID)
+        .is_empty());
+}
+
+#[tokio::test]
+async fn client_mcp_draft_preserves_user_provenance_and_cross_scope_input_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let anchor = state.sdk_config.project_anchor(TEST_INSTANCE_ID);
+    let user_mcp_path = anchor.join("a2c/mcp.json");
+    std::fs::create_dir_all(user_mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &user_mcp_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": {
+                "user-owned": {
+                    "type": "stdio",
+                    "server_parameters": {
+                        "command": "echo",
+                        "args": [],
+                        "env": {"TOKEN": "${input:shared-user-input}"}
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let project_definition = inputs::InputDefinition::PromptString {
+        id: "shared-user-input".to_string(),
+        label: None,
+        description: None,
+        default: None,
+        password: Some(true),
+    };
+    let local_owner: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "local-owner",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"TOKEN": "${input:shared-user-input}"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        local_owner,
+        vec![project_definition.clone()],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    let edited_user: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "user-owned",
+        "server_parameters": {
+            "command": "printf",
+            "args": ["edited"],
+            "env": {"TOKEN": "${input:shared-user-input}"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        edited_user,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let snapshot = state.sdk_config.load(TEST_INSTANCE_ID);
+    let user_server = snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "user-owned")
+        .unwrap();
+    assert_eq!(user_server.origin, ProvenanceScope::User);
+    assert_eq!(
+        serde_json::to_value(&user_server.config).unwrap()["server_parameters"]["command"],
+        "printf"
+    );
+    let project_doc = load_project_config_doc(&anchor).unwrap();
+    assert!(!project_doc
+        .mcp_local
+        .as_ref()
+        .and_then(|layer| layer.get("servers"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|servers| servers.contains_key("user-owned")));
+
+    let local_literal: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "local-owner",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"TOKEN": "literal"}
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        local_literal,
+        Vec::new(),
+        vec!["shared-user-input".to_string()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        state
+            .sdk_config
+            .load_input_definitions(TEST_INSTANCE_ID)
+            .iter()
+            .any(|definition| definition.id() == project_definition.id()),
+        "a raw User declaration still references the Project Input"
+    );
+
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "user-owned")
+        .await
+        .unwrap();
+    assert!(!state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|server| server.name == "user-owned"));
+    assert!(!state
+        .sdk_config
+        .load_input_definitions(TEST_INSTANCE_ID)
+        .iter()
+        .any(|definition| definition.id() == "shared-user-input"));
+}
+
+#[tokio::test]
+async fn client_mcp_draft_missing_definition_reports_the_exact_requester() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "profile-editor",
+        "bundle_id": "profile-editor-bundle",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"NAME": "${input:missing-name}"}
+        }
+    }))
+    .unwrap();
+
+    let error = sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        server,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeActionError::MissingInputDefinition {
+            input_id,
+            requesting_mcp: Some(requester),
+            ..
+        } if input_id == "missing-name"
+            && requester.bundle_id == "profile-editor-bundle"
+            && requester.name == "profile-editor"
+    ));
+}
+
+#[tokio::test]
+async fn client_mcp_draft_rejects_project_definition_shadowed_by_local_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let anchor = state.sdk_config.project_anchor(TEST_INSTANCE_ID);
+    let mut document = load_project_config_doc(&anchor).unwrap();
+    document.mcp_local = Some(
+        serde_json::json!({
+            "inputs": [{
+                "id": "shadowed",
+                "type": "PromptString",
+                "description": "Local definition",
+                "password": false
+            }]
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    state.sdk_config.save(TEST_INSTANCE_ID, &document).unwrap();
+
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "shadowed-input-server",
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"TOKEN": "${input:shadowed}"}
+        }
+    }))
+    .unwrap();
+    let error = sdk_config::upsert_computer_mcp_config_with_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        server,
+        vec![inputs::InputDefinition::PromptString {
+            id: "shadowed".to_string(),
+            label: Some("Edited Project definition".to_string()),
+            description: None,
+            default: None,
+            password: Some(true),
+        }],
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("shadowed by a higher-priority"));
+    let after = load_project_config_doc(&anchor).unwrap();
+    assert!(!after
+        .mcp
+        .as_ref()
+        .and_then(|layer| layer.get("inputs"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|inputs| inputs.iter().any(|input| input["id"] == "shadowed")));
+    assert!(!state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|item| item.name == "shadowed-input-server"));
+}
+
+#[tokio::test]
+async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let missing_input_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "batch-picture",
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "OPENROUTER_API_KEY": "${input:batch-openrouterkey}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, missing_input_server)
+        .await
+        .unwrap_err();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("batch-healthy"),
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let definition_error = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        &definition_error,
+        RuntimeActionError::MissingInputDefinition { input_id, .. }
+            if input_id == "batch-openrouterkey"
+    ));
+    assert_eq!(
+        serde_json::to_value(&definition_error).unwrap()["requesting_mcp"],
+        serde_json::json!({
+            "bundle_id": "batch-picture",
+            "name": "batch-picture"
+        })
+    );
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "batch-openrouterkey".to_string(),
+            label: Some("batch-openrouterkey".to_string()),
+            description: Some("Batch OpenRouter API key".to_string()),
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let missing_entry_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(missing_entry_batch.candidate_count, 2);
+    assert_eq!(missing_entry_batch.actual_operation_count, 0);
+    assert_eq!(missing_entry_batch.unchanged_count, 1);
+    assert!(matches!(
+        missing_entry_batch.failures.as_slice(),
+        [mcp::McpBatchFailure {
+            error: RuntimeActionError::ResolverFailed { input_id, message },
+            ..
+        }] if input_id == "batch-openrouterkey"
+            && message.contains("user confirmation is required")
+    ));
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "batch-openrouterkey",
+        Some("batch-test-secret".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let retry_batch = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(retry_batch.candidate_count, 2);
+    assert_eq!(retry_batch.actual_operation_count, 1);
+    assert_eq!(retry_batch.unchanged_count, 1);
+    assert!(retry_batch.failures.is_empty());
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(servers.iter().all(|server| server.running));
 }
 
 #[tokio::test]
@@ -1115,7 +2008,7 @@ async fn test_mcp_lifecycle_requires_started_computer() {
 }
 
 #[tokio::test]
-async fn test_config_add_applies_without_reloading_or_stopping_existing_servers() {
+async fn test_config_add_keeps_existing_process_and_applies_after_restart() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1152,15 +2045,22 @@ async fn test_config_add_applies_without_reloading_or_stopping_existing_servers(
         .find(|status| status.name == "already-running")
         .expect("active server status should exist");
     assert!(active.running, "active server should remain running");
-    let added = statuses
+    assert!(statuses
         .iter()
-        .find(|status| status.name == "newly-added")
-        .expect("enabled config addition should enter the live runtime");
-    assert!(added.running);
+        .any(|status| status.name == "newly-added" && !status.running));
+    computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(statuses
+        .iter()
+        .any(|status| status.name == "newly-added" && status.running));
 }
 
 #[tokio::test]
-async fn test_connected_config_update_syncs_without_rejoining_computer() {
+async fn test_connected_config_update_does_not_hot_sync_or_rejoin_computer() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -1188,22 +2088,18 @@ async fn test_connected_config_update_syncs_without_rejoining_computer() {
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(stats.update_config_events() > config_events_before);
-    assert_eq!(
-        stats.join_events(),
-        1,
-        "hot config apply must not reconnect"
-    );
+    assert_eq!(stats.update_config_events(), config_events_before);
+    assert_eq!(stats.join_events(), 1, "saved config must not reconnect");
     let config_events_after_upsert = stats.update_config_events();
     sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "echo-sync")
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(stats.update_config_events() > config_events_after_upsert);
+    assert_eq!(stats.update_config_events(), config_events_after_upsert);
     assert_eq!(
         stats.join_events(),
         1,
-        "hot config removal must not reconnect"
+        "saved config removal must not reconnect"
     );
 }
 
@@ -1234,6 +2130,11 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
         .servers
         .iter()
         .any(|server| server.name == "full-chain-echo"));
+    assert!(!runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("full-chain-echo")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_ids()
         .await
@@ -1296,10 +2197,7 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
     );
 
     let final_snapshot = runtime.runtime_snapshot().await;
-    assert_eq!(
-        final_snapshot.generation, initial_snapshot.generation,
-        "hot MCP config apply must not rebuild the Computer runtime"
-    );
+    assert!(final_snapshot.generation > initial_snapshot.generation);
     assert!(final_snapshot.capability_revision > initial_snapshot.capability_revision);
     assert_eq!(final_snapshot.active_mcp_servers, 1);
     assert_eq!(final_snapshot.tools, 1);
@@ -1375,7 +2273,7 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
 }
 
 #[tokio::test]
-async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
+async fn test_remove_mcp_server_command_applies_to_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -1387,6 +2285,7 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    runtime.start().await.unwrap();
     assert!(runtime
         .synced_sdk_servers()
         .await
@@ -1404,10 +2303,11 @@ async fn test_remove_mcp_server_command_syncs_sdk_runtime() {
         .unwrap();
 
     assert!(configs.is_empty());
-    assert!(!runtime
+    assert!(runtime
         .synced_sdk_servers()
         .await
         .contains_key(&bundle_id("remove-me")));
+    runtime.restart().await.unwrap();
     assert!(!runtime
         .sdk_mcp_server_ids()
         .await
@@ -1596,7 +2496,7 @@ async fn test_sdk_available_tools_raw_metadata_with_multiple_servers() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let statuses = runtime.mcp_server_statuses().await;
+    let statuses = runtime.mcp_server_runtime_statuses().await;
     eprintln!("server_statuses={statuses:#?}");
 
     let tools = runtime.available_tools().await.unwrap();
@@ -1852,7 +2752,7 @@ async fn test_config_io_import_export_are_instance_scoped() {
     assert!(second_configs
         .iter()
         .any(|server| server.name == "exported-second"));
-    assert!(second_sdk_servers.contains_key(&bundle_id("imported-second")));
+    assert!(!second_sdk_servers.contains_key(&bundle_id("imported-second")));
     assert!(!default_sdk_servers.contains_key(&bundle_id("imported-second")));
     let exported_names: std::collections::HashSet<_> = exported["servers"]
         .as_array()
@@ -1864,6 +2764,11 @@ async fn test_config_io_import_export_are_instance_scoped() {
         exported_names,
         std::collections::HashSet::from(["imported-second", "exported-second"])
     );
+    second_runtime.start().await.unwrap();
+    assert!(second_runtime
+        .synced_sdk_servers()
+        .await
+        .contains_key(&bundle_id("imported-second")));
 
     let round_trip = config_io::import_config_core(
         &state,
@@ -1946,7 +2851,7 @@ async fn test_config_io_import_atomically_merges_all_servers_into_local_sdk_conf
 }
 
 #[tokio::test]
-async fn test_config_io_input_only_import_does_not_mutate_sdk_config() {
+async fn test_config_io_input_only_import_updates_sdk_owned_top_level_inputs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let before_document = a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
@@ -1985,8 +2890,9 @@ async fn test_config_io_input_only_import_does_not_mutate_sdk_config() {
     .unwrap();
     assert_eq!(result.servers_imported, 0);
     assert_eq!(result.inputs_imported, 1);
-    assert_eq!(after_document, before_document);
-    assert_eq!(
+    assert_ne!(after_document, before_document);
+    assert_eq!(after_document.mcp.unwrap()["inputs"][0]["id"], "input-only");
+    assert_ne!(
         state.sdk_config.load(TEST_INSTANCE_ID).revision,
         before_revision
     );
@@ -2023,9 +2929,7 @@ async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_ex
     .unwrap_err();
     assert!(import_error.contains("inputs.unsafe-command.args[0]"));
     assert!(import_error.contains("access_token"));
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
     assert!(!state
@@ -2034,37 +2938,28 @@ async fn test_config_io_rejects_sensitive_command_input_args_before_import_or_ex
         .join("config_import_transaction.json")
         .exists());
 
-    state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::Command {
-                id: "unsafe-command".to_string(),
-                label: "Unsafe command".to_string(),
-                command: "helper".to_string(),
-                args: Some(vec!["--api-key=plain-export-secret".to_string()]),
-            }],
-        )
-        .unwrap();
-    let export_path = tmp.path().join("unsafe-command-export.json");
-    std::fs::write(&export_path, "existing-target").unwrap();
-    let export_error = config_io::export_config_core(
+    let save_error = inputs::add_or_update_input_core(
         &state,
-        export_path.to_string_lossy().into_owned(),
-        TEST_INSTANCE_ID.to_string(),
-        None,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::Command {
+            id: "unsafe-command".to_string(),
+            label: Some("Unsafe command".to_string()),
+            command: "helper".to_string(),
+            args: Some(vec!["--api-key=plain-export-secret".to_string()]),
+        },
     )
     .await
     .unwrap_err();
-    assert!(export_error.contains("inputs.unsafe-command.args[0]"));
-    assert_eq!(
-        std::fs::read_to_string(export_path).unwrap(),
-        "existing-target"
-    );
+    assert!(save_error
+        .to_string()
+        .contains("inputs.unsafe-command.args[0]"));
+    assert!(inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
-async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_write() {
+async fn test_local_config_crud_preserves_field_literals_but_rejects_sensitive_cli_plaintext() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let unsafe_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
@@ -2092,30 +2987,50 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
         .servers
         .is_empty());
 
-    let secret_stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "REGION".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: Some("cn".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+
+    let literal_stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Stdio",
-        "name": "redacted-crud-stdio",
+        "name": "literal-crud-stdio",
         "server_parameters": {
             "command": "helper",
             "args": [],
-            "env": { "TOKEN": "literal-crud-env-secret" }
+            "env": {
+                "LOG_LEVEL": "debug",
+                "MUSTACHE_LITERAL": "{{REGION}}",
+                "PREFIXED_MUSTACHE_LITERAL": "prefix-{{REGION}}",
+                "REGION": "${input:REGION}",
+                "PREFIXED_INPUT": "prefix-${input:REGION}"
+            }
         }
     }))
     .unwrap();
-    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_stdio)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, literal_stdio)
         .await
         .unwrap();
 
-    let secret_http: MCPServerConfig = serde_json::from_value(serde_json::json!({
+    let literal_http: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Http",
-        "name": "redacted-crud-http",
+        "name": "literal-crud-http",
         "server_parameters": {
-            "url": "https://user:password@example.com/mcp",
-            "headers": { "Authorization": "Bearer literal-crud-header-secret" }
+            "url": "https://example.com/mcp",
+            "headers": { "X-Deployment": "staging" }
         }
     }))
     .unwrap();
-    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, secret_http)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, literal_http)
         .await
         .unwrap();
 
@@ -2126,22 +3041,41 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
             .join(".tfrobot/mcp.local.json"),
     )
     .unwrap();
-    assert!(!persisted.contains("literal-crud-env-secret"));
-    assert!(!persisted.contains("literal-crud-header-secret"));
-    assert!(!persisted.contains("user:password"));
-    assert!(persisted.contains("${REDACTED}"));
+    assert!(persisted.contains("debug"));
+    assert!(persisted.contains("{{REGION}}"));
+    assert!(persisted.contains("prefix-{{REGION}}"));
+    assert!(persisted.contains("${input:REGION}"));
+    assert!(persisted.contains("prefix-${input:REGION}"));
+    assert!(persisted.contains("staging"));
+    assert!(!persisted.contains("${REDACTED}"));
 
     let view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
+    let stdio_view = view
+        .snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "literal-crud-stdio")
+        .expect("local view should include the literal stdio declaration");
+    let stdio_value = serde_json::to_value(&stdio_view.config).unwrap();
+    let env = &stdio_value["server_parameters"]["env"];
+    assert_eq!(env["MUSTACHE_LITERAL"], "{{REGION}}");
+    assert_eq!(env["PREFIXED_MUSTACHE_LITERAL"], "prefix-{{REGION}}");
+    assert_eq!(env["REGION"], "${input:REGION}");
+    assert_eq!(env["PREFIXED_INPUT"], "prefix-${input:REGION}");
     let view_json = serde_json::to_string(&view).unwrap();
-    assert!(!view_json.contains("literal-crud-env-secret"));
-    assert!(!view_json.contains("literal-crud-header-secret"));
-    assert!(!view_json.contains("user:password"));
-    assert!(view_json.contains("${REDACTED}"));
+    assert!(view_json.contains("debug"));
+    assert!(view_json.contains("{{REGION}}"));
+    assert!(view_json.contains("prefix-{{REGION}}"));
+    assert!(view_json.contains("${input:REGION}"));
+    assert!(view_json.contains("prefix-${input:REGION}"));
+    assert!(view_json.contains("staging"));
+    assert!(!view_json.contains("${REDACTED}"));
 
-    // A legacy/on-disk declaration that predates the guarded CRUD boundary must still never be
-    // echoed to the WebView snapshot with its plaintext secret surfaces intact.
+    // Same-machine configuration is an editable source of truth, so existing literals must also
+    // be visible to the trusted local WebView instead of being replaced by export sentinels.
     state
         .sdk_config
         .save(
@@ -2153,9 +3087,9 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
                             "legacy-plaintext-http": {
                                 "type": "http",
                                 "server_parameters": {
-                                    "url": "https://legacy-user:legacy-password@example.com/mcp",
+                                    "url": "https://example.com/mcp",
                                     "headers": {
-                                        "Authorization": "Bearer legacy-header-secret"
+                                        "X-Legacy-Mode": "compatibility"
                                     }
                                 }
                             }
@@ -2176,21 +3110,20 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
             .join(".tfrobot/mcp.json"),
     )
     .unwrap();
-    assert!(legacy_raw.contains("legacy-header-secret"));
+    assert!(legacy_raw.contains("compatibility"));
     let legacy_view = sdk_config::get_computer_config_state_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
     let legacy_view_json = serde_json::to_string(&legacy_view).unwrap();
-    assert!(!legacy_view_json.contains("legacy-header-secret"));
-    assert!(!legacy_view_json.contains("legacy-user:legacy-password"));
-    assert!(legacy_view_json.contains("${REDACTED}"));
+    assert!(legacy_view_json.contains("compatibility"));
+    assert!(!legacy_view_json.contains("${REDACTED}"));
 
     let input_error = inputs::add_or_update_input_core(
         &state,
         TEST_INSTANCE_ID,
         inputs::InputDefinition::Command {
             id: "unsafe-crud-input".to_string(),
-            label: "Unsafe CRUD input".to_string(),
+            label: Some("Unsafe CRUD input".to_string()),
             command: "helper".to_string(),
             args: Some(vec!["https://example.com/run?mode=debug".to_string()]),
         },
@@ -2199,15 +3132,14 @@ async fn test_config_crud_rejects_sensitive_plaintext_before_any_definition_writ
     .unwrap_err();
     assert!(input_error.contains("inputs.unsafe-crud-input.args[0]"));
     assert!(input_error.contains("mode"));
-    assert!(state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert!(!inputs::list_inputs_core(&state, TEST_INSTANCE_ID)
         .unwrap()
-        .is_empty());
+        .iter()
+        .any(|input| input.id() == "unsafe-crud-input"));
 }
 
 #[tokio::test]
-async fn test_password_input_defaults_are_removed_from_crud_import_and_read_views() {
+async fn test_password_input_import_rejects_plaintext_defaults() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -2216,9 +3148,9 @@ async fn test_password_input_defaults_are_removed_from_crud_import_and_read_view
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "crud-password".to_string(),
-            label: "CRUD password".to_string(),
+            label: Some("CRUD password".to_string()),
             description: None,
-            default: Some("crud-plaintext-secret".to_string()),
+            default: None,
             password: Some(true),
         },
     )
@@ -2238,40 +3170,33 @@ async fn test_password_input_defaults_are_removed_from_crud_import_and_read_view
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        inputs::import_inputs_core(
-            &state,
-            TEST_INSTANCE_ID,
-            import_path.to_string_lossy().as_ref()
-        )
-        .await
-        .unwrap(),
-        1
-    );
+    let error = inputs::import_inputs_core(
+        &state,
+        TEST_INSTANCE_ID,
+        import_path.to_string_lossy().as_ref(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("cannot contain a plaintext default"));
 
     let listed = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
-    for id in ["crud-password", "imported-password"] {
-        assert!(matches!(
-            listed.iter().find(|input| input.id() == id),
-            Some(inputs::InputDefinition::PromptString {
-                default: None,
-                password: Some(true),
-                ..
-            })
-        ));
-        assert!(matches!(
-            inputs::get_input_core(&state, TEST_INSTANCE_ID, id).unwrap(),
-            Some(inputs::InputDefinition::PromptString {
-                default: None,
-                password: Some(true),
-                ..
-            })
-        ));
-    }
-    let persisted =
-        std::fs::read_to_string(state.config.computer_inputs_path(TEST_INSTANCE_ID).unwrap())
-            .unwrap();
-    assert!(!persisted.contains("crud-plaintext-secret"));
+    assert!(matches!(
+        listed.as_slice(),
+        [inputs::InputDefinition::PromptString {
+            id,
+            password: Some(true),
+            ..
+        }] if id == "crud-password"
+    ));
+    let persisted = serde_json::to_string(
+        &a2c_smcp::smcp_computer::settings::config::load_project_config_doc(
+            &state.sdk_config.project_anchor(TEST_INSTANCE_ID),
+        )
+        .unwrap()
+        .mcp,
+    )
+    .unwrap();
+    assert!(!persisted.contains("default"));
     assert!(!persisted.contains("imported-plaintext-secret"));
 }
 
@@ -2280,25 +3205,18 @@ async fn test_config_import_preflights_sdk_target_before_journal_or_input_write(
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::PromptString {
-                id: "existing-input".to_string(),
-                label: "Existing".to_string(),
-                description: None,
-                default: None,
-                password: Some(false),
-            }],
-        )
-        .unwrap();
-    state
         .sdk_config
         .save(
             TEST_INSTANCE_ID,
             &ProjectConfigDoc {
                 mcp: Some(
                     serde_json::json!({
+                        "inputs": [{
+                            "type": "PromptString",
+                            "id": "existing-input",
+                            "description": "Existing",
+                            "password": false
+                        }],
                         "servers": {
                             "existing-invalid": { "type": "carrier-pigeon" }
                         }
@@ -2346,10 +3264,7 @@ async fn test_config_import_preflights_sdk_target_before_journal_or_input_write(
         .computer_instance_storage_root(TEST_INSTANCE_ID)
         .join("config_import_transaction.json")
         .exists());
-    let inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].id(), "existing-input");
 }
@@ -2368,13 +3283,28 @@ async fn test_startup_recovers_a_crash_interrupted_config_import_transaction() {
         serde_json::to_vec_pretty(&serde_json::json!({
             "version": 1,
             "instance_id": TEST_INSTANCE_ID,
-            "servers": [echo_server_config("recovered-server")],
+            "servers": [{
+                "type": "Stdio",
+                "name": "recovered-server",
+                "disabled": false,
+                "forbidden_tools": [],
+                "tool_meta": {},
+                "server_parameters": {
+                    "command": "echo",
+                    "args": [],
+                    "env": {
+                        "TOKEN": "recovered-literal",
+                        "TOKEN_REF": "${input:recovered-command}"
+                    },
+                    "cwd": "/workspace/recovered"
+                }
+            }],
             "inputs": [{
                 "type": "Command",
                 "id": "recovered-command",
                 "label": "Recovered command",
                 "command": "helper",
-                "args": ["--token", "${env:RECOVERED_TOKEN}"]
+                "args": ["--mode", "recovery"]
             }]
         }))
         .unwrap(),
@@ -2385,21 +3315,41 @@ async fn test_startup_recovers_a_crash_interrupted_config_import_transaction() {
     let recovered = create_test_app_state(tmp.path());
 
     assert!(!transaction_path.exists());
-    assert!(recovered
+    let recovered_server = recovered
         .sdk_config
         .load(TEST_INSTANCE_ID)
         .mcp
         .servers
         .iter()
-        .any(|server| server.name == "recovered-server"));
+        .find(|server| server.name == "recovered-server")
+        .map(|server| serde_json::to_value(&server.config).unwrap())
+        .unwrap();
     assert_eq!(
-        recovered
-            .config
-            .load_inputs_for_instance(TEST_INSTANCE_ID)
-            .unwrap()[0]
-            .id(),
-        "recovered-command"
+        recovered_server["server_parameters"]["env"]["TOKEN"],
+        "recovered-literal"
     );
+    assert_eq!(
+        recovered_server["server_parameters"]["env"]["TOKEN_REF"],
+        "${input:recovered-command}"
+    );
+    assert_eq!(
+        recovered_server["server_parameters"]["cwd"],
+        "/workspace/recovered"
+    );
+    assert!(matches!(
+        recovered
+            .sdk_config
+            .load_input_definitions(TEST_INSTANCE_ID)
+            .as_slice(),
+        [inputs::InputDefinition::Command {
+            id,
+            command,
+            args: Some(args),
+            ..
+        }] if id == "recovered-command"
+            && command == "helper"
+            && args == &["--mode".to_string(), "recovery".to_string()]
+    ));
     let runtime = recovered
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
@@ -2421,12 +3371,12 @@ fn test_startup_discards_an_aborted_config_import_transaction_without_replay() {
         .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
         .unwrap();
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PromptString {
                 id: "existing-input".to_string(),
-                label: "Existing".to_string(),
+                label: Some("Existing".to_string()),
                 description: None,
                 default: None,
                 password: Some(false),
@@ -2468,8 +3418,8 @@ fn test_startup_discards_an_aborted_config_import_transaction_without_replay() {
         .iter()
         .any(|server| server.name == "must-not-replay"));
     let persisted_inputs = recovered
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap();
     assert_eq!(persisted_inputs.len(), 1);
     assert_eq!(persisted_inputs[0].id(), "existing-input");
@@ -2585,14 +3535,16 @@ fn test_startup_recovery_preflights_sdk_target_before_replaying_inputs() {
     assert!(transaction_path.exists());
     let config =
         tfrobot_client_lib::services::config::ConfigService::new(tmp.path().to_path_buf()).unwrap();
-    assert!(config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    let sdk_config =
+        tfrobot_client_lib::services::sdk_config::SdkConfigService::new(Arc::new(config));
+    assert!(sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap()
         .is_empty());
 }
 
 #[tokio::test]
-async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
+async fn test_config_io_export_preserves_literals_without_exporting_input_values() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let export_path = tmp.path().join("shareable-export.json");
@@ -2613,7 +3565,8 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
                                     "env": {
                                         "TOKEN": "literal-secret",
                                         "TOKEN_REF": "${env:TOKEN}"
-                                    }
+                                    },
+                                    "cwd": "/workspace/source"
                                 }
                             },
                             "secret-http": {
@@ -2639,10 +3592,19 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
                                 "type": "stdio",
                                 "server_parameters": {
                                     "command": "local-command",
-                                    "env": { "LOCAL_TOKEN": "local-secret" }
+                                    "env": {
+                                        "LOCAL_TOKEN": "local-secret",
+                                        "LOCAL_REF": "${input:local-region}"
+                                    }
                                 }
                             }
-                        }
+                        },
+                        "inputs": [{
+                            "type": "PromptString",
+                            "id": "local-region",
+                            "description": "Local region",
+                            "password": false
+                        }]
                     })
                     .as_object()
                     .unwrap()
@@ -2652,32 +3614,51 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
             },
         )
         .unwrap();
+    let sdk_env = state.sdk_config.env(TEST_INSTANCE_ID);
+    let user_path = a2c_smcp::smcp_computer::settings::user_mcp_config_path(Some(&sdk_env));
+    std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &user_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "servers": {
+                "user-only": {
+                    "type": "stdio",
+                    "server_parameters": {
+                        "command": "user-command",
+                        "env": { "USER_REF": "${input:user-token}" }
+                    }
+                }
+            },
+            "inputs": [{
+                "type": "PromptString",
+                "id": "user-token",
+                "description": "User token",
+                "password": true
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PromptString {
                 id: "api-token".to_string(),
-                label: "API token".to_string(),
+                label: Some("API token".to_string()),
                 description: None,
                 default: None,
                 password: Some(true),
             }],
         )
         .unwrap();
-    tfrobot_client_lib::services::keychain::set_input_value(
-        state.secret_store.as_ref(),
+    inputs::set_input_value_core(
+        &state,
         TEST_INSTANCE_ID,
-        "api-token",
-        &serde_json::json!("legacy-input-secret"),
+        "api-token".to_string(),
+        serde_json::json!("actual-input-secret"),
     )
-    .unwrap();
-    tfrobot_client_lib::services::keychain::set_input_secret(
-        state.secret_store.as_ref(),
-        TEST_INSTANCE_ID,
-        "api-token",
-        "namespaced-input-secret",
-    )
+    .await
     .unwrap();
 
     config_io::export_config_core(
@@ -2704,15 +3685,19 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
         .iter()
         .find(|server| server["name"] == "local-only")
         .unwrap();
+    let user = servers
+        .iter()
+        .find(|server| server["name"] == "user-only")
+        .unwrap();
 
-    assert_eq!(stdio["server_parameters"]["env"]["TOKEN"], "${REDACTED}");
+    assert_eq!(stdio["server_parameters"]["env"]["TOKEN"], "literal-secret");
     assert_eq!(
         stdio["server_parameters"]["env"]["TOKEN_REF"],
         "${env:TOKEN}"
     );
     assert_eq!(
         http["server_parameters"]["headers"]["Authorization"],
-        "${REDACTED}"
+        "Bearer literal-secret"
     );
     assert_eq!(
         http["server_parameters"]["headers"]["Authorization-Ref"],
@@ -2720,46 +3705,99 @@ async fn test_config_io_export_is_complete_and_redacts_secret_surfaces() {
     );
     assert_eq!(
         http["server_parameters"]["url"],
-        "https://${REDACTED}@example.com/mcp"
+        "https://user:password@example.com/mcp"
     );
     assert_eq!(
         local["server_parameters"]["env"]["LOCAL_TOKEN"],
-        "${REDACTED}"
+        "local-secret"
     );
-    assert!(exported["inputs"][0].get("default").is_none());
-    assert!(!content.contains("literal-secret"));
-    assert!(!content.contains("local-secret"));
-    assert!(!content.contains("legacy-input-secret"));
-    assert!(!content.contains("namespaced-input-secret"));
+    assert_eq!(stdio["server_parameters"]["cwd"], "/workspace/source");
+    assert_eq!(
+        local["server_parameters"]["env"]["LOCAL_REF"],
+        "${input:local-region}"
+    );
+    assert_eq!(
+        user["server_parameters"]["env"]["USER_REF"],
+        "${input:user-token}"
+    );
+    let mut exported_input_ids = exported["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|input| input["id"].as_str())
+        .collect::<Vec<_>>();
+    exported_input_ids.sort_unstable();
+    assert_eq!(
+        exported_input_ids,
+        ["api-token", "local-region", "user-token"]
+    );
+    assert!(exported["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|input| input.get("default").is_none()));
+    assert!(content.contains("literal-secret"));
+    assert!(content.contains("local-secret"));
+    assert!(!content.contains("actual-input-secret"));
     assert!(content.contains("local-command"));
 }
 
 #[tokio::test]
-async fn test_config_io_import_redacts_secret_surfaces_before_persisting() {
+async fn test_config_io_import_and_reexport_preserve_literals_and_input_definitions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let import_path = tmp.path().join("secret-import.json");
     let import_data = serde_json::json!({
-        "servers": [{
-            "type": "Stdio",
-            "name": "secret-import",
-            "disabled": true,
-            "forbidden_tools": [],
-            "tool_meta": {},
-            "server_parameters": {
-                "command": "node",
-                "args": [],
-                "env": {
-                    "TOKEN": "literal-import-secret",
-                    "TOKEN_REF": "${input:api-token}"
+        "servers": [
+            {
+                "type": "Stdio",
+                "name": "secret-import",
+                "disabled": true,
+                "forbidden_tools": [],
+                "tool_meta": {},
+                "server_parameters": {
+                    "command": "node",
+                    "args": [],
+                    "env": {
+                        "TOKEN": "literal-import-secret",
+                        "TOKEN_REF": "${input:api-token}"
+                    },
+                    "cwd": "/workspace/imported"
+                }
+            },
+            {
+                "type": "Http",
+                "name": "http-import",
+                "disabled": false,
+                "forbidden_tools": [],
+                "tool_meta": {},
+                "server_parameters": {
+                    "url": "https://example.com/mcp",
+                    "headers": {
+                        "Authorization": "Bearer literal-http-secret",
+                        "X-Token": "${input:api-token}"
+                    }
+                }
+            },
+            {
+                "type": "Sse",
+                "name": "sse-import",
+                "disabled": false,
+                "forbidden_tools": [],
+                "tool_meta": {},
+                "server_parameters": {
+                    "url": "https://example.com/sse",
+                    "headers": {
+                        "Authorization": "Bearer literal-sse-secret",
+                        "X-Token": "${input:api-token}"
+                    }
                 }
             }
-        }],
+        ],
         "inputs": [{
             "type": "PromptString",
             "id": "api-token",
             "label": "API token",
-            "default": "input-default-secret",
             "password": true
         }]
     });
@@ -2788,29 +3826,116 @@ async fn test_config_io_import_redacts_secret_surfaces_before_persisting() {
     let persisted = serde_json::to_value(&server.config).unwrap();
     assert_eq!(
         persisted["server_parameters"]["env"]["TOKEN"],
-        "${REDACTED}"
+        "literal-import-secret"
     );
     assert_eq!(
         persisted["server_parameters"]["env"]["TOKEN_REF"],
         "${input:api-token}"
     );
-    let imported_inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+    assert_eq!(persisted["server_parameters"]["cwd"], "/workspace/imported");
+    let imported_http = snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "http-import")
+        .map(|server| serde_json::to_value(&server.config).unwrap())
         .unwrap();
+    assert_eq!(
+        imported_http["server_parameters"]["headers"]["Authorization"],
+        "Bearer literal-http-secret"
+    );
+    assert_eq!(
+        imported_http["server_parameters"]["headers"]["X-Token"],
+        "${input:api-token}"
+    );
+    let imported_sse = snapshot
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == "sse-import")
+        .map(|server| serde_json::to_value(&server.config).unwrap())
+        .unwrap();
+    assert_eq!(
+        imported_sse["server_parameters"]["headers"]["Authorization"],
+        "Bearer literal-sse-secret"
+    );
+    assert_eq!(
+        imported_sse["server_parameters"]["headers"]["X-Token"],
+        "${input:api-token}"
+    );
+    let imported_inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
     assert!(matches!(
         imported_inputs.as_slice(),
         [inputs::InputDefinition::PromptString {
-            default: None,
             password: Some(true),
             ..
         }]
     ));
-    assert_eq!(result.servers_imported, 1);
+    assert_eq!(result.servers_imported, 3);
     assert_eq!(result.inputs_imported, 1);
-    assert!(!serde_json::to_string(&persisted)
-        .unwrap()
-        .contains("literal-import-secret"));
+    assert_eq!(
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "api-token").unwrap(),
+        Some(inputs::InputValueView {
+            configured: false,
+            status: inputs::InputValueStatus::Missing,
+            value: None,
+        })
+    );
+
+    let reexport_path = tmp.path().join("reexported.json");
+    config_io::export_config_core(
+        &state,
+        reexport_path.to_string_lossy().to_string(),
+        TEST_INSTANCE_ID.to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+    let reexported: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(reexport_path).unwrap()).unwrap();
+    let reexported_servers = reexported["servers"].as_array().unwrap();
+    let reexported_server = reexported_servers
+        .iter()
+        .find(|server| server["name"] == "secret-import")
+        .unwrap();
+    assert_eq!(
+        reexported_server["server_parameters"]["env"]["TOKEN"],
+        "literal-import-secret"
+    );
+    assert_eq!(
+        reexported_server["server_parameters"]["env"]["TOKEN_REF"],
+        "${input:api-token}"
+    );
+    assert_eq!(
+        reexported_server["server_parameters"]["cwd"],
+        "/workspace/imported"
+    );
+    let reexported_http = reexported_servers
+        .iter()
+        .find(|server| server["name"] == "http-import")
+        .unwrap();
+    assert_eq!(
+        reexported_http["server_parameters"]["headers"]["Authorization"],
+        "Bearer literal-http-secret"
+    );
+    assert_eq!(
+        reexported_http["server_parameters"]["headers"]["X-Token"],
+        "${input:api-token}"
+    );
+    let reexported_sse = reexported_servers
+        .iter()
+        .find(|server| server["name"] == "sse-import")
+        .unwrap();
+    assert_eq!(
+        reexported_sse["server_parameters"]["headers"]["Authorization"],
+        "Bearer literal-sse-secret"
+    );
+    assert_eq!(
+        reexported_sse["server_parameters"]["headers"]["X-Token"],
+        "${input:api-token}"
+    );
+    assert_eq!(reexported["inputs"][0]["id"], "api-token");
+    assert!(reexported["inputs"][0].get("default").is_none());
 }
 
 #[tokio::test]
@@ -2875,18 +4000,18 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
-        .config
-        .save_inputs_for_instance(
+        .sdk_config
+        .replace_input_definitions(
             TEST_INSTANCE_ID,
             &[inputs::InputDefinition::PickString {
                 id: "existing-input".to_string(),
-                label: "Existing input".to_string(),
+                label: Some("Existing input".to_string()),
                 description: None,
+                default: None,
                 options: vec![inputs::PickOption {
                     label: "Existing".to_string(),
                     value: "existing".to_string(),
                 }],
-                default: Some("existing".to_string()),
             }],
         )
         .unwrap();
@@ -2943,8 +4068,8 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
     assert!(error.contains("unsafe-relative-import"));
     assert!(error.contains("access_token"));
     let inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
+        .sdk_config
+        .load_project_input_definitions(TEST_INSTANCE_ID)
         .unwrap();
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].id(), "existing-input");
@@ -2961,19 +4086,6 @@ async fn test_config_io_import_rejects_sensitive_plaintext_before_any_persistenc
 async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    state
-        .config
-        .save_inputs_for_instance(
-            TEST_INSTANCE_ID,
-            &[inputs::InputDefinition::PromptString {
-                id: "shared-token".to_string(),
-                label: "Existing token".to_string(),
-                description: None,
-                default: None,
-                password: Some(true),
-            }],
-        )
-        .unwrap();
     tfrobot_client_lib::services::keychain::set_input_secret(
         state.secret_store.as_ref(),
         TEST_INSTANCE_ID,
@@ -3005,6 +4117,19 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
                 ),
                 ..Default::default()
             },
+        )
+        .unwrap();
+    state
+        .sdk_config
+        .replace_input_definitions(
+            TEST_INSTANCE_ID,
+            &[inputs::InputDefinition::PromptString {
+                id: "shared-token".to_string(),
+                label: Some("Existing token".to_string()),
+                description: None,
+                default: None,
+                password: Some(true),
+            }],
         )
         .unwrap();
     let blocked_local_mcp = state
@@ -3049,11 +4174,12 @@ async fn test_config_io_import_preflights_unwritable_sdk_target_before_inputs() 
         .exists());
     assert!(matches!(
         state
-            .config
-            .load_inputs_for_instance(TEST_INSTANCE_ID)
+            .sdk_config
+            .load_project_input_definitions(TEST_INSTANCE_ID)
             .unwrap()
             .as_slice(),
-        [inputs::InputDefinition::PromptString { label, .. }] if label == "Existing token"
+        [inputs::InputDefinition::PromptString { label, .. }]
+            if label.as_deref() == Some("Existing token")
     ));
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_secret(
@@ -3399,7 +4525,8 @@ async fn test_config_io_export_does_not_overwrite_target_when_source_is_corrupt(
 }
 
 #[tokio::test]
-async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtime() {
+async fn test_cli_native_import_persists_sdk_inputs_without_hot_updating_runtimes() {
+    require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     let other_instance = ComputerInstance::new("other-computer", "Other Computer");
@@ -3453,10 +4580,7 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let imported_inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let imported_inputs = state.sdk_config.load_input_definitions(TEST_INSTANCE_ID);
 
     assert_eq!(import_result.servers_imported, 1);
     assert_eq!(import_result.inputs_imported, 1);
@@ -3469,8 +4593,8 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
         .iter()
         .any(|server| server.name == "input-backed-server"));
     assert!(
-        runtime.inputs.read().await.contains_key("node-command"),
-        "imported Input definitions must synchronize to the target runtime"
+        !runtime.inputs.read().await.contains_key("node-command"),
+        "saved Input definitions must not hot-update the target runtime"
     );
     assert!(
         !other_runtime
@@ -3480,6 +4604,19 @@ async fn test_cli_native_import_persists_inputs_and_syncs_only_the_target_runtim
             .contains_key("node-command"),
         "the import must not synchronize Input definitions to another Computer runtime"
     );
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .inputs
+        .read()
+        .await
+        .contains_key("node-command"));
 }
 
 // ── SDK Computer MCP lifecycle (requires Node.js) ──
@@ -3616,6 +4753,13 @@ async fn test_sdk_computer_execute_echo_tool() {
 async fn test_real_http_oauth_401_returns_structured_tool_result() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    let (runtime_event_sender, mut runtime_events) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .computer_registry
+        .set_runtime_event_sink(Arc::new(ChannelRuntimeEventSink {
+            sender: runtime_event_sender,
+        }))
+        .await;
     let url = start_oauth_rejecting_mcp_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "Http",
@@ -3639,6 +4783,16 @@ async fn test_real_http_oauth_401_returns_structured_tool_result() {
     mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &oauth_bundle_id)
         .await
         .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID && event.snapshot.tools > 0 {
+                return;
+            }
+        }
+        panic!("runtime event stream closed before the HTTP mock tool was projected");
+    })
+    .await
+    .expect("HTTP mock tool projection timed out");
     let protected_tool = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap()
@@ -3680,17 +4834,11 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let (url, stats) = start_auto_oauth_challenge_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": "oauth-auto-challenge",
         "bundle_id": "oauth-auto-challenge",
-        "authPolicy": "auto",
-        "oauth": {
-            "scopes": [],
-            "client_name": "TFRobot",
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
         "server_parameters": {
             "url": format!("{url}/mcp"),
             "headers": {}
@@ -3704,7 +4852,7 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
         .await
         .expect("validated OAuth challenge must not fail configuration application");
 
-    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert!(stats.discovery_requests.load(Ordering::SeqCst) > 0);
     assert!(!runtime
         .mcp_start_diagnostics()
         .await
@@ -3719,11 +4867,34 @@ async fn test_auto_oauth_challenge_is_authorization_state_not_start_diagnostic()
             a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
         ))
     ));
-    assert!(runtime
-        .mcp_server_statuses()
+    let runtime_status = runtime
+        .mcp_server_runtime_statuses()
         .await
-        .iter()
-        .any(|(id, _, running, _)| id == &bundle_id && !running));
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("OAuth MCP runtime status");
+    assert_eq!(runtime_status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        runtime_status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
+
+    let projected = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("projected OAuth MCP status");
+    assert_eq!(
+        projected.activation_state,
+        MCPServerActivationState::Started
+    );
+    assert_eq!(
+        projected.connection_state,
+        MCPServerConnectionState::AuthorizationRequired
+    );
+    assert!(projected.running, "legacy running must project activation");
+    assert_eq!(projected.status_message, "authorization_required");
 }
 
 #[tokio::test]
@@ -3740,7 +4911,7 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let (url, discovery_requests) = start_auto_oauth_challenge_server().await;
+    let (url, stats) = start_auto_oauth_challenge_server().await;
     let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
         "type": "streamable",
         "name": "oauth-legacy-auto",
@@ -3758,7 +4929,7 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
         .await
         .expect("legacy HTTP defaults must perform anonymous-first admission");
 
-    assert!(discovery_requests.load(Ordering::SeqCst) > 0);
+    assert!(stats.discovery_requests.load(Ordering::SeqCst) > 0);
     assert_eq!(
         runtime.mcp_server_oauth_is_interactive(&bundle_id).await,
         Some(true)
@@ -3792,7 +4963,199 @@ async fn test_legacy_omitted_http_auth_defaults_to_auto_oauth_after_challenge() 
 }
 
 #[tokio::test]
-async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
+async fn test_clear_oauth_preserves_runtime_and_withdraws_authorized_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let (runtime_event_sender, mut runtime_events) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .computer_registry
+        .set_runtime_event_sink(Arc::new(ChannelRuntimeEventSink {
+            sender: runtime_event_sender,
+        }))
+        .await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let (url, stats) = start_auto_oauth_challenge_server().await;
+    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "streamable",
+        "name": "oauth-clear-active",
+        "bundle_id": "oauth-clear-active",
+        "server_parameters": {
+            "url": format!("{url}/mcp"),
+            "headers": {}
+        }
+    }))
+    .unwrap();
+    let bundle_id = resolve_bundle_id(&config);
+    runtime.apply_user_mcp_server_config(config).await.unwrap();
+    let unauthorized_snapshot = runtime.runtime_snapshot().await;
+
+    let authorization_url = runtime
+        .begin_oauth_authorization(&bundle_id)
+        .await
+        .expect("automatic OAuth server must begin authorization");
+    let authorization_url = url::Url::parse(&authorization_url).expect("authorization URL");
+    let authorization_query: HashMap<_, _> = authorization_url.query_pairs().into_owned().collect();
+    let redirect_uri = authorization_query
+        .get("redirect_uri")
+        .expect("authorization URL redirect_uri");
+    let oauth_state = authorization_query
+        .get("state")
+        .expect("authorization URL state");
+    let mut callback_url = url::Url::parse(redirect_uri).expect("callback URL");
+    callback_url
+        .query_pairs_mut()
+        .append_pair("code", "authorization-code")
+        .append_pair("state", oauth_state)
+        .append_pair("iss", &url);
+    let callback_response = reqwest::get(callback_url)
+        .await
+        .expect("submit OAuth callback");
+    assert!(callback_response.status().is_success());
+    let projected = timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID
+                && event.snapshot.capability_revision > unauthorized_snapshot.capability_revision
+                && event.snapshot.tools > unauthorized_snapshot.tools
+            {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    if projected.is_none() {
+        panic!(
+            "authorized MCP capability projection was not published; oauth_status={:?}, runtime_snapshot={:?}, token_requests={}, registration_requests={}, token_form={:?}",
+            runtime.oauth_status(&bundle_id).await,
+            runtime.runtime_snapshot().await,
+            stats.token_requests.load(Ordering::SeqCst),
+            stats.registration_requests.load(Ordering::SeqCst),
+            *stats.last_token_form.lock().await,
+        );
+    }
+
+    assert_eq!(stats.token_requests.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Authorized { .. }
+        ))
+    ));
+    let protected_tool = debug::get_available_tools_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tool| tool.name == "oauth-clear-active__protected")
+        .expect("authorized MCP tool must be projected");
+    let authorized_call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &protected_tool.name,
+        serde_json::json!({}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(authorized_call.success);
+    assert!(stats.authorized_mcp_requests.load(Ordering::SeqCst) > 0);
+
+    let authorized_snapshot = runtime.runtime_snapshot().await;
+    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
+
+    let revoked = timeout(Duration::from_secs(5), async {
+        while let Some(event) = runtime_events.recv().await {
+            if event.instance_id == TEST_INSTANCE_ID
+                && matches!(
+                    &event.cause,
+                    ComputerRuntimeEventCause::CapabilityRevisionBumped { .. }
+                )
+                && event.snapshot.capability_revision > authorized_snapshot.capability_revision
+                && event.snapshot.tools < authorized_snapshot.tools
+            {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    assert!(
+        revoked.is_some(),
+        "clear_oauth did not publish a capability invalidation; before={authorized_snapshot:?}, after={:?}",
+        runtime.runtime_snapshot().await
+    );
+
+    assert!(matches!(
+        runtime.oauth_status(&bundle_id).await,
+        Ok(Some(
+            a2c_smcp::smcp_computer::oauth::OAuthStatus::Unauthorized
+        ))
+    ));
+    let runtime_status = runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("cleared OAuth MCP runtime status");
+    assert_eq!(runtime_status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        runtime_status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
+    assert!(runtime
+        .available_tools()
+        .await
+        .unwrap()
+        .iter()
+        .all(|tool| tool.name.as_ref() != "oauth-clear-active__protected"));
+    let mcp_requests_after_clear = stats.mcp_requests.load(Ordering::SeqCst);
+    let authorized_requests_after_clear = stats.authorized_mcp_requests.load(Ordering::SeqCst);
+    let unauthorized_call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &protected_tool.name,
+        serde_json::json!({}),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(!unauthorized_call.success);
+    assert_eq!(
+        stats.mcp_requests.load(Ordering::SeqCst),
+        mcp_requests_after_clear,
+        "cleared credentials must block the tool call before MCP transport"
+    );
+    assert_eq!(
+        stats.authorized_mcp_requests.load(Ordering::SeqCst),
+        authorized_requests_after_clear,
+        "the cleared bearer token must never be reused"
+    );
+
+    runtime.stop_mcp_server(&bundle_id).await.unwrap();
+    let stopped = runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .into_iter()
+        .find(|status| status.bundle_id == bundle_id)
+        .expect("stopped OAuth MCP runtime status");
+    assert_eq!(stopped.activation, MCPServerActivationState::Stopped);
+    assert_eq!(stopped.connection, MCPServerConnectionState::Disconnected);
+}
+
+#[tokio::test]
+async fn test_client_oauth_cancel_interrupts_delayed_dynamic_registration() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
@@ -3804,59 +5167,10 @@ async fn test_clear_oauth_stops_active_server_and_removes_tools_immediately() {
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
-        .unwrap();
-    let url = start_oauth_rejecting_mcp_server().await;
-    let config: MCPServerConfig = serde_json::from_value(serde_json::json!({
-        "type": "streamable",
-        "name": "oauth-clear-active",
-        "bundle_id": "oauth-clear-active",
-        "authPolicy": "auto",
-        "oauth": {
-            "scopes": [],
-            "client_name": "TFRobot",
-            "mode": { "type": "authorizationCode", "registration": "dynamic" }
-        },
-        "server_parameters": {
-            "url": url,
-            "headers": {}
-        }
-    }))
-    .unwrap();
-    let bundle_id = resolve_bundle_id(&config);
-    runtime.apply_user_mcp_server_config(config).await.unwrap();
-    assert!(runtime
-        .available_tools()
-        .await
-        .unwrap()
-        .iter()
-        .any(|tool| tool.name.as_ref() == "oauth-clear-active__protected"));
-
-    runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
-
-    assert!(runtime
-        .mcp_server_statuses()
-        .await
-        .iter()
-        .any(|(id, _, running, _)| id == &bundle_id && !running));
-    assert!(runtime
-        .available_tools()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .all(|tool| !tool.name.as_ref().starts_with("oauth-clear-active__")));
-}
-
-#[tokio::test]
-async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = create_mcp_test_app_state(tmp.path()).await;
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
-    let config = delayed_oauth_server_config(&url, true);
+    let (url, stats) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
+    let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
     runtime
         .apply_user_mcp_server_config(config)
@@ -3872,12 +5186,12 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
     });
 
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) == 0 {
+        while stats.registration_requests.load(Ordering::SeqCst) == 0 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("OAuth discovery request must start");
+    .expect("OAuth dynamic registration request must start after automatic admission");
 
     let started = Instant::now();
     timeout(
@@ -3885,7 +5199,7 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
         runtime.cancel_oauth_authorization(&oauth_bundle_id),
     )
     .await
-    .expect("client cancellation must not wait for provider discovery")
+    .expect("client cancellation must not wait for provider registration")
     .expect("client cancellation succeeds");
     assert!(started.elapsed() < Duration::from_secs(1));
 
@@ -3905,12 +5219,18 @@ async fn test_client_oauth_cancel_interrupts_delayed_sdk_discovery() {
 async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
+    let (url, stats) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
     let enabled = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&enabled);
     runtime
@@ -3926,19 +5246,19 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 1 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("first OAuth discovery request must start");
+    .expect("first OAuth registration request must start");
 
     timeout(
         Duration::from_secs(1),
         runtime.apply_user_mcp_server_config(delayed_oauth_server_config(&url, true)),
     )
     .await
-    .expect("server replacement must not wait for delayed discovery")
+    .expect("server replacement must not wait for delayed registration")
     .expect("replace OAuth server");
     let first_error = timeout(Duration::from_secs(1), first_begin)
         .await
@@ -3946,6 +5266,11 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
         .expect("first begin task joins")
         .expect_err("server replacement must cancel the first flow");
     assert!(first_error.to_ascii_lowercase().contains("cancel"));
+
+    runtime
+        .apply_user_mcp_server_config(delayed_oauth_server_config(&url, false))
+        .await
+        .expect("re-enable server and repeat automatic admission");
 
     let second_runtime = runtime.clone();
     let second_bundle_id = oauth_bundle_id.clone();
@@ -3955,7 +5280,7 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 2 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3981,18 +5306,28 @@ async fn test_oauth_server_update_retires_client_flow_before_sdk_replacement() {
 async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .expect("test runtime");
-    let (url, discovery_requests) = start_delayed_oauth_discovery_server().await;
-    let config = delayed_oauth_server_config(&url, true);
+    let (url, stats) =
+        start_auto_oauth_challenge_server_with_registration_delay(Duration::from_secs(5)).await;
+    let config = delayed_oauth_server_config(&url, false);
     let oauth_bundle_id = resolve_bundle_id(&config);
     runtime
         .add_or_update_plugin_server(config.clone())
         .await
         .expect("mount plugin OAuth server");
+    runtime
+        .start_mcp_server(&oauth_bundle_id)
+        .await
+        .expect("automatic admission must expose plugin OAuth state");
 
     let begin_runtime = runtime.clone();
     let begin_bundle_id = oauth_bundle_id.clone();
@@ -4002,19 +5337,19 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 1 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("plugin OAuth discovery request must start");
+    .expect("plugin OAuth registration request must start");
 
     timeout(
         Duration::from_secs(1),
         runtime.remove_plugin_server(&oauth_bundle_id),
     )
     .await
-    .expect("plugin unmount must not wait for delayed discovery")
+    .expect("plugin unmount must not wait for delayed registration")
     .expect("unmount plugin OAuth server");
     timeout(Duration::from_secs(1), begin)
         .await
@@ -4026,6 +5361,10 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
         .add_or_update_plugin_server(config)
         .await
         .expect("remount plugin OAuth server");
+    runtime
+        .start_mcp_server(&oauth_bundle_id)
+        .await
+        .expect("remounted plugin must repeat automatic admission");
     let replacement_runtime = runtime.clone();
     let replacement_bundle_id = oauth_bundle_id.clone();
     let replacement = tokio::spawn(async move {
@@ -4034,7 +5373,7 @@ async fn test_plugin_oauth_unmount_retires_client_flow_before_sdk_removal() {
             .await
     });
     timeout(Duration::from_secs(1), async {
-        while discovery_requests.load(Ordering::SeqCst) < 2 {
+        while stats.registration_requests.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
@@ -4177,7 +5516,7 @@ async fn test_sdk_computer_invalid_command_fails() {
 // ── Config IO integration ──
 
 #[tokio::test]
-async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime() {
+async fn test_import_official_remote_url_updates_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
@@ -4224,34 +5563,39 @@ async fn test_import_official_remote_url_creates_oauth_http_and_updates_runtime(
         http.server_parameters.url,
         "https://mcp.atlassian.com/v1/mcp/authv2"
     );
-    assert_eq!(
-        http.auth_policy,
-        Some(a2c_smcp::smcp_computer::mcp_clients::HttpAuthPolicy::Auto)
-    );
-    let oauth = http
-        .oauth
-        .expect("remote URL must retain OAuth discovery overrides");
-    assert!(oauth.resource.is_none());
-    assert!(oauth.scopes.is_empty());
+    let serialized = serde_json::to_value(&http).unwrap();
+    assert!(serialized.get("authPolicy").is_none());
+    assert!(serialized.get("oauth").is_none());
 
     let runtime = state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("atlassian")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_configs()
         .await
         .contains_key(&bundle_id("atlassian")));
-    assert!(runtime
-        .mcp_server_statuses()
+    let status = runtime
+        .mcp_server_runtime_statuses()
         .await
-        .iter()
-        .any(|(id, _, running, _)| id.as_str() == "atlassian" && !*running));
+        .into_iter()
+        .find(|status| status.bundle_id.as_str() == "atlassian")
+        .expect("imported server must have runtime status");
+    assert_eq!(status.activation, MCPServerActivationState::Started);
+    assert_eq!(
+        status.connection,
+        MCPServerConnectionState::AuthorizationRequired
+    );
 }
 
 #[tokio::test]
-async fn test_import_stdio_server_updates_an_active_runtime() {
+async fn test_import_stdio_server_updates_an_active_runtime_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
     state
@@ -4289,15 +5633,20 @@ async fn test_import_stdio_server_updates_an_active_runtime() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_configs()
+        .await
+        .contains_key(&bundle_id("runtime-import")));
+    runtime.restart().await.unwrap();
     assert!(runtime
         .sdk_mcp_server_configs()
         .await
         .contains_key(&bundle_id("runtime-import")));
     assert!(runtime
-        .mcp_server_statuses()
+        .mcp_server_runtime_statuses()
         .await
         .iter()
-        .any(|(id, _, running, _)| id.as_str() == "runtime-import" && *running));
+        .any(|status| status.bundle_id.as_str() == "runtime-import" && status.is_connected()));
 }
 
 #[tokio::test]
@@ -4472,38 +5821,21 @@ async fn test_input_definitions_crud() {
         }))
         .unwrap();
 
-    let mut inputs = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
-    inputs.push(input);
-    state
-        .config
-        .save_inputs_for_instance(TEST_INSTANCE_ID, &inputs)
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, input)
+        .await
         .unwrap();
 
     // Read back
-    let loaded = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let loaded = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id(), "test-input");
 
     // Remove
-    let filtered: Vec<_> = loaded
-        .into_iter()
-        .filter(|i| i.id() != "test-input")
-        .collect();
-    state
-        .config
-        .save_inputs_for_instance(TEST_INSTANCE_ID, &filtered)
+    inputs::remove_input_core(&state, TEST_INSTANCE_ID, "test-input")
+        .await
         .unwrap();
 
-    let after = state
-        .config
-        .load_inputs_for_instance(TEST_INSTANCE_ID)
-        .unwrap();
+    let after = inputs::list_inputs_core(&state, TEST_INSTANCE_ID).unwrap();
     assert!(after.is_empty());
 }
 
@@ -4556,7 +5888,7 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "runtime-token".to_string(),
-            label: "Runtime token".to_string(),
+            label: Some("Runtime token".to_string()),
             description: None,
             default: None,
             password: Some(false),
@@ -4572,19 +5904,15 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
             "command": "node",
             "args": [common::echo_server_path().to_str().unwrap()],
             "env": {
-                "RUNTIME_TOKEN": "{{runtime-token}}"
+                "RUNTIME_TOKEN": "${input:runtime-token}"
             }
         }
     }))
     .unwrap();
 
-    let save_error = sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
         .await
-        .unwrap_err();
-    assert!(matches!(
-        &save_error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "runtime-token"
-    ));
+        .unwrap();
     let persisted = state
         .sdk_config
         .load(TEST_INSTANCE_ID)
@@ -4601,16 +5929,21 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     // Recreate the application/runtime so boot reads the persisted SDK configuration,
     // matching the production cold-start path rather than an already-loaded runtime.
     let state = create_mcp_test_app_state(tmp.path()).await;
-    let error = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
         .await
-        .unwrap_err();
+        .unwrap();
+    assert!(started.running);
+    let error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-apply"))
+            .await
+            .unwrap_err();
     assert!(
         matches!(
             &error,
-            RuntimeActionError::MissingInput { input_id, env_hint, .. }
-                if input_id == "runtime-token" && env_hint == "A2C_SMCP_runtime_token"
+            RuntimeActionError::ResolverFailed { input_id, message }
+                if input_id == "runtime-token" && message.contains("user confirmation is required")
         ),
-        "unexpected boot error: {error:?}"
+        "unexpected MCP start error: {error:?}"
     );
 
     inputs::set_input_value_core(
@@ -4621,11 +5954,6 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
     )
     .await
     .unwrap();
-    state
-        .computer_registry
-        .start_runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("runtime-input-apply"))
         .await
         .unwrap();
@@ -4642,6 +5970,823 @@ async fn test_mcp_runtime_applies_config_after_missing_input_is_supplied() {
 }
 
 #[tokio::test]
+async fn test_user_mcp_start_prompts_in_place_and_continues_without_retry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: Some("Runtime token".to_string()),
+            description: Some("Token supplied during start".to_string()),
+            default: Some("definition-default-must-not-auto-resolve".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "runtime-input-interactive",
+        "bundle_id": "runtime-input-interactive",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "RUNTIME_TOKEN": "${input:runtime-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("integration-test", true);
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        mcp::start_mcp_server_interactive_core(
+            start_state.as_ref(),
+            TEST_INSTANCE_ID,
+            &bundle_id("runtime-input-interactive"),
+        )
+        .await
+    });
+
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("interactive start must emit a runtime input request")
+        .expect("runtime input bridge must remain connected");
+    assert_eq!(request.instance_id, TEST_INSTANCE_ID);
+    assert_eq!(request.reason, RuntimeInputRequestReason::Missing);
+    assert!(!request.secret);
+    assert!(matches!(
+        &request.definition,
+        a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
+            if prompt.id == "runtime-token"
+                && prompt.default.as_deref() == Some("definition-default-must-not-auto-resolve")
+    ));
+    assert!(
+        inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID)
+            .unwrap()
+            .is_empty()
+    );
+
+    let completion = bridge.complete(
+        &request.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "confirmed-at-start".to_string(),
+        },
+    );
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    start.unwrap().unwrap();
+
+    let entries = inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "runtime-token");
+    assert_eq!(
+        entries[0].value,
+        Some(serde_json::json!("confirmed-at-start"))
+    );
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("runtime-input-interactive")));
+}
+
+#[tokio::test]
+async fn test_pending_foreground_prompt_does_not_block_another_computer_background_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "runtime-token".to_string(),
+            label: Some("Runtime token".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let waiting_server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "waiting-server",
+        "bundle_id": "waiting-server",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "RUNTIME_TOKEN": "${input:runtime-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, waiting_server)
+        .await
+        .unwrap();
+
+    const SECOND_INSTANCE_ID: &str = "computer-b";
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(SECOND_INSTANCE_ID, "Computer B"))
+        .unwrap();
+    let independent_server =
+        echo_server_config_with_bundle_id("independent-server", "independent-server");
+    sdk_config::upsert_computer_mcp_config_core(&state, SECOND_INSTANCE_ID, independent_server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("cross-computer-test", true);
+
+    let waiting_state = state.clone();
+    let waiting_start = tokio::spawn(async move {
+        mcp::start_mcp_server_interactive_core(
+            waiting_state.as_ref(),
+            TEST_INSTANCE_ID,
+            &bundle_id("waiting-server"),
+        )
+        .await
+    });
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer A must reach its foreground prompt")
+        .expect("prompt bridge must remain available");
+
+    let stop_state = state.clone();
+    let same_computer_stop = tokio::spawn(async move {
+        computer::stop_computer_instance_core(stop_state.as_ref(), TEST_INSTANCE_ID.to_string())
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !same_computer_stop.is_finished(),
+        "Computer A stop must wait behind its foreground Runtime Input operation"
+    );
+
+    timeout(
+        Duration::from_secs(5),
+        start_computer_instance_core(None, state.as_ref(), SECOND_INSTANCE_ID.to_string()),
+    )
+    .await
+    .expect("Computer B background start must not wait behind Computer A's queued stop")
+    .unwrap();
+
+    let completion = bridge.complete(&request.request_id, RuntimeInputCompletion::Cancelled);
+    let (completion, waiting_start) = tokio::join!(completion, waiting_start);
+    completion.unwrap();
+    assert!(matches!(
+        waiting_start.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    timeout(Duration::from_secs(5), same_computer_stop)
+        .await
+        .expect("Computer A stop must resume after its prompt is cancelled")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_interactive_start_all_serializes_distinct_inputs_and_reuses_shared_entry() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    for input_id in ["shared-token", "region"] {
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: input_id.to_string(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for (name, input_id) in [
+        ("shared-one", "shared-token"),
+        ("region-server", "region"),
+        ("shared-two", "shared-token"),
+    ] {
+        let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": name,
+            "bundle_id": name,
+            "disabled": false,
+            "server_parameters": {
+                "command": "node",
+                "args": [common::echo_server_path().to_str().unwrap()],
+                "env": { "VALUE": format!("${{input:{input_id}}}") }
+            }
+        }))
+        .unwrap();
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+            .await
+            .unwrap();
+    }
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("start-all-test", true);
+    let start_state = state.clone();
+    let start_all = tokio::spawn(async move {
+        mcp::start_all_servers_interactive_core(start_state.as_ref(), TEST_INSTANCE_ID).await
+    });
+
+    let first = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("start-all must request its first missing input")
+        .unwrap();
+    let first_id = first.definition.id().to_string();
+    let first_value = format!("confirmed-{first_id}");
+    let completion_bridge = bridge.clone();
+    let first_completion = tokio::spawn(async move {
+        completion_bridge
+            .complete(
+                &first.request_id,
+                RuntimeInputCompletion::Confirmed { value: first_value },
+            )
+            .await
+    });
+    let second = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("start-all must serialize its second distinct input")
+        .unwrap();
+    first_completion.await.unwrap().unwrap();
+    let second_id = second.definition.id().to_string();
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        [first_id.as_str(), second_id.as_str()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        ["shared-token", "region"]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+    );
+
+    let completion = bridge.complete(
+        &second.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: format!("confirmed-{second_id}"),
+        },
+    );
+    let (completion, result) = tokio::join!(completion, start_all);
+    completion.unwrap();
+    let result = result.unwrap().unwrap();
+    assert!(
+        result.failures.is_empty(),
+        "unexpected failures: {:?}",
+        result.failures
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "shared input must not prompt twice"
+    );
+    let entries = inputs::list_input_entries_core(state.as_ref(), TEST_INSTANCE_ID).unwrap();
+    assert_eq!(entries.len(), 2);
+}
+
+#[tokio::test]
+async fn test_computer_start_and_restart_share_the_foreground_runtime_input_contract() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "lifecycle-token".to_string(),
+            label: None,
+            description: None,
+            default: Some("prefill-only".to_string()),
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "computer-lifecycle-input",
+        "bundle_id": "computer-lifecycle-input",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:lifecycle-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("computer-lifecycle-test", true);
+
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        computer::start_computer_instance_interactive_core(
+            None,
+            start_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let start_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer start must prompt")
+        .unwrap();
+    let completion = bridge.complete(
+        &start_prompt.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "start-value".to_string(),
+        },
+    );
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    assert!(start.unwrap().unwrap().running);
+
+    inputs::delete_input_entry_core(state.as_ref(), TEST_INSTANCE_ID, "lifecycle-token")
+        .await
+        .unwrap();
+    let restart_state = state.clone();
+    let restart = tokio::spawn(async move {
+        computer::restart_computer_instance_interactive_core(
+            None,
+            restart_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let restart_prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("Computer restart must prompt again after the entry is deleted")
+        .unwrap();
+    let completion = bridge.complete(
+        &restart_prompt.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "restart-value".to_string(),
+        },
+    );
+    let (completion, restart) = tokio::join!(completion, restart);
+    completion.unwrap();
+    assert!(restart.unwrap().unwrap().running);
+}
+
+#[tokio::test]
+async fn test_foreground_computer_start_propagates_runtime_input_bridge_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "start-token".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "start-bridge-failure",
+        "bundle_id": "start-bridge-failure",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:start-token}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    drop(state);
+
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let error = computer::start_computer_instance_interactive_core(
+        None,
+        &state,
+        TEST_INSTANCE_ID.to_string(),
+    )
+    .await
+    .expect_err("foreground start must not swallow an unavailable Runtime Input bridge");
+    assert!(matches!(
+        error,
+        RuntimeActionError::ResolverFailed { input_id, .. } if input_id == "start-token"
+    ));
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await,
+        "failed foreground start must roll back the partially started runtime"
+    );
+}
+
+#[tokio::test]
+async fn test_foreground_computer_start_stops_after_first_input_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    for input_id in ["first-token", "second-token"] {
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: input_id.to_string(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": format!("server-{input_id}"),
+            "bundle_id": format!("server-{input_id}"),
+            "disabled": false,
+            "server_parameters": {
+                "command": "node",
+                "args": [common::echo_server_path().to_str().unwrap()],
+                "env": { "TOKEN": format!("${{input:{input_id}}}") }
+            }
+        }))
+        .unwrap();
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+            .await
+            .unwrap();
+    }
+    drop(state);
+
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("computer-fail-fast-test", true);
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        computer::start_computer_instance_interactive_core(
+            None,
+            start_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let first = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground Computer start must request its first missing input")
+        .unwrap();
+
+    let completion = bridge.complete(&first.request_id, RuntimeInputCompletion::Cancelled);
+    let (completion, start) = tokio::join!(completion, start);
+    completion.unwrap();
+    assert!(matches!(
+        start.unwrap().unwrap_err(),
+        RuntimeActionError::RuntimeInputCancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "foreground Computer start must not request another input after cancellation"
+    );
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await
+    );
+}
+
+#[tokio::test]
+async fn test_foreground_computer_restart_propagates_secret_persistence_failure() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(create_config_only_state_with_store(
+        tmp.path(),
+        Arc::new(FailingInputWriteStore),
+    ));
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(
+            state
+                .config
+                .get_computer_instance(TEST_INSTANCE_ID)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    inputs::add_or_update_input_core(
+        state.as_ref(),
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "restart-secret".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            password: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "restart-persistence-failure",
+        "bundle_id": "restart-persistence-failure",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:restart-secret}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(state.as_ref(), TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let bridge = state.computer_registry.runtime_input_bridge();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+    bridge.set_ready("restart-persistence-test", true);
+    let restart_state = state.clone();
+    let restart = tokio::spawn(async move {
+        computer::restart_computer_instance_interactive_core(
+            None,
+            restart_state.as_ref(),
+            TEST_INSTANCE_ID.to_string(),
+        )
+        .await
+    });
+    let request = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("foreground restart must request its missing secret")
+        .unwrap();
+    assert!(request.secret);
+
+    let completion = bridge.complete(
+        &request.request_id,
+        RuntimeInputCompletion::Confirmed {
+            value: "must-not-persist".to_string(),
+        },
+    );
+    let (completion, restart) = tokio::join!(completion, restart);
+    assert!(
+        completion.is_err(),
+        "native persistence failure must reject completion"
+    );
+    assert!(matches!(
+        restart.unwrap().unwrap_err(),
+        RuntimeActionError::ResolverFailed { input_id, .. } if input_id == "restart-secret"
+    ));
+    assert!(
+        !state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_running()
+            .await,
+        "failed foreground restart must not leave a partially restarted runtime"
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_runtime_materializes_literal_and_input_sources_on_each_actual_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "region".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("cn"),
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "mixed-env-sources",
+        "bundle_id": "mixed-env-sources",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [env_server_path().to_str().unwrap()],
+            "env": {
+                "LOG_LEVEL": "debug",
+                "REGION": "${input:region}"
+            }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bundle = bundle_id("mixed-env-sources");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+
+    async fn read_env(state: &AppState) -> serde_json::Value {
+        let response = debug::execute_tool_core(
+            state,
+            TEST_INSTANCE_ID,
+            "mixed-env-sources__read_env",
+            serde_json::json!({}),
+            Some(10.0),
+        )
+        .await
+        .unwrap();
+        assert!(response.success, "tool call failed: {:?}", response.error);
+        let result = serde_json::to_value(response.result.unwrap()).unwrap();
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    assert_eq!(
+        read_env(&state).await,
+        serde_json::json!({ "LOG_LEVEL": "debug", "REGION": "cn" })
+    );
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("eu"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_env(&state).await["REGION"], "cn");
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_env(&state).await,
+        serde_json::json!({ "LOG_LEVEL": "debug", "REGION": "eu" })
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_runtime_migrates_legacy_secret_before_any_management_read() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "region".to_string(),
+            label: Some("Region".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    tfrobot_client_lib::services::keychain::set_input_secret(
+        state.secret_store.as_ref(),
+        TEST_INSTANCE_ID,
+        "region",
+        "cn",
+    )
+    .unwrap();
+    input_value_index::record(
+        state.config.as_ref(),
+        TEST_INSTANCE_ID,
+        "region",
+        InputValueStorageKind::Secret,
+    )
+    .unwrap();
+    let legacy_plain_values =
+        InputValueStore::for_computer(state.config.as_ref(), TEST_INSTANCE_ID);
+    legacy_plain_values
+        .set("region", &serde_json::json!("stale-plain"))
+        .unwrap();
+    let entry_metadata = state
+        .config
+        .computer_instance_storage_root(TEST_INSTANCE_ID)
+        .join("input_entries.json");
+    assert!(!entry_metadata.exists());
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "entry-storage-authority",
+        "bundle_id": "entry-storage-authority",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [env_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    let bundle = bundle_id("entry-storage-authority");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle)
+        .await
+        .unwrap();
+
+    let response = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "entry-storage-authority__read_env",
+        serde_json::json!({}),
+        Some(10.0),
+    )
+    .await
+    .unwrap();
+    let result = serde_json::to_value(response.result.unwrap()).unwrap();
+    let env: serde_json::Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(env["REGION"], "cn");
+    assert!(entry_metadata.exists());
+    assert_eq!(legacy_plain_values.get("region").unwrap(), None);
+    let entries = inputs::list_input_entries_core(&state, TEST_INSTANCE_ID).unwrap();
+    assert!(entries[0].secret);
+    assert_eq!(entries[0].value, None);
+}
+
+#[tokio::test]
 async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -4653,7 +6798,7 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
             "command": "node",
             "args": [common::echo_server_path().to_str().unwrap()],
             "env": {
-                "OPENAI_API_KEY": "{{OPENAI_KEY}}"
+                "OPENAI_API_KEY": "${input:OPENAI_KEY}"
             }
         }
     }))
@@ -4665,7 +6810,7 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
 
     assert!(matches!(
         error,
-        RuntimeActionError::MissingInput { input_id, .. } if input_id == "OPENAI_KEY"
+        RuntimeActionError::MissingInputDefinition { input_id, .. } if input_id == "OPENAI_KEY"
     ));
     let persisted = state
         .sdk_config
@@ -4682,6 +6827,55 @@ async fn test_mcp_config_reports_a_reference_without_an_input_definition() {
     );
 }
 
+#[tokio::test]
+async fn test_mcp_config_persists_a_canonical_pick_reference() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PickString {
+            id: "region".to_string(),
+            label: None,
+            description: None,
+            default: None,
+            options: vec![inputs::PickOption {
+                label: "US".to_string(),
+                value: "us".to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "dynamic-pick",
+        "disabled": true,
+        "server_parameters": {
+            "command": "echo",
+            "args": [],
+            "env": {"REGION": "${input:region}"}
+        }
+    }))
+    .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    let persisted = state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .into_iter()
+        .find(|server| server.name == "dynamic-pick")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(persisted.config).unwrap()["server_parameters"]["env"]["REGION"],
+        "${input:region}"
+    );
+}
+
 async fn create_running_input_backed_state(path: &std::path::Path, server_name: &str) -> AppState {
     let state = create_mcp_test_app_state(path).await;
     inputs::add_or_update_input_core(
@@ -4689,7 +6883,7 @@ async fn create_running_input_backed_state(path: &std::path::Path, server_name: 
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "runtime-token".to_string(),
-            label: "Runtime token".to_string(),
+            label: Some("Runtime token".to_string()),
             description: None,
             default: None,
             password: Some(false),
@@ -4726,7 +6920,7 @@ async fn create_running_input_backed_state(path: &std::path::Path, server_name: 
 }
 
 #[tokio::test]
-async fn test_restart_preserves_structured_missing_input_error() {
+async fn test_restart_is_not_blocked_and_mcp_start_preserves_missing_input_error() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_running_input_backed_state(tmp.path(), "restart-runtime-input").await;
@@ -4734,23 +6928,175 @@ async fn test_restart_preserves_structured_missing_input_error() {
         .await
         .unwrap();
 
-    let error =
+    let restarted =
         computer::restart_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
             .await
-            .unwrap_err();
+            .unwrap();
+    assert!(restarted.running);
+    let error = mcp::start_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id("restart-runtime-input"),
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         matches!(
             error,
-            RuntimeActionError::MissingInput { ref input_id, .. }
+            RuntimeActionError::ResolverFailed { ref input_id, ref message }
                 if input_id == "runtime-token"
+                    && message.contains("user confirmation is required")
         ),
-        "restart returned an unexpected error: {error:?}"
+        "MCP start returned an unexpected error after restart: {error:?}"
     );
 }
 
 #[tokio::test]
-async fn test_input_commands_sync_runtime_definitions() {
+async fn test_mcp_start_preserves_structured_invalid_pick_selection_and_stored_value() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let pick = |value: &str| inputs::InputDefinition::PickString {
+        id: "region".to_string(),
+        label: None,
+        description: Some("Region".to_string()),
+        default: Some(value.to_string()),
+        options: vec![inputs::PickOption {
+            label: value.to_uppercase(),
+            value: value.to_string(),
+        }],
+    };
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, pick("eu"))
+        .await
+        .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region".to_string(),
+        serde_json::json!("eu"),
+    )
+    .await
+    .unwrap();
+    inputs::add_or_update_input_core(&state, TEST_INSTANCE_ID, pick("cn"))
+        .await
+        .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "invalid-pick",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+
+    let started = start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    assert!(started.running);
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("invalid-pick"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeActionError::InvalidSelection {
+            ref input_id,
+            ref value,
+            ..
+        } if input_id == "region" && value.as_deref() == Some("eu")
+    ));
+    let view = inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "region")
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.status, inputs::InputValueStatus::InvalidSelection);
+    assert_eq!(view.value, Some(serde_json::json!("eu")));
+}
+
+#[tokio::test]
+async fn test_secret_pick_invalid_selection_never_leaves_keychain_plaintext() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PickString {
+            id: "region".to_string(),
+            label: None,
+            description: Some("Region".to_string()),
+            default: None,
+            options: vec![inputs::PickOption {
+                label: "China".to_string(),
+                value: "cn".to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    inputs::upsert_input_entry_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "region",
+        Some("private-retired-region".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "invalid-secret-pick",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "REGION": "${input:region}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let error =
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("invalid-secret-pick"))
+            .await
+            .unwrap_err();
+    let error_json = serde_json::to_string(&error).unwrap();
+    assert!(matches!(
+        error,
+        RuntimeActionError::InvalidSelection {
+            ref input_id,
+            value: None,
+            ..
+        } if input_id == "region"
+    ));
+    assert!(!error_json.contains("private-retired-region"));
+    assert!(!error_json.contains("redacted secret selection"));
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let diagnostics = serde_json::to_string(&runtime.runtime_snapshot().await).unwrap();
+    assert!(!diagnostics.contains("private-retired-region"));
+    assert!(!serde_json::to_string(
+        &inputs::list_input_entries_core(&state, TEST_INSTANCE_ID).unwrap()
+    )
+    .unwrap()
+    .contains("private-retired-region"));
+}
+
+#[tokio::test]
+async fn test_input_definition_changes_require_runtime_recreation() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -4759,9 +7105,9 @@ async fn test_input_commands_sync_runtime_definitions() {
         TEST_INSTANCE_ID,
         inputs::InputDefinition::PromptString {
             id: "api-key".to_string(),
-            label: "API Key".to_string(),
+            label: Some("API Key".to_string()),
             description: Some("Secret API key".to_string()),
-            default: Some("default-key".to_string()),
+            default: None,
             password: Some(false),
         },
     )
@@ -4773,19 +7119,7 @@ async fn test_input_commands_sync_runtime_definitions() {
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    {
-        let runtime_inputs = runtime.inputs.read().await;
-        let input = runtime_inputs
-            .get("api-key")
-            .expect("runtime input definition should be synced");
-        assert!(matches!(
-            input,
-            a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt)
-                if prompt.description == "Secret API key"
-                    && prompt.default.as_deref() == Some("default-key")
-                    && prompt.password == Some(false)
-        ));
-    }
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
 
     inputs::set_input_value_core(
         &state,
@@ -4796,115 +7130,30 @@ async fn test_input_commands_sync_runtime_definitions() {
     .await
     .unwrap();
 
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    let resolver_probe: MCPServerConfig = serde_json::from_value(serde_json::json!({
-        "type": "stdio",
-        "name": "input-resolver-probe",
-        "disabled": true,
-        "server_parameters": {
-            "command": "echo",
-            "args": ["${input:api-key}"],
-            "env": {}
-        }
-    }))
-    .unwrap();
-    mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, resolver_probe)
-        .await
-        .unwrap();
     assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "api-key"
-        )
-        .unwrap(),
-        Some(serde_json::json!("runtime-key"))
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "api-key").unwrap(),
+        Some(inputs::InputValueView {
+            configured: true,
+            status: inputs::InputValueStatus::Configured,
+            value: Some(serde_json::json!("runtime-key")),
+        })
     );
-    assert!(runtime
-        .sdk_mcp_server_ids()
-        .await
-        .contains(&bundle_id("input-resolver-probe")));
-
-    inputs::remove_input_value_core(&state, TEST_INSTANCE_ID, "api-key")
-        .await
-        .unwrap();
-    assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "api-key"
-        )
-        .unwrap(),
-        None
-    );
-
-    inputs::set_input_value_core(
-        &state,
-        TEST_INSTANCE_ID,
-        "api-key".to_string(),
-        serde_json::json!("runtime-key-2"),
-    )
-    .await
-    .unwrap();
-    inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
-        .await
-        .unwrap();
-    assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "api-key"
-        )
-        .unwrap(),
-        None
-    );
-
-    inputs::set_input_value_core(
-        &state,
-        TEST_INSTANCE_ID,
-        "api-key".to_string(),
-        serde_json::json!("stale-runtime-key"),
-    )
-    .await
-    .unwrap();
-    inputs::remove_input_core(&state, TEST_INSTANCE_ID, "api-key")
-        .await
-        .unwrap();
-
-    let runtime = state
-        .computer_registry
-        .runtime(TEST_INSTANCE_ID)
-        .await
-        .unwrap();
     assert!(!runtime.inputs.read().await.contains_key("api-key"));
 
-    inputs::add_or_update_input_core(
-        &state,
-        TEST_INSTANCE_ID,
-        inputs::InputDefinition::PromptString {
-            id: "api-key".to_string(),
-            label: "API Key".to_string(),
-            description: None,
-            default: Some("default-key".to_string()),
-            password: Some(false),
-        },
-    )
-    .await
-    .unwrap();
-    let runtime = state
+    drop(state);
+    let restarted_state = create_mcp_test_app_state(tmp.path()).await;
+    let restarted_runtime = restarted_state
         .computer_registry
         .runtime(TEST_INSTANCE_ID)
         .await
         .unwrap();
-    let runtime_inputs = runtime.inputs.read().await;
+    let runtime_inputs = restarted_runtime.inputs.read().await;
     assert!(matches!(
         runtime_inputs.get("api-key"),
         Some(a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput::PromptString(prompt))
-            if prompt.default.as_deref() == Some("default-key")
+            if prompt.description == "API Key"
+                && prompt.default.is_none()
+                && prompt.password == Some(false)
     ));
 }
 
@@ -4919,7 +7168,7 @@ async fn test_input_values_crud() {
             TEST_INSTANCE_ID,
             inputs::InputDefinition::PromptString {
                 id: id.to_string(),
-                label: id.to_string(),
+                label: Some(id.to_string()),
                 description: None,
                 default: None,
                 password: None,
@@ -4940,47 +7189,41 @@ async fn test_input_values_crud() {
         &state,
         TEST_INSTANCE_ID,
         "key2".to_string(),
-        serde_json::json!(42),
+        serde_json::json!("42"),
     )
     .await
     .unwrap();
 
     assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "key1"
-        )
-        .unwrap(),
-        Some(serde_json::json!("value1"))
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "key1").unwrap(),
+        Some(inputs::InputValueView {
+            configured: true,
+            status: inputs::InputValueStatus::Configured,
+            value: Some(serde_json::json!("value1")),
+        })
     );
     assert_eq!(
-        tfrobot_client_lib::services::keychain::get_input_value(
-            state.secret_store.as_ref(),
-            TEST_INSTANCE_ID,
-            "key2"
-        )
-        .unwrap(),
-        Some(serde_json::json!(42))
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "key2").unwrap(),
+        Some(inputs::InputValueView {
+            configured: true,
+            status: inputs::InputValueStatus::Configured,
+            value: Some(serde_json::json!("42")),
+        })
     );
 
     inputs::clear_input_values_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
-    assert!(tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        TEST_INSTANCE_ID,
-        "key1"
-    )
-    .unwrap()
-    .is_none());
-    assert!(tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        TEST_INSTANCE_ID,
-        "key2"
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "key1")
+            .unwrap()
+            .is_some_and(|view| !view.configured && view.value.is_none())
+    );
+    assert!(
+        inputs::get_input_value_core(&state, TEST_INSTANCE_ID, "key2")
+            .unwrap()
+            .is_some_and(|view| !view.configured && view.value.is_none())
+    );
 }
 
 // ── Issue #19 regression: stderr pipe deadlock ──

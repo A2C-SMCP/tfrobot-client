@@ -2,6 +2,8 @@
   "app": {
     "name": "TFRobot Client",
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
+    "runtimeInputUnavailable": "Runtime Input prompts are unavailable",
+    "retryRuntimeInput": "Retry prompts",
     "retryRuntimeEvents": "Retry"
   },
   "common": {
@@ -76,6 +78,10 @@
       "createConversationConfirm": "Create",
       "createConversationTitleLabel": "Conversation title",
       "createConversationTitlePlaceholder": "Enter a title",
+      "deleteConversation": "Delete conversation",
+      "deleteConversationCancel": "Cancel",
+      "deleteConversationConfirm": "Delete",
+      "deleteConversationPrompt": "Delete this conversation permanently? This action cannot be undone.",
       "disconnectedDescription": "Live updates are unavailable. Check the connection and try again.",
       "disconnectedTitle": "Disconnected",
       "emptyDescription": "Select a conversation to start chatting.",
@@ -98,6 +104,8 @@
       "interrupting": "Stopping",
       "jumpToLatest": "Jump to latest",
       "loadMoreConversations": "Load more",
+      "renameConversation": "Rename conversation",
+      "renameConversationConfirm": "Rename",
       "newMessages": "new messages",
       "noConversations": "No conversations",
       "openEventDetail": "Open event details",
@@ -106,7 +114,8 @@
       "send": "Send",
       "sending": "Sending",
       "textSendingUnavailable": "Text sending is unavailable.",
-      "timelineLabel": "Conversation timeline"
+      "timelineLabel": "Conversation timeline",
+      "lifecycleDegraded": "Connected with best-effort history recovery; some transient updates may be missing."
     }
   },
   "computer": {
@@ -171,7 +180,7 @@
         },
         "inputs": {
           "title": "Inputs",
-          "description": "Manage user-created definitions, values, and Secrets for this Computer."
+          "description": "Manage resolved values for this Computer's MCP Input definitions; secret values are stored securely and hidden in the interface."
         },
         "connection": {
           "title": "Connection Policy",
@@ -550,6 +559,11 @@
     "confirmRemove": "Are you sure you want to remove this server?",
     "importConfig": "Import Config",
     "exportConfig": "Export Config",
+    "exportWarning": {
+      "title": "Export configuration with plaintext constants?",
+      "description": "Constant MCP values are exported exactly as configured and may contain passwords, tokens, or other credentials. Input values saved on this Computer are not exported. Store and share the file securely.",
+      "confirm": "Export plaintext configuration"
+    },
     "validateConfig": "Validate Schema",
     "bundledConfigHint": "This declaration shares a name with an installed plugin bundle; its config declaration remains editable.",
     "readOnlyConfigHint": "This declaration comes from the read-only {{origin}} scope and cannot be edited here.",
@@ -564,9 +578,19 @@
       "invalid": "The SDK configuration has {{count}} schema error(s)."
     },
     "status": {
-      "running": "Running",
       "stopped": "Stopped",
-      "error": "Error",
+      "disconnected": "Started, not connected",
+      "connecting": "Connecting",
+      "connected": "Available",
+      "authorizationRequired": "Waiting for authorization",
+      "error": "Connection failed"
+    },
+    "connection": {
+      "disconnected": "Disconnected",
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "authorization_required": "Waiting for authorization",
+      "error": "Connection error",
       "pending": "Pending"
     },
     "table": {
@@ -600,6 +624,7 @@
     },
     "actions": {
       "start": "Start",
+      "retry": "Retry connection",
       "stop": "Stop",
       "managePlugin": "Manage {{plugin}}",
       "edit": "Edit",
@@ -632,12 +657,38 @@
       "cwd": "Working Directory",
       "envVars": "Environment Variables",
       "addEnv": "Add Variable",
+      "valueSource": "Value Source",
+      "constantSource": "Constant",
+      "constantValue": "Constant value",
+      "constantHint": "Constants are stored as plaintext configuration. Use a password Input for secrets.",
+      "inputSource": "Input",
       "inputReference": "Use Input",
+      "inputRequired": "Choose an Input",
+      "pickInputOption": "Choose option",
       "url": "URL",
       "urlRequired": "URL is required",
       "headers": "HTTP Headers",
       "addHeader": "Add Header",
+      "addConfigItem": "Add configuration item",
+      "editConfigItem": "Edit configuration item",
+      "editConfigItemFor": "Edit configuration item {{key}}",
+      "removeConfigItemFor": "Remove configuration item {{key}}",
+      "configKey": "Environment variable / header name",
+      "configKeyRequired": "Enter an environment variable or header name",
+      "configKeyDuplicate": "This name is already used in the current list",
+      "configItemType": "Configuration type",
+      "inputIdPlaceholder": "Enter a new Input ID or choose an existing one",
+      "sharedInputHint": "Input {{id}} already exists. Changing it updates every reference to this Input.",
+      "unresolvedInput": "Input definition is missing; edit this item to define it",
+      "inputDefinitionRequired": "Define Input {{id}} before saving",
+      "inputDefinitionsLoadFailed": "Input definitions could not be loaded. Editing is disabled to protect existing configuration.",
+      "inputDefinitionConflict": "Input {{id}} has conflicting definitions in this server",
       "oauthAuthorizationConflict": "Remove the static Authorization header: this server has an explicit OAuth configuration.",
+      "previewCommand": "Test Run",
+      "commandPreviewSucceeded": "Command completed successfully",
+      "commandPreviewFailed": "Command failed",
+      "commandPreviewEmpty": "The command completed successfully with no output.",
+      "commandPreviewTruncated": "Output is too long; only the first 64 KiB is shown.",
       "advancedSettings": "Advanced Settings",
       "disabled": "Disabled",
       "forbiddenTools": "Forbidden Tools",
@@ -652,29 +703,37 @@
       "toolMetaInvalidFormat": "Each tool_meta value must be an object (e.g. {\"auto_apply\": true})"
     },
     "messages": {
-      "added": "Server added successfully",
-      "updated": "Server updated successfully",
-      "enabled": "Server {{name}} enabled",
-      "disabled": "Server {{name}} disabled",
-      "removed": "Server removed successfully",
+      "added": "Server saved; restart Runtime to apply it",
+      "updated": "Server saved; restart Runtime to apply changes",
+      "enabled": "Server {{name}} saved as enabled; restart Runtime to apply it",
+      "disabled": "Server {{name}} saved as disabled; restart Runtime to apply it",
+      "removed": "Server removed; restart Runtime to apply it",
       "started": "Server {{name}} started",
+      "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
       "operationFailed": "The MCP operation failed. View Runtime diagnostics or logs for details.",
+      "missingInputDefinition": "MCP {{name}} references Input {{id}}, but its definition is missing. Define it in the MCP editor before saving.",
       "statusLoadFailed": "MCP status could not be loaded. Retry or view logs for details.",
       "allStarted": "All servers started",
       "allStopped": "All servers stopped",
       "editNotImplemented": "Edit functionality coming soon",
-      "importSuccess": "Imported {{servers}} servers and {{inputs}} inputs",
+      "importSuccess": "Imported {{servers}} servers and {{inputs}} inputs; restart Runtime to apply them",
       "exportSuccess": "Configuration exported successfully"
     }
   },
   "inputs": {
-    "title": "Input Variables",
+    "title": "Input Entries",
     "addInput": "Add Variable",
     "editInput": "Edit Variable",
     "editInputFor": "Edit variable {{id}}",
     "removeInputFor": "Remove variable {{id}}",
     "setValue": "Set Value",
+    "editValue": "Edit Value",
+    "deleteValue": "Delete Value",
+    "deleteValueFor": "Delete the saved value for {{id}}",
+    "confirmDeleteValue": "Delete the saved value for {{id}}?",
+    "secretMode": "Secret",
+    "nonSecretMode": "Regular value",
     "selectValue": "Select a value",
     "enterValue": "Enter value",
     "clearValues": "Clear All Values",
@@ -682,20 +741,57 @@
     "confirmClearValues": "Are you sure you want to clear all cached values?",
     "setValueFor": "Set value for: {{id}}",
     "configuredSecret": "Configured secret",
+    "notConfigured": "Not configured",
+    "valuesLoading": "Loading saved value…",
+    "valuesUnavailable": "Saved value unavailable",
+    "runtimeCommand": "Executed at runtime",
+    "entry": {
+      "add": "Add Input",
+      "edit": "Edit Input",
+      "empty": "No saved inputs",
+      "key": "Key",
+      "keyPlaceholder": "Enter the key used by ${input:key}",
+      "value": "Value",
+      "storeAsSecret": "Save as secret",
+      "secretHelp": "Secret values are stored securely and hidden in the interface.",
+      "secretUnchanged": "Leave blank to keep the current secret",
+      "saveFailed": "The input could not be saved. Please try again.",
+      "editFor": "Edit input {{key}}",
+      "deleteFor": "Delete input {{key}}",
+      "confirmDelete": "Delete input {{key}} and its saved value?"
+    },
+    "status": {
+      "usingDefault": "Using default",
+      "firstOption": "Not set; first option will be used",
+      "invalidSelection": "Invalid selection: {{value}}",
+      "invalidSecretSelection": "Stored secret is no longer a valid selection"
+    },
+    "referenceIssues": {
+      "title": "Some legacy PickString references need attention",
+      "item": "{{serverName}} · {{layer}} · {{fieldPath}} still references {{inputId}}"
+    },
     "runtime": {
       "missingInput": "Input required to start",
       "missingSecret": "Secret required to start",
+      "invalidSelection": "Select a current value to continue",
+      "description": "Complete this input to continue starting the MCP.",
       "envHint": "You can save it here or provide it through {{env}}.",
       "definitionMissing": "Input {{id}} is not configured yet. Saving will create it for this Computer.",
       "createAsSecret": "Store this Input as a Secret",
+      "entryMissing": "No saved InputEntry exists for {{id}}. Saving will create it for this Computer.",
+      "definitionUnavailable": "The runtime definition for Input {{id}} is unavailable. Edit the MCP configuration or retry the MCP action.",
+      "storeAsSecret": "Save as secret",
+      "requestedBy": "Requested by MCP {{name}} ({{id}})",
       "loadFailed": "The Input could not be loaded. Retry or view logs for details.",
-      "submitFailed": "The value could not be saved or the Runtime retry failed. Retry or view Runtime diagnostics or logs."
+      "submitFailed": "The value could not be saved. Retry or view Runtime diagnostics or logs.",
+      "completionFailed": "The Runtime Input request ended before it could be completed. Retry the original action."
     },
     "table": {
       "id": "ID",
       "type": "Type",
       "label": "Label",
       "currentValue": "Current Value",
+      "storageMode": "Storage Mode",
       "actions": "Actions"
     },
     "form": {
@@ -703,21 +799,28 @@
       "id": "Variable ID",
       "idRequired": "Variable ID is required",
       "label": "Display Label",
-      "labelRequired": "Display label is required",
       "description": "Description",
       "defaultValue": "Default Value",
+      "actualValue": "Actual Value",
+      "actualValueRequired": "Actual value is required",
+      "secretBlankKeeps": "Leave blank to keep the configured secret.",
       "password": "Password Mode",
       "options": "Options",
+      "optionRequired": "Add at least one option.",
       "addOption": "Add Option",
       "command": "Command",
       "args": "Arguments",
       "addArg": "Add Argument"
     },
     "messages": {
-      "saved": "Variable saved successfully",
-      "removed": "Variable removed successfully",
-      "valueSet": "Value set successfully",
-      "valuesCleared": "All cached values cleared"
+      "saved": "Variable saved; restart Runtime to apply it",
+      "removed": "Variable removed; restart Runtime to apply it",
+      "valueSet": "Value saved; restart Runtime to apply it",
+      "valueDeleted": "Saved value deleted; restart Runtime to apply it",
+      "valuesCleared": "All saved values cleared; restart Runtime to apply it",
+      "entryCreated": "Input created; it will be used on the next actual MCP start",
+      "entryUpdated": "Input updated; it will be used on the next actual MCP start",
+      "entryDeleted": "Input deleted"
     }
   },
   "connection": {

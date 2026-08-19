@@ -394,7 +394,6 @@ impl ComputerInstanceRuntime {
         }
         let _admission_guard = self.block_oauth_admission_for_server_change().await;
         self.cancel_oauth_authorization(bundle_id).await?;
-        self.stop_mcp_server_if_running(bundle_id).await?;
         let result = match self.computer.read().await.clear_oauth(bundle_id).await {
             Ok(()) => Ok(()),
             Err(OAuthError::NotConfigured) => {
@@ -445,15 +444,15 @@ impl ComputerInstanceRuntime {
     }
 
     async fn stop_mcp_server_if_running(&self, bundle_id: &BundleId) -> Result<(), String> {
-        let running = self
+        let started = self
             .computer
             .read()
             .await
-            .get_server_status()
+            .get_server_runtime_statuses()
             .await
             .into_iter()
-            .any(|(id, _, running, _)| id == *bundle_id && running);
-        if running {
+            .any(|status| status.bundle_id == *bundle_id && status.is_started());
+        if started {
             self.computer
                 .read()
                 .await
@@ -781,12 +780,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[ignore = "requires interactive Atlassian OAuth in a system browser"]
     async fn atlassian_automatic_oauth_lifecycle_e2e() {
-        use a2c_smcp::smcp_computer::mcp_clients::model::{
-            HttpAuthPolicy, HttpServerConfig, HttpServerParameters,
-        };
-        use a2c_smcp::smcp_computer::oauth::{
-            OAuthClientMode, OAuthClientRegistration, OAuthOptions,
-        };
+        use a2c_smcp::smcp_computer::mcp_clients::model::{HttpServerConfig, HttpServerParameters};
         use std::process::{Command, Stdio};
 
         const BUNDLE: &str = "atlassian-automatic-oauth-e2e";
@@ -810,15 +804,6 @@ mod tests {
             },
         );
         http.bundle_id = Some(bundle_id.clone());
-        http.auth_policy = Some(HttpAuthPolicy::Auto);
-        http.oauth = Some(OAuthOptions {
-            resource: None,
-            scopes: Vec::new(),
-            client_name: Some("TFRobot".to_string()),
-            mode: OAuthClientMode::AuthorizationCode {
-                registration: OAuthClientRegistration::Dynamic,
-            },
-        });
         runtime
             .apply_user_mcp_server_config(MCPServerConfig::Http(http))
             .await
@@ -995,17 +980,15 @@ mod tests {
             Err(_) => true,
             Ok(result) => result.is_error == Some(true),
         };
-        assert!(runtime
-            .available_tools()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .all(|tool| !tool.name.as_ref().starts_with(BUNDLE)));
-        runtime.start_mcp_server(&bundle_id).await.unwrap();
         assert!(matches!(
             runtime.oauth_status(&bundle_id).await.unwrap(),
             Some(OAuthStatus::Unauthorized)
         ));
+        assert!(runtime
+            .mcp_server_runtime_statuses()
+            .await
+            .iter()
+            .any(|status| status.bundle_id == bundle_id && status.is_started()));
         assert!(!runtime
             .mcp_start_diagnostics()
             .await

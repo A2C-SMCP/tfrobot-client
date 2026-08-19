@@ -17,10 +17,10 @@ import {
   type McpServerManagedBy,
 } from '@/stores/mcpStore';
 import { useSdkConfigStore, type SdkConfigServer } from '@/stores/sdkConfigStore';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
+import type { InputDefinitionChanges } from '@/stores/inputStore';
 import {
-  isMissingRuntimeInputError,
-  type MissingRuntimeInputError,
+  isMissingInputDefinitionError,
+  isRuntimeInputCancelledError,
 } from '@/utils/runtimeActionError';
 import { McpServerForm } from './McpServerForm';
 
@@ -33,7 +33,7 @@ interface McpConfigProps {
 
 export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const {
     snapshot,
     validation,
@@ -66,10 +66,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
 
   const [formVisible, setFormVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
-  const [inputPrompt, setInputPrompt] = useState<{
-    config: McpServerConfig;
-    error: MissingRuntimeInputError;
-  } | null>(null);
 
   useEffect(() => {
     void fetchConfig(instanceId);
@@ -101,20 +97,27 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     setFormVisible(true);
   };
 
-  const handleFormSubmit = async (config: McpServerConfig) => {
+  const handleFormSubmit = async (
+    config: McpServerConfig,
+    inputChanges?: InputDefinitionChanges,
+  ) => {
     if (!ownershipReady) return;
     try {
-      await upsertServer(instanceId, config);
+      if (inputChanges) await upsertServer(instanceId, config, inputChanges);
+      else await upsertServer(instanceId, config);
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
         name: config.name,
       }));
-      setInputPrompt(null);
       setFormVisible(false);
     } catch (cause) {
-      if (isMissingRuntimeInputError(cause)) {
-        setInputPrompt({ config, error: cause });
+      if (isMissingInputDefinitionError(cause)) {
+        message.error(t('mcp.messages.missingInputDefinition', {
+          id: cause.input_id,
+          name: cause.requesting_mcp?.name ?? config.name,
+        }));
         return;
       }
+      if (isRuntimeInputCancelledError(cause)) return;
       message.error(t('mcp.messages.operationFailed'));
     } finally {
       await fetchManagedServers(instanceId);
@@ -142,10 +145,14 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
         name: record.name,
       }));
     } catch (cause) {
-      if (isMissingRuntimeInputError(cause)) {
-        setInputPrompt({ config, error: cause });
+      if (isMissingInputDefinitionError(cause)) {
+        message.error(t('mcp.messages.missingInputDefinition', {
+          id: cause.input_id,
+          name: cause.requesting_mcp?.name ?? config.name,
+        }));
         return;
       }
+      if (isRuntimeInputCancelledError(cause)) return;
       message.error(t('mcp.messages.operationFailed'));
     } finally {
       await fetchManagedServers(instanceId);
@@ -175,7 +182,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     }
   };
 
-  const handleExport = async () => {
+  const exportToFile = async () => {
     try {
       const { save } = await import('@tauri-apps/plugin-dialog');
       const path = await save({
@@ -189,6 +196,16 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     } catch {
       message.error(t('mcp.messages.operationFailed'));
     }
+  };
+
+  const handleExport = () => {
+    modal.confirm({
+      title: t('mcp.exportWarning.title'),
+      content: t('mcp.exportWarning.description'),
+      okText: t('mcp.exportWarning.confirm'),
+      okButtonProps: { danger: true },
+      onOk: exportToFile,
+    });
   };
 
   const columns = [
@@ -476,15 +493,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           loading={configLoading}
         />
       </Modal>
-      {inputPrompt && (
-        <RuntimeInputPrompt
-          key={`${instanceId}:${inputPrompt.error.input_id}`}
-          instanceId={instanceId}
-          error={inputPrompt.error}
-          onCancel={() => setInputPrompt(null)}
-          onSubmitted={() => handleFormSubmit(inputPrompt.config)}
-        />
-      )}
     </div>
   );
 }

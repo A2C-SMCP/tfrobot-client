@@ -635,7 +635,7 @@ describe('Computer', () => {
     });
   });
 
-  it('prompts for consecutive missing values and retries only the original start action', async () => {
+  it('keeps one start invocation pending while the global runtime input bridge owns prompting', async () => {
     const stopped = {
       ...mockComputerInstances[0],
       running: false,
@@ -643,79 +643,32 @@ describe('Computer', () => {
       runtime: runtimeSnapshot({ lifecycle: 'shutdown' }),
     };
     let startAttempts = 0;
-    mockInvoke.mockImplementation(async (cmd, args) => {
+    let resolveStart!: (value: typeof stopped) => void;
+    const start = new Promise<typeof stopped>((resolve) => {
+      resolveStart = resolve;
+    });
+    mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === 'list_computer_instances') return [stopped];
       if (cmd === 'start_computer_instance') {
         startAttempts += 1;
-        if (startAttempts === 1) {
-          throw {
-            code: 'missing_secret',
-            input_id: 'secret-a',
-            env_hint: 'A2C_SMCP_secret_a',
-            message: 'Required secret input is unresolved',
-          };
-        }
-        if (startAttempts === 2) {
-          throw {
-            code: 'missing_input',
-            input_id: 'value-b',
-            env_hint: 'A2C_SMCP_value_b',
-            message: 'Required input is unresolved',
-          };
-        }
-        return {
-          ...stopped,
-          running: true,
-          runtime: runtimeSnapshot({ snapshot_revision: 2 }),
-        };
+        return start;
       }
-      if (cmd === 'get_input') {
-        const inputId = (args as { id?: string } | undefined)?.id;
-        return inputId === 'secret-a' ? {
-          type: 'PromptString',
-          id: 'secret-a',
-          label: 'Secret A',
-          password: true,
-        } : {
-          type: 'PromptString',
-          id: 'value-b',
-          label: 'Value B',
-          password: false,
-        };
-      }
-      if (cmd === 'set_input_value') return null;
-      if (cmd === 'list_input_values') return { 'api-key': { configured: true } };
       return null;
     });
 
     render(<Computer />);
     fireEvent.click((await screen.findAllByRole('button', { name: 'Start' }))[0]);
 
-    expect(await screen.findByText('Secret required to start')).toBeInTheDocument();
-    const input = await screen.findByPlaceholderText('Enter value');
-    fireEvent.change(input, { target: { value: 'secret-a-value' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(startAttempts).toBe(2));
-    expect(await screen.findByText('Input required to start')).toBeInTheDocument();
-    const secondInput = await screen.findByPlaceholderText('Enter value');
-    expect(secondInput).toHaveAttribute('type', 'text');
-    expect(secondInput).toHaveValue('');
-    expect(screen.queryByDisplayValue('secret-a-value')).not.toBeInTheDocument();
-    fireEvent.change(secondInput, { target: { value: 'value-b-value' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(startAttempts).toBe(3));
+    await waitFor(() => expect(startAttempts).toBe(1));
+    expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Key' })).not.toBeInTheDocument();
+    resolveStart({
+      ...stopped,
+      running: true,
+      runtime: runtimeSnapshot({ snapshot_revision: 2 }),
+    });
     expect(await screen.findByText('Running')).toBeInTheDocument();
-    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
-      instanceId: 'computer-a',
-      id: 'secret-a',
-      value: 'secret-a-value',
-    });
-    expect(mockInvoke).toHaveBeenCalledWith('set_input_value', {
-      instanceId: 'computer-a',
-      id: 'value-b',
-      value: 'value-b-value',
-    });
+    expect(startAttempts).toBe(1);
+    expect(mockInvoke).not.toHaveBeenCalledWith('upsert_input_entry', expect.anything());
   }, 80000);
 });

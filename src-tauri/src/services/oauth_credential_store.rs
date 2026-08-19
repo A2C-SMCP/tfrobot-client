@@ -1,13 +1,10 @@
 use crate::services::keychain::{oauth_credential_key, SecretStore};
 use a2c_smcp::smcp_computer::mcp_clients::{
-    bundle_id::resolve_bundle_id,
-    manager::MCPServerManager,
-    model::{HttpAuthPolicy, HttpServerConfig},
+    bundle_id::resolve_bundle_id, manager::MCPServerManager, model::HttpServerConfig,
     MCPServerConfig,
 };
 use a2c_smcp::smcp_computer::oauth::{
-    OAuthClientMode, OAuthCredentialKey, OAuthCredentialStore, OAuthCredentialStoreError,
-    OAuthOptions,
+    OAuthCredentialKey, OAuthCredentialStore, OAuthCredentialStoreError,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -18,8 +15,7 @@ pub(crate) struct EffectiveHttpOAuth {
     pub interactive: bool,
 }
 
-/// Resolve the SDK's backward-compatible HTTP authentication defaults in one client-owned place.
-/// In particular, an omitted policy and omitted OAuth block is anonymous-first Auto OAuth.
+/// Mirror the SDK's automatic-only HTTP OAuth eligibility in one client-owned place.
 pub(crate) fn effective_http_oauth(config: &HttpServerConfig) -> Option<EffectiveHttpOAuth> {
     // The SDK treats a literal Authorization header as static credentials and never falls back
     // to OAuth for that request. Mirror that precedence here so host-side UI and credential
@@ -32,43 +28,18 @@ pub(crate) fn effective_http_oauth(config: &HttpServerConfig) -> Option<Effectiv
     {
         return None;
     }
-    let interactive = config
-        .oauth
-        .as_ref()
-        .is_none_or(|oauth| matches!(oauth.mode, OAuthClientMode::AuthorizationCode { .. }));
-    match config.auth_policy {
-        Some(HttpAuthPolicy::Disabled) => None,
-        Some(HttpAuthPolicy::OAuth) if config.oauth.is_none() => None,
-        Some(HttpAuthPolicy::OAuth) => Some(EffectiveHttpOAuth {
-            automatic: false,
-            interactive,
-        }),
-        Some(HttpAuthPolicy::Auto) => Some(EffectiveHttpOAuth {
-            automatic: true,
-            interactive,
-        }),
-        None => Some(EffectiveHttpOAuth {
-            automatic: config.oauth.is_none(),
-            interactive,
-        }),
-        Some(_) => None,
-    }
+    Some(EffectiveHttpOAuth {
+        automatic: true,
+        interactive: true,
+    })
 }
 
-/// Materialize Auto defaults as proactive options only for offline credential deletion. The SDK
-/// intentionally does not admit Auto OAuth without a validated challenge, but credential cleanup
-/// must be network-free and address the same bundle/resource/mode key after a runtime is gone.
-pub(crate) fn oauth_cleanup_config(mut config: MCPServerConfig) -> Option<MCPServerConfig> {
-    let MCPServerConfig::Http(http) = &mut config else {
+/// Retain automatic-only HTTP configuration for the SDK's network-free credential deletion path.
+pub(crate) fn oauth_cleanup_config(config: MCPServerConfig) -> Option<MCPServerConfig> {
+    let MCPServerConfig::Http(http) = &config else {
         return None;
     };
-    let effective = effective_http_oauth(http)?;
-    if http.oauth.is_none() {
-        http.oauth = Some(OAuthOptions::default());
-    }
-    if effective.automatic {
-        http.auth_policy = Some(HttpAuthPolicy::OAuth);
-    }
+    effective_http_oauth(http)?;
     Some(config)
 }
 
@@ -173,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_http_auth_uses_auto_interactive_oauth_and_materializes_offline_cleanup() {
+    fn omitted_http_auth_uses_auto_interactive_oauth_and_preserves_cleanup_config() {
         let config = HttpServerConfig::new(
             "legacy-auto",
             HttpServerParameters {
@@ -190,12 +161,11 @@ mod tests {
         );
 
         let MCPServerConfig::Http(cleanup) =
-            oauth_cleanup_config(MCPServerConfig::Http(config)).unwrap()
+            oauth_cleanup_config(MCPServerConfig::Http(config.clone())).unwrap()
         else {
             panic!("cleanup config must remain HTTP");
         };
-        assert_eq!(cleanup.auth_policy, Some(HttpAuthPolicy::OAuth));
-        assert!(cleanup.oauth.is_some());
+        assert_eq!(cleanup, config);
     }
 
     #[test]

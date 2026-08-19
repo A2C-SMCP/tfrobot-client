@@ -677,6 +677,7 @@ mod tests {
     use crate::services::keychain::InMemorySecretStore;
     use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
+    use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
 
@@ -870,12 +871,15 @@ mod tests {
 
         assert!(runtime.sdk_mcp_server_ownership().await.is_empty());
         let provider = runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .into_iter()
-            .find(|(bundle_id, _, _, _)| bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
+            .find(|status| status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
             .expect("reserved provider must be mounted");
-        assert!(provider.2, "reserved provider must be running");
+        assert!(
+            provider.is_connected(),
+            "reserved provider must be connected"
+        );
 
         let tools = runtime.available_tools().await.unwrap();
         let control_tools = tools
@@ -889,12 +893,12 @@ mod tests {
 
         runtime.stop_all_mcp_servers().await.unwrap();
         let provider_after_batch_stop = runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .into_iter()
-            .find(|(bundle_id, _, _, _)| bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
+            .find(|status| status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
             .unwrap();
-        assert!(provider_after_batch_stop.2);
+        assert!(provider_after_batch_stop.is_connected());
         runtime.shutdown().await;
     }
 
@@ -935,11 +939,11 @@ mod tests {
             .unwrap();
         let enabled = registry.runtime("source").await.unwrap();
         assert!(enabled
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(bundle_id, _, running, _)| {
-                bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && *running
+            .any(|status| {
+                status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
             }));
         assert!(enabled.sdk_mcp_server_ownership().await.is_empty());
         plane
@@ -998,10 +1002,10 @@ mod tests {
             .unwrap();
         let disabled = registry.runtime("source").await.unwrap();
         assert!(disabled
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .all(|(bundle_id, _, _, _)| bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID));
+            .all(|status| status.bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID));
         disabled.shutdown().await;
     }
 
@@ -1158,5 +1162,87 @@ mod tests {
             .unwrap();
         assert_eq!(status["configured"], true);
         assert!(status.get("value").is_none());
+    }
+
+    #[tokio::test]
+    async fn client_control_config_state_redacts_constants_but_local_state_round_trips_them() {
+        let temp = TempDir::new().unwrap();
+        let config = ConfigService::new(temp.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("source", "Source"))
+            .unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("target", "Target"))
+            .unwrap();
+        let state = crate::AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(temp.path()).unwrap(),
+            SettingsService::new(temp.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        state
+            .client_control
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    tool_scope: ToolScope::All,
+                    target_scope: TargetScope::All,
+                },
+            )
+            .await
+            .unwrap();
+
+        let stdio: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": "remote-secret-stdio",
+            "server_parameters": {
+                "command": "helper",
+                "args": [],
+                "env": {
+                    "TOKEN": "remote-env-secret",
+                    "REGION": "${input:REGION}"
+                }
+            }
+        }))
+        .unwrap();
+        let http: MCPServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "name": "remote-secret-http",
+            "server_parameters": {
+                "url": "https://remote-user:remote-password@example.com/mcp",
+                "headers": { "Authorization": "Bearer remote-header-secret" }
+            }
+        }))
+        .unwrap();
+        state
+            .sdk_config
+            .upsert_mcp_configs("target", &[stdio, http])
+            .unwrap();
+
+        let local = crate::commands::sdk_config::get_computer_config_state_core(&state, "target")
+            .await
+            .unwrap();
+        let local_json = serde_json::to_string(&local).unwrap();
+        assert!(local_json.contains("remote-env-secret"));
+        assert!(local_json.contains("remote-header-secret"));
+        assert!(local_json.contains("remote-user:remote-password"));
+        assert!(local_json.contains("${input:REGION}"));
+
+        let remote = state
+            .client_control
+            .dispatch(
+                context("redacted-config-state"),
+                ToolId::McpConfigGetState,
+                serde_json::json!({ "computer_id": "target" }),
+            )
+            .await
+            .unwrap();
+        let remote_json = serde_json::to_string(&remote).unwrap();
+        assert!(!remote_json.contains("remote-env-secret"));
+        assert!(!remote_json.contains("remote-header-secret"));
+        assert!(!remote_json.contains("remote-user:remote-password"));
+        assert!(remote_json.contains("${REDACTED}"));
+        assert!(remote_json.contains("${input:REGION}"));
     }
 }

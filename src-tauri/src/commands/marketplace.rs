@@ -1,5 +1,6 @@
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::force_mcp_server_enabled;
+use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::oauth_credential_store::effective_http_oauth;
 use crate::AppState;
 use a2c_smcp::smcp_computer::errors::ComputerError;
@@ -176,7 +177,7 @@ pub async fn add_marketplace_core(
     instance_id: &str,
     request: AddMarketplaceRequest,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
     let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
@@ -209,7 +210,7 @@ pub async fn refresh_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
     let rows = runtime.sdk_refresh_marketplace(marketplace).await;
@@ -233,7 +234,7 @@ pub async fn remove_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
     let snapshot = marketplace_governance_snapshot(&runtime).await?;
@@ -270,7 +271,7 @@ pub async fn update_marketplace_core(
     instance_id: &str,
     request: UpdateMarketplaceRequest,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
     let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
@@ -319,7 +320,7 @@ pub async fn install_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -357,7 +358,23 @@ pub async fn enable_plugin(
     instance_id: String,
     request: PluginLifecycleRequest,
 ) -> Result<(), RuntimeActionError> {
-    enable_plugin_core(&state, &instance_id, request).await
+    enable_plugin_interactive_core(&state, &instance_id, request).await
+}
+
+/// Executes the foreground plugin-enable path without requiring a Tauri `State` wrapper.
+#[doc(hidden)]
+pub async fn enable_plugin_interactive_core(
+    state: &AppState,
+    instance_id: &str,
+    request: PluginLifecycleRequest,
+) -> Result<(), RuntimeActionError> {
+    enable_plugin_core_with_mode(
+        state,
+        instance_id,
+        request,
+        RuntimeInputInteractionMode::Interactive,
+    )
+    .await
 }
 
 pub async fn enable_plugin_core(
@@ -365,59 +382,81 @@ pub async fn enable_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    enable_plugin_core_with_mode(
+        state,
+        instance_id,
+        request,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn enable_plugin_core_with_mode(
+    state: &AppState,
+    instance_id: &str,
+    request: PluginLifecycleRequest,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<(), RuntimeActionError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    validate_plugin_request(&request).map_err(RuntimeActionError::runtime)?;
-    let plugin_id = plugin_id(&request);
-    let env = sdk_settings_env(state, instance_id);
-    let hooks = MarketplaceMcpHooks::for_plugin(
-        state,
-        instance_id,
-        &request.marketplace,
-        &request.plugin,
-        UserMcpConflictPolicy::KeepUserServer,
-    )
-    .await
-    .map_err(RuntimeActionError::runtime)?;
-    hooks
-        .inject_installed_plugin_inputs(&runtime)
-        .await
-        .map_err(RuntimeActionError::runtime)?;
-    if let Err(error) = runtime
-        .sdk_enable_plugin(
-            &plugin_id,
-            EnableOptions {
-                scope: Some("user"),
-                env: Some(&env),
-                ..Default::default()
-            },
-            Some(&hooks),
-        )
-        .await
-    {
-        let primary = hooks
-            .take_runtime_action_error()
+    runtime
+        .with_runtime_input_interaction(interaction_mode, async {
+            validate_plugin_request(&request).map_err(RuntimeActionError::runtime)?;
+            let plugin_id = plugin_id(&request);
+            let env = sdk_settings_env(state, instance_id);
+            let hooks = MarketplaceMcpHooks::for_plugin(
+                state,
+                instance_id,
+                &request.marketplace,
+                &request.plugin,
+                UserMcpConflictPolicy::KeepUserServer,
+            )
             .await
-            .unwrap_or_else(|| RuntimeActionError::runtime(error.to_string()));
-        let cleanup = async {
+            .map_err(RuntimeActionError::runtime)?;
             hooks
-                .restore_deferred_servers_after_plugin_release(&runtime)
-                .await?;
-            hooks.reclaim_unowned_plugin_servers(&runtime).await
-        }
-        .await;
-        return match cleanup {
-            Ok(()) => Err(primary),
-            Err(cleanup_error) => Err(primary.append_context(format!(
-                "Marketplace MCP rollback cleanup failed: {cleanup_error}"
-            ))),
-        };
-    }
+                .inject_installed_plugin_inputs(&runtime)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
+            if let Err(error) = runtime
+                .sdk_enable_plugin(
+                    &plugin_id,
+                    EnableOptions {
+                        scope: Some("user"),
+                        env: Some(&env),
+                        ..Default::default()
+                    },
+                    Some(&hooks),
+                )
+                .await
+            {
+                let primary = hooks
+                    .take_runtime_action_error()
+                    .await
+                    .unwrap_or_else(|| RuntimeActionError::runtime(error.to_string()));
+                let cleanup = async {
+                    hooks
+                        .restore_deferred_servers_after_plugin_release(&runtime)
+                        .await?;
+                    hooks.reclaim_unowned_plugin_servers(&runtime).await
+                }
+                .await;
+                return match cleanup {
+                    Ok(()) => Err(primary),
+                    Err(cleanup_error) => Err(primary.append_context(format!(
+                        "Marketplace MCP rollback cleanup failed: {cleanup_error}"
+                    ))),
+                };
+            }
 
-    runtime.mark_sdk_skills_dirty().await;
-    start_registered_plugin_servers_if_running(&runtime, &hooks).await
+            runtime.mark_sdk_skills_dirty().await;
+            // Plugin ledger/config mutation is committed. Starting its MCPs may enter the
+            // interactive resolver while the instance-scoped operation lease keeps this
+            // Computer serialized without blocking unrelated Computers.
+            start_registered_plugin_servers_if_running(&runtime, &hooks).await
+        })
+        .await
 }
 
 #[tauri::command]
@@ -434,7 +473,7 @@ pub async fn disable_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -481,7 +520,7 @@ pub async fn uninstall_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     validate_plugin_request(&request)?;
     let plugin_id = plugin_id(&request);
@@ -548,10 +587,10 @@ async fn start_registered_plugin_servers_if_running(
     }
 
     let running: HashSet<BundleId> = runtime
-        .mcp_server_statuses()
+        .mcp_server_runtime_statuses()
         .await
         .into_iter()
-        .filter_map(|(bundle_id, _, is_running, _)| is_running.then_some(bundle_id))
+        .filter_map(|status| status.is_started().then_some(status.bundle_id))
         .collect();
     let mut seen = HashSet::new();
     let bundle_ids = hooks
@@ -560,11 +599,20 @@ async fn start_registered_plugin_servers_if_running(
         .into_iter()
         .filter(|bundle_id| seen.insert(bundle_id.clone()) && !running.contains(bundle_id))
         .collect();
-    let failures = runtime.start_mcp_servers_best_effort(bundle_ids).await;
+    let failures = runtime
+        .start_mcp_servers_until_input_failure(bundle_ids)
+        .await;
     let mut input_resolution_error = None;
     for (bundle_id, error) in failures {
         if input_resolution_error.is_none() && matches!(&error, ComputerError::InputResolution(_)) {
-            input_resolution_error = Some(RuntimeActionError::from(error));
+            let name = runtime
+                .mcp_server_display_name(&bundle_id)
+                .await
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| bundle_id.to_string());
+            input_resolution_error = Some(
+                RuntimeActionError::from(error).with_requesting_mcp(bundle_id.to_string(), name),
+            );
             continue;
         }
         log::warn!(
@@ -907,13 +955,18 @@ impl MarketplaceMcpHooks {
         runtime: &crate::services::computer::ComputerInstanceRuntime,
         config: MCPServerConfig,
     ) -> Result<(), McpHookError> {
+        let bundle_id = resolve_bundle_id(&config);
+        let name = config.name().to_string();
         match runtime.add_or_update_plugin_server(config).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
                 let mut first_error = self.first_runtime_action_error.lock().await;
                 if first_error.is_none() {
-                    *first_error = Some(RuntimeActionError::from(error));
+                    *first_error = Some(
+                        RuntimeActionError::from(error)
+                            .with_requesting_mcp(bundle_id.to_string(), name),
+                    );
                 }
                 Err(McpHookError(message))
             }

@@ -1,9 +1,11 @@
 use crate::services::client_computers::{ClientComputersPaths, GlobalConfigFile};
+use crate::services::manager_context::ManagerContextKey;
 use crate::services::manager_environment::ManagerEnvironment;
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 fn default_diagnostic_retention_days() -> u32 {
     7
@@ -18,6 +20,41 @@ fn default_tool_history_retention_days() -> u32 {
 }
 
 pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
+const CHAT_PREFERENCES_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ChatPreferences {
+    schema_version: u32,
+    #[serde(default)]
+    entries: Vec<ChatPreferenceEntry>,
+}
+
+impl Default for ChatPreferences {
+    fn default() -> Self {
+        Self {
+            schema_version: CHAT_PREFERENCES_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatPreferenceEntry {
+    environment: ManagerEnvironment,
+    account_id: String,
+    organization_id: String,
+    employee_id: u64,
+}
+
+impl ChatPreferenceEntry {
+    fn matches(&self, context: &ManagerContextKey) -> bool {
+        self.environment == context.environment
+            && self.account_id == context.account_id
+            && self.organization_id == context.organization_id
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -164,9 +201,11 @@ impl AppSettings {
     }
 }
 
+#[derive(Debug)]
 pub struct SettingsService {
     settings_file: PathBuf,
     client_computers_paths: ClientComputersPaths,
+    chat_preferences_lock: Mutex<()>,
 }
 
 impl SettingsService {
@@ -182,6 +221,7 @@ impl SettingsService {
         Self {
             settings_file: app_data_dir.join("settings.json"),
             client_computers_paths,
+            chat_preferences_lock: Mutex::new(()),
         }
     }
 
@@ -292,6 +332,63 @@ impl SettingsService {
             .global_config(GlobalConfigFile::ManagerSession)
     }
 
+    pub fn load_recent_chat_employee(
+        &self,
+        context: &ManagerContextKey,
+    ) -> Result<Option<u64>, ChatPreferencesError> {
+        let _guard = self
+            .chat_preferences_lock
+            .lock()
+            .map_err(|_| ChatPreferencesError::LockPoisoned)?;
+        Ok(self
+            .load_chat_preferences_unlocked()?
+            .entries
+            .into_iter()
+            .find(|entry| entry.matches(context))
+            .map(|entry| entry.employee_id))
+    }
+
+    pub fn save_recent_chat_employee(
+        &self,
+        context: &ManagerContextKey,
+        employee_id: u64,
+    ) -> Result<(), ChatPreferencesError> {
+        let _guard = self
+            .chat_preferences_lock
+            .lock()
+            .map_err(|_| ChatPreferencesError::LockPoisoned)?;
+        let mut preferences = self.load_chat_preferences_unlocked()?;
+        preferences.entries.retain(|entry| !entry.matches(context));
+        preferences.entries.push(ChatPreferenceEntry {
+            environment: context.environment,
+            account_id: context.account_id.clone(),
+            organization_id: context.organization_id.clone(),
+            employee_id,
+        });
+        write_json_atomically(&self.chat_preferences_path(), &preferences)?;
+        Ok(())
+    }
+
+    fn load_chat_preferences_unlocked(&self) -> Result<ChatPreferences, ChatPreferencesError> {
+        let path = self.chat_preferences_path();
+        if !path.exists() {
+            return Ok(ChatPreferences::default());
+        }
+        let preferences: ChatPreferences = serde_json::from_str(&fs::read_to_string(path)?)?;
+        if preferences.schema_version != CHAT_PREFERENCES_SCHEMA_VERSION {
+            return Err(ChatPreferencesError::UnsupportedSchemaVersion {
+                expected: CHAT_PREFERENCES_SCHEMA_VERSION,
+                actual: preferences.schema_version,
+            });
+        }
+        Ok(preferences)
+    }
+
+    fn chat_preferences_path(&self) -> PathBuf {
+        self.client_computers_paths
+            .global_config(GlobalConfigFile::ChatPreferences)
+    }
+
     pub fn legacy_settings_path(&self) -> &std::path::Path {
         &self.settings_file
     }
@@ -344,6 +441,24 @@ pub enum ManagerSessionConfigError {
 
     #[error("Manager session metadata is missing complete user, account, organization, or permission identity")]
     IncompleteContext,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ChatPreferencesError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    AtomicJsonWrite(#[from] AtomicJsonWriteError),
+
+    #[error("unsupported chat preferences schema version {actual}; expected {expected}")]
+    UnsupportedSchemaVersion { expected: u32, actual: u32 },
+
+    #[error("chat preferences lock is poisoned")]
+    LockPoisoned,
 }
 
 #[cfg(test)]
@@ -436,6 +551,67 @@ mod tests {
             loaded.custom_runtime_paths.node.as_deref(),
             Some("/usr/local/bin/node")
         );
+    }
+
+    fn chat_context(
+        environment: ManagerEnvironment,
+        account_id: &str,
+        organization_id: &str,
+    ) -> ManagerContextKey {
+        ManagerContextKey {
+            environment,
+            account_id: account_id.into(),
+            organization_id: organization_id.into(),
+        }
+    }
+
+    #[test]
+    fn recent_chat_employee_roundtrips_and_isolates_manager_contexts() {
+        let (svc, _tmp) = setup();
+        let account_a = chat_context(ManagerEnvironment::Staging, "account-a", "organization-1");
+        let account_b = chat_context(ManagerEnvironment::Staging, "account-b", "organization-1");
+        let organization_b =
+            chat_context(ManagerEnvironment::Staging, "account-a", "organization-2");
+        let production = chat_context(ManagerEnvironment::Prod, "account-a", "organization-1");
+
+        assert_eq!(svc.load_recent_chat_employee(&account_a).unwrap(), None);
+        svc.save_recent_chat_employee(&account_a, 42).unwrap();
+        svc.save_recent_chat_employee(&account_b, 77).unwrap();
+        svc.save_recent_chat_employee(&organization_b, 88).unwrap();
+
+        assert_eq!(svc.load_recent_chat_employee(&account_a).unwrap(), Some(42));
+        assert_eq!(svc.load_recent_chat_employee(&account_b).unwrap(), Some(77));
+        assert_eq!(
+            svc.load_recent_chat_employee(&organization_b).unwrap(),
+            Some(88)
+        );
+        assert_eq!(svc.load_recent_chat_employee(&production).unwrap(), None);
+
+        svc.save_recent_chat_employee(&account_a, 43).unwrap();
+        assert_eq!(svc.load_recent_chat_employee(&account_a).unwrap(), Some(43));
+    }
+
+    #[test]
+    fn recent_chat_employee_rejects_unsupported_or_corrupt_preferences() {
+        let (svc, _tmp) = setup();
+        let context = chat_context(ManagerEnvironment::Beta, "account-a", "organization-1");
+        std::fs::create_dir_all(svc.chat_preferences_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            svc.chat_preferences_path(),
+            r#"{"schema_version":99,"entries":[]}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            svc.load_recent_chat_employee(&context),
+            Err(ChatPreferencesError::UnsupportedSchemaVersion { actual: 99, .. })
+        ));
+
+        std::fs::write(svc.chat_preferences_path(), "not json").unwrap();
+        assert!(matches!(
+            svc.load_recent_chat_employee(&context),
+            Err(ChatPreferencesError::Json(_))
+        ));
     }
 
     #[test]

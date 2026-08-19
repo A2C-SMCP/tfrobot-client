@@ -17,18 +17,11 @@ describe('TFRobot Smoke Test', () => {
     expect(height).toBeGreaterThanOrEqual(600);
   });
 
-  // ── Dashboard ──
+  // ── Chat home ──
 
-  it('Dashboard page renders', async () => {
-    const dashboard = await $('[data-testid="dashboard"]');
-    await dashboard.waitForDisplayed({ timeout: 10000 });
-  });
-
-  it('Dashboard shows runtime detection results', async () => {
-    const runtimeSection = await $('[data-testid="runtimes"]');
-    await runtimeSection.waitForDisplayed();
-    const text = await runtimeSection.getText();
-    expect(text).toMatch(/node|python|uv|pnpm/i);
+  it('Chat page renders by default', async () => {
+    const chat = await $('[data-testid="chat"]');
+    await chat.waitForDisplayed({ timeout: 10000 });
   });
 
   // ── Navigation ──

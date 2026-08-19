@@ -1,13 +1,19 @@
+use crate::commands::inputs::input_definition_to_sdk;
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::computer::{
-    ComputerRuntimeAction, ComputerRuntimeActionUnavailable, McpServerManagedBy,
+    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeActionUnavailable,
+    McpServerManagedBy,
 };
 use crate::services::computer_runtime_events::PublicOAuthStatus;
+use crate::services::input_references::referenced_input_ids;
+use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
-use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    BundleId, MCPServerActivationState, MCPServerConnectionState,
+};
 use a2c_smcp::smcp_computer::settings::config::ProvenanceScope;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -27,6 +33,9 @@ pub struct McpServerStatus {
     #[serde(rename = "bundleId")]
     pub bundle_id: BundleId,
     pub name: String,
+    pub activation_state: MCPServerActivationState,
+    pub connection_state: MCPServerConnectionState,
+    /// Compatibility projection for existing consumers. This means "started", not "connected".
     pub running: bool,
     pub status_message: String,
     pub disabled: bool,
@@ -64,7 +73,7 @@ struct McpServerRuntimeMetadata {
 struct McpBatchCandidate {
     bundle_id: BundleId,
     name: String,
-    running: bool,
+    started: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,10 +105,10 @@ pub async fn get_mcp_servers_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     let runtime_statuses: std::collections::HashMap<_, _> = runtime
-        .mcp_server_statuses()
+        .mcp_server_runtime_statuses()
         .await
         .into_iter()
-        .map(|(bundle_id, _name, running, _status_message)| (bundle_id, running))
+        .map(|status| (status.bundle_id.clone(), status))
         .collect();
     let diagnostics = runtime.mcp_start_diagnostics().await;
     let mut metadata = mcp_server_runtime_metadata(&runtime).await;
@@ -123,23 +132,29 @@ pub async fn get_mcp_servers_core(
         .into_iter()
         .filter(|(_, metadata)| metadata.managed_by.is_plugin_owned() || !metadata.disabled)
         .map(|(bundle_id, metadata)| {
-            let running = runtime_statuses.get(&bundle_id).copied().unwrap_or(false);
+            let runtime_status = runtime_statuses.get(&bundle_id);
+            let activation_state = runtime_status
+                .map(|status| status.activation)
+                .unwrap_or(MCPServerActivationState::Stopped);
+            let connection_state = runtime_status
+                .map(|status| status.connection)
+                .unwrap_or(MCPServerConnectionState::Disconnected);
+            let running = activation_state == MCPServerActivationState::Started;
             // This field is rendered in the ordinary MCP table, so expose only a stable,
             // presentation-safe status. Owner diagnostics remain in RuntimeProblem.technical_detail.
-            let status_message = if running {
-                "running"
-            } else if diagnostics.contains_key(&bundle_id) {
-                "error"
-            } else if runtime_statuses.contains_key(&bundle_id) {
-                "stopped"
+            let status_message = if diagnostics.contains_key(&bundle_id) {
+                "error".to_string()
+            } else if let Some(status) = runtime_status {
+                status.connection.to_string()
             } else {
-                "pending"
-            }
-            .to_string();
+                "pending".to_string()
+            };
             McpServerStatus {
                 disabled: metadata.disabled,
                 bundle_id,
                 name: metadata.name,
+                activation_state,
+                connection_state,
                 running,
                 status_message,
                 managed_by: metadata.managed_by,
@@ -229,7 +244,26 @@ pub async fn start_mcp_server(
     instance_id: String,
     bundle_id: BundleId,
 ) -> Result<(), RuntimeActionError> {
-    start_mcp_server_core(&state, &instance_id, &bundle_id).await
+    start_mcp_server_interactive_core(&state, &instance_id, &bundle_id).await
+}
+
+/// Executes the user-initiated start path without requiring a Tauri `State` wrapper.
+///
+/// Kept separate from `start_mcp_server_core` so background and Client Control callers remain
+/// non-interactive while integration tests can exercise the same path as the UI command.
+#[doc(hidden)]
+pub async fn start_mcp_server_interactive_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), RuntimeActionError> {
+    start_mcp_server_core_with_mode(
+        state,
+        instance_id,
+        bundle_id,
+        RuntimeInputInteractionMode::Interactive,
+    )
+    .await
 }
 
 pub async fn start_mcp_server_core(
@@ -237,8 +271,23 @@ pub async fn start_mcp_server_core(
     instance_id: &str,
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    start_mcp_server_core_with_mode(
+        state,
+        instance_id,
+        bundle_id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn start_mcp_server_core_with_mode(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Starting MCP server for instance {}: {}",
         instance_id,
@@ -248,16 +297,28 @@ pub async fn start_mcp_server_core(
     let runtime = require_runtime(state, instance_id)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    ensure_computer_started(&runtime)
-        .await
-        .map_err(RuntimeActionError::from)?;
-    let server_name = ensure_user_managed_server(bundle_id, &runtime)
-        .await
-        .map_err(RuntimeActionError::runtime)?;
-    runtime
-        .start_mcp_server(bundle_id)
-        .await
-        .map_err(RuntimeActionError::from)?;
+    let server_name = runtime
+        .with_runtime_input_interaction(interaction_mode, async {
+            ensure_computer_started(&runtime)
+                .await
+                .map_err(RuntimeActionError::from)?;
+            let server_name = ensure_user_managed_server(bundle_id, &runtime)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
+            materialize_missing_configured_inputs_for_retry(
+                state,
+                instance_id,
+                &runtime,
+                std::slice::from_ref(bundle_id),
+            )
+            .await?;
+            runtime.start_mcp_server(bundle_id).await.map_err(|error| {
+                RuntimeActionError::from(error)
+                    .with_requesting_mcp(bundle_id.to_string(), server_name.to_string())
+            })?;
+            Ok::<_, RuntimeActionError>(server_name)
+        })
+        .await?;
 
     log::info!(
         "MCP server started for instance {}: {}",
@@ -296,8 +357,8 @@ pub async fn stop_mcp_server_core(
     instance_id: &str,
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Stopping MCP server for instance {}: {}",
         instance_id,
@@ -346,76 +407,178 @@ pub async fn start_all_servers(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    start_all_servers_core(&state, &instance_id).await
+    start_all_servers_interactive_core(&state, &instance_id).await
+}
+
+/// Executes the foreground start-all path without requiring a Tauri `State` wrapper.
+#[doc(hidden)]
+pub async fn start_all_servers_interactive_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<McpBatchOperationResult, RuntimeActionError> {
+    start_all_servers_core_with_mode(state, instance_id, RuntimeInputInteractionMode::Interactive)
+        .await
 }
 
 pub async fn start_all_servers_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    start_all_servers_core_with_mode(
+        state,
+        instance_id,
+        RuntimeInputInteractionMode::NonInteractive,
+    )
+    .await
+}
+
+async fn start_all_servers_core_with_mode(
+    state: &AppState,
+    instance_id: &str,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
     let runtime = require_runtime(state, instance_id)
         .await
         .map_err(RuntimeActionError::runtime)?;
-    ensure_computer_started(&runtime)
-        .await
-        .map_err(RuntimeActionError::from)?;
-    let inventory = mcp_batch_inventory(&runtime).await;
-    let candidate_count = inventory.candidates.len();
-    let unchanged_count = inventory
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.running)
-        .count();
-    let operation_candidates: Vec<_> = inventory
-        .candidates
-        .into_iter()
-        .filter(|candidate| !candidate.running)
-        .collect();
-    let operation_count = operation_candidates.len();
-    let names: std::collections::HashMap<_, _> = operation_candidates
-        .iter()
-        .map(|candidate| (candidate.bundle_id.clone(), candidate.name.clone()))
-        .collect();
-    let failures = runtime
-        .start_mcp_servers_best_effort(
-            operation_candidates
+    runtime
+        .with_runtime_input_interaction(interaction_mode, async {
+            ensure_computer_started(&runtime)
+                .await
+                .map_err(RuntimeActionError::from)?;
+            let inventory = mcp_batch_inventory(&runtime).await;
+            let candidate_count = inventory.candidates.len();
+            let unchanged_count = inventory
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.started)
+                .count();
+            let operation_candidates: Vec<_> = inventory
+                .candidates
                 .into_iter()
-                .map(|candidate| candidate.bundle_id)
-                .collect(),
-        )
+                .filter(|candidate| !candidate.started)
+                .collect();
+            let operation_count = operation_candidates.len();
+            let operation_ids: Vec<_> = operation_candidates
+                .iter()
+                .map(|candidate| candidate.bundle_id.clone())
+                .collect();
+            materialize_missing_configured_inputs_for_retry(
+                state,
+                instance_id,
+                &runtime,
+                &operation_ids,
+            )
+            .await?;
+            let names: std::collections::HashMap<_, _> = operation_candidates
+                .iter()
+                .map(|candidate| (candidate.bundle_id.clone(), candidate.name.clone()))
+                .collect();
+            let failures = runtime
+                .start_mcp_servers_best_effort(
+                    operation_candidates
+                        .into_iter()
+                        .map(|candidate| candidate.bundle_id)
+                        .collect(),
+                )
+                .await
+                .into_iter()
+                .map(|(bundle_id, error)| {
+                    let name = names
+                        .get(&bundle_id)
+                        .cloned()
+                        .unwrap_or_else(|| bundle_id.to_string());
+                    McpBatchFailure {
+                        error: RuntimeActionError::from(error)
+                            .with_requesting_mcp(bundle_id.to_string(), name.clone()),
+                        name,
+                        bundle_id,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let result = McpBatchOperationResult {
+                candidate_count,
+                actual_operation_count: operation_count.saturating_sub(failures.len()),
+                unchanged_count,
+                excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
+                failures,
+            };
+
+            log::info!(
+                "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
+                instance_id,
+                result.candidate_count,
+                result.actual_operation_count,
+                result.unchanged_count,
+                result.excluded_plugin_owned_count,
+                result.failures.len()
+            );
+            Ok(result)
+        })
         .await
+}
+
+async fn materialize_missing_configured_inputs_for_retry(
+    state: &AppState,
+    instance_id: &str,
+    runtime: &ComputerInstanceRuntime,
+    bundle_ids: &[BundleId],
+) -> Result<(), RuntimeActionError> {
+    if bundle_ids.is_empty() {
+        return Ok(());
+    }
+    let bundle_ids = bundle_ids.iter().collect::<std::collections::HashSet<_>>();
+    let selected_servers = state
+        .sdk_config
+        .load(instance_id)
+        .mcp
+        .servers
         .into_iter()
-        .map(|(bundle_id, error)| McpBatchFailure {
-            name: names
-                .get(&bundle_id)
-                .cloned()
-                .unwrap_or_else(|| bundle_id.to_string()),
-            bundle_id,
-            error: RuntimeActionError::from(error),
+        .filter(|server| bundle_ids.contains(&resolve_bundle_id(&server.config)))
+        .filter_map(|server| {
+            let bundle_id = resolve_bundle_id(&server.config);
+            let referenced = serde_json::to_value(server.config)
+                .ok()
+                .map(|config| referenced_input_ids(&config))?;
+            Some((bundle_id, server.name, referenced))
         })
         .collect::<Vec<_>>();
-    let result = McpBatchOperationResult {
-        candidate_count,
-        actual_operation_count: operation_count.saturating_sub(failures.len()),
-        unchanged_count,
-        excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
-        failures,
-    };
-
-    log::info!(
-        "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
-        instance_id,
-        result.candidate_count,
-        result.actual_operation_count,
-        result.unchanged_count,
-        result.excluded_plugin_owned_count,
-        result.failures.len()
-    );
-    Ok(result)
+    let referenced_inputs = selected_servers
+        .iter()
+        .flat_map(|(_, _, referenced)| referenced.iter().cloned())
+        .collect::<std::collections::HashSet<_>>();
+    if referenced_inputs.is_empty() {
+        return Ok(());
+    }
+    let definitions = state
+        .sdk_config
+        .load_project_input_definitions(instance_id)
+        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?
+        .into_iter()
+        .filter(|definition| referenced_inputs.contains(definition.id()))
+        .map(|definition| input_definition_to_sdk(&definition))
+        .collect();
+    runtime
+        .materialize_missing_configured_inputs_for_retry(definitions)
+        .await
+        .map_err(RuntimeActionError::runtime)?;
+    for (bundle_id, name, referenced) in selected_servers {
+        for input_id in referenced {
+            if runtime.runtime_input_definition(&input_id).await.is_some() {
+                continue;
+            }
+            return Err(RuntimeActionError::MissingInputDefinition {
+                message: format!("Required input '{input_id}' is not defined for this Computer"),
+                input_id,
+                requesting_mcp: None,
+            }
+            .with_requesting_mcp(bundle_id.to_string(), name));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -430,8 +593,8 @@ pub async fn stop_all_servers_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Stopping all MCP servers for instance {}", instance_id);
 
     let runtime = require_runtime(state, instance_id)
@@ -444,7 +607,7 @@ pub async fn stop_all_servers_core(
     let operation_ids = inventory
         .candidates
         .iter()
-        .filter(|candidate| candidate.running)
+        .filter(|candidate| candidate.started)
         .map(|candidate| candidate.bundle_id.clone())
         .collect();
     let operations = runtime.stop_mcp_servers_best_effort(operation_ids).await;
@@ -477,7 +640,7 @@ fn mcp_stop_batch_result(
         unchanged_count: inventory
             .candidates
             .iter()
-            .filter(|candidate| !candidate.running)
+            .filter(|candidate| !candidate.started)
             .count(),
         excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
         failures: Vec::new(),
@@ -543,11 +706,11 @@ async fn require_runtime(
 async fn mcp_batch_inventory(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> McpBatchInventory {
-    let running: std::collections::HashSet<_> = runtime
-        .mcp_server_statuses()
+    let started: std::collections::HashSet<_> = runtime
+        .mcp_server_runtime_statuses()
         .await
         .into_iter()
-        .filter_map(|(bundle_id, _name, running, _status)| running.then_some(bundle_id))
+        .filter_map(|status| status.is_started().then_some(status.bundle_id))
         .collect();
     let metadata = mcp_server_runtime_metadata(runtime).await;
     let excluded_plugin_owned_count = metadata
@@ -558,7 +721,7 @@ async fn mcp_batch_inventory(
         .into_iter()
         .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned() && !metadata.disabled)
         .map(|(bundle_id, metadata)| McpBatchCandidate {
-            running: running.contains(&bundle_id),
+            started: started.contains(&bundle_id),
             bundle_id,
             name: metadata.name,
         })
@@ -867,22 +1030,22 @@ mod tests {
                 McpBatchCandidate {
                     bundle_id: bundle_id("stopped"),
                     name: "Stopped server".to_string(),
-                    running: true,
+                    started: true,
                 },
                 McpBatchCandidate {
                     bundle_id: bundle_id("already-gone"),
                     name: "Already gone".to_string(),
-                    running: true,
+                    started: true,
                 },
                 McpBatchCandidate {
                     bundle_id: bundle_id("broken"),
                     name: "Broken server".to_string(),
-                    running: true,
+                    started: true,
                 },
                 McpBatchCandidate {
                     bundle_id: bundle_id("unchanged"),
                     name: "Unchanged server".to_string(),
-                    running: false,
+                    started: false,
                 },
             ],
             excluded_plugin_owned_count: 2,

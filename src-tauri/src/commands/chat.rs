@@ -12,8 +12,27 @@ use crate::AppState;
 pub async fn chat_open_session(
     state: State<'_, AppState>,
     employee_id: u64,
+    selection_revision: u64,
 ) -> Result<ChatSessionDescriptor, ManagerError> {
-    state.chat_sessions.open(employee_id).await
+    state
+        .chat_sessions
+        .open(employee_id, selection_revision)
+        .await
+}
+
+#[tauri::command]
+pub async fn chat_get_recent_robot(
+    state: State<'_, AppState>,
+) -> Result<Option<u64>, ManagerError> {
+    state.chat_sessions.recent_employee().await
+}
+
+#[tauri::command]
+pub async fn chat_remember_robot(
+    state: State<'_, AppState>,
+    lease_id: String,
+) -> Result<(), ManagerError> {
+    state.chat_sessions.remember(&lease_id).await
 }
 
 #[tauri::command]

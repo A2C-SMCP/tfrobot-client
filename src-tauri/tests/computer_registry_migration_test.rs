@@ -15,6 +15,7 @@ use tfrobot_client_lib::services::config_migration::{migrate_legacy_config, Migr
 use tfrobot_client_lib::services::connection_targets::{
     manual_target_keychain_id, ConnectionTargetsConfig, ManualSmcpTarget,
 };
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{self, InMemorySecretStore, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::{
@@ -64,9 +65,9 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
     legacy_instance.local_skills_root = Some(expected_skill_home.clone());
     legacy_instance.inputs = vec![InputDefinition::PromptString {
         id: "api-token".to_string(),
-        label: "API token".to_string(),
+        label: Some("API token".to_string()),
         description: None,
-        default: Some("password-default".to_string()),
+        default: None,
         password: Some(true),
     }];
     legacy_instance.input_values.insert(
@@ -159,12 +160,14 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
     assert!(!state.config.legacy_connection_targets_path().exists());
 
     assert!(state
-        .config
-        .load_inputs_for_instance("computer-a")
+        .sdk_config
+        .load_project_input_definitions("computer-a")
         .unwrap()
         .is_empty());
     assert_eq!(
-        keychain::get_input_value(secrets.as_ref(), "computer-a", "api-token").unwrap(),
+        InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+            .get("api-token")
+            .unwrap(),
         None
     );
 
@@ -259,12 +262,14 @@ async fn startup_does_not_import_legacy_global_inputs_or_read_unscoped_keychain_
 
     assert!(list_inputs_core(&state, "computer-a").unwrap().is_empty());
     assert!(state
-        .config
-        .load_inputs_for_instance("computer-a")
+        .sdk_config
+        .load_project_input_definitions("computer-a")
         .unwrap()
         .is_empty());
     assert_eq!(
-        keychain::get_input_value(secrets.as_ref(), "computer-a", "shared-token").unwrap(),
+        InputValueStore::for_computer(state.config.as_ref(), "computer-a")
+            .get("shared-token")
+            .unwrap(),
         None
     );
     assert_eq!(

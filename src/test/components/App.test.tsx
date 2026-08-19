@@ -28,8 +28,20 @@ const runtimeStoreMock = vi.hoisted(() => ({
   recover: vi.fn().mockResolvedValue(undefined),
 }));
 
+const runtimeInputBridgeMock = vi.hoisted(() => ({
+  initialize: vi.fn<() => Promise<() => Promise<void>>>().mockResolvedValue(
+    vi.fn().mockResolvedValue(undefined),
+  ),
+}));
+
 vi.mock('@/stores/runtimeStore', () => ({
   useRuntimeStore: (selector: (state: typeof runtimeStoreMock) => unknown) => selector(runtimeStoreMock),
+}));
+
+vi.mock('@/services/runtimeInputBridge', () => ({
+  initializeRuntimeInputBridge: runtimeInputBridgeMock.initialize,
+  completeRuntimeInputRequest: vi.fn(),
+  RuntimeInputCompletionError: class RuntimeInputCompletionError extends Error {},
 }));
 
 vi.mock('@/stores/themeStore', () => ({
@@ -79,9 +91,33 @@ vi.mock('@/components/Dashboard', () => ({
   ),
 }));
 vi.mock('@/components/Computer', () => ({
-  Computer: ({ initialView, initialSection }: { initialView?: 'list' | 'detail'; initialSection?: string }) => (
+  Computer: ({
+    initialView,
+    initialSection,
+    onNavigate,
+  }: {
+    initialView?: 'list' | 'detail';
+    initialSection?: string;
+    onNavigate: (key: string) => void;
+  }) => initialView === 'detail' ? (
+    <div>Computer Detail View: {initialSection}</div>
+  ) : (
     <div>
-      {initialView === 'detail' ? `Computer Detail View: ${initialSection}` : 'Computer List View'}
+      <div>Computer List View</div>
+      <button onClick={() => onNavigate('computer-detail:overview')}>Open Computer Detail</button>
+      <button onClick={() => onNavigate('computer-detail:runtime')}>Open legacy Runtime</button>
+      <button onClick={() => onNavigate('computer-detail:skills')}>Open legacy Skills</button>
+      <button onClick={() => onNavigate('computer-detail:resources')}>Open legacy Resources</button>
+      <button onClick={() => onNavigate('computer-detail:debug')}>Open legacy Debug</button>
+      <button onClick={() => onNavigate('computer-detail:logs')}>Open legacy Logs</button>
+      <button onClick={() => onNavigate('computer-detail:mcp')}>Open legacy MCP</button>
+      <button onClick={() => onNavigate('computer-detail:marketplace')}>Open legacy marketplace</button>
+      <button onClick={() => onNavigate('computer-detail:inputs')}>Open legacy inputs</button>
+      <button onClick={() => onNavigate('computer-detail:connection')}>Open legacy connection</button>
+      <button onClick={() => onNavigate('computer-detail:configuration')}>Open legacy configuration</button>
+      <button onClick={() => onNavigate('computer-settings:plugins:acme:audit:plugin-2')}>
+        Open targeted Plugin settings
+      </button>
     </div>
   ),
 }));
@@ -137,6 +173,7 @@ describe('App', () => {
     runtimeStoreMock.initialize.mockResolvedValue(undefined);
     runtimeStoreMock.dispose.mockResolvedValue(undefined);
     runtimeStoreMock.recover.mockResolvedValue(undefined);
+    runtimeInputBridgeMock.initialize.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
   });
 
   it('shows runtime event initialization failures and retries recovery', async () => {
@@ -148,6 +185,23 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(runtimeStoreMock.recover).toHaveBeenCalledOnce());
+  });
+
+  it('keeps runtime events available when Runtime Input initialization fails and retries it', async () => {
+    runtimeInputBridgeMock.initialize.mockRejectedValueOnce(new Error('input bridge unavailable'));
+    render(<App />);
+
+    await waitFor(() => {
+      expect(runtimeStoreMock.initialize).toHaveBeenCalledOnce();
+      expect(screen.getByText('Runtime Input prompts are unavailable')).toBeInTheDocument();
+      expect(screen.getByText('Error: input bridge unavailable')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry prompts' }));
+    await waitFor(() => expect(runtimeInputBridgeMock.initialize).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.queryByText('Runtime Input prompts are unavailable')).not.toBeInTheDocument();
+    });
   });
 
   it('restores Manager session at app startup', async () => {
@@ -169,8 +223,8 @@ describe('App', () => {
 
   it('opens Chat from the overview group', () => {
     render(<App />);
-    fireEvent.click(screen.getByText('Chat'));
     expect(screen.getByText('Managed Chat Page')).toBeInTheDocument();
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument();
   });
 
   it('places Chat immediately before Computer in the overview navigation', () => {
@@ -218,6 +272,8 @@ describe('App', () => {
   it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {
     render(<App />);
 
+    fireEvent.click(screen.getByText('Computer'));
+
     await act(async () => {
       fireEvent.click(screen.getByText('Open Computer Detail'));
     });
@@ -242,6 +298,7 @@ describe('App', () => {
 
     for (const [entry, section] of routes) {
       const view = render(<App />);
+      fireEvent.click(screen.getByText('Computer'));
       fireEvent.click(screen.getByText(entry));
       expect(screen.getByText(`Computer Settings View: ${section}`)).toBeInTheDocument();
       view.unmount();
@@ -260,6 +317,7 @@ describe('App', () => {
 
     for (const [entry, section] of routes) {
       const view = render(<App />);
+      fireEvent.click(screen.getByText('Computer'));
       fireEvent.click(screen.getByText(entry));
       expect(screen.getByText(`Computer Detail View: ${section}`)).toBeInTheDocument();
       view.unmount();
@@ -268,6 +326,7 @@ describe('App', () => {
 
   it('preserves a targeted Plugin destination in Computer settings navigation', () => {
     render(<App />);
+    fireEvent.click(screen.getByText('Computer'));
     fireEvent.click(screen.getByText('Open targeted Plugin settings'));
     expect(screen.getByText(
       'Computer Settings View: plugins:acme/audit/plugin-2',

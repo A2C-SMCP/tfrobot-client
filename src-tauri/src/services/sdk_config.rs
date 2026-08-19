@@ -1,4 +1,8 @@
+use crate::commands::inputs::{
+    input_definition_from_sdk, input_definition_to_sdk, InputDefinition,
+};
 use crate::services::config::ConfigService;
+use crate::services::input_references::{find_project_input_references, referenced_input_ids};
 use crate::services::storage::write_json_atomically;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -9,18 +13,44 @@ use a2c_smcp::smcp_computer::settings::config::{
     EntityKey, ProjectConfigDoc, ProvenanceScope, ValidationReport, WriteScope, WriteTargetError,
 };
 use a2c_smcp::smcp_computer::settings::{
-    resolve_mcp_config, resolve_settings, EnvMap, ResolveMcpConfigArgs, ResolveSettingsArgs,
-    ResolvedMcpConfig, SettingsValidationError, MANAGED_MCP_FILENAME, TFROBOT_DIRNAME,
-    XDG_CONFIG_HOME_ENV,
+    resolve_mcp_config, resolve_settings, user_mcp_config_path, workdir_mcp_config_path, EnvMap,
+    ResolveMcpConfigArgs, ResolveSettingsArgs, ResolvedMcpConfig, SettingsValidationError,
+    MANAGED_MCP_FILENAME, TFROBOT_DIRNAME, XDG_CONFIG_HOME_ENV,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+type AnchorRestorePause = (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>);
+
+type ConfigTransaction = Arc<std::sync::RwLock<()>>;
+
+static CONFIG_TRANSACTIONS: OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<std::sync::RwLock<()>>>>,
+> = OnceLock::new();
+
+fn config_transaction_for(project_anchor: &Path) -> ConfigTransaction {
+    let registry = CONFIG_TRANSACTIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut transactions = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(transaction) = transactions
+        .get(project_anchor)
+        .and_then(std::sync::Weak::upgrade)
+    {
+        return transaction;
+    }
+    transactions.retain(|_, transaction| transaction.strong_count() > 0);
+    let transaction = Arc::new(std::sync::RwLock::new(()));
+    transactions.insert(project_anchor.to_path_buf(), Arc::downgrade(&transaction));
+    transaction
+}
 
 /// The client-side boundary for SDK-owned Computer configuration.
 ///
@@ -33,6 +63,10 @@ pub struct SdkConfigService {
     fail_next_raw_restore: Arc<AtomicBool>,
     #[cfg(test)]
     fail_next_raw_restore_after_backup: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_next_anchor_restore_after_project_backup: Arc<AtomicBool>,
+    #[cfg(test)]
+    anchor_restore_pause_after_project_backup: Arc<std::sync::Mutex<Option<AnchorRestorePause>>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +84,22 @@ struct RawRestoreTransaction {
     original_settings_dir_existed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AnchorRestorePhase {
+    Prepared,
+    PreviousMoved,
+    Committed,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnchorRestoreTransaction {
+    phase: AnchorRestorePhase,
+    original_project_dir_existed: bool,
+    original_user_dir_existed: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SdkConfigPortabilityError {
     #[error("Cannot export invalid SDK MCP configuration: {details}")]
@@ -64,6 +114,12 @@ pub enum SdkConfigPortabilityError {
     },
     #[error(transparent)]
     Crud(#[from] ConfigCrudError),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RemovedHttpOAuthMigration {
+    pub removed_fields: usize,
+    pub disabled_opt_out_servers: usize,
 }
 
 impl SdkConfigPortabilityError {
@@ -89,8 +145,10 @@ impl SdkConfigPortabilityError {
     }
 }
 
-/// Accepts the UI-friendly `{{ID}}` spelling only in fields consumed while creating an MCP
-/// transport. Identity, governance, and tool metadata are deliberately left unchanged.
+/// Converts the legacy UI's `{{ID}}` spelling while migrating pre-SDK client configuration.
+///
+/// This must remain confined to [`crate::services::config_migration`]. Applying it during normal
+/// CRUD would make literal constants ambiguous and corrupt their exact persisted value.
 pub(crate) fn normalize_mcp_input_references(
     config: MCPServerConfig,
 ) -> Result<MCPServerConfig, String> {
@@ -170,6 +228,7 @@ pub(crate) struct InstanceConfigContext {
     project_anchor: PathBuf,
     skill_home: PathBuf,
     env: EnvMap,
+    config_transaction: ConfigTransaction,
 }
 
 impl InstanceConfigContext {
@@ -180,6 +239,7 @@ impl InstanceConfigContext {
             project_anchor.to_string_lossy().into_owned(),
         );
         Self {
+            config_transaction: config_transaction_for(&project_anchor),
             project_anchor,
             skill_home,
             env,
@@ -194,10 +254,18 @@ impl InstanceConfigContext {
     }
 
     pub(crate) fn load(&self) -> ComputerConfigSnapshot {
+        self.with_read(|| self.load_unlocked())
+    }
+
+    fn load_unlocked(&self) -> ComputerConfigSnapshot {
         load_config(&self.sdk_context())
     }
 
     fn validate(&self) -> ValidationReport {
+        self.with_read(|| self.validate_unlocked())
+    }
+
+    fn validate_unlocked(&self) -> ValidationReport {
         let mut errors = resolve_settings(ResolveSettingsArgs {
             cwd: Some(&self.project_anchor),
             env: Some(&self.env),
@@ -213,6 +281,14 @@ impl InstanceConfigContext {
             .errors,
         );
         ValidationReport { errors }
+    }
+
+    pub(crate) fn with_read<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .config_transaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        action()
     }
 
     pub(crate) fn project_anchor(&self) -> &Path {
@@ -236,6 +312,10 @@ impl SdkConfigService {
             fail_next_raw_restore: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             fail_next_raw_restore_after_backup: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_anchor_restore_after_project_backup: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            anchor_restore_pause_after_project_backup: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -243,6 +323,26 @@ impl SdkConfigService {
         self.config
             .computer_instance_storage_root(instance_id)
             .join("sdk_config")
+    }
+
+    fn config_transaction(&self, instance_id: &str) -> Arc<std::sync::RwLock<()>> {
+        config_transaction_for(&self.project_anchor(instance_id))
+    }
+
+    fn with_config_read<T>(&self, instance_id: &str, action: impl FnOnce() -> T) -> T {
+        let transaction = self.config_transaction(instance_id);
+        let _guard = transaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        action()
+    }
+
+    fn with_config_write<T>(&self, instance_id: &str, action: impl FnOnce() -> T) -> T {
+        let transaction = self.config_transaction(instance_id);
+        let _guard = transaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        action()
     }
 
     pub fn skill_home(&self, instance_id: &str) -> PathBuf {
@@ -265,33 +365,167 @@ impl SdkConfigService {
     }
 
     pub fn init(&self, instance_id: &str) -> Result<(), ConfigCrudError> {
-        init_config(&self.project_anchor(instance_id))
+        self.with_config_write(instance_id, || {
+            init_config(&self.project_anchor(instance_id))
+        })
     }
 
     pub fn load(&self, instance_id: &str) -> ComputerConfigSnapshot {
-        self.context(instance_id).load()
+        self.with_config_read(instance_id, || self.context(instance_id).load_unlocked())
+    }
+
+    /// Reads the merged top-level MCP input definitions projected by the SDK.
+    ///
+    /// The returned client DTO is a UI/API projection only; definitions remain owned by the
+    /// SDK `ProjectConfigDoc` and are never persisted in client profile storage.
+    pub fn load_input_definitions(&self, instance_id: &str) -> Vec<InputDefinition> {
+        self.load(instance_id)
+            .inputs
+            .inputs
+            .iter()
+            .map(input_definition_from_sdk)
+            .collect()
+    }
+
+    /// Reads only the definitions owned by this Computer's writable project document.
+    ///
+    /// The SDK merged snapshot is intentionally not suitable for CRUD: copying it back would
+    /// shadow local/user/policy definitions in project scope and could make an edit appear to
+    /// succeed while a higher-precedence owner remains unchanged.
+    pub fn load_project_input_definitions(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<InputDefinition>, ConfigCrudError> {
+        self.with_config_read(instance_id, || {
+            let mcp = self.load_project_mcp_document_unlocked(instance_id)?;
+            let Some(encoded) = mcp.get("inputs") else {
+                return Ok(Vec::new());
+            };
+            let definitions = serde_json::from_value::<
+                Vec<a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput>,
+            >(encoded.clone())
+            .map_err(|error| ConfigCrudError::Io {
+                path: self.project_anchor(instance_id),
+                reason: format!("failed to deserialize project MCP input definitions: {error}"),
+            })?;
+            Ok(definitions.iter().map(input_definition_from_sdk).collect())
+        })
+    }
+
+    /// Replaces the current Computer's project-scope top-level MCP input definitions atomically.
+    /// Runtime state is deliberately untouched; the SDK rematerializes this raw configuration on
+    /// the next actual start or restart.
+    pub fn replace_input_definitions(
+        &self,
+        instance_id: &str,
+        definitions: &[InputDefinition],
+    ) -> Result<ProjectConfigDoc, ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            let previous_mcp = self.load_project_mcp_document_unlocked(instance_id)?;
+            let encoded = definitions
+                .iter()
+                .map(input_definition_to_sdk)
+                .map(|definition| {
+                    serde_json::to_value(definition).map_err(|error| ConfigCrudError::Io {
+                        path: self.project_anchor(instance_id),
+                        reason: format!("failed to serialize MCP input definition: {error}"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut next_mcp = previous_mcp.clone();
+            next_mcp.insert("inputs".to_string(), Value::Array(encoded));
+            self.save_project_mcp_document_unlocked(instance_id, &next_mcp)?;
+            Ok(ProjectConfigDoc {
+                mcp: Some(previous_mcp),
+                ..Default::default()
+            })
+        })
+    }
+
+    pub(crate) fn load_project_input_document(
+        &self,
+        instance_id: &str,
+    ) -> Result<ProjectConfigDoc, ConfigCrudError> {
+        self.with_config_read(instance_id, || {
+            Ok(ProjectConfigDoc {
+                mcp: Some(self.load_project_mcp_document_unlocked(instance_id)?),
+                ..Default::default()
+            })
+        })
+    }
+
+    pub(crate) fn restore_project_input_document(
+        &self,
+        instance_id: &str,
+        document: &ProjectConfigDoc,
+    ) -> Result<(), ConfigCrudError> {
+        let empty = Map::new();
+        self.with_config_write(instance_id, || {
+            self.save_project_mcp_document_unlocked(
+                instance_id,
+                document.mcp.as_ref().unwrap_or(&empty),
+            )
+        })
+    }
+
+    fn load_project_mcp_document_unlocked(
+        &self,
+        instance_id: &str,
+    ) -> Result<Map<String, Value>, ConfigCrudError> {
+        let path = workdir_mcp_config_path(&self.project_anchor(instance_id));
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(error) => return Err(raw_restore_io(&path, error)),
+        };
+        serde_json::from_slice::<Map<String, Value>>(&bytes).map_err(|error| ConfigCrudError::Io {
+            path,
+            reason: format!("failed to deserialize project MCP document: {error}"),
+        })
+    }
+
+    fn save_project_mcp_document_unlocked(
+        &self,
+        instance_id: &str,
+        document: &Map<String, Value>,
+    ) -> Result<(), ConfigCrudError> {
+        let path = workdir_mcp_config_path(&self.project_anchor(instance_id));
+        #[cfg(test)]
+        if self.fail_next_raw_restore.swap(false, Ordering::SeqCst) {
+            return Err(ConfigCrudError::Io {
+                path,
+                reason: "injected raw SDK restore failure".to_string(),
+            });
+        }
+        write_json_atomically(&path, document).map_err(|error| ConfigCrudError::Io {
+            path,
+            reason: error.to_string(),
+        })
     }
 
     pub fn load_with_validation(
         &self,
         instance_id: &str,
     ) -> Result<(ComputerConfigSnapshot, ValidationReport), ConfigCrudError> {
-        let context = self.context(instance_id);
-        for _ in 0..3 {
-            let snapshot_before = context.load();
-            let validation_before = context.validate();
-            let snapshot_after = context.load();
-            let validation_after = context.validate();
-            if snapshot_before.revision == snapshot_after.revision
-                && validation_before == validation_after
-            {
-                return Ok((snapshot_after, validation_after));
+        self.with_config_read(instance_id, || {
+            let context = self.context(instance_id);
+            for _ in 0..3 {
+                let snapshot_before = context.load_unlocked();
+                let validation_before = context.validate_unlocked();
+                let snapshot_after = context.load_unlocked();
+                let validation_after = context.validate_unlocked();
+                if snapshot_before.revision == snapshot_after.revision
+                    && validation_before == validation_after
+                {
+                    return Ok((snapshot_after, validation_after));
+                }
             }
-        }
-        Err(ConfigCrudError::Io {
-            path: context.project_anchor().to_path_buf(),
-            reason: "SDK configuration changed repeatedly while reading snapshot and validation"
-                .to_string(),
+            Err(ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason:
+                    "SDK configuration changed repeatedly while reading snapshot and validation"
+                        .to_string(),
+            })
         })
     }
 
@@ -300,7 +534,9 @@ impl SdkConfigService {
         instance_id: &str,
         document: &ProjectConfigDoc,
     ) -> Result<(), ConfigCrudError> {
-        save_config(&self.project_anchor(instance_id), document)
+        self.with_config_write(instance_id, || {
+            save_config(&self.project_anchor(instance_id), document)
+        })
     }
 
     pub fn update(
@@ -308,8 +544,10 @@ impl SdkConfigService {
         instance_id: &str,
         edits: &[ConfigEdit],
     ) -> Result<ComputerConfigSnapshot, ConfigCrudError> {
-        let context = self.context(instance_id);
-        update_config(&context.sdk_context(), edits)
+        self.with_config_write(instance_id, || {
+            let context = self.context(instance_id);
+            update_config(&context.sdk_context(), edits)
+        })
     }
 
     /// Upserts MCP declarations into SDK-owned config without touching runtime state.
@@ -322,30 +560,66 @@ impl SdkConfigService {
         instance_id: &str,
         servers: &[MCPServerConfig],
     ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
-        let servers = self.prepare_portable_mcp_configs(servers)?;
-        let context = self.context(instance_id);
-        let mut sdk_context = context.sdk_context();
-        sdk_context.opts.upsert_new_scope = WriteScope::Local;
-        let edits = servers
-            .iter()
-            .map(|server| {
-                let name = server.name().to_string();
-                let value = serde_json::to_value(server).map_err(|error| ConfigCrudError::Io {
-                    path: context.project_anchor().to_path_buf(),
-                    reason: format!("failed to serialize MCP server '{name}': {error}"),
-                })?;
-                let body =
-                    canonical_mcp_server_body(value).map_err(|reason| ConfigCrudError::Io {
-                        path: context.project_anchor().to_path_buf(),
-                        reason: format!("invalid MCP server '{name}': {reason}"),
-                    })?;
-                Ok(ConfigEdit::new(
-                    ConfigEntity::McpServer(name),
-                    EditIntent::Upsert(Value::Object(body)),
-                ))
-            })
-            .collect::<Result<Vec<_>, ConfigCrudError>>()?;
-        Ok(update_config(&sdk_context, &edits)?)
+        self.with_config_write(instance_id, || {
+            let servers = self.prepare_literal_preserving_mcp_configs(servers)?;
+            let context = self.context(instance_id);
+            let mut sdk_context = context.sdk_context();
+            sdk_context.opts.upsert_new_scope = WriteScope::Local;
+            let edits = mcp_upsert_edits(&context, &servers)?;
+            Ok(update_config(&sdk_context, &edits)?)
+        })
+    }
+
+    /// Atomically commits one MCP declaration together with its Client-edited Input definitions.
+    ///
+    /// The SDK still owns the durable wire model. We stage the complete raw SDK document, ask the
+    /// SDK edit executor to select the correct writable server scope, then replace the live SDK
+    /// files with one crash-safe raw transaction. The WebView can therefore edit one logical
+    /// configuration item without exposing a transient definition/reference split.
+    pub fn upsert_mcp_config_with_inputs_atomically(
+        &self,
+        instance_id: &str,
+        config: &MCPServerConfig,
+        project_inputs: &[InputDefinition],
+        edited_input_ids: &HashSet<String>,
+        remove_input_ids_if_unused: &HashSet<String>,
+    ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
+        self.with_config_write(instance_id, || {
+            let config = self
+                .prepare_literal_preserving_mcp_configs(std::slice::from_ref(config))?
+                .into_iter()
+                .next()
+                .expect("one MCP config was prepared");
+            let (_staging, staging_anchor) =
+                self.stage_complete_sdk_anchor_unlocked(instance_id)?;
+            let mut staged_document = load_project_config_doc(&staging_anchor)?;
+            replace_project_inputs(&mut staged_document, project_inputs)?;
+            save_config(&staging_anchor, &staged_document)?;
+
+            let staging_context =
+                InstanceConfigContext::new(staging_anchor.clone(), self.skill_home(instance_id));
+            let mut sdk_context = staging_context.sdk_context();
+            sdk_context.opts.upsert_new_scope = WriteScope::Local;
+            let edits = mcp_upsert_edits(&staging_context, std::slice::from_ref(&config))?;
+            update_config(&sdk_context, &edits)?;
+
+            let mut next_document = load_project_config_doc(&staging_anchor)?;
+            let referenced = all_scope_input_references(&staging_context, &next_document)?;
+            remove_unreferenced_project_inputs(
+                &mut next_document,
+                remove_input_ids_if_unused,
+                &referenced,
+            );
+            save_config(&staging_anchor, &next_document)?;
+            let report = staging_context.validate();
+            if !report.is_valid() {
+                return Err(SdkConfigPortabilityError::invalid_source(report.errors));
+            }
+            ensure_edited_inputs_are_effective(&staging_context, project_inputs, edited_input_ids)?;
+
+            self.commit_complete_sdk_anchor_unlocked(instance_id, &staging_anchor)?;
+            Ok(self.context(instance_id).load_unlocked())
+        })
     }
 
     /// Atomically merges an imported set of MCP declarations into the SDK local scope.
@@ -359,12 +633,15 @@ impl SdkConfigService {
         instance_id: &str,
         servers: &[MCPServerConfig],
     ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
-        let context = self.context(instance_id);
-        let Some(document) = self.prepare_local_mcp_import_document(instance_id, servers)? else {
-            return Ok(context.load());
-        };
-        save_config(context.project_anchor(), &document)?;
-        Ok(context.load())
+        self.with_config_write(instance_id, || {
+            let context = self.context(instance_id);
+            let Some(document) = self.prepare_local_mcp_import_document(instance_id, servers)?
+            else {
+                return Ok(context.load_unlocked());
+            };
+            save_config(context.project_anchor(), &document)?;
+            Ok(context.load_unlocked())
+        })
     }
 
     /// Verifies the complete local-scope merge before a client crash-recovery journal is created.
@@ -375,8 +652,10 @@ impl SdkConfigService {
         instance_id: &str,
         servers: &[MCPServerConfig],
     ) -> Result<(), SdkConfigPortabilityError> {
-        self.prepare_local_mcp_import_document(instance_id, servers)?;
-        Ok(())
+        self.with_config_read(instance_id, || {
+            self.prepare_local_mcp_import_document(instance_id, servers)?;
+            Ok(())
+        })
     }
 
     fn prepare_local_mcp_import_document(
@@ -384,12 +663,12 @@ impl SdkConfigService {
         instance_id: &str,
         servers: &[MCPServerConfig],
     ) -> Result<Option<ProjectConfigDoc>, SdkConfigPortabilityError> {
-        let servers = self.prepare_portable_mcp_configs(servers)?;
+        let servers = self.prepare_literal_preserving_mcp_configs(servers)?;
         if servers.is_empty() {
             return Ok(None);
         }
         let context = self.context(instance_id);
-        let snapshot = context.load();
+        let snapshot = context.load_unlocked();
 
         for server in &servers {
             let entity = EntityKey::Mcp(server.name().to_string());
@@ -461,6 +740,45 @@ impl SdkConfigService {
         )
     }
 
+    /// Removes one declaration and any project Input definitions that become unreferenced in the
+    /// same raw SDK transaction. Definitions still used by another server or scope are retained.
+    pub fn remove_mcp_config_with_input_gc_atomically(
+        &self,
+        instance_id: &str,
+        name: &str,
+        input_candidates: &HashSet<String>,
+    ) -> Result<ComputerConfigSnapshot, ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            let (_staging, staging_anchor) =
+                self.stage_complete_sdk_anchor_unlocked(instance_id)?;
+            let staging_context =
+                InstanceConfigContext::new(staging_anchor.clone(), self.skill_home(instance_id));
+            update_config(
+                &staging_context.sdk_context(),
+                &[ConfigEdit::new(
+                    ConfigEntity::McpServer(name.to_string()),
+                    EditIntent::Remove,
+                )],
+            )?;
+            let mut next_document = load_project_config_doc(&staging_anchor)?;
+            let referenced = all_scope_input_references(&staging_context, &next_document)?;
+            remove_unreferenced_project_inputs(&mut next_document, input_candidates, &referenced);
+            save_config(&staging_anchor, &next_document)?;
+            let report = staging_context.validate();
+            if !report.is_valid() {
+                return Err(ConfigCrudError::Io {
+                    path: staging_anchor,
+                    reason: format!("staged MCP removal is invalid: {:?}", report.errors),
+                });
+            }
+            self.commit_complete_sdk_anchor_unlocked(
+                instance_id,
+                staging_context.project_anchor(),
+            )?;
+            Ok(self.context(instance_id).load_unlocked())
+        })
+    }
+
     pub fn validate(&self, document: &ProjectConfigDoc) -> ValidationReport {
         validate_config(document)
     }
@@ -474,18 +792,45 @@ impl SdkConfigService {
         &self,
         instance_id: &str,
     ) -> Result<ValidationReport, ConfigCrudError> {
-        Ok(self.context(instance_id).validate())
+        self.with_config_read(instance_id, || {
+            Ok(self.context(instance_id).validate_unlocked())
+        })
     }
 
     pub fn migrate(&self, instance_id: &str) -> Result<bool, ConfigCrudError> {
-        migrate_config(&self.project_anchor(instance_id))
+        self.with_config_write(instance_id, || {
+            migrate_config(&self.project_anchor(instance_id))
+        })
     }
 
     pub fn delete(&self, instance_id: &str) -> Result<(), ConfigCrudError> {
-        delete_config(&self.project_anchor(instance_id))
+        self.with_config_write(instance_id, || {
+            delete_config(&self.project_anchor(instance_id))
+        })
     }
 
     pub fn duplicate(&self, source_id: &str, target_id: &str) -> Result<(), ConfigCrudError> {
+        if source_id == target_id {
+            return self.with_config_write(source_id, || {
+                duplicate_config(
+                    &self.project_anchor(source_id),
+                    &self.project_anchor(target_id),
+                )
+            });
+        }
+        let (first_id, second_id) = if source_id < target_id {
+            (source_id, target_id)
+        } else {
+            (target_id, source_id)
+        };
+        let first = self.config_transaction(first_id);
+        let second = self.config_transaction(second_id);
+        let _first_guard = first
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _second_guard = second
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         duplicate_config(
             &self.project_anchor(source_id),
             &self.project_anchor(target_id),
@@ -493,7 +838,9 @@ impl SdkConfigService {
     }
 
     pub fn export(&self, instance_id: &str) -> Result<ProjectConfigDoc, ConfigCrudError> {
-        export_config(&self.project_anchor(instance_id))
+        self.with_config_read(instance_id, || {
+            export_config(&self.project_anchor(instance_id))
+        })
     }
 
     /// Loads the SDK-owned project anchor without crossing the sanitized export boundary.
@@ -502,9 +849,225 @@ impl SdkConfigService {
         &self,
         instance_id: &str,
     ) -> Result<ProjectConfigDoc, ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            self.load_raw_project_config_unlocked(instance_id)
+        })
+    }
+
+    fn load_raw_project_config_unlocked(
+        &self,
+        instance_id: &str,
+    ) -> Result<ProjectConfigDoc, ConfigCrudError> {
         let anchor = self.project_anchor(instance_id);
+        recover_anchor_restore_transaction(&anchor)?;
         recover_raw_restore_transaction(&anchor)?;
         load_project_config_doc(&anchor)
+    }
+
+    /// Copies the complete SDK scope root into an isolated same-filesystem staging anchor.
+    /// The instance-specific XDG root lives below this anchor, so this preserves User together
+    /// with Project/Local provenance while the SDK resolves its normal write target.
+    #[cfg(test)]
+    fn stage_complete_sdk_anchor(
+        &self,
+        instance_id: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf), ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            self.stage_complete_sdk_anchor_unlocked(instance_id)
+        })
+    }
+
+    fn stage_complete_sdk_anchor_unlocked(
+        &self,
+        instance_id: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf), ConfigCrudError> {
+        let anchor = self.project_anchor(instance_id);
+        recover_anchor_restore_transaction(&anchor)?;
+        recover_raw_restore_transaction(&anchor)?;
+        let parent = anchor.parent().ok_or_else(|| ConfigCrudError::Io {
+            path: anchor.clone(),
+            reason: "SDK project anchor has no parent directory".to_string(),
+        })?;
+        fs::create_dir_all(parent).map_err(|error| raw_restore_io(parent, error))?;
+        let staging = tempfile::Builder::new()
+            .prefix(".mcp-input-stage-")
+            .tempdir_in(parent)
+            .map_err(|error| ConfigCrudError::Io {
+                path: parent.to_path_buf(),
+                reason: format!("failed to create MCP config staging directory: {error}"),
+            })?;
+        let staging_anchor = staging.path().join("sdk-anchor");
+        fs::create_dir_all(&staging_anchor)
+            .map_err(|error| raw_restore_io(&staging_anchor, error))?;
+        for relative in [Path::new(TFROBOT_DIRNAME), Path::new("a2c")] {
+            let source = anchor.join(relative);
+            if source.exists() {
+                copy_directory_tree(&source, &staging_anchor.join(relative))?;
+            }
+        }
+        Ok((staging, staging_anchor))
+    }
+
+    /// Commits a fully prepared SDK scope root with one recovery journal. Swapping the complete
+    /// instance anchor keeps User/Project/Local files in the same logical transaction.
+    #[cfg(test)]
+    fn commit_complete_sdk_anchor(
+        &self,
+        instance_id: &str,
+        staged_anchor: &Path,
+    ) -> Result<(), ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            self.commit_complete_sdk_anchor_unlocked(instance_id, staged_anchor)
+        })
+    }
+
+    fn commit_complete_sdk_anchor_unlocked(
+        &self,
+        instance_id: &str,
+        staged_anchor: &Path,
+    ) -> Result<(), ConfigCrudError> {
+        let anchor = self.project_anchor(instance_id);
+        recover_anchor_restore_transaction(&anchor)?;
+        #[cfg(test)]
+        if self.fail_next_raw_restore.swap(false, Ordering::SeqCst) {
+            return Err(ConfigCrudError::Io {
+                path: anchor,
+                reason: "injected complete SDK restore failure".to_string(),
+            });
+        }
+
+        let transaction_root = anchor_restore_transaction_root(&anchor)?;
+        fs::create_dir_all(&transaction_root)
+            .map_err(|error| raw_restore_io(&transaction_root, error))?;
+        let current_project_dir = anchor.join(TFROBOT_DIRNAME);
+        let current_user_dir = anchor.join("a2c");
+        let staged_project_dir = staged_anchor.join(TFROBOT_DIRNAME);
+        let staged_user_dir = staged_anchor.join("a2c");
+        let transaction_staged_project_dir = transaction_root.join("staged-project");
+        let transaction_staged_user_dir = transaction_root.join("staged-user");
+        if staged_project_dir.exists() {
+            fs::rename(&staged_project_dir, &transaction_staged_project_dir)
+                .map_err(|error| raw_restore_io(&staged_project_dir, error))?;
+        }
+        if staged_user_dir.exists() {
+            fs::rename(&staged_user_dir, &transaction_staged_user_dir)
+                .map_err(|error| raw_restore_io(&staged_user_dir, error))?;
+        }
+        let previous_project_dir = transaction_root.join("previous-project");
+        let previous_user_dir = transaction_root.join("previous-user");
+        let mut transaction = AnchorRestoreTransaction {
+            phase: AnchorRestorePhase::Prepared,
+            original_project_dir_existed: current_project_dir.exists(),
+            original_user_dir_existed: current_user_dir.exists(),
+        };
+        write_anchor_restore_transaction(&transaction_root, &transaction)?;
+
+        if current_project_dir.exists() {
+            if let Err(error) = fs::rename(&current_project_dir, &previous_project_dir) {
+                return Err(rollback_anchor_restore_after_error(
+                    &anchor,
+                    raw_restore_io(&current_project_dir, error),
+                ));
+            }
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_anchor_restore_after_project_backup
+            .swap(false, Ordering::SeqCst)
+        {
+            let error = ConfigCrudError::Io {
+                path: anchor.clone(),
+                reason: "injected complete SDK restore failure after project backup".to_string(),
+            };
+            return Err(rollback_anchor_restore_after_error(&anchor, error));
+        }
+        #[cfg(test)]
+        if let Some((reached, resume)) = self
+            .anchor_restore_pause_after_project_backup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            reached.wait();
+            resume.wait();
+        }
+        if current_user_dir.exists() {
+            if let Err(error) = fs::rename(&current_user_dir, &previous_user_dir) {
+                return Err(rollback_anchor_restore_after_error(
+                    &anchor,
+                    raw_restore_io(&current_user_dir, error),
+                ));
+            }
+        }
+        transaction.phase = AnchorRestorePhase::PreviousMoved;
+        if let Err(error) = write_anchor_restore_transaction(&transaction_root, &transaction) {
+            return Err(rollback_anchor_restore_after_error(&anchor, error));
+        }
+
+        #[cfg(test)]
+        if self
+            .fail_next_raw_restore_after_backup
+            .swap(false, Ordering::SeqCst)
+        {
+            let error = ConfigCrudError::Io {
+                path: anchor.clone(),
+                reason: "injected complete SDK restore failure after backup".to_string(),
+            };
+            return Err(rollback_anchor_restore_after_error(&anchor, error));
+        }
+
+        if let Err(error) = fs::create_dir_all(&anchor) {
+            return Err(rollback_anchor_restore_after_error(
+                &anchor,
+                raw_restore_io(&anchor, error),
+            ));
+        }
+        if transaction_staged_project_dir.exists() {
+            if let Err(error) = fs::rename(&transaction_staged_project_dir, &current_project_dir) {
+                return Err(rollback_anchor_restore_after_error(
+                    &anchor,
+                    raw_restore_io(&transaction_staged_project_dir, error),
+                ));
+            }
+        }
+        if transaction_staged_user_dir.exists() {
+            if let Err(error) = fs::rename(&transaction_staged_user_dir, &current_user_dir) {
+                return Err(rollback_anchor_restore_after_error(
+                    &anchor,
+                    raw_restore_io(&transaction_staged_user_dir, error),
+                ));
+            }
+        }
+        transaction.phase = AnchorRestorePhase::Committed;
+        if let Err(error) = write_anchor_restore_transaction(&transaction_root, &transaction) {
+            return Err(rollback_anchor_restore_after_error(&anchor, error));
+        }
+        if let Err(error) = fs::remove_dir_all(&transaction_root) {
+            log::warn!(
+                "Complete SDK restore committed for Computer '{}', but transaction cleanup failed: {}",
+                instance_id,
+                error
+            );
+        }
+        Ok(())
+    }
+
+    /// Migrates the breaking automatic-only HTTP OAuth schema before the candidate SDK validates
+    /// the project files. The raw document path preserves unknown fields and both project layers.
+    /// A legacy explicit OAuth opt-out cannot be represented by the new SDK, so an otherwise
+    /// unauthenticated server is conservatively disabled instead of silently enabling OAuth.
+    pub(crate) fn migrate_removed_http_oauth_fields(
+        &self,
+        instance_id: &str,
+    ) -> Result<RemovedHttpOAuthMigration, ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            let mut document = self.load_raw_project_config_unlocked(instance_id)?;
+            let migration = strip_removed_http_oauth_fields(&mut document);
+            if migration.removed_fields > 0 {
+                self.restore_raw_project_config_unlocked(instance_id, &document)?;
+            }
+            Ok(migration)
+        })
     }
 
     /// Bundle identities declared in this Computer's durable project/local MCP files.
@@ -541,6 +1104,16 @@ impl SdkConfigService {
 
     /// Replaces all four SDK project-anchor files from a raw same-machine snapshot.
     pub(crate) fn restore_raw_project_config(
+        &self,
+        instance_id: &str,
+        document: &ProjectConfigDoc,
+    ) -> Result<(), ConfigCrudError> {
+        self.with_config_write(instance_id, || {
+            self.restore_raw_project_config_unlocked(instance_id, document)
+        })
+    }
+
+    fn restore_raw_project_config_unlocked(
         &self,
         instance_id: &str,
         document: &ProjectConfigDoc,
@@ -638,37 +1211,67 @@ impl SdkConfigService {
             .store(true, Ordering::SeqCst);
     }
 
-    /// Export every reconciled instance-owned MCP declaration through the SDK sanitizer.
+    #[cfg(test)]
+    pub(crate) fn inject_anchor_restore_failure_after_project_backup(&self) {
+        self.fail_next_anchor_restore_after_project_backup
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn pause_anchor_restore_after_project_backup(
+        &self,
+    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        *self
+            .anchor_restore_pause_after_project_backup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((reached.clone(), resume.clone()));
+        (reached, resume)
+    }
+
+    /// Export every reconciled instance-owned MCP declaration with user-authored literals intact.
     ///
     /// SDK shareable export intentionally omits local scopes. The client's CLI-native export is
-    /// a full backup, so it resolves User/Project/Local declarations without ambient Policy,
-    /// stages them in an isolated project document, and delegates redaction to the SDK.
+    /// a full backup, so it resolves User/Project/Local declarations without ambient Policy and
+    /// validates the typed declarations without applying the SDK's shareable redaction boundary.
     pub fn export_cli_native_mcp(
         &self,
         instance_id: &str,
     ) -> Result<ProjectConfigDoc, SdkConfigPortabilityError> {
-        let context = self.context(instance_id);
-        let source_anchor = context.project_anchor.clone();
-        let resolution_staging = tempfile::tempdir().map_err(|error| ConfigCrudError::Io {
-            path: source_anchor.clone(),
-            reason: format!("failed to create CLI-native export staging directory: {error}"),
-        })?;
-        let mut resolved = resolve_portable_mcp_without_policy(&context, resolution_staging.path());
-        let export_errors = std::mem::take(&mut resolved.errors)
-            .into_iter()
-            .filter(|error| error.field != "inputs" && !error.field.starts_with("inputs."))
-            .collect::<Vec<_>>();
-        if !export_errors.is_empty() {
-            return Err(SdkConfigPortabilityError::invalid_source(export_errors));
-        }
+        self.with_config_read(instance_id, || {
+            let context = self.context(instance_id);
+            let source_anchor = context.project_anchor.clone();
+            let resolution_staging = tempfile::tempdir().map_err(|error| ConfigCrudError::Io {
+                path: source_anchor.clone(),
+                reason: format!("failed to create CLI-native export staging directory: {error}"),
+            })?;
+            let mut resolved =
+                resolve_portable_mcp_without_policy(&context, resolution_staging.path());
+            let export_errors = std::mem::take(&mut resolved.errors)
+                .into_iter()
+                .filter(|error| error.field != "inputs" && !error.field.starts_with("inputs."))
+                .collect::<Vec<_>>();
+            if !export_errors.is_empty() {
+                return Err(SdkConfigPortabilityError::invalid_source(export_errors));
+            }
 
-        let servers = resolved
-            .servers
-            .into_values()
-            .map(|server| server.config)
-            .collect::<Vec<_>>();
-        let sanitized = self.prepare_portable_mcp_configs(&servers)?;
-        Ok(project_document_from_servers(&sanitized)?)
+            let servers = resolved
+                .servers
+                .into_values()
+                .map(|server| server.config)
+                .collect::<Vec<_>>();
+            let prepared = self.prepare_literal_preserving_mcp_configs(&servers)?;
+            let inputs = resolved
+                .inputs
+                .iter()
+                .map(input_definition_from_sdk)
+                .collect::<Vec<_>>();
+            let mut document = project_document_from_servers(&prepared)?;
+            replace_project_inputs(&mut document, &inputs)?;
+            Ok(document)
+        })
     }
 
     pub fn import(
@@ -676,7 +1279,9 @@ impl SdkConfigService {
         instance_id: &str,
         document: &ProjectConfigDoc,
     ) -> Result<ValidationReport, ConfigCrudError> {
-        import_config(&self.project_anchor(instance_id), document)
+        self.with_config_write(instance_id, || {
+            import_config(&self.project_anchor(instance_id), document)
+        })
     }
 
     /// Applies the SDK import boundary in an isolated staging directory.
@@ -702,8 +1307,8 @@ impl SdkConfigService {
         Ok((sanitized, report))
     }
 
-    /// Converts MCP declarations through the one SDK-owned portability boundary used by every
-    /// client persistence entry point.
+    /// Converts MCP declarations through the SDK-owned sanitized portability boundary used for
+    /// untrusted projections such as remote Client Control responses.
     ///
     /// The preflight guard rejects sensitive CLI/query plaintext before the SDK staging write;
     /// the SDK then redacts env, headers, URL userinfo, and password defaults and validates only
@@ -713,16 +1318,7 @@ impl SdkConfigService {
         &self,
         servers: &[MCPServerConfig],
     ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
-        let servers = servers
-            .iter()
-            .cloned()
-            .map(normalize_mcp_input_references)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|reason| ConfigCrudError::Io {
-                path: PathBuf::from("<in-memory-mcp-config>"),
-                reason,
-            })?;
-        let document = project_document_from_servers(&servers)?;
+        let document = project_document_from_servers(servers)?;
         let (sanitized, report) = self.prepare_import(&document)?;
         if !report.is_valid() {
             return Err(SdkConfigPortabilityError::invalid_source(report.errors));
@@ -730,17 +1326,57 @@ impl SdkConfigService {
         Ok(mcp_configs_from_project_document(sanitized)?)
     }
 
-    /// Decodes an SDK portable document through the same canonical typed boundary used by import.
+    /// Canonicalizes and validates user-authored MCP declarations without altering literals.
+    ///
+    /// Trusted local CRUD and explicit client import/export share this boundary: environment
+    /// variables, headers, and URL userinfo may be intentional plaintext constants and must
+    /// round-trip exactly. Remote Client Control projections continue to use
+    /// [`Self::prepare_portable_mcp_configs`] so this does not widen that trust boundary.
+    pub fn prepare_literal_preserving_mcp_configs(
+        &self,
+        servers: &[MCPServerConfig],
+    ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
+        let document = project_document_from_servers(servers)?;
+
+        // Keep the existing structured argument/query guard. Unlike env/header values, these
+        // locations have no dedicated value-source editor and should still require references
+        // when they carry secret intent.
+        ensure_portable_secret_references(&document)?;
+        let report = validate_config(&document);
+        if !report.is_valid() {
+            return Err(SdkConfigPortabilityError::invalid_source(report.errors));
+        }
+        Ok(mcp_configs_from_project_document(document)?)
+    }
+
+    /// Decodes an SDK configuration document through its canonical typed boundary.
     pub fn mcp_configs_from_portable_document(
         document: ProjectConfigDoc,
     ) -> Result<Vec<MCPServerConfig>, SdkConfigPortabilityError> {
         Ok(mcp_configs_from_project_document(document)?)
     }
 
-    /// Redacts the MCP part of a reconciled snapshot before it crosses the Tauri/UI boundary.
-    /// Existing legacy plaintext is never echoed to the WebView; unsafe CLI/query plaintext makes
-    /// the read fail closed instead of exposing the value.
-    pub fn sanitize_snapshot_for_view(
+    /// Decodes the merged Input definitions carried by a CLI-native export document.
+    pub fn input_definitions_from_portable_document(
+        document: &ProjectConfigDoc,
+    ) -> Result<Vec<InputDefinition>, SdkConfigPortabilityError> {
+        let Some(encoded) = document.mcp.as_ref().and_then(|mcp| mcp.get("inputs")) else {
+            return Ok(Vec::new());
+        };
+        let definitions = serde_json::from_value::<
+            Vec<a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput>,
+        >(encoded.clone())
+        .map_err(|error| ConfigCrudError::Io {
+            path: PathBuf::from("<portable-sdk-config>"),
+            reason: format!("invalid portable SDK MCP input definitions: {error}"),
+        })?;
+        Ok(definitions.iter().map(input_definition_from_sdk).collect())
+    }
+
+    /// Redacts the MCP portion of a reconciled snapshot before it crosses the Client Control
+    /// boundary. The trusted local WebView uses the raw projection so its editor can round-trip
+    /// intentional constants; remote automation receives only SDK-sanitized declarations.
+    pub fn sanitize_snapshot_for_client_control(
         &self,
         mut snapshot: ComputerConfigSnapshot,
     ) -> Result<ComputerConfigSnapshot, SdkConfigPortabilityError> {
@@ -761,7 +1397,7 @@ impl SdkConfigService {
                 .ok_or_else(|| ConfigCrudError::Io {
                     path: PathBuf::from("<in-memory-mcp-config>"),
                     reason: format!(
-                        "SDK portability sanitizer omitted MCP server '{}'",
+                        "SDK Client Control sanitizer omitted MCP server '{}'",
                         server.name
                     ),
                 })?;
@@ -773,6 +1409,63 @@ impl SdkConfigService {
         path.starts_with(self.project_anchor(instance_id))
             || path.starts_with(self.skill_home(instance_id))
     }
+}
+
+fn strip_removed_http_oauth_fields(document: &mut ProjectConfigDoc) -> RemovedHttpOAuthMigration {
+    let mut migration = RemovedHttpOAuthMigration::default();
+    for layer in [&mut document.mcp, &mut document.mcp_local] {
+        let Some(layer) = layer.as_mut() else {
+            continue;
+        };
+        let Some(Value::Object(servers)) = layer.get_mut("servers") else {
+            continue;
+        };
+        for server in servers.values_mut() {
+            let Value::Object(body) = server else {
+                continue;
+            };
+            let is_http = body
+                .get("server_parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("url"))
+                .and_then(Value::as_str)
+                .is_some();
+            if !is_http {
+                continue;
+            }
+
+            let has_static_authorization = body
+                .get("server_parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("headers"))
+                .and_then(Value::as_object)
+                .is_some_and(|headers| {
+                    headers
+                        .keys()
+                        .any(|header| header.eq_ignore_ascii_case("authorization"))
+                });
+            let explicit_opt_out = body.get("oauth") == Some(&Value::Bool(false))
+                || ["authPolicy", "auth_policy"].into_iter().any(|field| {
+                    body.get(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|policy| policy.eq_ignore_ascii_case("disabled"))
+                });
+            if explicit_opt_out && !has_static_authorization {
+                let was_disabled = body.get("disabled") == Some(&Value::Bool(true));
+                body.insert("disabled".to_string(), Value::Bool(true));
+                if !was_disabled {
+                    migration.disabled_opt_out_servers += 1;
+                }
+            }
+
+            for field in ["oauth", "authPolicy", "auth_policy"] {
+                if body.remove(field).is_some() {
+                    migration.removed_fields += 1;
+                }
+            }
+        }
+    }
+    migration
 }
 
 /// The SDK sanitizer owns known secret-bearing value fields (env, headers, URL userinfo, and
@@ -956,6 +1649,156 @@ fn canonical_mcp_server_body(value: Value) -> Result<Map<String, Value>, String>
     Ok(body)
 }
 
+fn mcp_upsert_edits(
+    context: &InstanceConfigContext,
+    servers: &[MCPServerConfig],
+) -> Result<Vec<ConfigEdit>, ConfigCrudError> {
+    servers
+        .iter()
+        .map(|server| {
+            let name = server.name().to_string();
+            let value = serde_json::to_value(server).map_err(|error| ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason: format!("failed to serialize MCP server '{name}': {error}"),
+            })?;
+            let body = canonical_mcp_server_body(value).map_err(|reason| ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason: format!("invalid MCP server '{name}': {reason}"),
+            })?;
+            Ok(ConfigEdit::new(
+                ConfigEntity::McpServer(name),
+                EditIntent::Upsert(Value::Object(body)),
+            ))
+        })
+        .collect()
+}
+
+fn replace_project_inputs(
+    document: &mut ProjectConfigDoc,
+    definitions: &[InputDefinition],
+) -> Result<(), ConfigCrudError> {
+    let encoded = definitions
+        .iter()
+        .map(input_definition_to_sdk)
+        .map(|definition| {
+            serde_json::to_value(definition).map_err(|error| ConfigCrudError::Io {
+                path: PathBuf::from("<staged-mcp-config>"),
+                reason: format!("failed to serialize MCP input definition: {error}"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    document
+        .mcp
+        .get_or_insert_with(Map::new)
+        .insert("inputs".to_string(), Value::Array(encoded));
+    Ok(())
+}
+
+fn remove_unreferenced_project_inputs(
+    document: &mut ProjectConfigDoc,
+    candidates: &HashSet<String>,
+    referenced: &HashSet<String>,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    let Some(Value::Array(inputs)) = document.mcp.as_mut().and_then(|mcp| mcp.get_mut("inputs"))
+    else {
+        return;
+    };
+    inputs.retain(|input| {
+        let Some(id) = input.get("id").and_then(Value::as_str) else {
+            return true;
+        };
+        !candidates.contains(id) || referenced.contains(id)
+    });
+}
+
+fn all_scope_input_references(
+    context: &InstanceConfigContext,
+    project_document: &ProjectConfigDoc,
+) -> Result<HashSet<String>, ConfigCrudError> {
+    let mut referenced = find_project_input_references(project_document)
+        .into_iter()
+        .map(|location| location.input_id)
+        .collect::<HashSet<_>>();
+
+    // User declarations can be hidden by a Project/Local server with the same name and would not
+    // appear in the merged snapshot. Scan the raw User layer as well so GC remains conservative.
+    let user_path = user_mcp_config_path(Some(context.env()));
+    match fs::read(&user_path) {
+        Ok(bytes) => {
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|error| ConfigCrudError::Io {
+                    path: user_path.clone(),
+                    reason: format!(
+                        "invalid User MCP config while checking Input references: {error}"
+                    ),
+                })?;
+            if let Some(servers) = value.get("servers").and_then(Value::as_object) {
+                for server in servers.values() {
+                    for field in [server.get("server_parameters"), server.get("envFile")]
+                        .into_iter()
+                        .flatten()
+                    {
+                        referenced.extend(referenced_input_ids(field));
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(raw_restore_io(&user_path, error)),
+    }
+
+    // The resolved view contributes read-only ambient scopes (notably Policy). Writable raw
+    // layers were scanned above, including declarations currently hidden by a higher layer.
+    for server in context.load().mcp.servers {
+        let value = serde_json::to_value(server.config).map_err(|error| ConfigCrudError::Io {
+            path: context.project_anchor().to_path_buf(),
+            reason: format!("failed to inspect MCP Input references: {error}"),
+        })?;
+        for field in [value.get("server_parameters"), value.get("envFile")]
+            .into_iter()
+            .flatten()
+        {
+            referenced.extend(referenced_input_ids(field));
+        }
+    }
+    Ok(referenced)
+}
+
+fn ensure_edited_inputs_are_effective(
+    context: &InstanceConfigContext,
+    project_inputs: &[InputDefinition],
+    edited_input_ids: &HashSet<String>,
+) -> Result<(), ConfigCrudError> {
+    if edited_input_ids.is_empty() {
+        return Ok(());
+    }
+    let effective = context
+        .load()
+        .inputs
+        .inputs
+        .into_iter()
+        .map(|definition| (definition.id().to_string(), definition))
+        .collect::<std::collections::HashMap<_, _>>();
+    for expected in project_inputs
+        .iter()
+        .filter(|definition| edited_input_ids.contains(definition.id()))
+    {
+        if effective.get(expected.id()) != Some(&input_definition_to_sdk(expected)) {
+            return Err(ConfigCrudError::Io {
+                path: context.project_anchor().to_path_buf(),
+                reason: format!(
+                    "Input definition '{}' is shadowed by a higher-priority SDK scope and cannot be edited from this MCP form",
+                    expected.id()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn project_document_from_servers(
     servers: &[MCPServerConfig],
 ) -> Result<ProjectConfigDoc, ConfigCrudError> {
@@ -1035,6 +1878,119 @@ fn raw_restore_transaction_root(anchor: &Path) -> Result<PathBuf, ConfigCrudErro
             reason: "SDK project anchor has no valid directory name".to_string(),
         })?;
     Ok(anchor.with_file_name(format!(".{file_name}-raw-restore")))
+}
+
+fn anchor_restore_transaction_root(anchor: &Path) -> Result<PathBuf, ConfigCrudError> {
+    let file_name = anchor
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ConfigCrudError::Io {
+            path: anchor.to_path_buf(),
+            reason: "SDK project anchor has no valid directory name".to_string(),
+        })?;
+    Ok(anchor.with_file_name(format!(".{file_name}-sdk-anchor-restore")))
+}
+
+fn anchor_restore_transaction_path(transaction_root: &Path) -> PathBuf {
+    transaction_root.join("transaction.json")
+}
+
+fn write_anchor_restore_transaction(
+    transaction_root: &Path,
+    transaction: &AnchorRestoreTransaction,
+) -> Result<(), ConfigCrudError> {
+    write_json_atomically(
+        &anchor_restore_transaction_path(transaction_root),
+        transaction,
+    )
+    .map_err(|error| ConfigCrudError::Io {
+        path: transaction_root.to_path_buf(),
+        reason: error.to_string(),
+    })
+}
+
+fn load_anchor_restore_transaction(
+    transaction_root: &Path,
+) -> Result<AnchorRestoreTransaction, ConfigCrudError> {
+    let path = anchor_restore_transaction_path(transaction_root);
+    let content = fs::read(&path).map_err(|error| raw_restore_io(&path, error))?;
+    serde_json::from_slice(&content).map_err(|error| ConfigCrudError::Io {
+        path,
+        reason: format!("corrupt complete SDK restore transaction: {error}"),
+    })
+}
+
+fn recover_anchor_restore_transaction(anchor: &Path) -> Result<(), ConfigCrudError> {
+    let transaction_root = anchor_restore_transaction_root(anchor)?;
+    if !transaction_root.exists() {
+        return Ok(());
+    }
+    let previous_project_dir = transaction_root.join("previous-project");
+    let previous_user_dir = transaction_root.join("previous-user");
+    let marker_path = anchor_restore_transaction_path(&transaction_root);
+    if !marker_path.exists() {
+        if previous_project_dir.exists() || previous_user_dir.exists() {
+            return Err(ConfigCrudError::Io {
+                path: transaction_root,
+                reason: "unmarked complete SDK restore retains previous scope directories"
+                    .to_string(),
+            });
+        }
+        fs::remove_dir_all(&transaction_root)
+            .map_err(|error| raw_restore_io(&transaction_root, error))?;
+        return Ok(());
+    }
+    let transaction = load_anchor_restore_transaction(&transaction_root)?;
+    if transaction.phase != AnchorRestorePhase::Committed {
+        let current_project_dir = anchor.join(TFROBOT_DIRNAME);
+        let current_user_dir = anchor.join("a2c");
+        for (current, previous, originally_existed, label) in [
+            (
+                current_project_dir,
+                previous_project_dir,
+                transaction.original_project_dir_existed,
+                "Project/Local",
+            ),
+            (
+                current_user_dir,
+                previous_user_dir,
+                transaction.original_user_dir_existed,
+                "User",
+            ),
+        ] {
+            if previous.exists() {
+                remove_path_if_present(&current)?;
+                if let Some(parent) = current.parent() {
+                    fs::create_dir_all(parent).map_err(|error| raw_restore_io(parent, error))?;
+                }
+                fs::rename(&previous, &current)
+                    .map_err(|error| raw_restore_io(&previous, error))?;
+            } else if transaction.phase == AnchorRestorePhase::PreviousMoved {
+                if originally_existed {
+                    return Err(ConfigCrudError::Io {
+                        path: transaction_root.clone(),
+                        reason: format!(
+                            "complete SDK restore lost its previous {label} scope directory"
+                        ),
+                    });
+                }
+                remove_path_if_present(&current)?;
+            }
+        }
+    }
+    fs::remove_dir_all(&transaction_root)
+        .map_err(|error| raw_restore_io(&transaction_root, error))?;
+    Ok(())
+}
+
+fn rollback_anchor_restore_after_error(anchor: &Path, primary: ConfigCrudError) -> ConfigCrudError {
+    match recover_anchor_restore_transaction(anchor) {
+        Ok(()) => primary,
+        Err(rollback) => ConfigCrudError::Io {
+            path: anchor.to_path_buf(),
+            reason: format!("{primary}; complete SDK restore rollback also failed: {rollback}"),
+        },
+    }
 }
 
 fn raw_restore_transaction_path(transaction_root: &Path) -> PathBuf {
@@ -1192,6 +2148,195 @@ mod tests {
     }
 
     #[test]
+    fn project_input_crud_never_copies_or_edits_local_scope_definitions() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config
+            .save(
+                "computer-a",
+                &ProjectConfigDoc {
+                    mcp: Some(
+                        json!({
+                            "inputs": [{
+                                "type": "PromptString",
+                                "id": "project-token",
+                                "description": "Project token"
+                            }]
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    mcp_local: Some(
+                        json!({
+                            "inputs": [{
+                                "type": "PromptString",
+                                "id": "local-token",
+                                "description": "Local token"
+                            }]
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let project = sdk_config
+            .load_project_input_definitions("computer-a")
+            .unwrap();
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0].id(), "project-token");
+
+        sdk_config
+            .replace_input_definitions(
+                "computer-a",
+                &[InputDefinition::PromptString {
+                    id: "replacement".to_string(),
+                    label: Some("Replacement".to_string()),
+                    description: None,
+                    default: None,
+                    password: Some(false),
+                }],
+            )
+            .unwrap();
+
+        let raw = sdk_config.load_raw_project_config("computer-a").unwrap();
+        assert_eq!(raw.mcp.as_ref().unwrap()["inputs"][0]["id"], "replacement");
+        assert_eq!(
+            raw.mcp_local.as_ref().unwrap()["inputs"][0]["id"],
+            "local-token"
+        );
+    }
+
+    fn legacy_http_oauth_document() -> ProjectConfigDoc {
+        ProjectConfigDoc {
+            settings: Some(
+                json!({"futureSetting": {"preserve": true}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+            mcp: Some(
+                json!({
+                    "futureLayerField": "preserve-me",
+                    "servers": {
+                        "remote": {
+                            "type": "streamable",
+                            "authPolicy": "auto",
+                            "oauth": {
+                                "resource": "https://mcp.example/mcp",
+                                "client_name": "TFRobot"
+                            },
+                            "futureServerField": {"preserve": true},
+                            "server_parameters": {
+                                "url": "https://mcp.example/mcp",
+                                "headers": {"X-Routing": "preserve-me"}
+                            }
+                        },
+                        "static": {
+                            "type": "streamable",
+                            "auth_policy": "disabled",
+                            "server_parameters": {
+                                "url": "https://static.example/mcp",
+                                "headers": {"authorization": "Bearer ${input:token}"}
+                            }
+                        },
+                        "stdio": {
+                            "type": "stdio",
+                            "oauth": {"extensionOwned": true},
+                            "server_parameters": {"command": "node"}
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            mcp_local: Some(
+                json!({
+                    "servers": {
+                        "opt-out": {
+                            "type": "sse",
+                            "oauth": false,
+                            "server_parameters": {"url": "https://public.example/sse"}
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            ..ProjectConfigDoc::default()
+        }
+    }
+
+    #[test]
+    fn removed_http_oauth_migration_is_selective_and_idempotent() {
+        let mut document = legacy_http_oauth_document();
+        let first = strip_removed_http_oauth_fields(&mut document);
+        assert_eq!(first.removed_fields, 4);
+        assert_eq!(first.disabled_opt_out_servers, 1);
+        assert!(document.mcp.as_ref().unwrap()["servers"]["remote"]
+            .get("oauth")
+            .is_none());
+        assert!(document.mcp.as_ref().unwrap()["servers"]["remote"]
+            .get("authPolicy")
+            .is_none());
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["remote"]["futureServerField"],
+            json!({"preserve": true})
+        );
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["static"]["server_parameters"]["headers"]
+                ["authorization"],
+            "Bearer ${input:token}"
+        );
+        assert_eq!(
+            document.mcp.as_ref().unwrap()["servers"]["stdio"]["oauth"],
+            json!({"extensionOwned": true})
+        );
+        assert_eq!(
+            document.mcp_local.as_ref().unwrap()["servers"]["opt-out"]["disabled"],
+            true
+        );
+
+        assert_eq!(
+            strip_removed_http_oauth_fields(&mut document),
+            RemovedHttpOAuthMigration::default()
+        );
+    }
+
+    #[test]
+    fn removed_http_oauth_migration_persists_through_raw_transaction() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config
+            .save("computer-a", &legacy_http_oauth_document())
+            .unwrap();
+
+        let first = sdk_config
+            .migrate_removed_http_oauth_fields("computer-a")
+            .unwrap();
+        assert_eq!(first.removed_fields, 4);
+        assert_eq!(first.disabled_opt_out_servers, 1);
+        assert!(sdk_config
+            .validate_instance("computer-a")
+            .unwrap()
+            .is_valid());
+        assert_eq!(
+            sdk_config
+                .migrate_removed_http_oauth_fields("computer-a")
+                .unwrap(),
+            RemovedHttpOAuthMigration::default()
+        );
+    }
+
+    #[test]
     fn raw_restore_replaces_sdk_files_and_preserves_non_sdk_files() {
         let directory = tempdir().unwrap();
         let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
@@ -1214,6 +2359,187 @@ mod tests {
             after
         );
         assert_eq!(fs::read(extension).unwrap(), b"preserve-me");
+    }
+
+    #[test]
+    fn complete_sdk_restore_rolls_back_project_and_user_scopes_together() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        let before = project_doc_with_marker("before");
+        let after = project_doc_with_marker("after");
+        sdk_config.save("computer-a", &before).unwrap();
+        let anchor = sdk_config.project_anchor("computer-a");
+        let user_path = anchor.join("a2c/mcp.json");
+        let client_profile = anchor.join("profile.json");
+        fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        fs::write(&user_path, br#"{"marker":"before-user"}"#).unwrap();
+        fs::write(&client_profile, br#"{"name":"before-stage"}"#).unwrap();
+
+        let (_staging, staged_anchor) = sdk_config.stage_complete_sdk_anchor("computer-a").unwrap();
+        save_config(&staged_anchor, &after).unwrap();
+        let staged_user = staged_anchor.join("a2c/mcp.json");
+        fs::write(&staged_user, br#"{"marker":"after-user"}"#).unwrap();
+        fs::write(&client_profile, br#"{"name":"client-owned-update"}"#).unwrap();
+        sdk_config.inject_raw_restore_failure_after_backup();
+        sdk_config
+            .commit_complete_sdk_anchor("computer-a", &staged_anchor)
+            .unwrap_err();
+
+        assert_eq!(
+            sdk_config.load_raw_project_config("computer-a").unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read_to_string(user_path).unwrap(),
+            r#"{"marker":"before-user"}"#
+        );
+        assert_eq!(
+            fs::read_to_string(client_profile).unwrap(),
+            r#"{"name":"client-owned-update"}"#
+        );
+        assert!(!anchor_restore_transaction_root(&anchor).unwrap().exists());
+    }
+
+    #[test]
+    fn complete_sdk_restore_immediately_rolls_back_between_live_scope_backups() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        let before = project_doc_with_marker("before");
+        let after = project_doc_with_marker("after");
+        sdk_config.save("computer-a", &before).unwrap();
+        let anchor = sdk_config.project_anchor("computer-a");
+        let user_path = anchor.join("a2c/mcp.json");
+        fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        fs::write(&user_path, br#"{"marker":"before-user"}"#).unwrap();
+
+        let (_staging, staged_anchor) = sdk_config.stage_complete_sdk_anchor("computer-a").unwrap();
+        save_config(&staged_anchor, &after).unwrap();
+        let staged_user = staged_anchor.join("a2c/mcp.json");
+        fs::write(&staged_user, br#"{"marker":"after-user"}"#).unwrap();
+        sdk_config.inject_anchor_restore_failure_after_project_backup();
+
+        sdk_config
+            .commit_complete_sdk_anchor("computer-a", &staged_anchor)
+            .unwrap_err();
+
+        // No follow-up mutation or recovery call is needed before ordinary reads see old state.
+        let snapshot = sdk_config.load("computer-a");
+        assert!(snapshot
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "before"));
+        assert!(!snapshot
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "after"));
+        assert_eq!(
+            fs::read_to_string(user_path).unwrap(),
+            r#"{"marker":"before-user"}"#
+        );
+        assert!(!anchor_restore_transaction_root(&anchor).unwrap().exists());
+    }
+
+    #[test]
+    fn complete_sdk_restore_isolates_merged_and_recovery_reads_until_commit() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        let before = project_doc_with_marker("before");
+        let after = project_doc_with_marker("after");
+        sdk_config.save("computer-a", &before).unwrap();
+        sdk_config
+            .save("computer-b", &project_doc_with_marker("other"))
+            .unwrap();
+        let anchor = sdk_config.project_anchor("computer-a");
+        let user_path = anchor.join("a2c/mcp.json");
+        fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        fs::write(&user_path, br#"{"marker":"before-user"}"#).unwrap();
+        let (_staging, staged_anchor) = sdk_config.stage_complete_sdk_anchor("computer-a").unwrap();
+        save_config(&staged_anchor, &after).unwrap();
+        fs::write(
+            staged_anchor.join("a2c/mcp.json"),
+            br#"{"marker":"after-user"}"#,
+        )
+        .unwrap();
+
+        let (commit_reached, resume_commit) =
+            sdk_config.pause_anchor_restore_after_project_backup();
+        let commit_service = sdk_config.clone();
+        let commit_anchor = staged_anchor.clone();
+        let commit = std::thread::spawn(move || {
+            commit_service.commit_complete_sdk_anchor("computer-a", &commit_anchor)
+        });
+        commit_reached.wait();
+
+        let (merged_started_tx, merged_started_rx) = std::sync::mpsc::channel();
+        let (merged_done_tx, merged_done_rx) = std::sync::mpsc::channel();
+        let merged_service = sdk_config.clone();
+        let merged_reader = std::thread::spawn(move || {
+            merged_started_tx.send(()).unwrap();
+            let snapshot = merged_service.load("computer-a");
+            merged_done_tx.send(snapshot).unwrap();
+        });
+        merged_started_rx.recv().unwrap();
+
+        let (raw_started_tx, raw_started_rx) = std::sync::mpsc::channel();
+        let (raw_done_tx, raw_done_rx) = std::sync::mpsc::channel();
+        let raw_service = sdk_config.clone();
+        let raw_reader = std::thread::spawn(move || {
+            raw_started_tx.send(()).unwrap();
+            let document = raw_service.load_raw_project_config("computer-a");
+            raw_done_tx.send(document).unwrap();
+        });
+        raw_started_rx.recv().unwrap();
+
+        let (other_done_tx, other_done_rx) = std::sync::mpsc::channel();
+        let other_service = sdk_config.clone();
+        let other_reader = std::thread::spawn(move || {
+            other_done_tx
+                .send(other_service.load("computer-b"))
+                .unwrap();
+        });
+        let other = other_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("an active transaction must not block another Computer");
+        assert!(other
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "other"));
+        other_reader.join().unwrap();
+
+        assert!(matches!(
+            merged_done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            raw_done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        resume_commit.wait();
+        commit.join().unwrap().unwrap();
+        let snapshot = merged_done_rx.recv().unwrap();
+        let raw = raw_done_rx.recv().unwrap().unwrap();
+        merged_reader.join().unwrap();
+        raw_reader.join().unwrap();
+
+        assert!(snapshot
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "after"));
+        assert!(!snapshot
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "before"));
+        assert_eq!(raw, after);
+        assert!(!anchor_restore_transaction_root(&anchor).unwrap().exists());
     }
 
     #[test]

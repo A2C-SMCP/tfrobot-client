@@ -10,10 +10,12 @@ use crate::services::computer_runtime_events::{
     RuntimeDiagnosticRecord, SdkProblemObservations,
 };
 use crate::services::config::instance_storage_dir_name;
-use crate::services::input_resolver::RuntimeInputResolver;
+use crate::services::input_references::referenced_input_ids;
+use crate::services::input_resolver::{RuntimeInputInteractionMode, RuntimeInputResolver};
 use crate::services::keychain::{InMemorySecretStore, SecretStore};
 use crate::services::manager_context::ManagerContextKey;
 use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
+use crate::services::runtime_input_bridge::RuntimeInputBridge;
 use crate::services::sdk_config::InstanceConfigContext;
 use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
@@ -21,8 +23,12 @@ use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::manager::{ClientFactory, MCPServerManager};
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    BundleId, CallToolResult, CommandInput, HttpAuthenticationError, MCPServerInput,
-    PickStringInput, PromptStringInput, ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
+    BundleId, CallToolResult, HttpAuthenticationError, MCPServerInput, MCPServerRuntimeStatus,
+    ReadResourceResult, Resource, ServerName, Tool, ToolMeta,
+};
+#[cfg(test)]
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    CommandInput, PickStringInput, PickStringOption, PromptStringInput,
 };
 use a2c_smcp::smcp_computer::mcp_clients::utils::client_factory;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
@@ -45,6 +51,7 @@ use a2c_smcp::A2CSkillRef;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -288,7 +295,7 @@ pub struct ComputerInstance {
 }
 
 pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 3;
-pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 1;
+pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 2;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 /// Client-owned, durable metadata for one Computer instance.
@@ -394,14 +401,32 @@ impl Default for SdkContextConfig {
     }
 }
 
-/// Per-Computer input definitions and UI schema owned by the client.
-/// Resolved values and secrets are deliberately stored through `SecretStore`.
+/// Obsolete client input sidecar retained only as a directory-transaction compatibility member.
+/// New definitions are never written here; SDK `ProjectConfigDoc` is the sole source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerInputsConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub inputs: Vec<ComputerInputDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migration_issues: Vec<ComputerInputMigrationIssue>,
+}
+
+/// Explicit compatibility state for legacy data that cannot satisfy the v2 schema without
+/// inventing a value. Normal CRUD never creates this marker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComputerInputMigrationIssue {
+    UnresolvedPickNoOption { input_id: String },
+}
+
+impl ComputerInputMigrationIssue {
+    pub fn input_id(&self) -> &str {
+        match self {
+            Self::UnresolvedPickNoOption { input_id } => input_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -409,7 +434,8 @@ pub struct ComputerInputsConfig {
 pub enum ComputerInputDefinition {
     PromptString {
         id: String,
-        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -419,7 +445,8 @@ pub enum ComputerInputDefinition {
     },
     PickString {
         id: String,
-        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         options: Vec<GlobalPickOption>,
@@ -428,7 +455,8 @@ pub enum ComputerInputDefinition {
     },
     Command {
         id: String,
-        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         command: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         args: Option<Vec<String>>,
@@ -557,6 +585,7 @@ impl Default for ComputerInputsConfig {
         Self {
             schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: Vec::new(),
+            migration_issues: Vec::new(),
         }
     }
 }
@@ -593,15 +622,26 @@ impl InstanceSession {
 impl Session for InstanceSession {
     async fn resolve_input(&self, input: &MCPServerInput) -> ComputerResult<serde_json::Value> {
         match input {
-            MCPServerInput::PromptString(input) => Ok(serde_json::Value::String(
-                input.default.clone().unwrap_or_default(),
-            )),
-            MCPServerInput::PickString(input) => Ok(serde_json::Value::String(
-                input
-                    .default
-                    .clone()
-                    .unwrap_or_else(|| input.options.first().cloned().unwrap_or_default()),
-            )),
+            MCPServerInput::PromptString(prompt) => prompt
+                .default
+                .clone()
+                .map(serde_json::Value::String)
+                .ok_or_else(|| {
+                    ComputerError::InputResolution(InputResolutionError::missing(
+                        input.id(),
+                        InputKind::of(input),
+                    ))
+                }),
+            MCPServerInput::PickString(pick) => pick
+                .default
+                .clone()
+                .map(serde_json::Value::String)
+                .ok_or_else(|| {
+                    ComputerError::InputResolution(InputResolutionError::missing(
+                        input.id(),
+                        InputKind::of(input),
+                    ))
+                }),
             MCPServerInput::Command(input) => {
                 let args: Vec<String> = input
                     .args
@@ -672,6 +712,30 @@ pub enum ComputerRuntimeStartError {
     Client(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleReplacementConfig {
+    ReloadPersisted,
+    RetainCurrentGeneration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeMcpStartFailurePolicy {
+    BestEffort,
+    PropagateRuntimeInputFailures,
+}
+
+impl RuntimeMcpStartFailurePolicy {
+    fn propagates_runtime_input_failures(self) -> bool {
+        matches!(self, Self::PropagateRuntimeInputFailures)
+    }
+}
+
+struct HandleDeclarations<'a> {
+    injected_inputs: &'a HashMap<String, MCPServerInput>,
+    retained_inputs: Option<&'a HashMap<String, MCPServerInput>>,
+    retained_mcp_servers: Option<&'a HashMap<String, MCPServerConfig>>,
+}
+
 impl ComputerRuntimeStartError {
     fn append_context(self, context: impl std::fmt::Display) -> Self {
         let context = context.to_string();
@@ -736,6 +800,14 @@ pub(crate) struct SdkSkillMutationLease {
     runtime: ComputerInstanceRuntime,
     _activity: RuntimeActivityGuard,
     _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Keeps one Computer generation lifecycle-locked while an application-wide transaction guard is
+/// released. Foreground commands use this hand-off before entering Runtime Input so another
+/// Computer remains independent without allowing same-Computer replacement to slip into the gap.
+pub(crate) struct ComputerRuntimeLifecycleLease<'a> {
+    runtime: &'a ComputerInstanceRuntime,
+    _lifecycle: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl SdkSkillMutationLease {
@@ -836,6 +908,19 @@ pub struct ComputerInstanceRuntime {
 }
 
 impl ComputerInstanceRuntime {
+    pub async fn with_runtime_input_interaction<F, T>(
+        &self,
+        mode: RuntimeInputInteractionMode,
+        future: F,
+    ) -> T
+    where
+        F: Future<Output = T>,
+    {
+        self.input_resolver
+            .with_interaction_mode(mode, future)
+            .await
+    }
+
     /// Builds isolated runtime handles for an instance. MCP runtime ownership lives in SDK
     /// Computer; the client keeps only instance-scoped state and lifecycle handles here.
     pub fn new(instance: ComputerInstance, skill_home_base: PathBuf) -> Self {
@@ -856,6 +941,7 @@ impl ComputerInstanceRuntime {
             skill_home_base,
             secret_store,
             Arc::new(RwLock::new(None)),
+            Arc::new(RuntimeInputBridge::new()),
             ClientControlBinding::default(),
         )
     }
@@ -865,18 +951,28 @@ impl ComputerInstanceRuntime {
         skill_home_base: PathBuf,
         secret_store: Arc<dyn SecretStore>,
         runtime_event_sink: SharedRuntimeEventSink,
+        runtime_input_bridge: Arc<RuntimeInputBridge>,
         client_control_binding: ClientControlBinding,
     ) -> Self {
-        let inputs = input_definitions_to_mcp_map(&instance.inputs);
+        let injected_inputs = HashMap::new();
         let session = InstanceSession::new(instance.id.clone());
         let oauth_credential_store = Arc::new(KeychainOAuthCredentialStore::new(
             instance.id.clone(),
             secret_store.clone(),
         ));
-        let input_resolver = Arc::new(RuntimeInputResolver::new(instance.id.clone(), secret_store));
-        let (computer, sdk_servers) = build_sdk_computer(
+        let input_resolver = Arc::new(RuntimeInputResolver::new_with_bridge(
+            instance.id.clone(),
+            skill_home_base.join(instance_storage_dir_name(&instance.id)),
+            secret_store,
+            runtime_input_bridge,
+        ));
+        let (computer, sdk_servers, inputs) = build_sdk_computer(
             &instance,
-            &inputs,
+            HandleDeclarations {
+                injected_inputs: &injected_inputs,
+                retained_inputs: None,
+                retained_mcp_servers: None,
+            },
             session.clone(),
             input_resolver.clone(),
             oauth_credential_store.clone(),
@@ -1066,23 +1162,21 @@ impl ComputerInstanceRuntime {
             || (provider_is_mounted && remote_control_policy_changed)
         {
             let was_running = self.is_running().await;
-            self.replace_sdk_computer(was_running, "Client Control policy changed")
-                .await?;
+            self.replace_sdk_computer(
+                was_running,
+                "Client Control policy changed",
+                HandleReplacementConfig::RetainCurrentGeneration,
+                RuntimeMcpStartFailurePolicy::BestEffort,
+            )
+            .await?;
             return Ok(());
         }
 
-        let mut merged_inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        merged_inputs.extend(self.plugin_runtime_inputs.read().await.clone());
-        {
-            let mut inputs = self.inputs.write().await;
-            *inputs = merged_inputs;
-            self.computer
-                .read()
-                .await
-                .update_inputs(inputs.clone())
-                .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
-        }
+        // Persisted SDK input definitions belong to the current handle generation. Metadata
+        // synchronization (status reads, rename, policy saves) must not refresh that pool: only
+        // an actual start/restart rebuilds the SDK Computer from the latest raw declarations.
+        // Plugin lifecycle inputs are injected explicitly by the SDK hook path and remain
+        // independent from project definition CRUD.
         *self.sdk_servers.write().await = self
             .sdk_user_mcp_server_config_map()
             .await
@@ -1134,6 +1228,10 @@ impl ComputerInstanceRuntime {
             .await
             .get(input_id)
             .and_then(runtime_stored_input_kind)
+    }
+
+    pub async fn runtime_input_definition(&self, input_id: &str) -> Option<MCPServerInput> {
+        self.inputs.read().await.get(input_id).cloned()
     }
 
     /// Applies an already-persisted user MCP declaration to this runtime without rebuilding the
@@ -1384,15 +1482,15 @@ impl ComputerInstanceRuntime {
         self.ensure_active()?;
         self.clear_oauth_authorization_inner(bundle_id).await?;
         let computer_running = self.is_running().await;
-        let server_running = self
+        let server_started = self
             .computer
             .read()
             .await
-            .get_server_status()
+            .get_server_runtime_statuses()
             .await
             .into_iter()
-            .any(|(id, _, running, _)| id == *bundle_id && running);
-        if server_running {
+            .any(|status| status.bundle_id == *bundle_id && status.is_started());
+        if server_started {
             self.computer
                 .read()
                 .await
@@ -1418,7 +1516,9 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(|error| error.to_string())?;
         if computer_running {
-            let failures = self.start_desired_mcp_servers_inner().await;
+            let failures = self
+                .start_desired_mcp_servers_inner(RuntimeMcpStartFailurePolicy::BestEffort)
+                .await;
             self.log_mcp_start_failures(&failures, "user MCP removal");
         }
         Ok(())
@@ -1445,9 +1545,13 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
-    pub async fn mcp_server_statuses(&self) -> Vec<(BundleId, ServerName, bool, String)> {
+    pub async fn mcp_server_runtime_statuses(&self) -> Vec<MCPServerRuntimeStatus> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.computer.read().await.get_server_status().await
+        self.computer
+            .read()
+            .await
+            .get_server_runtime_statuses()
+            .await
     }
 
     pub async fn mcp_start_diagnostics(&self) -> HashMap<BundleId, String> {
@@ -1511,6 +1615,14 @@ impl ComputerInstanceRuntime {
 
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
         self.ensure_active_computer()?;
+        if let Some(input_id) = self.missing_configured_input_definition(bundle_id).await {
+            let error = ComputerError::InvalidConfiguration(format!(
+                "Required input '{input_id}' is not defined for this Computer"
+            ));
+            self.record_mcp_start_diagnostic(bundle_id.clone(), format!("Start failed: {error}"))
+                .await;
+            return Err(error);
+        }
         let result = self.computer.read().await.start_mcp_client(bundle_id).await;
         if Self::is_expected_oauth_required(&result) {
             // A validated OAuth challenge is an expected runtime state, not a malformed server
@@ -1533,6 +1645,19 @@ impl ComputerInstanceRuntime {
             }
         }
         result
+    }
+
+    async fn missing_configured_input_definition(&self, bundle_id: &BundleId) -> Option<String> {
+        let config = self.sdk_mcp_server_config_map().await.remove(bundle_id)?;
+        let config = serde_json::to_value(config).ok()?;
+        let referenced = referenced_input_ids(&config);
+        if referenced.is_empty() {
+            return None;
+        }
+        let defined = self.inputs.read().await;
+        referenced
+            .into_iter()
+            .find(|input_id| !defined.contains_key(input_id))
     }
 
     /// True when a start result means "this OAuth server is awaiting authorization" rather than a
@@ -1622,20 +1747,52 @@ impl ComputerInstanceRuntime {
         self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
+    pub async fn start_mcp_servers_until_input_failure(
+        &self,
+        bundle_ids: Vec<BundleId>,
+    ) -> Vec<(BundleId, ComputerError)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.start_mcp_servers_with_failure_policy_inner(
+            bundle_ids,
+            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures,
+        )
+        .await
+    }
+
     async fn start_mcp_servers_best_effort_inner(
         &self,
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, ComputerError)> {
+        self.start_mcp_servers_with_failure_policy_inner(
+            bundle_ids,
+            RuntimeMcpStartFailurePolicy::BestEffort,
+        )
+        .await
+    }
+
+    async fn start_mcp_servers_with_failure_policy_inner(
+        &self,
+        bundle_ids: Vec<BundleId>,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Vec<(BundleId, ComputerError)> {
         let mut failures = Vec::new();
         for bundle_id in bundle_ids {
             if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
+                let stop = failure_policy.propagates_runtime_input_failures()
+                    && matches!(error, ComputerError::InputResolution(_));
                 failures.push((bundle_id, error));
+                if stop {
+                    break;
+                }
             }
         }
         failures
     }
 
-    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
+    pub(super) async fn start_desired_mcp_servers_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership_internal()
             .await
@@ -1645,7 +1802,8 @@ impl ComputerInstanceRuntime {
             })
             .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok())
             .collect();
-        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+        self.start_mcp_servers_with_failure_policy_inner(bundle_ids, failure_policy)
+            .await
     }
 
     pub(super) fn log_mcp_start_failures(
@@ -1661,6 +1819,65 @@ impl ComputerInstanceRuntime {
                 bundle_id,
                 error
             );
+        }
+    }
+
+    pub(super) fn handle_desired_mcp_start_failures(
+        &self,
+        failures: Vec<(BundleId, ComputerError)>,
+        cause: &str,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> ComputerResult<()> {
+        self.log_mcp_start_failures(&failures, cause);
+        if failure_policy.propagates_runtime_input_failures() {
+            if let Some((_, error)) = failures
+                .into_iter()
+                .find(|(_, error)| matches!(error, ComputerError::InputResolution(_)))
+            {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn reconcile_governance_for_computer_start(
+        &self,
+        cause: &str,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> ComputerResult<()> {
+        // SDK governance recovery owns its own best-effort bundled MCP start loop. Keep that
+        // loop non-interactive for foreground Computer actions so it can mount every enabled
+        // plugin server without prompting (or continuing after a cancelled prompt). The client
+        // then starts the complete desired inventory below with its foreground fail-fast policy.
+        // Reconciliation is a large SDK future. Box it before wrapping it in the task-local
+        // interaction scope so Computer lifecycle commands do not inflate their async stack frame.
+        let reconcile = Box::pin(self.reconcile_sdk_governance_inner());
+        let reconcile_result = if failure_policy.propagates_runtime_input_failures() {
+            self.with_runtime_input_interaction(
+                RuntimeInputInteractionMode::NonInteractive,
+                reconcile,
+            )
+            .await
+        } else {
+            reconcile.await
+        };
+        match reconcile_result {
+            Ok(_) => Ok(()),
+            Err(error @ ComputerError::InputResolution(_))
+                if failure_policy.propagates_runtime_input_failures() =>
+            {
+                Err(error)
+            }
+            Err(ComputerError::InputResolution(error)) => {
+                log::warn!(
+                    "Plugin MCP input resolution failed for Computer instance {} during {}: {}",
+                    self.instance.id,
+                    cause,
+                    error
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1796,6 +2013,35 @@ impl ComputerInstanceRuntime {
             .add_or_update_input(input)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Adds persisted definitions that were absent when this SDK handle was created.
+    ///
+    /// This is intentionally narrower than ordinary Input CRUD: callers use it only at an
+    /// explicit MCP start boundary, and existing runtime definitions are never refreshed. That
+    /// lets a user create a definition in response to a structured start failure and retry only
+    /// the affected MCP without hot-applying unrelated Input edits.
+    pub async fn materialize_missing_configured_inputs_for_retry(
+        &self,
+        inputs: Vec<MCPServerInput>,
+    ) -> Result<(), String> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.ensure_active_computer()
+            .map_err(|error| error.to_string())?;
+        for input in inputs {
+            let input_id = input.id().to_string();
+            if self.inputs.read().await.contains_key(&input_id) {
+                continue;
+            }
+            self.computer
+                .read()
+                .await
+                .add_or_update_input(input.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            self.inputs.write().await.insert(input_id, input);
+        }
+        Ok(())
     }
 
     pub async fn synced_sdk_servers(&self) -> HashMap<BundleId, ServerName> {
@@ -2121,12 +2367,30 @@ impl ComputerInstanceRuntime {
         &self,
         was_running: bool,
         reason: &str,
+        config_mode: HandleReplacementConfig,
+        failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> Result<(), ComputerRuntimeStartError> {
-        let mut inputs = input_definitions_to_mcp_map(&self.instance.inputs);
-        inputs.extend(self.plugin_runtime_inputs.read().await.clone());
-        let (new_computer, sdk_servers) = build_sdk_computer(
+        let injected_inputs = self.plugin_runtime_inputs.read().await.clone();
+        let (retained_inputs, retained_mcp_servers) = match config_mode {
+            HandleReplacementConfig::ReloadPersisted => (None, None),
+            HandleReplacementConfig::RetainCurrentGeneration => {
+                let inputs = self.inputs.read().await.clone();
+                let servers = self
+                    .sdk_user_mcp_server_config_map()
+                    .await
+                    .into_values()
+                    .map(|config| (config.name().to_string(), config))
+                    .collect();
+                (Some(inputs), Some(servers))
+            }
+        };
+        let (new_computer, sdk_servers, inputs) = build_sdk_computer(
             &self.instance,
-            &inputs,
+            HandleDeclarations {
+                injected_inputs: &injected_inputs,
+                retained_inputs: retained_inputs.as_ref(),
+                retained_mcp_servers: retained_mcp_servers.as_ref(),
+            },
             self.session.clone(),
             self.input_resolver.clone(),
             self.oauth_credential_store.clone(),
@@ -2174,6 +2438,7 @@ impl ComputerInstanceRuntime {
             *computer = new_computer;
             self.shutdown_completed.store(false, Ordering::Release);
         }
+        *self.inputs.write().await = inputs;
         *self.sdk_servers.write().await = sdk_servers;
         self.plugin_mounted_server_ids.write().await.clear();
         self.start_runtime_event_relay().await;
@@ -2189,11 +2454,30 @@ impl ComputerInstanceRuntime {
                 .boot_up()
                 .await
                 .map_err(ComputerRuntimeStartError::Sdk)?;
-            self.reconcile_sdk_governance_inner()
+            if let Err(error) = self
+                .reconcile_governance_for_computer_start(reason, failure_policy)
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
-            let failures = self.start_desired_mcp_servers_inner().await;
-            self.log_mcp_start_failures(&failures, reason);
+            {
+                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                    start_error = start_error.append_context(format!(
+                        "failed to roll back the partially restarted Computer: {cleanup_error}"
+                    ));
+                }
+                return Err(start_error);
+            }
+            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            if let Err(error) =
+                self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
+            {
+                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                    start_error = start_error.append_context(format!(
+                        "failed to roll back the partially restarted Computer: {cleanup_error}"
+                    ));
+                }
+                return Err(start_error);
+            }
         }
         Ok(())
     }
@@ -2225,38 +2509,58 @@ where
 
 fn build_sdk_computer(
     instance: &ComputerInstance,
-    inputs: &HashMap<String, MCPServerInput>,
+    declarations: HandleDeclarations<'_>,
     session: InstanceSession,
     input_resolver: Arc<RuntimeInputResolver>,
     oauth_credential_store: Arc<KeychainOAuthCredentialStore>,
     skill_home_base: &Path,
     client_control_binding: ClientControlBinding,
-) -> (Computer<InstanceSession>, HashMap<BundleId, ServerName>) {
+) -> (
+    Computer<InstanceSession>,
+    HashMap<BundleId, ServerName>,
+    HashMap<String, MCPServerInput>,
+) {
     let instance_storage_root = skill_home_base.join(instance_storage_dir_name(&instance.id));
     let config_context = instance_config_context(instance, skill_home_base);
     let skill_home = config_context.skill_home().to_path_buf();
-    let mut mcp_servers: HashMap<String, MCPServerConfig> = config_context
-        .load()
-        .mcp
-        .servers
-        .into_iter()
-        // Plugin servers are a read-side projection derived from the governance ledger, not
-        // durable declarations. Feeding them back into a fresh Computer would make governance
-        // reconciliation treat them as pre-existing and skip input injection/remount.
-        .filter(|server| server.origin != ProvenanceScope::Plugin)
-        .filter(|server| {
-            let reserved = resolve_bundle_id(&server.config).as_str() == CLIENT_CONTROL_BUNDLE_ID;
-            if reserved {
-                log::warn!(
-                    "Ignoring durable MCP declaration with reserved bundleId '{}' for Computer {}",
-                    CLIENT_CONTROL_BUNDLE_ID,
-                    instance.id
-                );
-            }
-            !reserved
-        })
-        .map(|server| (server.name, normalize_mcp_server_tool_meta(server.config)))
-        .collect();
+    let snapshot = config_context.load();
+    let mut inputs = declarations.retained_inputs.cloned().unwrap_or_else(|| {
+        snapshot
+            .inputs
+            .inputs
+            .into_iter()
+            .map(|input| (input.id().to_string(), input))
+            .collect::<HashMap<_, _>>()
+    });
+    inputs.extend(declarations.injected_inputs.clone());
+    let mut mcp_servers: HashMap<String, MCPServerConfig> = declarations
+        .retained_mcp_servers
+        .cloned()
+        .unwrap_or_else(|| {
+            snapshot
+                .mcp
+                .servers
+                .into_iter()
+                // Plugin servers are a read-side projection derived from the governance ledger,
+                // not durable declarations. Feeding them back into a fresh Computer would make
+                // governance reconciliation treat them as pre-existing and skip input
+                // injection/remount.
+                .filter(|server| server.origin != ProvenanceScope::Plugin)
+                .filter(|server| {
+                    let reserved = resolve_bundle_id(&server.config).as_str()
+                        == CLIENT_CONTROL_BUNDLE_ID;
+                    if reserved {
+                        log::warn!(
+                            "Ignoring durable MCP declaration with reserved bundleId '{}' for Computer {}",
+                            CLIENT_CONTROL_BUNDLE_ID,
+                            instance.id
+                        );
+                    }
+                    !reserved
+                })
+                .map(|server| (server.name, normalize_mcp_server_tool_meta(server.config)))
+                .collect()
+        });
     if instance.remote_control.enabled {
         mcp_servers.insert(
             CLIENT_CONTROL_BUNDLE_ID.to_string(),
@@ -2297,7 +2601,7 @@ fn build_sdk_computer(
         .with_config_dir(config_context.project_anchor())
         .with_config_env(config_context.env().clone())
         .with_blob_cache_root(instance_storage_root.join("blob"));
-    (computer, sdk_servers)
+    (computer, sdk_servers, inputs)
 }
 
 struct RuntimeMcpHooks {
@@ -2571,14 +2875,16 @@ pub(crate) fn configured_skill_home_for_instance(
 fn resolve_instance_settings(
     context: &InstanceConfigContext,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let policy = resolve_policy_settings(Some(context.env()), None, None);
-    resolve_settings(ResolveSettingsArgs {
-        cwd: Some(context.project_anchor()),
-        env: Some(context.env()),
-        flag_settings_path: None,
-        policy_settings: Some(&policy),
+    context.with_read(|| {
+        let policy = resolve_policy_settings(Some(context.env()), None, None);
+        resolve_settings(ResolveSettingsArgs {
+            cwd: Some(context.project_anchor()),
+            env: Some(context.env()),
+            flag_settings_path: None,
+            policy_settings: Some(&policy),
+        })
+        .settings
     })
-    .settings
 }
 
 pub(crate) fn sdk_managed_by_to_client(managed_by: McpOwnership) -> Option<McpServerManagedBy> {
@@ -2674,18 +2980,6 @@ fn headers_to_connect_options(headers: HashMap<String, String>) -> Option<String
     )
 }
 
-fn input_definitions_to_mcp_map(
-    definitions: &[InputDefinition],
-) -> HashMap<String, MCPServerInput> {
-    definitions
-        .iter()
-        .map(|definition| {
-            let input = input_definition_to_mcp(definition);
-            (input.id().to_string(), input)
-        })
-        .collect()
-}
-
 fn runtime_stored_input_kind(input: &MCPServerInput) -> Option<InputKind> {
     match input {
         MCPServerInput::PromptString(input) => Some(if input.password == Some(true) {
@@ -2696,63 +2990,6 @@ fn runtime_stored_input_kind(input: &MCPServerInput) -> Option<InputKind> {
         MCPServerInput::PickString(_) => Some(InputKind::Value),
         MCPServerInput::Command(_) => None,
     }
-}
-
-fn input_description(label: &str, description: &Option<String>) -> String {
-    description
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| label.to_string())
-}
-
-fn input_definition_to_mcp(definition: &InputDefinition) -> MCPServerInput {
-    match definition {
-        InputDefinition::PromptString {
-            id,
-            label,
-            description,
-            default,
-            password,
-        } => MCPServerInput::PromptString(PromptStringInput {
-            id: id.clone(),
-            description: input_description(label, description),
-            default: default.clone(),
-            password: *password,
-        }),
-        InputDefinition::PickString {
-            id,
-            label,
-            description,
-            options,
-            default,
-        } => MCPServerInput::PickString(PickStringInput {
-            id: id.clone(),
-            description: input_description(label, description),
-            options: options.iter().map(|option| option.value.clone()).collect(),
-            default: default.clone(),
-        }),
-        InputDefinition::Command {
-            id,
-            label,
-            command,
-            args,
-        } => MCPServerInput::Command(CommandInput {
-            id: id.clone(),
-            description: label.clone(),
-            command: command.clone(),
-            args: command_args_to_mcp(args),
-        }),
-    }
-}
-
-fn command_args_to_mcp(args: &Option<Vec<String>>) -> Option<HashMap<String, String>> {
-    args.as_ref().map(|args| {
-        args.iter()
-            .enumerate()
-            .map(|(index, value)| (format!("{index:06}"), value.clone()))
-            .collect()
-    })
 }
 
 fn default_skill_home_base() -> PathBuf {
@@ -2915,12 +3152,33 @@ mod tests {
         let mut instance = ComputerInstance::new(id, "Computer");
         instance.inputs = vec![InputDefinition::PromptString {
             id: "api-key".to_string(),
-            label: label.to_string(),
+            label: Some(label.to_string()),
             description: None,
-            default: Some("default-value".to_string()),
+            default: None,
             password: Some(true),
         }];
         instance
+    }
+
+    fn seed_sdk_input(instance: &ComputerInstance, skill_home_base: &Path, label: &str) {
+        let context = instance_config_context(instance, skill_home_base);
+        let definition = MCPServerInput::PromptString(PromptStringInput {
+            id: "api-key".to_string(),
+            description: label.to_string(),
+            default: None,
+            password: Some(true),
+        });
+        let document = a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc {
+            mcp: Some(
+                serde_json::json!({ "inputs": [definition] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+            ..Default::default()
+        };
+        a2c_smcp::smcp_computer::settings::config::save_config(context.project_anchor(), &document)
+            .unwrap();
     }
 
     fn instance_with_input_value(id: &str, value: serde_json::Value) -> ComputerInstance {
@@ -3184,11 +3442,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_seeds_smcp_input_definitions_from_instance() {
-        let runtime = ComputerInstanceRuntime::new(
-            instance_with_input("one", "API Key"),
-            std::env::temp_dir().join("tfrobot-client-test-skill-home"),
-        );
+    async fn runtime_seeds_smcp_input_definitions_from_sdk_project_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let skill_home_base = directory.path().to_path_buf();
+        let instance = instance("one", "One");
+        seed_sdk_input(&instance, &skill_home_base, "API Key");
+        let runtime = ComputerInstanceRuntime::new(instance, skill_home_base);
 
         let inputs = runtime.inputs.read().await;
         let input = inputs.get("api-key").expect("input should be loaded");
@@ -3196,7 +3455,7 @@ mod tests {
         match input {
             MCPServerInput::PromptString(prompt) => {
                 assert_eq!(prompt.description, "API Key");
-                assert_eq!(prompt.default.as_deref(), Some("default-value"));
+                assert_eq!(prompt.default, None);
                 assert_eq!(prompt.password, Some(true));
             }
             other => panic!("expected PromptString input, got: {other:?}"),
@@ -3205,39 +3464,54 @@ mod tests {
 
     #[tokio::test]
     async fn instance_session_does_not_receive_transient_resolved_values() {
-        let runtime = ComputerInstanceRuntime::new(
-            instance_with_input_value("one", serde_json::json!("persisted-secret")),
-            std::env::temp_dir().join("tfrobot-client-test-skill-home"),
-        );
+        let directory = tempfile::tempdir().unwrap();
+        let skill_home_base = directory.path().to_path_buf();
+        let instance = instance_with_input_value("one", serde_json::json!("persisted-secret"));
+        seed_sdk_input(&instance, &skill_home_base, "API Key");
+        let runtime = ComputerInstanceRuntime::new(instance, skill_home_base);
         let inputs = runtime.inputs.read().await;
         let input = inputs.get("api-key").unwrap();
 
-        assert_eq!(
-            runtime.session.resolve_input(input).await.unwrap(),
-            serde_json::json!("default-value")
-        );
+        assert!(matches!(
+            runtime.session.resolve_input(input).await,
+            Err(ComputerError::InputResolution(InputResolutionError::Missing { id, .. }))
+                if id == "api-key"
+        ));
     }
 
     #[tokio::test]
-    async fn instance_session_falls_back_to_sdk_input_semantics() {
+    async fn instance_session_never_auto_selects_pick_and_executes_command() {
         let session = InstanceSession::new("one");
         let pick = MCPServerInput::PickString(PickStringInput {
             id: "runtime".to_string(),
             description: "Runtime".to_string(),
-            options: vec!["node".to_string(), "python".to_string()],
+            options: vec![
+                PickStringOption {
+                    label: "Node".to_string(),
+                    value: "node".to_string(),
+                },
+                PickStringOption {
+                    label: "Python".to_string(),
+                    value: "python".to_string(),
+                },
+            ],
             default: None,
         });
         let command = MCPServerInput::Command(CommandInput {
             id: "command".to_string(),
             description: "Command".to_string(),
             command: "echo".to_string(),
-            args: command_args_to_mcp(&Some(vec!["hello".to_string(), "world".to_string()])),
+            args: Some(HashMap::from([
+                ("000000".to_string(), "hello".to_string()),
+                ("000001".to_string(), "world".to_string()),
+            ])),
         });
 
-        assert_eq!(
-            session.resolve_input(&pick).await.unwrap(),
-            serde_json::json!("node")
-        );
+        assert!(matches!(
+            session.resolve_input(&pick).await,
+            Err(ComputerError::InputResolution(InputResolutionError::Missing { id, .. }))
+                if id == "runtime"
+        ));
         assert_eq!(
             session.resolve_input(&command).await.unwrap(),
             serde_json::json!("hello world")
@@ -4421,13 +4695,13 @@ mod tests {
     async fn update_runtime_instance_saves_profile_without_restarting_active_handle() {
         let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
-            instances: vec![instance_with_input("one", "Initial Label")],
+            instances: vec![instance("one", "One")],
         });
 
         let before = registry.runtime("one").await.unwrap();
         registry.start_runtime("one").await.unwrap();
         let generation_before_update = before.runtime_generation();
-        let mut updated = instance_with_input("one", "Updated Label");
+        let mut updated = instance("one", "One");
         updated.name = "Renamed".to_string();
         let after = registry.update_runtime_instance(updated).await.unwrap();
 
@@ -4443,17 +4717,9 @@ mod tests {
         assert_eq!(before.runtime_incarnation, after.runtime_incarnation);
         assert!(Arc::ptr_eq(&before.lifecycle_lock, &after.lifecycle_lock));
         assert_eq!(after.runtime_generation(), generation_before_update);
-        assert_eq!(after.computer.read().await.name(), "Computer");
+        assert_eq!(after.computer.read().await.name(), "One");
         let inputs = after.inputs.read().await;
-        let input = inputs.get("api-key").expect("input should be synced");
-        assert!(matches!(
-            input,
-            MCPServerInput::PromptString(prompt) if prompt.description == "Updated Label"
-        ));
-        assert_eq!(
-            after.session.resolve_input(input).await.unwrap(),
-            serde_json::json!("default-value")
-        );
+        assert!(inputs.is_empty());
         assert_eq!(
             after.sdk_skill_home().await,
             after.skill_home_base.join("one").join("skill_home")

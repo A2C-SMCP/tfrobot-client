@@ -1,10 +1,17 @@
 import { useEffect } from 'react';
-import { Form, Select, Button, Space, Card, Collapse, Switch } from 'antd';
+import { Alert, Form, Select, Button, Space, Card, Collapse, Switch, Spin } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { McpServerConfig, ToolMeta } from '@/stores/mcpStore';
-import { useInputStore } from '@/stores/inputStore';
+import { useInputStore, type InputDefinitionChanges } from '@/stores/inputStore';
+import { ConfigEntryList } from './ConfigEntryList';
+import {
+  buildInputDefinitionChanges,
+  projectConfigEntries,
+  serializeConfigEntries,
+  type ConfigEntryFormValue,
+} from './configValue';
 import {
   hasConflictingHttpAuthorization,
   preserveHttpAuthenticationOptions,
@@ -84,8 +91,8 @@ interface FormValues {
   // Http/Sse fields
   url?: string;
   // Common
-  env?: { key: string; value: string }[];
-  headers?: { key: string; value: string }[];
+  env?: ConfigEntryFormValue[];
+  headers?: ConfigEntryFormValue[];
   disabled?: boolean;
   // Advanced
   forbidden_tools?: string[];
@@ -97,7 +104,7 @@ interface FormValues {
 interface McpServerFormProps {
   instanceId: string;
   initialValues?: McpServerConfig;
-  onSubmit: (config: McpServerConfig) => Promise<void>;
+  onSubmit: (config: McpServerConfig, inputChanges: InputDefinitionChanges) => Promise<void>;
   onCancel: () => void;
   loading?: boolean;
 }
@@ -114,15 +121,13 @@ export function McpServerForm({
   const serverType = Form.useWatch('type', form);
   const inputs = useInputStore((state) => state.inputs);
   const fetchInputs = useInputStore((state) => state.fetchInputs);
+  const inputsLoading = useInputStore((state) => state.loading);
+  const inputsError = useInputStore((state) => state.error);
+  const inputInstanceId = useInputStore((state) => state.activeInstanceId);
 
   useEffect(() => {
     void fetchInputs(instanceId);
   }, [fetchInputs, instanceId]);
-
-  const inputReferenceOptions = inputs.map((input) => ({
-    label: `${input.label} (${input.id})`,
-    value: input.id,
-  }));
 
   // Convert initial config to form values
   const getInitialFormValues = (): FormValues | undefined => {
@@ -152,7 +157,7 @@ export function McpServerForm({
         command: sp.command,
         args: sp.args,
         cwd: sp.cwd ?? undefined,
-        env: Object.entries(sp.env).map(([key, value]) => ({ key, value })),
+        env: projectConfigEntries(sp.env, inputs),
       };
     }
     if (initialValues.type === 'Http') {
@@ -162,7 +167,7 @@ export function McpServerForm({
         ...advanced,
         type: 'http',
         url: sp.url,
-        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
+        headers: projectConfigEntries(sp.headers, inputs),
       };
     }
     if (initialValues.type === 'Sse') {
@@ -172,7 +177,7 @@ export function McpServerForm({
         ...advanced,
         type: 'sse',
         url: sp.url,
-        headers: Object.entries(sp.headers).map(([key, value]) => ({ key, value })),
+        headers: projectConfigEntries(sp.headers, inputs),
       };
     }
     return { type: 'stdio', name: '', env: [], args: [] };
@@ -180,6 +185,19 @@ export function McpServerForm({
 
   const handleFinish = async (values: FormValues) => {
     let config: McpServerConfig;
+    const entries = values.type === 'stdio' ? values.env : values.headers;
+    const serializedEntries = serializeConfigEntries(entries);
+    if (!serializedEntries.ok) {
+      const field = values.type === 'stdio' ? 'env' : 'headers';
+      const errorKey = serializedEntries.error === 'missing_definition'
+        ? 'mcp.form.inputDefinitionRequired'
+        : 'mcp.form.inputDefinitionConflict';
+      form.setFields([{
+        name: field,
+        errors: [t(errorKey, { id: serializedEntries.inputId })],
+      }]);
+      return;
+    }
 
     // Parse and validate tool_meta JSON
     const toolMetaResult = parseToolMetaJson(values.tool_meta_json);
@@ -206,26 +224,18 @@ export function McpServerForm({
     };
 
     if (values.type === 'stdio') {
-      const envObj: Record<string, string> = {};
-      values.env?.forEach(({ key, value }) => {
-        if (key) envObj[key] = value;
-      });
-
       config = {
         type: 'Stdio' as const,
         ...commonFields,
         server_parameters: {
           command: values.command || '',
           args: values.args || [],
-          env: envObj,
+          env: serializedEntries.values,
           cwd: values.cwd || null,
         },
       };
     } else if (values.type === 'http') {
-      const headersObj: Record<string, string> = {};
-      values.headers?.forEach(({ key, value }) => {
-        if (key) headersObj[key] = value;
-      });
+      const headersObj = serializedEntries.values;
       const authenticationOptions = preserveHttpAuthenticationOptions(
         initialValues?.type === 'Http' ? initialValues : undefined,
       );
@@ -246,10 +256,7 @@ export function McpServerForm({
         },
       };
     } else {
-      const headersObj: Record<string, string> = {};
-      values.headers?.forEach(({ key, value }) => {
-        if (key) headersObj[key] = value;
-      });
+      const headersObj = serializedEntries.values;
 
       config = {
         type: 'Sse' as const,
@@ -261,8 +268,32 @@ export function McpServerForm({
       };
     }
 
-    await onSubmit(config);
+    const initialEntries = initialValues
+      ? initialValues.type === 'Stdio'
+        ? projectConfigEntries(initialValues.server_parameters.env, inputs)
+        : projectConfigEntries(initialValues.server_parameters.headers, inputs)
+      : [];
+    await onSubmit(
+      config,
+      buildInputDefinitionChanges(initialEntries, serializedEntries.definitions, inputs),
+    );
   };
+
+  if (inputInstanceId !== instanceId || inputsLoading) {
+    return <Spin style={{ display: 'block', margin: '48px auto' }} />;
+  }
+
+  if (inputsError) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message={t('mcp.form.inputDefinitionsLoadFailed')}
+        description={inputsError}
+        action={<Button onClick={() => void fetchInputs(instanceId)}>{t('common.retry')}</Button>}
+      />
+    );
+  }
 
   return (
     <Form
@@ -334,45 +365,12 @@ export function McpServerForm({
           </Form.Item>
 
           <Card size="small" title={t('mcp.form.envVars')} style={{ marginBottom: 16 }}>
-            <Form.List name="env">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map((field) => (
-                    <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
-                      <Form.Item
-                        name={[field.name, 'key']}
-                        noStyle
-                      >
-                        <Input placeholder="KEY" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item
-                        name={[field.name, 'value']}
-                        noStyle
-                      >
-                        <Input placeholder="value" style={{ width: 200 }} />
-                      </Form.Item>
-                      <Select
-                        aria-label={t('mcp.form.inputReference')}
-                        placeholder={t('mcp.form.inputReference')}
-                        options={inputReferenceOptions}
-                        style={{ width: 180 }}
-                        value={undefined}
-                        onChange={(inputId) => {
-                          form.setFieldValue(
-                            ['env', field.name, 'value'],
-                            `\${input:${inputId}}`,
-                          );
-                        }}
-                      />
-                      <MinusCircleOutlined onClick={() => remove(field.name)} />
-                    </Space>
-                  ))}
-                  <Button type="dashed" onClick={() => add({ key: '', value: '' })} block icon={<PlusOutlined />}>
-                    {t('mcp.form.addEnv')}
-                  </Button>
-                </>
-              )}
-            </Form.List>
+            <ConfigEntryList
+              name="env"
+              instanceId={instanceId}
+              inputs={inputs}
+              addLabel={t('mcp.form.addEnv')}
+            />
           </Card>
         </>
       )}
@@ -388,46 +386,12 @@ export function McpServerForm({
           </Form.Item>
 
           <Card size="small" title={t('mcp.form.headers')} style={{ marginBottom: 16 }}>
-            <Form.List name="headers">
-              {(fields, { add, remove }, { errors }) => (
-                <>
-                  {fields.map((field) => (
-                    <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
-                      <Form.Item
-                        name={[field.name, 'key']}
-                        noStyle
-                      >
-                        <Input placeholder="Header-Name" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item
-                        name={[field.name, 'value']}
-                        noStyle
-                      >
-                        <Input placeholder="value" style={{ width: 200 }} />
-                      </Form.Item>
-                      <Select
-                        aria-label={t('mcp.form.inputReference')}
-                        placeholder={t('mcp.form.inputReference')}
-                        options={inputReferenceOptions}
-                        style={{ width: 180 }}
-                        value={undefined}
-                        onChange={(inputId) => {
-                          form.setFieldValue(
-                            ['headers', field.name, 'value'],
-                            `\${input:${inputId}}`,
-                          );
-                        }}
-                      />
-                      <MinusCircleOutlined onClick={() => remove(field.name)} />
-                    </Space>
-                  ))}
-                  <Button type="dashed" onClick={() => add({ key: '', value: '' })} block icon={<PlusOutlined />}>
-                    {t('mcp.form.addHeader')}
-                  </Button>
-                  <Form.ErrorList errors={errors} />
-                </>
-              )}
-            </Form.List>
+            <ConfigEntryList
+              name="headers"
+              instanceId={instanceId}
+              inputs={inputs}
+              addLabel={t('mcp.form.addHeader')}
+            />
           </Card>
         </>
       )}

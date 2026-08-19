@@ -17,11 +17,13 @@ use tfrobot_client_lib::commands::connection::{
     connect_connection_target_core, connect_connection_target_for_policy_core, disconnect_smcp_core,
 };
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
+use tfrobot_client_lib::commands::sdk_config;
 use tfrobot_client_lib::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
+use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::SettingsService;
@@ -107,7 +109,7 @@ async fn create_computer_with_input(state: &AppState, name: &str) -> String {
         &created.id,
         InputDefinition::PromptString {
             id: "token".to_string(),
-            label: "Token".to_string(),
+            label: Some("Token".to_string()),
             description: None,
             default: None,
             password: Some(true),
@@ -159,7 +161,7 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         &created.id,
         InputDefinition::PromptString {
             id: "delete-token".to_string(),
-            label: "Delete token".to_string(),
+            label: Some("Delete token".to_string()),
             description: None,
             default: None,
             password: Some(true),
@@ -175,6 +177,20 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     )
     .await
     .unwrap();
+    inputs::remove_input_core(&state, &created.id, "delete-token")
+        .await
+        .unwrap();
+    assert_eq!(
+        tfrobot_client_lib::services::keychain::get_input_secret(
+            state.secret_store.as_ref(),
+            &created.id,
+            "delete-token",
+        )
+        .unwrap()
+        .as_deref(),
+        Some("deleted-secret"),
+        "definition deletion must retain historical input storage"
+    );
     tfrobot_client_lib::services::keychain::set_input_secret(
         state.secret_store.as_ref(),
         "other-computer",
@@ -394,7 +410,7 @@ async fn computer_lifecycle_commands_wait_for_the_transaction_lock() {
             &created.id,
             InputDefinition::PromptString {
                 id: "serialized-input".to_string(),
-                label: "Serialized input".to_string(),
+                label: Some("Serialized input".to_string()),
                 description: None,
                 default: None,
                 password: None,
@@ -447,6 +463,69 @@ async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
     drop(guard);
 
     operation.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let created = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Config Delete Race".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let storage_root = state.config.computer_instance_storage_root(&created.id);
+
+    // Hold the global transaction lock so the SDK config writer stops after acquiring the
+    // per-Computer gate. This makes the formerly split coordination domains deterministic.
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let upsert_state = state.clone();
+    let upsert_id = created.id.clone();
+    let upsert = tokio::spawn(async move {
+        sdk_config::upsert_computer_mcp_config_core(
+            upsert_state.as_ref(),
+            &upsert_id,
+            common::echo_server_config("serialized-before-delete"),
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.computer_registry.operation_lease(&created.id),
+        )
+        .await
+        .is_err(),
+        "SDK config writer must own the per-Computer operation gate before its global commit"
+    );
+
+    let delete_state = state.clone();
+    let delete_id = created.id.clone();
+    let mut delete = tokio::spawn(async move {
+        delete_computer_instance_core(delete_state.as_ref(), delete_id).await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut delete)
+            .await
+            .is_err(),
+        "Computer deletion must wait for the in-flight SDK config mutation"
+    );
+
+    drop(lifecycle_guard);
+    upsert.await.unwrap().unwrap();
+    delete.await.unwrap().unwrap();
+
+    assert!(state.config.get_computer_instance(&created.id).is_err());
+    assert!(state.computer_registry.runtime(&created.id).await.is_none());
+    assert!(
+        !storage_root.exists(),
+        "serialized deletion must not leave an orphan SDK config directory"
+    );
 }
 
 #[tokio::test]
@@ -597,7 +676,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
         &source.id,
         InputDefinition::PromptString {
             id: "source-token".to_string(),
-            label: "Source token".to_string(),
+            label: Some("Source token".to_string()),
             description: None,
             default: None,
             password: Some(true),
@@ -641,8 +720,9 @@ async fn duplicate_copies_configuration_without_runtime_state() {
     assert_ne!(duplicate.id, source.id);
     assert_uuid_instance_id(&duplicate.id);
     assert!(duplicate_config.input_values.is_empty());
-    assert_eq!(duplicate_config.inputs.len(), 1);
-    assert_eq!(duplicate_config.inputs[0].id(), "source-token");
+    assert!(duplicate_config.inputs.is_empty());
+    assert_eq!(duplicate_sdk_snapshot.inputs.inputs.len(), 1);
+    assert_eq!(duplicate_sdk_snapshot.inputs.inputs[0].id(), "source-token");
     assert_eq!(
         tfrobot_client_lib::services::keychain::get_input_secret(
             state.secret_store.as_ref(),
@@ -1105,7 +1185,7 @@ async fn failed_delete_preserves_the_authoritative_runtime_incarnation() {
 }
 
 #[tokio::test]
-async fn status_reads_reconcile_runtime_inputs_from_computer_storage() {
+async fn status_reads_do_not_hot_update_inputs_and_start_loads_sdk_storage() {
     let dir = TempDir::new().unwrap();
     let state = create_test_app_state(dir.path());
     let created = create_computer_instance_core(
@@ -1118,27 +1198,75 @@ async fn status_reads_reconcile_runtime_inputs_from_computer_storage() {
     .await
     .unwrap();
 
+    inputs::add_or_update_input_core(
+        &state,
+        &created.id,
+        InputDefinition::PromptString {
+            id: "api-key".to_string(),
+            label: Some("API Key".to_string()),
+            description: None,
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        &created.id,
+        "api-key".to_string(),
+        serde_json::json!("saved-value"),
+    )
+    .await
+    .unwrap();
+    let delayed_server = serde_json::from_value(serde_json::json!({
+        "type": "Stdio",
+        "name": "delayed-mcp",
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path()],
+            "env": {"API_KEY": "${input:api-key}"}
+        }
+    }))
+    .unwrap();
+    mcp::add_mcp_server_core(&state, &created.id, delayed_server)
+        .await
+        .unwrap();
+
+    // Force metadata synchronization down the handle-replacement path. A policy-only rebuild
+    // must retain the current generation's complete declaration snapshot instead of mixing the
+    // new server with the old input pool.
     state
         .config
-        .save_inputs_for_instance(
-            &created.id,
-            &[InputDefinition::PromptString {
-                id: "api-key".to_string(),
-                label: "API Key".to_string(),
-                description: None,
-                default: Some("default-key".to_string()),
-                password: Some(false),
-            }],
-        )
+        .update_computer_instance(&created.id, |instance| {
+            instance.remote_control.enabled = true;
+        })
         .unwrap();
 
     list_computer_instances_core(&state).await.unwrap();
+    let runtime = state.computer_registry.runtime(&created.id).await.unwrap();
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
+    assert!(runtime
+        .synced_sdk_servers()
+        .await
+        .iter()
+        .all(|(_, name)| name != "delayed-mcp"));
+
     get_computer_instance_status_core(&state, created.id.clone())
         .await
         .unwrap();
 
-    let runtime = state.computer_registry.runtime(&created.id).await.unwrap();
+    assert!(!runtime.inputs.read().await.contains_key("api-key"));
+
+    start_computer_instance_core(None, &state, created.id.clone())
+        .await
+        .unwrap();
     assert!(runtime.inputs.read().await.contains_key("api-key"));
+    assert!(runtime
+        .synced_sdk_servers()
+        .await
+        .iter()
+        .any(|(_, name)| name == "delayed-mcp"));
 }
 
 #[tokio::test]
@@ -1228,7 +1356,7 @@ async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
         LEGACY_INSTANCE_ID,
         InputDefinition::PromptString {
             id: "token".to_string(),
-            label: "Shared token".to_string(),
+            label: Some("Shared token".to_string()),
             description: None,
             default: None,
             password: None,
@@ -1241,7 +1369,7 @@ async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
         &second.id,
         InputDefinition::PromptString {
             id: "token".to_string(),
-            label: "Second token".to_string(),
+            label: Some("Second token".to_string()),
             description: None,
             default: None,
             password: None,
@@ -1262,34 +1390,35 @@ async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
         .await
         .unwrap();
     let second_servers = mcp::get_mcp_servers_core(&state, &second.id).await.unwrap();
-    let default_inputs = state
-        .config
-        .load_inputs_for_instance(LEGACY_INSTANCE_ID)
+    let default_inputs = state.sdk_config.load_input_definitions(LEGACY_INSTANCE_ID);
+    let second_inputs = state.sdk_config.load_input_definitions(&second.id);
+    let default_value = InputValueStore::for_computer(state.config.as_ref(), LEGACY_INSTANCE_ID)
+        .get("token")
         .unwrap();
-    let second_inputs = state.config.load_inputs_for_instance(&second.id).unwrap();
-    let default_value = tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        LEGACY_INSTANCE_ID,
-        "token",
-    )
-    .unwrap();
-    let second_value = tfrobot_client_lib::services::keychain::get_input_value(
-        state.secret_store.as_ref(),
-        &second.id,
-        "token",
-    )
-    .unwrap();
+    let second_value = InputValueStore::for_computer(state.config.as_ref(), &second.id)
+        .get("token")
+        .unwrap();
 
     assert_eq!(default_servers[0].name, "default-only");
     assert_eq!(second_servers[0].name, "second-only");
     assert_eq!(default_inputs[0].id(), "token");
     assert_eq!(second_inputs[0].id(), "token");
     match &default_inputs[0] {
-        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Shared token"),
+        InputDefinition::PromptString {
+            label, description, ..
+        } => {
+            assert_eq!(label.as_deref(), Some("Shared token"));
+            assert_eq!(description, &None);
+        }
         _ => panic!("expected default PromptString input"),
     }
     match &second_inputs[0] {
-        InputDefinition::PromptString { label, .. } => assert_eq!(label, "Second token"),
+        InputDefinition::PromptString {
+            label, description, ..
+        } => {
+            assert_eq!(label.as_deref(), Some("Second token"));
+            assert_eq!(description, &None);
+        }
         _ => panic!("expected second PromptString input"),
     }
     assert_eq!(default_value, None);

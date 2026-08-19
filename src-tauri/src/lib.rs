@@ -67,10 +67,12 @@ pub enum AppStateInitError {
     Migration(#[from] MigrationError),
     #[error("failed to discover Computer profiles: {0}")]
     Config(#[from] services::config::ConfigError),
-    #[error("failed to load Computer input values from Keychain: {0}")]
+    #[error("failed to access the system Keychain: {0}")]
     Keychain(#[from] services::keychain::KeychainError),
     #[error("failed to recover an interrupted configuration import: {0}")]
     ConfigImportRecovery(String),
+    #[error("failed to migrate removed rust-sdk HTTP OAuth fields: {0}")]
+    RemovedHttpOAuthMigration(String),
     #[error("failed to recover an interrupted Client Control Skill transaction: {0}")]
     SkillPackageRecovery(String),
 }
@@ -124,7 +126,10 @@ impl AppState {
             manager_client,
             settings_service.clone(),
         ));
-        let chat_sessions = Arc::new(ChatSessionService::new(Arc::downgrade(&manager_context)));
+        let chat_sessions = Arc::new(ChatSessionService::new_with_settings(
+            Arc::downgrade(&manager_context),
+            settings_service.clone(),
+        ));
 
         migrate_legacy_config(
             config.as_ref(),
@@ -133,10 +138,33 @@ impl AppState {
             secret_store.as_ref(),
         )?;
         let stored_instances = config.load_computer_instances()?;
+        for instance in &stored_instances.instances {
+            let migration = sdk_config
+                .migrate_removed_http_oauth_fields(&instance.id)
+                .map_err(|error| {
+                    AppStateInitError::RemovedHttpOAuthMigration(format!(
+                        "Computer '{}': {error}",
+                        instance.id
+                    ))
+                })?;
+            if migration.removed_fields > 0 {
+                log::info!(
+                    "Migrated {} removed rust-sdk HTTP OAuth field(s) for Computer '{}'",
+                    migration.removed_fields,
+                    instance.id
+                );
+            }
+            if migration.disabled_opt_out_servers > 0 {
+                log::warn!(
+                    "Disabled {} MCP server(s) for Computer '{}' because their legacy explicit OAuth opt-out cannot be represented by the automatic-only rust-sdk",
+                    migration.disabled_opt_out_servers,
+                    instance.id
+                );
+            }
+        }
         commands::config_io::recover_pending_config_imports(
             config.as_ref(),
             sdk_config.as_ref(),
-            secret_store.as_ref(),
             stored_instances
                 .instances
                 .iter()
@@ -347,6 +375,10 @@ pub fn run() {
             tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
                 commands::manager::TauriManagerContextEventSink::new(app.handle().clone()),
             )));
+            tauri::async_runtime::block_on(state.manager_context.set_token_bridge_sink(Arc::new(
+                commands::manager::TauriManagerTokenBridgeSink::new(app.handle().clone()),
+            )));
+            commands::runtime_input::install_runtime_input_sink(app.handle().clone(), &state);
 
             // Write startup log and cleanup old entries
             if let Err(error) = state
@@ -402,6 +434,7 @@ pub fn run() {
             commands::mcp::clear_mcp_authorization,
             commands::sdk_config::get_computer_config_state,
             commands::sdk_config::upsert_computer_mcp_config,
+            commands::sdk_config::upsert_computer_mcp_config_with_inputs,
             commands::sdk_config::remove_computer_mcp_config,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
@@ -427,15 +460,23 @@ pub fn run() {
             // Input variable management
             commands::inputs::list_inputs,
             commands::inputs::get_input,
+            commands::inputs::get_runtime_input,
             commands::inputs::add_or_update_input,
             commands::inputs::remove_input,
+            commands::inputs::list_input_reference_issues,
             commands::inputs::list_input_values,
+            commands::inputs::list_input_entries,
+            commands::inputs::upsert_input_entry,
+            commands::inputs::delete_input_entry,
             commands::inputs::get_input_value,
             commands::inputs::set_input_value,
             commands::inputs::set_runtime_input_value,
             commands::inputs::remove_input_value,
             commands::inputs::clear_input_values,
             commands::inputs::import_inputs,
+            commands::inputs::preview_command_input,
+            commands::runtime_input::runtime_input_bridge_ready,
+            commands::runtime_input::complete_runtime_input_request,
             // SMCP connection management
             commands::connection::list_manual_smcp_targets,
             commands::connection::save_manual_smcp_target,
@@ -497,8 +538,13 @@ pub fn run() {
             commands::manager::manager_switch_account,
             commands::manager::manager_list_digital_employees,
             commands::manager::manager_logout,
+            commands::manager::manager_token_bridge_ready,
+            commands::manager::manager_token_bridge_http_request,
+            commands::manager::manager_token_bridge_complete,
             // Context-bound Chat Kit session and HTTP BFF
             commands::chat::chat_open_session,
+            commands::chat::chat_get_recent_robot,
+            commands::chat::chat_remember_robot,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,
@@ -511,6 +557,7 @@ pub fn run() {
                 // Graceful shutdown: close connections and log exit
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
+                    state.manager_context.force_token_bridge_not_ready().await;
                     state.chat_sessions.close_for_context(None).await;
                     state.computer_registry.shutdown_all().await;
                     if let Err(error) = state
@@ -623,6 +670,56 @@ mod tests {
         let runtime = state.computer_registry.runtime("one").await.unwrap();
 
         assert!(!runtime.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn app_state_migrates_removed_http_oauth_fields_before_runtime_discovery() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(services::computer::ComputerInstance::new("one", "One"))
+            .unwrap();
+        let sdk_config = SdkConfigService::new(Arc::new(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+        ));
+        sdk_config
+            .save(
+                "one",
+                &a2c_smcp::smcp_computer::settings::config::ProjectConfigDoc {
+                    mcp: Some(
+                        serde_json::json!({
+                            "servers": {
+                                "legacy": {
+                                    "type": "streamable",
+                                    "authPolicy": "auto",
+                                    "oauth": {"client_name": "TFRobot"},
+                                    "futureField": {"preserve": true},
+                                    "server_parameters": {
+                                        "url": "https://mcp.example/mcp"
+                                    }
+                                }
+                            }
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let state = AppState::new(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+        );
+        let migrated = state.sdk_config.load_raw_project_config("one").unwrap();
+        let server = &migrated.mcp.as_ref().unwrap()["servers"]["legacy"];
+        assert!(server.get("oauth").is_none());
+        assert!(server.get("authPolicy").is_none());
+        assert_eq!(server["futureField"], serde_json::json!({"preserve": true}));
+        assert!(state.computer_registry.runtime("one").await.is_some());
     }
 
     #[tokio::test]

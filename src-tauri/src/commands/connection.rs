@@ -262,6 +262,14 @@ pub async fn connect_connection_target_for_policy_core(
     instance_id: &str,
     target: &ComputerConnectionTarget,
 ) -> Result<(), String> {
+    connect_connection_target_for_policy_inner(state, instance_id, target).await
+}
+
+pub(crate) async fn connect_connection_target_for_policy_inner(
+    state: &AppState,
+    instance_id: &str,
+    target: &ComputerConnectionTarget,
+) -> Result<(), String> {
     let ComputerConnectionTarget::ManualSmcp { id } = target else {
         return Err("Expected a Manual SMCP connection target".to_string());
     };
@@ -278,8 +286,9 @@ async fn connect_connection_target_with_policy(
     // publish the operation token under the Computer lifecycle lock, then release the lock before
     // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
     // runtimes, or operation tokens.
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?.to_string();
+    let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&instance_id)
@@ -317,6 +326,7 @@ async fn connect_connection_target_with_policy(
     )
     .await?;
     drop(lifecycle_guard);
+    drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token).await?;
 
     let connect_result = async {
@@ -422,6 +432,7 @@ async fn commit_manual_connection_target(
     expected_api_key: Option<&str>,
     expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime.ensure_connection_operation(operation_token).await?;
     state
@@ -607,8 +618,9 @@ pub async fn disconnect_smcp(
 pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
     // Publish the operation while the authoritative runtime is protected, release the global
     // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?.to_string();
+    let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
         .computer_registry
@@ -651,9 +663,11 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
         return Err(message);
     }
     drop(lifecycle_guard);
+    drop(operation_guard);
 
     if runtime.has_smcp_transport().await {
         if let Err(error) = close_smcp_transport(&runtime).await {
+            let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
             let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
             if state
                 .computer_registry
@@ -672,6 +686,7 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
             return Err(error);
         }
     }
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     state
         .computer_registry
@@ -749,6 +764,7 @@ pub async fn get_connection_status_core(
     instance_id: &str,
 ) -> Result<ConnectionStatusInfo, String> {
     let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -976,6 +992,7 @@ async fn begin_manager_connect(
     ),
     ManagerError,
 > {
+    let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
@@ -1007,6 +1024,7 @@ async fn begin_manager_connect(
     .await
     .map_err(ManagerError::InvalidResponse)?;
     drop(lifecycle_guard);
+    drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token)
         .await
         .map_err(ManagerError::InvalidResponse)?;
@@ -1057,6 +1075,7 @@ async fn mark_manager_binding_dormant(
     expected_context_key: &ManagerContextKey,
     employee_id: u64,
 ) -> Result<(), ManagerError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
@@ -1402,6 +1421,7 @@ async fn commit_robot_binding(
             "only an active Manager Robot binding can be committed".to_string(),
         ));
     }
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
@@ -1447,6 +1467,10 @@ async fn commit_refreshed_robot_binding(
             "refreshed Manager Robot binding is missing its Context key".to_string(),
         )
     })?;
+    let _operation_guard = state
+        .computer_registry
+        .operation_lease(&runtime.instance.id)
+        .await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     state
         .computer_registry

@@ -2,10 +2,13 @@ use super::*;
 
 pub struct ComputerRegistry {
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
+    runtime_membership: Arc<Mutex<()>>,
     runtime_mutations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
+    runtime_operations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
     skill_home_base: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     runtime_event_sink: SharedRuntimeEventSink,
+    runtime_input_bridge: Arc<crate::services::runtime_input_bridge::RuntimeInputBridge>,
     client_control_binding: ClientControlBinding,
 }
 
@@ -87,6 +90,8 @@ impl ComputerRegistry {
         config.normalize();
         let mut runtimes = HashMap::new();
         let runtime_event_sink: SharedRuntimeEventSink = Arc::new(RwLock::new(None));
+        let runtime_input_bridge =
+            Arc::new(crate::services::runtime_input_bridge::RuntimeInputBridge::new());
         let client_control_binding = ClientControlBinding::default();
 
         for instance in config.instances {
@@ -96,6 +101,7 @@ impl ComputerRegistry {
                 skill_home_base.clone(),
                 secret_store.clone(),
                 runtime_event_sink.clone(),
+                runtime_input_bridge.clone(),
                 client_control_binding.clone(),
             );
             runtimes.insert(instance_id, runtime);
@@ -104,10 +110,13 @@ impl ComputerRegistry {
         let initial_runtime = runtimes.values().next().cloned();
         let registry = Self {
             runtimes: RwLock::new(runtimes),
+            runtime_membership: Arc::new(Mutex::new(())),
             runtime_mutations: std::sync::Mutex::new(HashMap::new()),
+            runtime_operations: std::sync::Mutex::new(HashMap::new()),
             skill_home_base,
             secret_store,
             runtime_event_sink,
+            runtime_input_bridge,
             client_control_binding,
         };
 
@@ -131,6 +140,12 @@ impl ComputerRegistry {
         for runtime in self.list_runtimes().await {
             runtime.start_runtime_event_relay().await;
         }
+    }
+
+    pub fn runtime_input_bridge(
+        &self,
+    ) -> Arc<crate::services::runtime_input_bridge::RuntimeInputBridge> {
+        self.runtime_input_bridge.clone()
     }
 
     pub fn bind_client_control(
@@ -171,6 +186,36 @@ impl ComputerRegistry {
         let coordinator = Arc::new(Mutex::new(()));
         coordinators.insert(id.to_string(), Arc::downgrade(&coordinator));
         coordinator
+    }
+
+    /// Serializes command-level operations for one Computer before they enter the application-wide
+    /// configuration transaction. Runtime Input can hold the runtime lifecycle lock indefinitely;
+    /// acquiring this gate first prevents a same-Computer waiter from holding the global
+    /// transaction lock and blocking unrelated Computers.
+    pub async fn operation_lease(&self, id: &str) -> OwnedMutexGuard<()> {
+        let coordinator = {
+            let mut coordinators = self
+                .runtime_operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(coordinator) = coordinators.get(id).and_then(Weak::upgrade) {
+                coordinator
+            } else {
+                coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
+                let coordinator = Arc::new(Mutex::new(()));
+                coordinators.insert(id.to_string(), Arc::downgrade(&coordinator));
+                coordinator
+            }
+        };
+        coordinator.lock_owned().await
+    }
+
+    /// Linearizes runtime membership changes that can carry Manager authority with Context
+    /// cleanup. This lock is deliberately independent from the application-wide configuration
+    /// transaction so waiting for one Computer's operation gate cannot convoy unrelated
+    /// lifecycle commands.
+    pub(crate) async fn membership_lease(&self) -> OwnedMutexGuard<()> {
+        self.runtime_membership.clone().lock_owned().await
     }
 
     fn runtime_entry_matches(
@@ -221,6 +266,7 @@ impl ComputerRegistry {
             self.skill_home_base.clone(),
             self.secret_store.clone(),
             self.runtime_event_sink.clone(),
+            self.runtime_input_bridge.clone(),
             self.client_control_binding.clone(),
         );
         {

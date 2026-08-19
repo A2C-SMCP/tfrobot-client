@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
-import { formatRuntimeActionError, type RuntimeActionError } from '@/utils/runtimeActionError';
+import {
+  formatRuntimeActionError,
+  isRuntimeInputCancelledError,
+  type RuntimeActionError,
+} from '@/utils/runtimeActionError';
 
 // Types matching the Rust backend (internally tagged via serde(tag = "type"))
 
@@ -15,6 +19,9 @@ export interface ToolMeta {
 export interface McpServerStatus {
   bundleId: string;
   name: string;
+  activation_state: McpServerActivationState;
+  connection_state: McpServerConnectionState;
+  /** Compatibility projection from activation_state; do not use for capability readiness. */
   running: boolean;
   status_message: string;
   disabled: boolean;
@@ -24,6 +31,15 @@ export interface McpServerStatus {
   /** Backend-owned actionability projection; machine credentials never launch a browser flow. */
   oauth_interaction?: 'none' | 'interactive' | 'machine';
 }
+
+export type McpServerActivationState = 'stopped' | 'started';
+
+export type McpServerConnectionState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'authorization_required'
+  | 'error';
 
 export type McpOAuthStatus =
   | { state: 'not_applicable' }
@@ -290,7 +306,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
         await get().fetchServers(instanceId);
       }
     } catch (e) {
-      const actionError = formatRuntimeActionError(e);
+      const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
       if (isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
@@ -327,7 +343,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
       }
       return result;
     } catch (e) {
-      const actionError = formatRuntimeActionError(e);
+      const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
       if (isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
