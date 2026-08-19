@@ -11,6 +11,7 @@ interface InputEntryEditorProps {
   initialSecret?: boolean;
   initialValue?: string;
   lockSecret?: boolean;
+  showSecretControl?: boolean;
   requireValue?: boolean;
   onSubmit: (key: string, value: string | undefined, secret: boolean) => Promise<void>;
   onCancel: () => void;
@@ -23,6 +24,7 @@ export function InputEntryEditor({
   initialSecret = false,
   initialValue,
   lockSecret = false,
+  showSecretControl = true,
   requireValue = false,
   onSubmit,
   onCancel,
@@ -107,18 +109,20 @@ export function InputEntryEditor({
           />
         )}
       </div>
-      <Space align="start">
-        <Switch
-          aria-label={t('inputs.entry.storeAsSecret')}
-          checked={secret}
-          disabled={submitting || lockSecret}
-          onChange={setSecret}
-        />
-        <Space direction="vertical" size={0}>
-          <Typography.Text>{t('inputs.entry.storeAsSecret')}</Typography.Text>
-          <Typography.Text type="secondary">{t('inputs.entry.secretHelp')}</Typography.Text>
+      {showSecretControl && (
+        <Space align="start">
+          <Switch
+            aria-label={t('inputs.entry.storeAsSecret')}
+            checked={secret}
+            disabled={submitting || lockSecret}
+            onChange={setSecret}
+          />
+          <Space direction="vertical" size={0}>
+            <Typography.Text>{t('inputs.entry.storeAsSecret')}</Typography.Text>
+            <Typography.Text type="secondary">{t('inputs.entry.secretHelp')}</Typography.Text>
+          </Space>
         </Space>
-      </Space>
+      )}
       <Space>
         <Button type="primary" disabled={!canSubmit} loading={submitting} onClick={handleSubmit}>
           {t('common.save')}

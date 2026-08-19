@@ -79,6 +79,7 @@ describe('RuntimeInputPrompt', () => {
     render(<RuntimeInputPrompt />);
 
     expect(screen.getByText('Europe')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Save as secret' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
       expect(complete).toHaveBeenCalledWith('request-1', {
@@ -102,6 +103,7 @@ describe('RuntimeInputPrompt', () => {
     render(<RuntimeInputPrompt />);
 
     const select = screen.getByRole('combobox');
+    expect(screen.queryByRole('switch', { name: 'Save as secret' })).not.toBeInTheDocument();
     expect(select).toHaveTextContent('');
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     fireEvent.mouseDown(select);
@@ -113,6 +115,23 @@ describe('RuntimeInputPrompt', () => {
         value: 'cn',
       });
     });
+  });
+
+  it('hides the secret control when an existing secret PickString needs reconfirmation', () => {
+    enqueue({
+      definition: {
+        type: 'PickString',
+        id: 'region',
+        options: [{ label: 'China', value: 'cn' }],
+        default: 'cn',
+      },
+      reason: 'invalid_selection',
+      secret: true,
+    });
+    render(<RuntimeInputPrompt />);
+
+    expect(screen.getByText('China')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Save as secret' })).not.toBeInTheDocument();
   });
 
   it('forces password PromptString values to remain secret', () => {

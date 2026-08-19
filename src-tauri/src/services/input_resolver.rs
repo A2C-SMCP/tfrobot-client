@@ -546,6 +546,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactive_missing_pick_defaults_to_plain_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(InMemorySecretStore::default());
+        let entries =
+            InputEntryStore::from_storage_root("computer-a", directory.path(), secrets.clone());
+        let (resolver, bridge, mut requests) = interactive_resolver(directory.path(), secrets);
+        let definition = MCPServerInput::PickString(PickStringInput {
+            id: "region".to_string(),
+            description: "Region".to_string(),
+            options: vec![PickStringOption {
+                label: "China".to_string(),
+                value: "cn".to_string(),
+            }],
+            default: Some("cn".to_string()),
+        });
+        let task_resolver = resolver.clone();
+        let task_definition = definition.clone();
+        let resolution = tokio::spawn(async move {
+            task_resolver
+                .with_interaction_mode(
+                    RuntimeInputInteractionMode::Interactive,
+                    InputValueResolver::resolve_input(task_resolver.as_ref(), &task_definition),
+                )
+                .await
+        });
+
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.definition, definition);
+        assert_eq!(request.reason, RuntimeInputRequestReason::Missing);
+        assert!(!request.secret);
+        let completion = bridge.complete(
+            &request.request_id,
+            RuntimeInputCompletion::Confirmed {
+                value: "cn".to_string(),
+            },
+        );
+        let (completion, resolution) = tokio::join!(completion, resolution);
+
+        completion.unwrap();
+        assert_eq!(resolution.unwrap().unwrap(), Some(serde_json::json!("cn")));
+        assert_eq!(
+            entries.storage_kind("region").unwrap(),
+            Some(InputEntryStorageKind::Value)
+        );
+        assert_eq!(
+            entries.get("region").unwrap().unwrap().value,
+            Some(serde_json::json!("cn"))
+        );
+    }
+
+    #[tokio::test]
     async fn interactive_cancellation_returns_structured_error_without_saving() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = Arc::new(InMemorySecretStore::default());

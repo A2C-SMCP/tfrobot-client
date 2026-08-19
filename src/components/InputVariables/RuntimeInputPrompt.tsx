@@ -95,6 +95,7 @@ export function RuntimeInputPrompt() {
         initialSecret={request.secret}
         initialValue={initialValue}
         lockSecret
+        showSecretControl={definition.type !== 'PickString'}
         requireValue={requireValue}
         onSubmit={handleSubmit}
         onCancel={() => { void handleCancel(); }}
