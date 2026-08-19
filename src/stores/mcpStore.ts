@@ -337,7 +337,7 @@ export const useMcpStore = create<McpServerState>((set, get) => {
     beginInstanceAction(instanceId);
     try {
       const result = await invoke<McpBatchOperationResult>('start_all_servers', { instanceId });
-      info('All MCP servers started');
+      info('MCP start-all completed');
       if (isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }

@@ -14,6 +14,7 @@ import { useComputerStore } from '@/stores/computerStore';
 const { Search } = Input;
 const { Title } = Typography;
 const LEVEL_COLORS = { debug: 'default', info: 'blue', warn: 'orange', error: 'red' };
+const OUTCOME_COLORS = { succeeded: 'green', failed: 'red', unknown: 'default' };
 const TIME_PRESETS = [
   { label: '1h', hours: 1 },
   { label: '6h', hours: 6 },
@@ -78,6 +79,12 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
       ),
     },
     { title: t('logs.category'), dataIndex: 'category', width: 110 },
+    {
+      title: t('logs.outcome'), dataIndex: 'outcome', width: 110,
+      render: (outcome: ActivityEvent['outcome']) => (
+        <Tag color={OUTCOME_COLORS[outcome]}>{outcome.toUpperCase()}</Tag>
+      ),
+    },
     {
       title: 'Scope', dataIndex: 'scope', width: 160,
       render: (scope: ActivityEvent['scope']) => scope.kind === 'client' ? 'Client' : scope.computer_id,

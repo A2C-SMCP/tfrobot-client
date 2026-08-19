@@ -10,14 +10,18 @@ use crate::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ComputerInstanceId, ComputerRuntimeAction,
     ConnectionStateSummary, ManagerRobotBindingState, RobotBindingMetadata,
 };
-use crate::services::computer_runtime_events::ComputerRuntimeSnapshot;
+use crate::services::computer_runtime_events::{
+    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemSource, ComputerRuntimeSnapshot,
+};
 use crate::services::input_entry_store::{InputEntryStorageKind, InputEntryStore};
 use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::input_value_index;
 use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
-use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
+use crate::services::observability::{
+    redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -688,6 +692,7 @@ async fn start_computer_instance_core_with_mode(
     };
     start_result.map_err(RuntimeActionError::from)?;
     drop(runtime_lifecycle);
+    record_mcp_start_failure_activities(state, &id, &runtime).await;
     drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -833,6 +838,7 @@ async fn restart_computer_instance_core_with_mode(
     };
     restart_result.map_err(RuntimeActionError::from)?;
     drop(runtime_lifecycle);
+    record_mcp_start_failure_activities(state, &id, &runtime).await;
     drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
@@ -843,6 +849,47 @@ async fn restart_computer_instance_core_with_mode(
     }
 
     Ok(status_from_instance(&instance, &runtime).await)
+}
+
+async fn record_mcp_start_failure_activities(
+    state: &AppState,
+    instance_id: &str,
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+) {
+    let problems = runtime.runtime_snapshot().await.problems;
+    for problem in problems.into_iter().filter(|problem| {
+        problem.source == ComputerRuntimeProblemSource::Mcp && problem.operation == "start"
+    }) {
+        let error_summary = problem
+            .technical_detail
+            .as_deref()
+            .map(redact_text)
+            .unwrap_or_else(|| "MCP server failed to start".to_string());
+        for capability in problem.affected_capabilities {
+            let ComputerRuntimeAffectedCapability::McpServer { bundle_id, name } = capability
+            else {
+                continue;
+            };
+            let server_label = name.as_deref().unwrap_or(&bundle_id);
+            let mut activity = ActivityEventDraft::computer(
+                instance_id,
+                ActivityLevel::Error,
+                "mcp",
+                "mcp_server_lifecycle",
+                "start",
+                ActivityOutcome::Failed,
+                format!("Server start failed: {server_label}: {error_summary}"),
+            );
+            activity.fields = Some(serde_json::json!({
+                "bundle_id": bundle_id,
+                "server_name": name,
+                "error": error_summary.clone(),
+            }));
+            if let Err(error) = state.observability.record_activity_async(activity).await {
+                log::error!("failed to persist MCP startup failure activity: {error}");
+            }
+        }
+    }
 }
 
 #[tauri::command]

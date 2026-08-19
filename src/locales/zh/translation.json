@@ -948,6 +948,7 @@
     "time": "时间",
     "level": "级别",
     "category": "分类",
+    "outcome": "执行结果",
     "message": "消息",
     "filterLevel": "按级别筛选",
     "filterCategory": "按分类筛选",

@@ -724,6 +724,27 @@ pub(super) enum RuntimeMcpStartFailurePolicy {
     PropagateRuntimeInputFailures,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum McpServerStartOperation {
+    Start(BundleId),
+    Restart(BundleId),
+}
+
+impl McpServerStartOperation {
+    pub(crate) fn bundle_id(&self) -> &BundleId {
+        match self {
+            Self::Start(bundle_id) | Self::Restart(bundle_id) => bundle_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UserMcpServerStartRequest {
+    pub(crate) config: MCPServerConfig,
+    pub(crate) input_definitions: Vec<MCPServerInput>,
+    pub(crate) operation: McpServerStartOperation,
+}
+
 impl RuntimeMcpStartFailurePolicy {
     fn propagates_runtime_input_failures(self) -> bool {
         matches!(self, Self::PropagateRuntimeInputFailures)
@@ -1614,6 +1635,123 @@ impl ComputerInstanceRuntime {
     }
 
     async fn start_mcp_server_inner(&self, bundle_id: &BundleId) -> ComputerResult<()> {
+        self.run_mcp_server_start_operation(&McpServerStartOperation::Start(bundle_id.clone()))
+            .await
+    }
+
+    /// Applies one latest persisted user declaration and starts that exact declaration while the
+    /// runtime generation is lifecycle-locked. Plugin-owned declarations remain authoritative and
+    /// are never replaced by this path.
+    pub(crate) async fn start_user_mcp_server_with_latest_config(
+        &self,
+        request: UserMcpServerStartRequest,
+    ) -> ComputerResult<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
+        self.start_user_mcp_server_with_latest_config_inner(request)
+            .await
+    }
+
+    async fn start_user_mcp_server_with_latest_config_inner(
+        &self,
+        request: UserMcpServerStartRequest,
+    ) -> ComputerResult<()> {
+        self.ensure_active_computer()?;
+        let bundle_id = resolve_bundle_id(&request.config);
+        if request.operation.bundle_id() != &bundle_id {
+            return Err(ComputerError::InvalidConfiguration(format!(
+                "MCP start request bundleId '{}' does not match latest configuration '{}'",
+                request.operation.bundle_id(),
+                bundle_id
+            )));
+        }
+        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+            return Err(ComputerError::InvalidConfiguration(
+                "the reserved Client Control provider is not user-manageable".to_string(),
+            ));
+        }
+        if request.config.disabled() {
+            return Err(ComputerError::InvalidConfiguration(format!(
+                "MCP server '{bundle_id}' is disabled"
+            )));
+        }
+        let tracked_plugin_server = self
+            .plugin_mounted_server_ids
+            .read()
+            .await
+            .contains(&bundle_id);
+        if tracked_plugin_server
+            || self
+                .plugin_mcp_server_owner_inner(&bundle_id)
+                .await
+                .is_some()
+        {
+            return Err(ComputerError::InvalidConfiguration(format!(
+                "MCP server '{bundle_id}' is managed by a Marketplace plugin"
+            )));
+        }
+
+        self.cancel_oauth_before_server_lifecycle_change(&bundle_id)
+            .await?;
+        for input in request.input_definitions {
+            let input_id = input.id().to_string();
+            self.computer
+                .read()
+                .await
+                .add_or_update_input(input.clone())
+                .await?;
+            self.inputs.write().await.insert(input_id, input);
+        }
+
+        let server_name = request.config.name().to_string();
+        if let Err(error) = self
+            .computer
+            .read()
+            .await
+            .mount_server(normalize_mcp_server_tool_meta(request.config))
+            .await
+        {
+            self.record_mcp_config_apply_diagnostic_for_server(
+                bundle_id.clone(),
+                server_name,
+                format!("Latest configuration could not be applied before start: {error}"),
+            )
+            .await;
+            return Err(error);
+        }
+        self.sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), server_name);
+        self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
+        self.run_mcp_server_start_operation(&request.operation)
+            .await
+    }
+
+    pub(crate) async fn start_user_mcp_servers_with_latest_configs_best_effort(
+        &self,
+        requests: Vec<UserMcpServerStartRequest>,
+    ) -> Vec<(BundleId, ComputerError)> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
+        let mut failures = Vec::new();
+        for request in requests {
+            let bundle_id = request.operation.bundle_id().clone();
+            if let Err(error) = self
+                .start_user_mcp_server_with_latest_config_inner(request)
+                .await
+            {
+                failures.push((bundle_id, error));
+            }
+        }
+        failures
+    }
+
+    async fn run_mcp_server_start_operation(
+        &self,
+        operation: &McpServerStartOperation,
+    ) -> ComputerResult<()> {
+        let bundle_id = operation.bundle_id();
         self.ensure_active_computer()?;
         if let Some(input_id) = self.missing_configured_input_definition(bundle_id).await {
             let error = ComputerError::InvalidConfiguration(format!(
@@ -1623,7 +1761,11 @@ impl ComputerInstanceRuntime {
                 .await;
             return Err(error);
         }
-        let result = self.computer.read().await.start_mcp_client(bundle_id).await;
+        let computer = self.computer.read().await;
+        let result = match operation {
+            McpServerStartOperation::Start(_) => computer.start_mcp_client(bundle_id).await,
+            McpServerStartOperation::Restart(_) => computer.restart_mcp_client(bundle_id).await,
+        };
         if Self::is_expected_oauth_required(&result) {
             // A validated OAuth challenge is an expected runtime state, not a malformed server
             // configuration or failed import. The SDK has admitted the OAuth coordinator, so the

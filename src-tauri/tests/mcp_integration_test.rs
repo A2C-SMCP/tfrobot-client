@@ -42,7 +42,9 @@ use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::input_value_index::{self, InputValueStorageKind};
 use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
-use tfrobot_client_lib::services::observability::ObservabilityService;
+use tfrobot_client_lib::services::observability::{
+    ActivityLevel, ActivityOutcome, ActivityQuery, ActivityScopeFilter, ObservabilityService,
+};
 use tfrobot_client_lib::services::runtime_input_bridge::{
     RuntimeInputCompletion, RuntimeInputRequest, RuntimeInputRequestReason, RuntimeInputRequestSink,
 };
@@ -1180,6 +1182,23 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         .presentation_detail
         .as_deref()
         .is_some_and(|detail| detail.starts_with("Start failed:")));
+    let startup_activity = state
+        .observability
+        .query_activity(&ActivityQuery {
+            scope: ActivityScopeFilter::Computer {
+                computer_id: TEST_INSTANCE_ID.to_string(),
+            },
+            ..ActivityQuery::default()
+        })
+        .unwrap();
+    let failed_start = startup_activity
+        .items
+        .iter()
+        .find(|event| event.category == "mcp" && event.operation == "start")
+        .expect("Computer startup should persist each failed MCP start as activity");
+    assert_eq!(failed_start.level, ActivityLevel::Error);
+    assert_eq!(failed_start.outcome, ActivityOutcome::Failed);
+    assert!(failed_start.message.contains("broken-server"));
 
     mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("healthy-server"))
         .await
@@ -1189,12 +1208,27 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         .unwrap();
     assert_eq!(batch.candidate_count, 2);
     assert_eq!(batch.actual_operation_count, 1);
-    assert_eq!(
-        batch.unchanged_count, 1,
-        "an already-started server remains unchanged even when its connection failed"
-    );
+    assert_eq!(batch.unchanged_count, 0);
     assert_eq!(batch.excluded_plugin_owned_count, 0);
-    assert!(batch.failures.is_empty());
+    assert!(matches!(
+        batch.failures.as_slice(),
+        [mcp::McpBatchFailure {
+            bundle_id,
+            name,
+            error: RuntimeActionError::RuntimeError { .. },
+        }] if bundle_id.as_str() == "broken-server" && name == "broken-server"
+    ));
+    let batch_activity = state
+        .observability
+        .query_activity(&ActivityQuery::default())
+        .unwrap();
+    let start_all = batch_activity
+        .items
+        .iter()
+        .find(|event| event.operation == "start_all")
+        .expect("start-all should persist a terminal activity event");
+    assert_eq!(start_all.level, ActivityLevel::Error);
+    assert_eq!(start_all.outcome, ActivityOutcome::Failed);
 }
 
 #[tokio::test]
@@ -1974,6 +2008,261 @@ async fn test_start_stop_mcp_server_use_sdk_computer_runtime() {
         .unwrap();
     assert_eq!(stopped[0].name, "sdk-single");
     assert!(!stopped[0].running);
+}
+
+#[tokio::test]
+async fn single_start_mounts_a_user_mcp_added_after_computer_start() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("added-after-start"),
+    )
+    .await
+    .unwrap();
+
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("added-after-start"))
+        .await
+        .unwrap();
+
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(statuses.iter().any(|status| {
+        status.bundle_id == bundle_id("added-after-start")
+            && status.activation_state == MCPServerActivationState::Started
+            && status.connection_state == MCPServerConnectionState::Connected
+    }));
+}
+
+#[tokio::test]
+async fn single_start_uses_latest_user_config_without_falling_back_to_runtime_config() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("latest-single"),
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-single"))
+        .await
+        .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        unavailable_server_config("latest-single"),
+    )
+    .await
+    .unwrap();
+    let error = mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-single"))
+        .await
+        .expect_err("the latest unavailable command must replace the old runnable declaration");
+    assert!(matches!(error, RuntimeActionError::RuntimeError { .. }));
+
+    let _ = mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-single")).await;
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("latest-single"),
+    )
+    .await
+    .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-single"))
+        .await
+        .expect("retry must mount and start the corrected latest declaration");
+}
+
+#[tokio::test]
+async fn start_all_uses_latest_user_snapshot_and_excludes_disabled_or_removed_servers() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("latest-batch"),
+    )
+    .await
+    .unwrap();
+    let started = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(started.candidate_count, 1);
+    assert_eq!(started.actual_operation_count, 1);
+    assert!(started.failures.is_empty());
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-batch"))
+        .await
+        .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_disabled("latest-batch", true),
+    )
+    .await
+    .unwrap();
+    let disabled = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(disabled.candidate_count, 0);
+    assert!(
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-batch"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+
+    sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "latest-batch")
+        .await
+        .unwrap();
+    let removed = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(removed.candidate_count, 0);
+    assert!(
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("latest-batch"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Server not found")
+    );
+}
+
+#[tokio::test]
+async fn start_all_restarts_an_error_with_the_latest_user_config() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        unavailable_server_config("latest-batch-retry"),
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config("latest-batch-retry"),
+    )
+    .await
+    .unwrap();
+    let result = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(result.candidate_count, 1);
+    assert_eq!(result.actual_operation_count, 1);
+    assert!(result.failures.is_empty());
+    let statuses = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(statuses.iter().any(|status| {
+        status.bundle_id == bundle_id("latest-batch-retry")
+            && status.activation_state == MCPServerActivationState::Started
+            && status.connection_state == MCPServerConnectionState::Connected
+    }));
+}
+
+#[tokio::test]
+async fn actual_start_syncs_the_latest_referenced_input_definition() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "fresh-definition".to_string(),
+            label: Some("Fresh definition".to_string()),
+            description: Some("before start".to_string()),
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    inputs::set_input_value_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "fresh-definition".to_string(),
+        serde_json::json!("available-value"),
+    )
+    .await
+    .unwrap();
+    let server: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": "fresh-input-server",
+        "bundle_id": "fresh-input-server",
+        "disabled": false,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::echo_server_path().to_str().unwrap()],
+            "env": { "TOKEN": "${input:fresh-definition}" }
+        }
+    }))
+    .unwrap();
+    sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, server)
+        .await
+        .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("fresh-input-server"))
+        .await
+        .unwrap();
+
+    inputs::add_or_update_input_core(
+        &state,
+        TEST_INSTANCE_ID,
+        inputs::InputDefinition::PromptString {
+            id: "fresh-definition".to_string(),
+            label: Some("Latest definition".to_string()),
+            description: Some("latest before actual start".to_string()),
+            default: None,
+            password: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("fresh-input-server"))
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let definition = runtime
+        .runtime_input_definition("fresh-definition")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(definition).unwrap()["description"],
+        "Latest definition"
+    );
 }
 
 #[tokio::test]
@@ -5024,7 +5313,7 @@ async fn test_clear_oauth_preserves_runtime_and_withdraws_authorized_tools() {
         .await
         .expect("submit OAuth callback");
     assert!(callback_response.status().is_success());
-    let projected = timeout(Duration::from_secs(5), async {
+    let projected = timeout(MCP_RUNTIME_TIMEOUT, async {
         while let Some(event) = runtime_events.recv().await {
             if event.instance_id == TEST_INSTANCE_ID
                 && event.snapshot.capability_revision > unauthorized_snapshot.capability_revision
@@ -5077,7 +5366,7 @@ async fn test_clear_oauth_preserves_runtime_and_withdraws_authorized_tools() {
     let authorized_snapshot = runtime.runtime_snapshot().await;
     runtime.clear_oauth_authorization(&bundle_id).await.unwrap();
 
-    let revoked = timeout(Duration::from_secs(5), async {
+    let revoked = timeout(MCP_RUNTIME_TIMEOUT, async {
         while let Some(event) = runtime_events.recv().await {
             if event.instance_id == TEST_INSTANCE_ID
                 && matches!(
@@ -5507,14 +5796,30 @@ async fn test_sdk_computer_invalid_command_fails() {
         MCP_RUNTIME_TIMEOUT,
         mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("bad-server")),
     )
-    .await;
-    match result {
-        Ok(r) => assert!(
-            r.is_err(),
-            "Starting server with invalid command should fail"
-        ),
-        Err(_) => { /* Timeout is acceptable — the server doesn't exist / command is invalid */ }
-    }
+    .await
+    .expect("invalid command should fail before the MCP runtime timeout");
+    assert!(
+        result.is_err(),
+        "Starting server with invalid command should fail"
+    );
+
+    let activity = state
+        .observability
+        .query_activity(&ActivityQuery {
+            scope: ActivityScopeFilter::Computer {
+                computer_id: TEST_INSTANCE_ID.to_string(),
+            },
+            ..ActivityQuery::default()
+        })
+        .unwrap();
+    let failed_start = activity
+        .items
+        .iter()
+        .find(|event| event.operation == "start")
+        .expect("failed manual start should be queryable as activity");
+    assert_eq!(failed_start.level, ActivityLevel::Error);
+    assert_eq!(failed_start.outcome, ActivityOutcome::Failed);
+    assert!(failed_start.message.contains("bad-server"));
 }
 
 // ── Config IO integration ──

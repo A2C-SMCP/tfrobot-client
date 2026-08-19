@@ -54,27 +54,55 @@ describe('ActivityViewer', () => {
     expect(screen.queryAllByLabelText('Activity scope')).toHaveLength(0);
   });
 
-  it('renders structured scope and operation columns', () => {
+  it('renders structured scope, outcome, and operation columns', () => {
     const populated = {
       ...activityStore,
-      items: [{
-        id: 1,
-        timestamp: '2026-01-01T00:00:00Z',
-        scope: { kind: 'computer', computer_id: 'deleted-computer' },
-        level: 'error',
-        category: 'mcp',
-        event_type: 'server',
-        operation: 'start',
-        outcome: 'failed',
-        message: 'Server failed',
-      }],
+      items: [
+        {
+          id: 1,
+          timestamp: '2026-01-01T00:00:00Z',
+          scope: { kind: 'computer', computer_id: 'deleted-computer' },
+          level: 'error',
+          category: 'mcp',
+          event_type: 'server',
+          operation: 'start',
+          outcome: 'failed',
+          message: 'Server failed',
+        },
+        {
+          id: 2,
+          timestamp: '2026-01-01T00:01:00Z',
+          scope: { kind: 'client' },
+          level: 'info',
+          category: 'system',
+          event_type: 'lifecycle',
+          operation: 'start',
+          outcome: 'succeeded',
+          message: 'Client started',
+        },
+        {
+          id: 3,
+          timestamp: '2026-01-01T00:02:00Z',
+          scope: { kind: 'client' },
+          level: 'warn',
+          category: 'system',
+          event_type: 'legacy',
+          operation: 'import',
+          outcome: 'unknown',
+          message: 'Legacy activity',
+        },
+      ],
     };
     vi.mocked(useActivityStore).mockReturnValue(populated as never);
 
     render(<ActivityViewer />);
 
     expect(screen.getByText('deleted-computer')).toBeInTheDocument();
-    expect(screen.getByText('start')).toBeInTheDocument();
+    expect(screen.getAllByText('Outcome').length).toBeGreaterThan(0);
+    expect(screen.getByText('FAILED')).toBeInTheDocument();
+    expect(screen.getByText('SUCCEEDED')).toBeInTheDocument();
+    expect(screen.getByText('UNKNOWN')).toBeInTheDocument();
+    expect(screen.getAllByText('start').length).toBeGreaterThan(0);
     expect(screen.getByText('Server failed')).toBeInTheDocument();
   });
 });

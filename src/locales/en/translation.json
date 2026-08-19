@@ -948,6 +948,7 @@
     "time": "Time",
     "level": "Level",
     "category": "Category",
+    "outcome": "Outcome",
     "message": "Message",
     "filterLevel": "Filter by level",
     "filterCategory": "Filter by category",
