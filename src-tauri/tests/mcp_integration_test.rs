@@ -1176,6 +1176,10 @@ async fn computer_start_isolates_mcp_failures_and_surfaces_each_error() {
         .technical_detail
         .as_deref()
         .is_some_and(|detail| detail.starts_with("Start failed:")));
+    assert!(problem
+        .presentation_detail
+        .as_deref()
+        .is_some_and(|detail| detail.starts_with("Start failed:")));
 
     mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("healthy-server"))
         .await

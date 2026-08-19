@@ -73,6 +73,8 @@ export interface ComputerRuntimeProblem {
   current: boolean;
   message: ComputerRuntimeProblemMessage;
   recommended_actions: ComputerRuntimeProblemAction[];
+  /** Redacted MCP startup detail intended for the ordinary problem alert. */
+  presentation_detail?: string | null;
   technical_detail?: string | null;
 }
 

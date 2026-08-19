@@ -165,7 +165,8 @@ describe('ComputerRuntime', () => {
           current: true,
           message: 'mcp_start_failed',
           recommended_actions: ['restart_runtime', 'view_logs'],
-          technical_detail: 'process exited',
+          presentation_detail: 'Initialize failed: connection closed: initialize response',
+          technical_detail: 'Authorization: Bearer private-token',
         }],
         actions: {
           ...runtimeSnapshot({ lifecycle: 'degraded' }).actions,
@@ -177,6 +178,10 @@ describe('ComputerRuntime', () => {
     expect(screen.getByText('The Runtime is available, but an MCP server could not start.'))
       .toBeInTheDocument();
     expect(screen.getByText('Affected: MCP server Browser MCP')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Technical details: Initialize failed: connection closed: initialize response',
+    )).toBeInTheDocument();
+    expect(screen.queryByText('Authorization: Bearer private-token')).not.toBeInTheDocument();
     expect(screen.getByText(
       'Restart unavailable: Wait for the current Runtime operation to finish.',
     )).toBeInTheDocument();

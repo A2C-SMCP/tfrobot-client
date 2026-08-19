@@ -315,6 +315,7 @@
         },
         "affected": "受影响能力：{{capabilities}}",
         "occurredAt": "发生时间：{{time}}",
+        "technicalDetail": "技术详情：{{detail}}",
         "actions": {
           "retryConnection": "重试连接",
           "retryDisconnection": "重试断开",

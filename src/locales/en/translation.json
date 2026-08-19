@@ -315,6 +315,7 @@
         },
         "affected": "Affected: {{capabilities}}",
         "occurredAt": "Occurred at {{time}}",
+        "technicalDetail": "Technical details: {{detail}}",
         "actions": {
           "retryConnection": "Retry connection",
           "retryDisconnection": "Retry disconnection",

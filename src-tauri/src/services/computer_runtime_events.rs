@@ -2,6 +2,7 @@ use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationError, ClientConnectionStateSnapshot,
     ClientConnectionStatus, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
 };
+use crate::services::observability::redact_text;
 use a2c_smcp::smcp_computer::oauth::OAuthStatus;
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,9 @@ pub struct ComputerRuntimeProblem {
     pub current: bool,
     pub message: ComputerRuntimeProblemMessage,
     pub recommended_actions: Vec<ComputerRuntimeProblemAction>,
+    /// Redacted MCP startup detail intended for the ordinary problem alert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub technical_detail: Option<String>,
 }
@@ -216,6 +220,7 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::StartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail: None,
             technical_detail: observation.technical_detail,
         }
     }
@@ -234,6 +239,7 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::RestartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail: None,
             technical_detail: observation.technical_detail,
         }
     }
@@ -271,6 +277,7 @@ impl ComputerRuntimeProblem {
             current: true,
             message,
             recommended_actions,
+            presentation_detail: None,
             technical_detail: Some(error.message.clone()),
         }
     }
@@ -301,6 +308,7 @@ impl ComputerRuntimeProblem {
             current: true,
             message,
             recommended_actions: vec![retry_action, ComputerRuntimeProblemAction::ViewLogs],
+            presentation_detail: None,
             technical_detail: Some(diagnostic.message),
         }
     }
@@ -311,6 +319,11 @@ impl ComputerRuntimeProblem {
         name: Option<String>,
         diagnostic: RuntimeDiagnosticRecord,
     ) -> Self {
+        let presentation_detail = if diagnostic.operation == "apply_configuration" {
+            None
+        } else {
+            mcp_presentation_detail(&diagnostic.message)
+        };
         let message = if diagnostic.operation == "apply_configuration" {
             ComputerRuntimeProblemMessage::McpConfigurationApplyFailed
         } else {
@@ -332,9 +345,16 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::RestartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail,
             technical_detail: Some(diagnostic.message),
         }
     }
+}
+
+fn mcp_presentation_detail(detail: &str) -> Option<String> {
+    let detail = redact_text(detail);
+    let detail = detail.trim();
+    (!detail.is_empty()).then(|| detail.to_string())
 }
 
 fn client_connection_operation_name(operation: ClientConnectionOperation) -> &'static str {
@@ -760,6 +780,34 @@ mod tests {
         assert!(problem
             .recommended_actions
             .contains(&ComputerRuntimeProblemAction::RetryConnection));
+    }
+
+    #[test]
+    fn mcp_start_problem_exposes_a_redacted_presentation_detail() {
+        let problem = ComputerRuntimeProblem::mcp(
+            3,
+            "browser",
+            Some("Browser MCP".to_string()),
+            RuntimeDiagnosticRecord {
+                operation: "start".to_string(),
+                message: "Start failed: Authorization: Bearer private-token".to_string(),
+                occurred_at: "2026-08-19T09:00:00Z".to_string(),
+                mcp_server_name: None,
+            },
+        );
+
+        assert_eq!(
+            problem.presentation_detail.as_deref(),
+            Some("Start failed: Authorization: [REDACTED]")
+        );
+        assert_eq!(
+            problem.technical_detail.as_deref(),
+            Some("Start failed: Authorization: Bearer private-token")
+        );
+        assert_eq!(
+            serde_json::to_value(&problem).unwrap()["presentation_detail"],
+            "Start failed: Authorization: [REDACTED]"
+        );
     }
 
     #[test]
