@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2c-smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=07d7cc04dfce51ec9c0951ee94e3556f4c99b585#07d7cc04dfce51ec9c0951ee94e3556f4c99b585"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=1197caa4c261d6c24ded13edc89b37317c1fe804#1197caa4c261d6c24ded13edc89b37317c1fe804"
 dependencies = [
  "serde",
  "serde_json",
@@ -6863,7 +6863,7 @@ dependencies = [
 [[package]]
 name = "smcp"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=07d7cc04dfce51ec9c0951ee94e3556f4c99b585#07d7cc04dfce51ec9c0951ee94e3556f4c99b585"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=1197caa4c261d6c24ded13edc89b37317c1fe804#1197caa4c261d6c24ded13edc89b37317c1fe804"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6878,7 +6878,7 @@ dependencies = [
 [[package]]
 name = "smcp-client-transport"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=07d7cc04dfce51ec9c0951ee94e3556f4c99b585#07d7cc04dfce51ec9c0951ee94e3556f4c99b585"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=1197caa4c261d6c24ded13edc89b37317c1fe804#1197caa4c261d6c24ded13edc89b37317c1fe804"
 dependencies = [
  "serde_json",
  "smcp 0.3.1",
@@ -6890,7 +6890,7 @@ dependencies = [
 [[package]]
 name = "smcp-computer"
 version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=07d7cc04dfce51ec9c0951ee94e3556f4c99b585#07d7cc04dfce51ec9c0951ee94e3556f4c99b585"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=1197caa4c261d6c24ded13edc89b37317c1fe804#1197caa4c261d6c24ded13edc89b37317c1fe804"
 dependencies = [
  "async-recursion",
  "async-trait",
