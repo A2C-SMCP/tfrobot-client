@@ -439,7 +439,6 @@
     "preview": "Skill 预览",
     "searchPlaceholder": "搜索 skills",
     "openLocalRoot": "打开本地目录",
-    "openMcpSource": "打开 MCP 服务器 {{server}}",
     "resourceUnavailable": "SKILL.md 不可用",
     "missingSkillMd": "所选 skill 未返回 SKILL.md 资源。",
     "emptySkillMd": "SKILL.md 没有可预览内容",

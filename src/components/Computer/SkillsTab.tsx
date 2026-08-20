@@ -10,7 +10,6 @@ const EMPTY_SKILLS: SkillRef[] = [];
 
 interface SkillsTabProps {
   instanceId: string;
-  onOpenMcpTab?: () => void;
 }
 
 function groupBySource(skills: SkillRef[]) {
@@ -53,7 +52,7 @@ function renderMarkdown(markdown: string) {
   });
 }
 
-export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
+export function SkillsTab({ instanceId }: SkillsTabProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [search, setSearch] = useState('');
@@ -174,18 +173,6 @@ export function SkillsTab({ instanceId, onOpenMcpTab }: SkillsTabProps) {
                   renderItem={(skill) => (
                     <List.Item
                       style={{ background: selectedSkillName === skill.name ? '#f6ffed' : undefined }}
-                      actions={skill.source.startsWith('mcp:')
-                        ? [
-                            <Button
-                              key="open-mcp-source"
-                              type="link"
-                              size="small"
-                              onClick={() => onOpenMcpTab?.()}
-                            >
-                              {t('skills.openMcpSource', { server: skill.source.replace(/^mcp:/, '') })}
-                            </Button>,
-                          ]
-                        : undefined}
                     >
                       <button
                         type="button"

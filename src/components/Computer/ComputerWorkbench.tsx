@@ -101,10 +101,7 @@ export function ComputerWorkbench({
           aria-label={t('computer.workbench.sections.skills')}
         >
           <Card className={styles.sectionCard}>
-            <SkillsTab
-              instanceId={instance.id}
-              onOpenMcpTab={() => openSection('top')}
-            />
+            <SkillsTab instanceId={instance.id} />
           </Card>
         </section>
 

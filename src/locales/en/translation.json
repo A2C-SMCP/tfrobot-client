@@ -439,7 +439,6 @@
     "preview": "Skill preview",
     "searchPlaceholder": "Search skills",
     "openLocalRoot": "Open Local Root",
-    "openMcpSource": "Open MCP server {{server}}",
     "resourceUnavailable": "SKILL.md unavailable",
     "missingSkillMd": "The selected skill did not return a SKILL.md resource.",
     "emptySkillMd": "SKILL.md has no preview content",
