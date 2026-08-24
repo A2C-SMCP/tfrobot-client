@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   CachingTokenSource,
   PaymentRequiredError,
+  TokenProfile,
   TokenExchangeError,
   TransportError,
   UserJwtCredential,
@@ -12,10 +13,6 @@ import {
 const TOKEN_REQUEST_EVENT = 'manager:token-request';
 const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
-// Rust schedules renewal from a floored `expiresIn` value at roughly T-60s. Keep a small margin
-// above that boundary so the scheduled call cannot receive the still-cached token due to rounding.
-const TOKEN_EXPIRY_SKEW_SECONDS = 65;
-
 interface ManagerTokenRequest {
   requestId: string;
   generation: number;
@@ -23,6 +20,7 @@ interface ManagerTokenRequest {
   userJwt: string;
   audience: string;
   scope?: string | null;
+  tokenProfile: TokenProfile;
 }
 
 interface ManagerTokenHttpResponse {
@@ -86,6 +84,7 @@ function sourceKey(request: ManagerTokenRequest): string {
     request.tokenUrl,
     request.audience,
     request.scope ?? '',
+    request.tokenProfile,
   ]);
 }
 
@@ -188,11 +187,11 @@ function tokenSource(request: ManagerTokenRequest): TokenSource {
       userJwt: request.userJwt,
       audience: request.audience,
       ...(request.scope ? { scope: request.scope } : {}),
+      tokenProfile: request.tokenProfile,
     }),
     {
       tokenUrl: request.tokenUrl,
       fetch: bridgeFetch(() => entry.currentRequest),
-      expirySkewSeconds: TOKEN_EXPIRY_SKEW_SECONDS,
     },
   );
   entry.source = source;
@@ -214,6 +213,13 @@ async function handleTokenRequest(request: ManagerTokenRequest): Promise<void> {
     await complete(request, {
       status: 'error',
       error: { kind: 'invalid_response', description: 'Invalid Manager generation' },
+    });
+    return;
+  }
+  if (request.tokenProfile !== TokenProfile.Session) {
+    await complete(request, {
+      status: 'error',
+      error: { kind: 'invalid_response', description: 'Invalid Manager token profile' },
     });
     return;
   }

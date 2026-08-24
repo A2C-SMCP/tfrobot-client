@@ -87,6 +87,7 @@ export interface ComputerRuntimeSnapshot {
   actions: ComputerRuntimeActionCapabilities;
   config_revision: number;
   capability_revision: number;
+  diagnostics_revision: number;
   mcp_servers: number;
   active_mcp_servers: number;
   tools: number;

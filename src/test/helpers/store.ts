@@ -88,6 +88,7 @@ export function runtimeSnapshot(
     actions: overrides.actions ?? runtimeActionsForTest(lifecycle),
     config_revision: 0,
     capability_revision: 0,
+    diagnostics_revision: 0,
     mcp_servers: 0,
     active_mcp_servers: 0,
     tools: 0,

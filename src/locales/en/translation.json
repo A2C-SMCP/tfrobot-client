@@ -277,6 +277,7 @@
         "lifecycleChanged": "Lifecycle changed to {{state}}",
         "configRevisionBumped": "Config revision changed to {{revision}}",
         "capabilityRevisionBumped": "Capability revision changed to {{revision}}",
+        "diagnosticsChanged": "Runtime diagnostics changed at revision {{revision}}",
         "clientConnectionStateChanged": "Connection state revision {{revision}} changed to {{status}}",
         "connectionPresent": "present",
         "connectionAbsent": "absent",

@@ -27,6 +27,7 @@ use tfrobot_client_lib::services::manager_context::{
 use tfrobot_client_lib::services::manager_environment::ManagerEnvironment;
 use tfrobot_client_lib::services::manager_token_bridge::{
     ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
+    ManagerTokenProfile,
 };
 use tfrobot_client_lib::services::settings::SettingsService;
 
@@ -2388,6 +2389,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
     assert_eq!(request.user_jwt, "jwt-for-typescript");
     assert_eq!(request.audience, "robot:robot-account-1");
     assert_eq!(request.scope.as_deref(), Some("smcp:connect"));
+    assert_eq!(request.token_profile, ManagerTokenProfile::Session);
     let form = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs([
             (
@@ -2398,6 +2400,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
             ("subject_token_type", "urn:ietf:params:oauth:token-type:jwt"),
             ("audience", "robot:robot-account-1"),
             ("scope", "smcp:connect"),
+            ("token_profile", "session"),
         ])
         .finish();
     let (status, response_body, content_type) = coordinator
@@ -2439,6 +2442,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
     assert!(token_request
         .body
         .contains("subject_token=jwt-for-typescript"));
+    assert!(token_request.body.contains("token_profile=session"));
 }
 
 #[tokio::test]

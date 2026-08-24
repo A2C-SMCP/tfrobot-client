@@ -471,8 +471,7 @@ impl ComputerInstanceRuntime {
             }
         }
         // Teardown is deliberately exhaustive after the commit point: no cleanup failure may
-        // leave refresh work or logical connection state alive for an instance being removed.
-        self.abort_refresh_task().await;
+        // leave logical connection state alive for an instance being removed.
         self.take_connection_state().await;
         self.complete_connection_operation().await;
         self.clear_client_runtime_diagnostic_silent().await;

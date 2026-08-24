@@ -258,6 +258,7 @@ impl ComputerInstanceRuntime {
         &self,
         token: ClientConnectionOperationToken,
         url: &str,
+        auth_provider: Option<SocketIoAuthProvider>,
         auth_payload: Option<serde_json::Value>,
         headers: HashMap<String, String>,
         namespace: Option<String>,
@@ -270,6 +271,7 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self
             .connect_smcp_socketio_inner(
                 url,
+                auth_provider,
                 auth_payload,
                 headers,
                 namespace,
@@ -311,6 +313,7 @@ impl ComputerInstanceRuntime {
         let result = self
             .connect_smcp_socketio_inner(
                 url,
+                None,
                 auth_payload,
                 headers,
                 namespace,
@@ -370,8 +373,8 @@ impl ComputerInstanceRuntime {
 
     /// Clears only a Manager-owned connection/operation during an identity transaction.
     ///
-    /// Remote teardown is best-effort: even when the SDK reports an error, the refresh task,
-    /// socket handle and client-owned connection authority are removed locally so credentials
+    /// Remote teardown is best-effort: even when the SDK reports an error, the socket handle and
+    /// client-owned connection authority are removed locally so credentials
     /// from the departing Context cannot remain usable. Manual SMCP state is never touched.
     pub async fn clear_manager_connection_for_context_transaction(&self) -> Result<bool, String> {
         const MANAGER_SOURCE: &str = "manager_robot";
@@ -393,7 +396,6 @@ impl ComputerInstanceRuntime {
             return Ok(false);
         }
 
-        self.abort_refresh_task().await;
         let teardown_error = if self.has_smcp_transport().await {
             self.disconnect_smcp_socketio_bounded_inner().await.err()
         } else {
@@ -444,119 +446,6 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn reconnect_smcp_socketio_for_generation(
-        &self,
-        generation: u64,
-        url: &str,
-        auth_payload: Option<serde_json::Value>,
-        headers: HashMap<String, String>,
-        namespace: Option<String>,
-        office_id: &str,
-        computer_name: &str,
-        expires_in: i64,
-    ) -> Result<SmcpReconnectOutcome, String> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
-        {
-            let guard = self.connection.read().await;
-            match guard.as_ref() {
-                Some(connection) if connection.generation == generation => {}
-                _ => return Ok(SmcpReconnectOutcome::Stale),
-            }
-        }
-
-        if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-
-        if let Err(error) = self
-            .connect_smcp_socketio_inner(
-                url,
-                auth_payload,
-                headers,
-                namespace,
-                office_id,
-                computer_name,
-            )
-            .await
-        {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-        if self
-            .refresh_connection_timestamp_for_generation(generation)
-            .await
-        {
-            return Ok(SmcpReconnectOutcome::Reconnected { expires_in });
-        }
-        if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-        Ok(SmcpReconnectOutcome::Stale)
-    }
-
-    pub async fn set_refresh_task(&self, task: tokio::task::JoinHandle<()>) {
-        if self.is_retired() {
-            task.abort();
-            return;
-        }
-        let mut lock = self.refresh_task.lock().await;
-        if self.is_retired() {
-            task.abort();
-            return;
-        }
-        if let Some(previous) = lock.replace(task) {
-            previous.abort();
-        }
-    }
-
-    pub async fn set_refresh_task_for_generation(
-        &self,
-        generation: u64,
-        task: tokio::task::JoinHandle<()>,
-    ) -> Result<(), String> {
-        let _guard = self.lifecycle_lock.lock().await;
-        if self
-            .connection
-            .read()
-            .await
-            .as_ref()
-            .is_none_or(|connection| connection.generation != generation)
-        {
-            task.abort();
-            return Err("Connection was replaced before refresh ownership was installed".into());
-        }
-        self.set_refresh_task(task).await;
-        Ok(())
-    }
-
-    pub async fn abort_refresh_task(&self) {
-        if let Some(task) = self.refresh_task.lock().await.take() {
-            // A refresh-triggered 401 enters the same Context cleanup transaction from inside
-            // this task. Aborting itself would cancel that transaction at its next await before
-            // the signed-out Context is committed; detach instead and let its Unauthorized path
-            // return normally.
-            if tokio::task::try_id() != Some(task.id()) {
-                task.abort();
-            }
-        }
-    }
-
     pub async fn is_connected(&self) -> bool {
         self.runtime_state().await == ComputerRuntimeState::JoinedOffice
             && self.connection.read().await.is_some()
@@ -570,8 +459,8 @@ impl ComputerInstanceRuntime {
     }
 
     /// Returns the client-owned logical connection context independently of SDK transport state.
-    /// During token refresh the SDK temporarily leaves JoinedOffice while this context remains the
-    /// authority that allows a later JoinedOffice event to restore business connectivity.
+    /// The context is the client-owned logical connection authority independently of a brief SDK
+    /// transport transition during automatic reconnect.
     pub async fn connection_context(&self) -> Option<ConnectionStateSummary> {
         self.connection_snapshot().await.context
     }
@@ -951,9 +840,8 @@ impl ComputerInstanceRuntime {
         true
     }
 
-    /// Closes the transport owned by a failed refresh generation and then settles its logical
-    /// authority. This intentionally does not abort `refresh_task`: it is called from that task's
-    /// own terminal branch.
+    /// Closes the transport owned by a failed reconnect generation and settles its logical
+    /// authority.
     pub async fn terminate_reconnect_for_generation(
         &self,
         generation: u64,
@@ -1093,9 +981,11 @@ impl ComputerInstanceRuntime {
         previous
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn connect_smcp_socketio_inner(
         &self,
         url: &str,
+        auth_provider: Option<SocketIoAuthProvider>,
         auth_payload: Option<serde_json::Value>,
         headers: HashMap<String, String>,
         namespace: Option<String>,
@@ -1103,6 +993,7 @@ impl ComputerInstanceRuntime {
         computer_name: &str,
     ) -> Result<(), String> {
         let options = ConnectOptions {
+            auth_provider,
             auth_payload,
             headers: headers_to_connect_options(headers),
             namespace: namespace.unwrap_or_default(),
@@ -1196,7 +1087,6 @@ impl ComputerInstanceRuntime {
     pub(super) async fn clear_smcp_connection_inner(&self) -> Result<(), String> {
         match self.disconnect_smcp_socketio_bounded_inner().await {
             Ok(()) => {
-                self.abort_refresh_task().await;
                 let mut connection = self.connection.write().await;
                 let generation = connection.as_ref().map(|state| state.generation);
                 let connection_changed = connection.take().is_some();

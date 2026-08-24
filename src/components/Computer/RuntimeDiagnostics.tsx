@@ -28,6 +28,10 @@ export function RuntimeDiagnostics({ runtime, recentEvents }: RuntimeDiagnostics
         return t('computer.runtime.eventCauses.capabilityRevisionBumped', {
           revision: cause.revision,
         });
+      case 'diagnostics_changed':
+        return t('computer.runtime.eventCauses.diagnosticsChanged', {
+          revision: cause.revision,
+        });
       case 'client_connection_state_changed':
         return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
           revision: cause.revision,

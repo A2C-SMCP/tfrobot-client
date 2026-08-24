@@ -17,7 +17,9 @@ use crate::services::manager_context::ManagerContextKey;
 use crate::services::oauth_credential_store::{effective_http_oauth, KeychainOAuthCredentialStore};
 use crate::services::runtime_input_bridge::RuntimeInputBridge;
 use crate::services::sdk_config::InstanceConfigContext;
-use a2c_smcp::smcp_computer::computer::{Computer, ConnectOptions, Session, ToolCallRecord};
+use a2c_smcp::smcp_computer::computer::{
+    Computer, ConnectOptions, Session, SocketIoAuthProvider, ToolCallRecord,
+};
 use a2c_smcp::smcp_computer::errors::{ComputerError, ComputerResult};
 use a2c_smcp::smcp_computer::inputs::run_command;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -774,12 +776,6 @@ impl ComputerRuntimeStartError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SmcpReconnectOutcome {
-    Reconnected { expires_in: i64 },
-    Stale,
-}
-
 struct RuntimeEventRelay {
     generation: u64,
     task: JoinHandle<()>,
@@ -902,7 +898,6 @@ pub struct ComputerInstanceRuntime {
     connection_operation: Arc<RwLock<ClientConnectionOperationState>>,
     connection_authority_revision: Arc<AtomicU64>,
     lifecycle_lock: Arc<Mutex<()>>,
-    refresh_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     retired: Arc<AtomicBool>,
     active_operations: Arc<AtomicUsize>,
     activity_changed: Arc<Notify>,
@@ -1020,7 +1015,6 @@ impl ComputerInstanceRuntime {
             connection_operation: Arc::new(RwLock::new(ClientConnectionOperationState::default())),
             connection_authority_revision: Arc::new(AtomicU64::new(0)),
             lifecycle_lock: Arc::new(Mutex::new(())),
-            refresh_task: Arc::new(Mutex::new(None)),
             retired: Arc::new(AtomicBool::new(false)),
             active_operations: Arc::new(AtomicUsize::new(0)),
             activity_changed: Arc::new(Notify::new()),
@@ -1068,7 +1062,6 @@ impl ComputerInstanceRuntime {
             connection_operation: self.connection_operation.clone(),
             connection_authority_revision: self.connection_authority_revision.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
-            refresh_task: self.refresh_task.clone(),
             retired: self.retired.clone(),
             active_operations: self.active_operations.clone(),
             activity_changed: self.activity_changed.clone(),
@@ -1130,16 +1123,6 @@ impl ComputerInstanceRuntime {
     #[doc(hidden)]
     pub fn is_retired_for_test(&self) -> bool {
         self.is_retired()
-    }
-
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub async fn has_refresh_task_for_test(&self) -> bool {
-        self.refresh_task
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|task| !task.is_finished())
     }
 
     #[cfg(debug_assertions)]
@@ -3143,7 +3126,6 @@ fn default_skill_home_base() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::connection::{settle_refresh_terminal, RefreshTerminalOutcome};
 
     #[test]
     fn is_expected_oauth_required_classifies_both_sdk_error_paths() {
@@ -4598,53 +4580,6 @@ mod tests {
         assert_eq!(snapshot.status, ClientConnectionStatus::Disconnected);
         assert!(snapshot.operation.is_none());
         assert!(!snapshot.present);
-    }
-
-    #[tokio::test]
-    async fn every_refresh_terminal_outcome_leaves_a_non_transitional_snapshot() {
-        let cases = [
-            (RefreshTerminalOutcome::Gone, None),
-            (RefreshTerminalOutcome::Unauthorized, Some(false)),
-            (RefreshTerminalOutcome::Stop, Some(false)),
-            (RefreshTerminalOutcome::Exhausted, Some(true)),
-        ];
-        for (index, (outcome, expected_retryable)) in cases.into_iter().enumerate() {
-            let id = format!("terminal-{index}");
-            let registry = ComputerRegistry::from_config(ComputerInstancesConfig {
-                schema_version: 1,
-                instances: vec![instance(&id, "Terminal")],
-            });
-            let runtime = registry.runtime(&id).await.unwrap();
-            let generation = 100 + index as u64;
-            runtime
-                .install_connection_state(ConnectionState {
-                    profile_name: "manager:1".to_string(),
-                    url: "https://smcp.example.com".to_string(),
-                    office_id: "office-a".to_string(),
-                    computer_name: "Terminal".to_string(),
-                    connected_at: chrono::Utc::now(),
-                    source_type: "manager_robot".to_string(),
-                    target_id: Some("manager:1".to_string()),
-                    target_name: Some("Robot One".to_string()),
-                    employee_id: Some(1),
-                    generation,
-                })
-                .await
-                .unwrap();
-            assert!(runtime.begin_reconnect_for_generation(generation).await);
-            assert!(
-                settle_refresh_terminal(&runtime, generation, outcome).await,
-                "terminal outcome {outcome:?} did not settle"
-            );
-
-            let snapshot = runtime.connection_snapshot().await;
-            assert_ne!(snapshot.status, ClientConnectionStatus::Connecting);
-            assert_ne!(snapshot.status, ClientConnectionStatus::Disconnecting);
-            assert_eq!(
-                snapshot.last_error.as_ref().map(|error| error.retryable),
-                expected_retryable
-            );
-        }
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ import {
   RateLimitedError,
   ServerError,
   TokenExchangeError,
+  TokenProfile,
 } from '@turingfocus/tfrs-auth';
 import {
   initializeManagerTokenBridge,
@@ -61,6 +62,7 @@ describe('managerTokenBridge', () => {
       userJwt: 'user-jwt',
       audience: 'robot:r1',
       scope: 'smcp:connect',
+      tokenProfile: TokenProfile.Session,
     };
 
     tokenListener?.({ payload: { ...request, requestId: 'request-1' } });
@@ -72,6 +74,7 @@ describe('managerTokenBridge', () => {
       subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
       audience: 'robot:r1',
       scope: 'smcp:connect',
+      token_profile: 'session',
     });
     expect(completions[0]).toMatchObject({
       requestId: 'request-1',
@@ -121,6 +124,7 @@ describe('managerTokenBridge', () => {
       userJwt: 'user-jwt',
       audience: 'robot:r1',
       scope: 'smcp:connect',
+      tokenProfile: TokenProfile.Session,
     };
 
     tokenListener?.({ payload: { ...request, requestId: 'concurrent-1' } });
@@ -134,6 +138,41 @@ describe('managerTokenBridge', () => {
     await vi.waitFor(() => expect(completedRequestIds).toHaveLength(2));
     expect(completedRequestIds.sort()).toEqual(['concurrent-1', 'concurrent-2']);
 
+    await dispose();
+  });
+
+  it('rejects a native request that does not select the session token profile', async () => {
+    const completions: Array<Record<string, unknown>> = [];
+    mockedInvoke.mockImplementation(async (command, args) => {
+      if (command === 'manager_token_bridge_complete') {
+        completions.push(args as Record<string, unknown>);
+      }
+      return undefined;
+    });
+    const dispose = await initializeManagerTokenBridge();
+
+    listeners.get('manager:token-request')?.({
+      payload: {
+        requestId: 'invalid-profile',
+        generation: 12,
+        tokenUrl: 'https://manager.example/api/v1/oauth/token',
+        userJwt: 'user-jwt',
+        audience: 'robot:r1',
+        tokenProfile: 'connection',
+      },
+    });
+
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    expect(completions[0]).toMatchObject({
+      completion: {
+        status: 'error',
+        error: { kind: 'invalid_response', description: 'Invalid Manager token profile' },
+      },
+    });
+    expect(mockedInvoke).not.toHaveBeenCalledWith(
+      'manager_token_bridge_http_request',
+      expect.anything(),
+    );
     await dispose();
   });
 
@@ -187,6 +226,7 @@ describe('managerTokenBridge', () => {
         tokenUrl: 'https://manager.example/api/v1/oauth/token',
         userJwt: 'secret-user-jwt',
         audience: 'robot:r1',
+        tokenProfile: TokenProfile.Session,
       },
     });
 

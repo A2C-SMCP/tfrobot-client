@@ -277,6 +277,7 @@
         "lifecycleChanged": "生命周期变更为 {{state}}",
         "configRevisionBumped": "配置 Revision 变更为 {{revision}}",
         "capabilityRevisionBumped": "能力 Revision 变更为 {{revision}}",
+        "diagnosticsChanged": "运行时诊断变更为 Revision {{revision}}",
         "clientConnectionStateChanged": "连接状态 Revision {{revision}}：{{status}}",
         "connectionPresent": "存在",
         "connectionAbsent": "不存在",

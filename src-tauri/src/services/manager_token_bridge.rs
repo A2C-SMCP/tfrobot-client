@@ -23,6 +23,20 @@ const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
 const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagerTokenProfile {
+    Session,
+}
+
+impl ManagerTokenProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerTokenBridgeRequest {
@@ -32,6 +46,7 @@ pub struct ManagerTokenBridgeRequest {
     pub user_jwt: String,
     pub audience: String,
     pub scope: Option<String>,
+    pub token_profile: ManagerTokenProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +95,7 @@ struct PendingRequest {
     user_jwt: String,
     audience: String,
     scope: Option<String>,
+    token_profile: ManagerTokenProfile,
     attempt_count: u8,
     active_attempt: Option<String>,
     completion: oneshot::Sender<ManagerTokenBridgeCompletion>,
@@ -144,6 +160,7 @@ impl ManagerTokenBridge {
         user_jwt: String,
         audience: String,
         scope: Option<String>,
+        token_profile: ManagerTokenProfile,
     ) -> Result<ExchangedToken, ManagerError> {
         let sink = self.sink.read().await.clone().ok_or_else(|| {
             ManagerError::InvalidResponse("Manager token bridge is unavailable".to_string())
@@ -156,6 +173,7 @@ impl ManagerTokenBridge {
             user_jwt,
             audience,
             scope,
+            token_profile,
         };
         let (sender, receiver) = oneshot::channel();
         {
@@ -172,6 +190,7 @@ impl ManagerTokenBridge {
                     user_jwt: request.user_jwt.clone(),
                     audience: request.audience.clone(),
                     scope: request.scope.clone(),
+                    token_profile: request.token_profile,
                     attempt_count: 0,
                     active_attempt: None,
                     completion: sender,
@@ -284,13 +303,14 @@ fn validate_token_exchange_form(request: &PendingRequest, body: &str) -> Result<
             ));
         }
     }
-    let expected_field_count = if request.scope.is_some() { 5 } else { 4 };
+    let expected_field_count = if request.scope.is_some() { 6 } else { 5 };
     let valid = fields.len() == expected_field_count
         && fields.get("grant_type").map(String::as_str) == Some(TOKEN_EXCHANGE_GRANT_TYPE)
         && fields.get("subject_token").map(String::as_str) == Some(request.user_jwt.as_str())
         && fields.get("subject_token_type").map(String::as_str) == Some(JWT_TOKEN_TYPE)
         && fields.get("audience").map(String::as_str) == Some(request.audience.as_str())
-        && fields.get("scope").map(String::as_str) == request.scope.as_deref();
+        && fields.get("scope").map(String::as_str) == request.scope.as_deref()
+        && fields.get("token_profile").map(String::as_str) == Some(request.token_profile.as_str());
     if !valid {
         return Err(ManagerError::InvalidResponse(
             "Manager token bridge rejected unexpected token exchange fields".to_string(),
@@ -405,6 +425,7 @@ mod tests {
             ("subject_token", user_jwt),
             ("subject_token_type", JWT_TOKEN_TYPE),
             ("audience", audience),
+            ("token_profile", ManagerTokenProfile::Session.as_str()),
         ];
         if let Some(scope) = scope {
             form.push(("scope", scope));
@@ -453,6 +474,7 @@ mod tests {
                     "user-jwt".to_string(),
                     "robot:r1".to_string(),
                     None,
+                    ManagerTokenProfile::Session,
                 )
                 .await
         });
@@ -508,6 +530,7 @@ mod tests {
                     "user-jwt".to_string(),
                     "robot:r1".to_string(),
                     None,
+                    ManagerTokenProfile::Session,
                 )
                 .await
         });
@@ -547,6 +570,7 @@ mod tests {
                     "secret-user-jwt".to_string(),
                     "robot:r9".to_string(),
                     Some("smcp:connect".to_string()),
+                    ManagerTokenProfile::Session,
                 )
                 .await
         });
@@ -559,6 +583,22 @@ mod tests {
                     9,
                     &valid_form("different-jwt", "robot:r9", Some("smcp:connect")),
                 )
+                .await,
+            Err(ManagerError::InvalidResponse(_))
+        ));
+
+        let legacy_form = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs([
+                ("grant_type", TOKEN_EXCHANGE_GRANT_TYPE),
+                ("subject_token", "secret-user-jwt"),
+                ("subject_token_type", JWT_TOKEN_TYPE),
+                ("audience", "robot:r9"),
+                ("scope", "smcp:connect"),
+            ])
+            .finish();
+        assert!(matches!(
+            bridge
+                .begin_transport(&request.request_id, 9, &legacy_form)
                 .await,
             Err(ManagerError::InvalidResponse(_))
         ));

@@ -30,6 +30,7 @@ export type ComputerRuntimeEventCause =
   | { kind: 'lifecycle_changed'; state: ComputerRuntimeSnapshot['lifecycle'] }
   | { kind: 'config_revision_bumped'; revision: number }
   | { kind: 'capability_revision_bumped'; revision: number }
+  | { kind: 'diagnostics_changed'; revision: number }
   | {
       kind: 'client_connection_state_changed';
       revision: number;

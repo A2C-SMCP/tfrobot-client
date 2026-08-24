@@ -476,7 +476,8 @@ pub(crate) fn is_auth_header_name(key: &str) -> bool {
 pub struct ExchangedToken {
     pub access_token: String,
     pub token_type: String,
-    /// 有效期秒数（server 默认 300）。上层据此计算 `expires_at - 60s` 预刷新重连。
+    /// Server-controlled validity in seconds. Preserved for token-source cache semantics; the
+    /// client does not schedule a healthy-connection teardown from this value.
     pub expires_in: i64,
     pub scope: Option<String>,
 }

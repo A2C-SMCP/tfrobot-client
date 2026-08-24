@@ -23,7 +23,9 @@ use crate::services::manager_client::{
     SwitchedManagerAccount, UserInfo,
 };
 use crate::services::manager_environment::ManagerEnvironment;
-use crate::services::manager_token_bridge::{ManagerTokenBridge, ManagerTokenBridgeSink};
+use crate::services::manager_token_bridge::{
+    ManagerTokenBridge, ManagerTokenBridgeSink, ManagerTokenProfile,
+};
 use crate::services::settings::{
     ManagerSessionConfig, ManagerSessionConfigError, PersistedManagerSession, SettingsService,
     MANAGER_SESSION_SCHEMA_VERSION,
@@ -610,6 +612,7 @@ impl ManagerContextCoordinator {
                 material.user_jwt,
                 format!("robot:{robot_account_id}"),
                 scope,
+                ManagerTokenProfile::Session,
             )
             .await;
         let outcome = ManagerRequestOutcome { generation, result };

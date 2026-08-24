@@ -375,6 +375,7 @@ pub struct ComputerRuntimeSnapshot {
     pub actions: ComputerRuntimeActionCapabilities,
     pub config_revision: u64,
     pub capability_revision: u64,
+    pub diagnostics_revision: u64,
     pub mcp_servers: usize,
     pub active_mcp_servers: usize,
     pub tools: usize,
@@ -401,6 +402,7 @@ impl ComputerRuntimeSnapshot {
             actions: ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle),
             config_revision: snapshot.config_revision,
             capability_revision: snapshot.capability_revision,
+            diagnostics_revision: snapshot.diagnostics_revision,
             mcp_servers: snapshot.mcp_servers,
             active_mcp_servers: snapshot.active_mcp_servers,
             tools: snapshot.tools,
@@ -437,6 +439,9 @@ pub enum ComputerRuntimeEventCause {
         revision: u64,
     },
     CapabilityRevisionBumped {
+        revision: u64,
+    },
+    DiagnosticsChanged {
         revision: u64,
     },
     #[serde(rename = "oauth_status_changed")]
@@ -476,6 +481,7 @@ impl From<ComputerEvent> for ComputerRuntimeEventCause {
             ComputerEvent::CapabilityRevisionBumped { revision } => {
                 Self::CapabilityRevisionBumped { revision }
             }
+            ComputerEvent::DiagnosticsChanged { revision } => Self::DiagnosticsChanged { revision },
             ComputerEvent::OAuthStatusChanged { bundle_id, status } => Self::OAuthStatusChanged {
                 bundle_id: bundle_id.into_string(),
                 status: status.into(),
@@ -496,6 +502,7 @@ impl ComputerRuntimeEventCause {
             Self::CapabilityRevisionBumped { revision } => {
                 snapshot.capability_revision == *revision
             }
+            Self::DiagnosticsChanged { revision } => snapshot.diagnostics_revision == *revision,
             Self::OAuthStatusChanged { .. } => true,
             Self::ClientConnectionStateChanged { revision, status } => {
                 connection.revision == *revision && connection.status == *status
@@ -590,6 +597,8 @@ mod tests {
             skills: 6,
             last_error: Some("runtime_error".to_string()),
             degraded_reason: None,
+            diagnostics_revision: 0,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -634,6 +643,7 @@ mod tests {
         assert_eq!(snapshot.user_state, ComputerRuntimeUserState::Degraded);
         assert_eq!(snapshot.config_revision, 2);
         assert_eq!(snapshot.capability_revision, 3);
+        assert_eq!(snapshot.diagnostics_revision, 0);
         assert!(snapshot.is_running());
     }
 
@@ -680,6 +690,31 @@ mod tests {
             })
         );
         assert!(!value.to_string().contains("sensitive-provider-diagnostic"));
+    }
+
+    #[test]
+    fn diagnostics_changed_event_is_forwarded_as_a_secret_free_resync_hint() {
+        let cause =
+            ComputerRuntimeEventCause::from(ComputerEvent::DiagnosticsChanged { revision: 17 });
+
+        assert_eq!(
+            serde_json::to_value(cause).unwrap(),
+            serde_json::json!({ "kind": "diagnostics_changed", "revision": 17 })
+        );
+    }
+
+    #[test]
+    fn stale_diagnostics_cause_is_not_attached_to_a_newer_snapshot() {
+        let mut snapshot = sdk_snapshot(LifecycleState::Started);
+        snapshot.diagnostics_revision = 18;
+        let event = ComputerRuntimeStatusEvent::from_observation(
+            "computer-a".to_string(),
+            ComputerRuntimeEventCause::DiagnosticsChanged { revision: 17 },
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, snapshot),
+            connection_state(0, false),
+        );
+
+        assert_eq!(event.cause, ComputerRuntimeEventCause::ObservationAdvanced);
     }
 
     #[test]
