@@ -16,12 +16,22 @@ use crate::AppState;
 use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::State;
 use tokio::time::{timeout, Duration};
 
 const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MANAGER_AUTH_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const MANAGER_AUTH_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+
+type ManagerTokenExchange = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<ExchangedToken, ManagerError>> + Send + 'static>>
+        + Send
+        + Sync,
+>;
 
 /// 单调代际号：连接快照与 Manager generation 共同隔离手动断开、改连及身份切换。
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -1230,39 +1240,67 @@ fn manager_socketio_auth_provider(
     scope: Option<String>,
     initial_access_token: String,
 ) -> SocketIoAuthProvider {
-    let refresh_provider: SocketIoAuthProvider = Arc::new(move || {
+    let exchange: ManagerTokenExchange = Arc::new(move || {
         let manager_context = manager_context.clone();
         let robot_account_id = robot_account_id.clone();
         let scope = scope.clone();
         Box::pin(async move {
-            match manager_context
+            manager_context
                 .exchange_token_for_generation(manager_generation, &robot_account_id, scope)
                 .await
-            {
-                Ok(token) => serde_json::json!({ "token": token.access_token }),
-                Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
-                    // Manager Context owns auth-expired publication and credential cleanup. Its
-                    // registered consumer disconnects Manager-owned runtimes; returning an empty
-                    // auth dict ensures no stale credential is replayed meanwhile.
-                    log::warn!("Manager Socket.IO auth stopped because the session is unavailable");
-                    serde_json::json!({})
-                }
-                Err(ManagerError::ContextChanged) => {
-                    log::info!("Manager Socket.IO auth ignored a stale generation");
-                    serde_json::json!({})
-                }
-                Err(ManagerError::SigningUnavailable { .. } | ManagerError::NetworkError(_)) => {
-                    log::warn!("Manager Socket.IO auth exchange failed transiently");
-                    serde_json::json!({})
-                }
-                Err(_) => {
-                    log::error!("Manager Socket.IO auth exchange failed permanently");
-                    serde_json::json!({})
+        })
+    });
+    let refresh_provider = retrying_manager_socketio_auth_provider(
+        exchange,
+        MANAGER_AUTH_RETRY_INITIAL_DELAY,
+        MANAGER_AUTH_RETRY_MAX_DELAY,
+    );
+    seeded_socketio_auth_provider(initial_access_token, refresh_provider)
+}
+
+fn retrying_manager_socketio_auth_provider(
+    exchange: ManagerTokenExchange,
+    initial_delay: Duration,
+    max_delay: Duration,
+) -> SocketIoAuthProvider {
+    Arc::new(move || {
+        let exchange = exchange.clone();
+        Box::pin(async move {
+            let mut retry_delay = initial_delay;
+            loop {
+                match exchange().await {
+                    Ok(token) => return serde_json::json!({ "token": token.access_token }),
+                    Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
+                        // Manager Context owns auth-expired publication and credential cleanup. Its
+                        // registered consumer disconnects Manager-owned runtimes; returning an empty
+                        // auth dict ensures no stale credential is replayed meanwhile.
+                        log::warn!(
+                            "Manager Socket.IO auth stopped because the session is unavailable"
+                        );
+                        return serde_json::json!({});
+                    }
+                    Err(ManagerError::ContextChanged) => {
+                        log::info!("Manager Socket.IO auth ignored a stale generation");
+                        return serde_json::json!({});
+                    }
+                    Err(
+                        ManagerError::SigningUnavailable { .. } | ManagerError::NetworkError(_),
+                    ) => {
+                        log::warn!(
+                            "Manager Socket.IO auth exchange failed transiently; retrying in {} ms",
+                            retry_delay.as_millis()
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay.saturating_mul(2).min(max_delay);
+                    }
+                    Err(_) => {
+                        log::error!("Manager Socket.IO auth exchange failed permanently");
+                        return serde_json::json!({});
+                    }
                 }
             }
         })
-    });
-    seeded_socketio_auth_provider(initial_access_token, refresh_provider)
+    })
 }
 
 fn seeded_socketio_auth_provider(
@@ -1290,11 +1328,6 @@ fn seeded_socketio_auth_provider(
 }
 
 /// 用动态 auth provider 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
-///
-/// Known upstream limitation: after a transport-level automatic reconnect, rust-sdk refreshes
-/// CONNECT auth but does not yet re-emit `join_office` (A2C-SMCP/rust-sdk#204). TFRC-123 accepts
-/// this narrow risk for now. Session-token expiry alone does not tear down a healthy connection;
-/// the limitation requires an actual network/server disconnect. Remove this note after #204 lands.
 async fn build_and_join(
     runtime: &ComputerInstanceRuntime,
     operation_token: ClientConnectionOperationToken,
@@ -1948,5 +1981,43 @@ mod tests {
         assert_eq!(provider().await, serde_json::json!({ "token": "fresh-1" }));
         assert_eq!(provider().await, serde_json::json!({ "token": "fresh-2" }));
         assert_eq!(refresh_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn manager_auth_provider_retries_transient_exchange_without_emitting_empty_auth() {
+        let exchange_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let exchange: ManagerTokenExchange = {
+            let exchange_count = exchange_count.clone();
+            Arc::new(move || {
+                let attempt = exchange_count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(ManagerError::NetworkError(
+                            "temporary bridge outage".to_string(),
+                        ))
+                    } else {
+                        Ok(ExchangedToken {
+                            access_token: "fresh-after-retry".to_string(),
+                            token_type: "Bearer".to_string(),
+                            expires_in: 300,
+                            scope: None,
+                        })
+                    }
+                })
+            })
+        };
+        let provider = retrying_manager_socketio_auth_provider(
+            exchange,
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        );
+
+        let auth = timeout(Duration::from_secs(1), provider())
+            .await
+            .expect("transient exchange should recover");
+
+        assert_eq!(auth, serde_json::json!({ "token": "fresh-after-retry" }));
+        assert_eq!(exchange_count.load(Ordering::SeqCst), 2);
+        assert_ne!(auth, serde_json::json!({}));
     }
 }

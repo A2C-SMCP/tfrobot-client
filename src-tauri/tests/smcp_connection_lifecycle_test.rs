@@ -203,7 +203,6 @@ async fn start_dynamic_auth_reconnect_server() -> DynamicAuthReconnectServer {
         .expect("bind backend");
     let backend_addr = backend_listener.local_addr().expect("backend address");
     let (auth_tx, auth_rx) = mpsc::unbounded_channel();
-
     let (socket_layer, io) = SocketIo::new_layer();
     io.ns(
         "/smcp",
@@ -392,7 +391,7 @@ async fn agent_client_with_skill_update_listener(
 
 fn ack_cb(
     tx: oneshot::Sender<Value>,
-) -> impl FnMut(Payload, Client) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync {
+) -> impl Fn(Payload, Client) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync {
     let tx = Arc::new(Mutex::new(Some(tx)));
     move |payload: Payload, _client: Client| {
         let tx = tx.clone();
@@ -551,6 +550,7 @@ fn skill_ref(name: &str, source: &str, description: &str, path: &Path) -> A2CSki
         license: None,
         compatibility: None,
         allowed_tools: None,
+        tags: None,
         version: None,
         skill_metadata: None,
     }

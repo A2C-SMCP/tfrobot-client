@@ -21,7 +21,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8", features = ["computer"] }
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "b10afff61c9cf9004cc6883a7b4e13ef8291c2f1", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -79,7 +79,7 @@ hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
 smcp-server-core = "0.2.3"
 socketioxide = { version = "0.16.3", features = ["state"] }
-tf-rust-socketio = "0.8.1"
+tf-rust-socketio = "0.9.0"
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]

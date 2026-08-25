@@ -171,8 +171,26 @@ impl ClientConnectionStateSnapshot {
                 ClientConnectionStatus::Connecting
             }
             Some(ClientConnectionOperation::Disconnect) => ClientConnectionStatus::Disconnecting,
-            None if connection.is_some() => ClientConnectionStatus::Connected,
-            None => ClientConnectionStatus::Disconnected,
+            None if connection.is_none() => ClientConnectionStatus::Disconnected,
+            // A local ConnectionState is durable client context, not transport-liveness proof.
+            // Only the SDK's JoinedOffice lifecycle confirms both a live namespace connection and
+            // current Office membership. Only the SDK's explicit Connecting state is projected as
+            // an SDK-driven reconnect attempt; every other non-member state is disconnected.
+            None => match runtime_state {
+                ComputerRuntimeState::JoinedOffice => ClientConnectionStatus::Connected,
+                ComputerRuntimeState::Connecting => ClientConnectionStatus::Connecting,
+                ComputerRuntimeState::Created
+                | ComputerRuntimeState::Starting
+                | ComputerRuntimeState::Started
+                | ComputerRuntimeState::Connected
+                | ComputerRuntimeState::Syncing
+                | ComputerRuntimeState::Degraded
+                | ComputerRuntimeState::Disconnecting
+                | ComputerRuntimeState::Stopping
+                | ComputerRuntimeState::Stopped
+                | ComputerRuntimeState::Shutdown
+                | ComputerRuntimeState::Error => ClientConnectionStatus::Disconnected,
+            },
         };
         let transition_disabled = ClientConnectionActionCapability::disabled(
             ClientConnectionActionDisabledReason::TransitionInProgress,
@@ -997,6 +1015,7 @@ impl ComputerInstanceRuntime {
             auth_payload,
             headers: headers_to_connect_options(headers),
             namespace: namespace.unwrap_or_default(),
+            ..ConnectOptions::default()
         };
         let options = if options.namespace.trim().is_empty() {
             ConnectOptions {
@@ -1160,5 +1179,117 @@ impl ComputerInstanceRuntime {
 
     pub(super) async fn clear_client_runtime_diagnostic_silent(&self) {
         self.client_runtime_diagnostic.write().await.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection_state() -> ConnectionState {
+        ConnectionState {
+            profile_name: "manager:123".to_string(),
+            url: "https://smcp.invalid".to_string(),
+            office_id: "office-beta".to_string(),
+            computer_name: "公文写作".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:123".to_string()),
+            target_name: Some("Beta Robot".to_string()),
+            employee_id: Some(123),
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn retained_context_follows_sdk_transport_and_office_lifecycle() {
+        let connection = connection_state();
+        let operation = ClientConnectionOperationState::default();
+        let cases = [
+            (
+                ComputerRuntimeState::Created,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Starting,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::JoinedOffice,
+                ClientConnectionStatus::Connected,
+            ),
+            (
+                ComputerRuntimeState::Connecting,
+                ClientConnectionStatus::Connecting,
+            ),
+            (
+                ComputerRuntimeState::Connected,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Syncing,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Degraded,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Started,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Disconnecting,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Stopping,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Stopped,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Shutdown,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Error,
+                ClientConnectionStatus::Disconnected,
+            ),
+        ];
+
+        for (runtime_state, expected) in cases {
+            let snapshot = ClientConnectionStateSnapshot::from_parts(
+                1,
+                Some(&connection),
+                &operation,
+                runtime_state,
+            );
+            assert_eq!(
+                snapshot.status, expected,
+                "unexpected projection for SDK lifecycle {runtime_state}"
+            );
+            assert!(snapshot.present, "retained context must remain inspectable");
+        }
+    }
+
+    #[test]
+    fn explicit_connection_operation_precedes_sdk_lifecycle_projection() {
+        let connection = connection_state();
+        let mut operation = ClientConnectionOperationState::default();
+        operation.operation = Some(ClientConnectionOperation::Reconnect);
+
+        let snapshot = ClientConnectionStateSnapshot::from_parts(
+            1,
+            Some(&connection),
+            &operation,
+            ComputerRuntimeState::JoinedOffice,
+        );
+
+        assert_eq!(snapshot.status, ClientConnectionStatus::Connecting);
+        assert!(!snapshot.actions.connect.enabled);
+        assert!(!snapshot.actions.disconnect.enabled);
     }
 }

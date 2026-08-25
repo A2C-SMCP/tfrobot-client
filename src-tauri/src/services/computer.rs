@@ -3954,7 +3954,7 @@ mod tests {
                     &event.cause,
                     ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 1,
-                        status: ClientConnectionStatus::Connected,
+                        status: ClientConnectionStatus::Disconnected,
                     }
                 )
             })
@@ -3977,7 +3977,7 @@ mod tests {
                     &event.cause,
                     ComputerRuntimeEventCause::ClientConnectionStateChanged {
                         revision: 2,
-                        status: ClientConnectionStatus::Connected,
+                        status: ClientConnectionStatus::Disconnected,
                     }
                 )
             })
@@ -4085,10 +4085,11 @@ mod tests {
 
         first.complete_connection_operation().await;
         let connected = first.connection_snapshot().await;
-        assert_eq!(connected.status, ClientConnectionStatus::Connected);
+        assert_eq!(connected.status, ClientConnectionStatus::Disconnected);
         assert_eq!(connected.revision, 3);
+        assert!(connected.present);
         assert!(connected.operation_target.is_none());
-        assert!(connected.actions.disconnect.enabled);
+        assert!(!connected.actions.disconnect.enabled);
 
         first
             .begin_connection_operation(
@@ -4186,7 +4187,8 @@ mod tests {
 
         assert!(runtime.abort_reconnect_for_generation(7).await);
         let settled = runtime.connection_snapshot().await;
-        assert_eq!(settled.status, ClientConnectionStatus::Connected);
+        assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
+        assert!(settled.present);
         assert_eq!(
             settled.context.and_then(|context| context.target_id),
             Some("target-b".to_string())

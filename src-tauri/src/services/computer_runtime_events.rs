@@ -481,6 +481,9 @@ impl From<ComputerEvent> for ComputerRuntimeEventCause {
             ComputerEvent::CapabilityRevisionBumped { revision } => {
                 Self::CapabilityRevisionBumped { revision }
             }
+            // Per-server status is not part of the public runtime event contract yet. Still emit
+            // an observation so consumers refresh from the authoritative aggregate snapshot.
+            ComputerEvent::MCPServerStatusChanged { .. } => Self::ObservationAdvanced,
             ComputerEvent::DiagnosticsChanged { revision } => Self::DiagnosticsChanged { revision },
             ComputerEvent::OAuthStatusChanged { bundle_id, status } => Self::OAuthStatusChanged {
                 bundle_id: bundle_id.into_string(),
@@ -585,12 +588,17 @@ mod tests {
         ClientConnectionActionCapabilities, ClientConnectionActionCapability,
         ClientConnectionActionDisabledReason,
     };
+    use a2c_smcp::smcp_computer::mcp_clients::model::{
+        BundleId, MCPServerActivationState, MCPServerConnectionState, MCPServerRuntimeStatus,
+        ServerName,
+    };
 
     fn sdk_snapshot(lifecycle: LifecycleState) -> ComputerStatusSnapshot {
         ComputerStatusSnapshot {
             lifecycle,
             config_revision: 2,
             capability_revision: 3,
+            server_status_revision: 0,
             mcp_servers: 4,
             active_mcp_servers: 1,
             tools: 5,
@@ -701,6 +709,23 @@ mod tests {
             serde_json::to_value(cause).unwrap(),
             serde_json::json!({ "kind": "diagnostics_changed", "revision": 17 })
         );
+    }
+
+    #[test]
+    fn mcp_server_status_event_requests_an_aggregate_snapshot_refresh() {
+        let bundle_id = BundleId::try_from("server-a").unwrap();
+        let cause = ComputerRuntimeEventCause::from(ComputerEvent::MCPServerStatusChanged {
+            bundle_id: bundle_id.clone(),
+            status: MCPServerRuntimeStatus {
+                bundle_id,
+                name: ServerName::try_from("Server A").unwrap(),
+                activation: MCPServerActivationState::Started,
+                connection: MCPServerConnectionState::Connected,
+            },
+            revision: 9,
+        });
+
+        assert_eq!(cause, ComputerRuntimeEventCause::ObservationAdvanced);
     }
 
     #[test]

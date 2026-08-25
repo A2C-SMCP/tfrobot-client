@@ -4,12 +4,12 @@ version = 4
 
 [[package]]
 name = "a2c-smcp"
-version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8#5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8"
+version = "0.4.0-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=b10afff61c9cf9004cc6883a7b4e13ef8291c2f1#b10afff61c9cf9004cc6883a7b4e13ef8291c2f1"
 dependencies = [
  "serde",
  "serde_json",
- "smcp 0.3.1",
+ "smcp 0.4.0-dev.0",
  "smcp-computer",
  "thiserror 2.0.18",
  "tokio",
@@ -3082,7 +3082,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5285,7 +5285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6862,8 +6862,8 @@ dependencies = [
 
 [[package]]
 name = "smcp"
-version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8#5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8"
+version = "0.4.0-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=b10afff61c9cf9004cc6883a7b4e13ef8291c2f1#b10afff61c9cf9004cc6883a7b4e13ef8291c2f1"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -6877,11 +6877,11 @@ dependencies = [
 
 [[package]]
 name = "smcp-client-transport"
-version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8#5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8"
+version = "0.4.0-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=b10afff61c9cf9004cc6883a7b4e13ef8291c2f1#b10afff61c9cf9004cc6883a7b4e13ef8291c2f1"
 dependencies = [
  "serde_json",
- "smcp 0.3.1",
+ "smcp 0.4.0-dev.0",
  "tf-rust-engineio",
  "tf-rust-socketio",
  "tracing",
@@ -6889,8 +6889,8 @@ dependencies = [
 
 [[package]]
 name = "smcp-computer"
-version = "0.3.1"
-source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8#5cf5e8bbd0b48fb0322236462ed4a32d8a7d61b8"
+version = "0.4.0-dev.0"
+source = "git+https://github.com/A2C-SMCP/rust-sdk.git?rev=b10afff61c9cf9004cc6883a7b4e13ef8291c2f1#b10afff61c9cf9004cc6883a7b4e13ef8291c2f1"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -6921,7 +6921,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "smcp 0.3.1",
+ "smcp 0.4.0-dev.0",
  "smcp-client-transport",
  "sse-stream",
  "tar",
@@ -7845,9 +7845,9 @@ dependencies = [
 
 [[package]]
 name = "tf-rust-engineio"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86c6ddbc7f08807da7c7604e452943de6c248406e0d73258e30c506b5fc79323"
+checksum = "6ca81c71fed001e67a5422b8b9bc2efa52e305f08c0d3755d814993a44163301"
 dependencies = [
  "adler32",
  "async-stream",
@@ -7869,9 +7869,9 @@ dependencies = [
 
 [[package]]
 name = "tf-rust-socketio"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc40a5f3adf357af456b0046fce9ebcd584e6a7eac08186d0661429496b9b339"
+checksum = "daa10a05ae15c0915e2bf59eec014184319616b50cfdb34a13399ec15ba4c975"
 dependencies = [
  "adler32",
  "async-stream",
