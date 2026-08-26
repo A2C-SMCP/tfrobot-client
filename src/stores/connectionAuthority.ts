@@ -1,4 +1,5 @@
 import type { ComputerRuntimeSnapshot } from './runtimeSnapshot';
+import { debug } from '@/utils/logger';
 
 export interface ConnectionStateSummary {
   url: string;
@@ -130,7 +131,19 @@ export function setClientConnectionAuthority(
         )
       )
     )
-  )) return;
+  )) {
+    const reason = runtime.incarnation < current.incarnation
+      ? 'older_runtime_incarnation'
+      : normalized.revision < current.revision
+        ? 'older_connection_revision'
+        : runtime.generation < current.runtime_generation
+          ? 'older_runtime_generation'
+          : 'non_newer_snapshot_revision';
+    debug(
+      `connection.authority_rejected layer=frontend instance_id=${instanceId} reason=${reason} incoming_incarnation=${runtime.incarnation} current_incarnation=${current.incarnation} incoming_connection_revision=${normalized.revision} current_connection_revision=${current.revision} incoming_runtime_generation=${runtime.generation} current_runtime_generation=${current.runtime_generation} incoming_snapshot_revision=${runtime.snapshot_revision} current_snapshot_revision=${current.runtime_snapshot_revision}`,
+    );
+    return;
+  }
   authorities.set(instanceId, {
     ...normalized,
     context: normalized.present ? normalized.context ?? null : null,

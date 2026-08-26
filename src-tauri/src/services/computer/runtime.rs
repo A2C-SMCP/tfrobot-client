@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::observability::CONNECTION_LOG_TARGET;
 #[cfg(test)]
 use a2c_smcp::smcp_computer::oauth::OAuthStatus;
 use a2c_smcp::smcp_computer::ComputerEvent;
@@ -359,20 +360,56 @@ impl ComputerInstanceRuntime {
                 let Some(sink) = sink.read().await.clone() else {
                     break;
                 };
-                let event = ComputerRuntimeStatusEvent::from_observation(
-                    instance_id.clone(),
-                    cause,
-                    runtime_snapshot.clone(),
-                    {
-                        let connection = connection.read().await;
-                        let operation = connection_operation.read().await;
+                let (connection_snapshot, connection_generation) = {
+                    let connection = connection.read().await;
+                    let operation = connection_operation.read().await;
+                    (
                         ClientConnectionStateSnapshot::from_parts(
                             connection_authority_revision.load(Ordering::Acquire),
                             connection.as_ref(),
                             &operation,
                             runtime_snapshot.lifecycle,
-                        )
-                    },
+                        ),
+                        connection.as_ref().map(|connection| connection.generation),
+                    )
+                };
+                match &cause {
+                    ComputerRuntimeEventCause::LifecycleChanged { state }
+                        if connection_snapshot.present =>
+                    {
+                        tracing::debug!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.sdk_lifecycle_changed",
+                            instance_id = %instance_id,
+                            runtime_incarnation = incarnation,
+                            runtime_generation = generation,
+                            snapshot_revision = runtime_snapshot.snapshot_revision,
+                            connection_generation,
+                            sdk_lifecycle = ?state,
+                            projected_status = ?connection_snapshot.status,
+                            connection_revision = connection_snapshot.revision,
+                            "observed SDK lifecycle change for an SMCP connection"
+                        );
+                    }
+                    ComputerRuntimeEventCause::Resync { skipped_events } => {
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.runtime_event_resync",
+                            instance_id = %instance_id,
+                            runtime_incarnation = incarnation,
+                            runtime_generation = generation,
+                            skipped_events,
+                            connection_present = connection_snapshot.present,
+                            "runtime event relay lagged and rebuilt connection projection"
+                        );
+                    }
+                    _ => {}
+                }
+                let event = ComputerRuntimeStatusEvent::from_observation(
+                    instance_id.clone(),
+                    cause,
+                    runtime_snapshot.clone(),
+                    connection_snapshot,
                 );
                 if let Err(error) = sink.emit(&event) {
                     log::warn!(

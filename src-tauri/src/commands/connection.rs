@@ -11,7 +11,10 @@ use crate::services::manager_client::{
     ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
 };
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
-use crate::services::observability::{ActivityEventDraft, ActivityLevel, ActivityOutcome};
+use crate::services::observability::{
+    classify_connection_error, redact_text, sanitize_connection_endpoint, ActivityEventDraft,
+    ActivityLevel, ActivityOutcome, CONNECTION_LOG_TARGET,
+};
 use crate::AppState;
 use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tauri::State;
 use tokio::time::{timeout, Duration};
 
@@ -33,11 +37,25 @@ type ManagerTokenExchange = Arc<
         + Sync,
 >;
 
+#[derive(Clone)]
+struct ManagerAuthDiagnostics {
+    instance_id: String,
+    origin_operation_id: uuid::Uuid,
+    origin_operation_epoch: u64,
+    runtime_generation: u64,
+    manager_generation: u64,
+    connection_generation: u64,
+}
+
 /// 单调代际号：连接快照与 Manager generation 共同隔离手动断开、改连及身份切换。
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn next_generation() -> u64 {
     CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn should_warn_manager_auth_retry(attempt: u64) -> bool {
+    attempt.is_power_of_two()
 }
 
 /// Manager 驱动连接所需的解析结果。
@@ -272,6 +290,68 @@ async fn connect_connection_target_with_policy(
     target_id: &str,
     required_policy_target: Option<&ComputerConnectionTarget>,
 ) -> Result<(), String> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANUAL_SMCP,
+        target_id = %target_id,
+        policy_driven = required_policy_target.is_some(),
+        "manual SMCP connection requested"
+    );
+    let result = connect_connection_target_with_policy_inner_impl(
+        state,
+        instance_id,
+        target_id,
+        required_policy_target,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANUAL_SMCP,
+            target_id = %target_id,
+            policy_driven = required_policy_target.is_some(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "manual SMCP connection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANUAL_SMCP,
+            target_id = %target_id,
+            policy_driven = required_policy_target.is_some(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(error),
+            error = %redact_text(error),
+            "manual SMCP connection request failed"
+        ),
+    }
+    result
+}
+
+async fn connect_connection_target_with_policy_inner_impl(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
+    required_policy_target: Option<&ComputerConnectionTarget>,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), String> {
     // The connection mutation is a two-phase transaction. Validate its authoritative inputs and
     // publish the operation token under the Computer lifecycle lock, then release the lock before
     // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
@@ -315,6 +395,23 @@ async fn connect_connection_target_with_policy(
         },
     )
     .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANUAL_SMCP,
+        target_id = %target.id,
+        endpoint = %sanitize_connection_endpoint(&target.url),
+        office_id = %target.office_id,
+        auth_present = api_key.as_deref().is_some_and(|value| !value.is_empty()),
+        header_count = target.headers.len(),
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "manual SMCP connection preflight completed"
+    );
     drop(lifecycle_guard);
     drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token).await?;
@@ -362,7 +459,17 @@ async fn connect_connection_target_with_policy(
                     },
                 )
                 .await?;
-            commit_manual_connection_target(
+            let commit_started = Instant::now();
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.commit_started",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                "committing manual SMCP connection target"
+            );
+            let commit_result = commit_manual_connection_target(
                 state,
                 &runtime,
                 operation_token,
@@ -371,7 +478,23 @@ async fn connect_connection_target_with_policy(
                 api_key.as_deref(),
                 &profile_snapshot,
             )
-            .await
+            .await;
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.commit_completed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                elapsed_ms = commit_started.elapsed().as_millis() as u64,
+                outcome = if commit_result.is_ok() { "succeeded" } else { "failed" },
+                error_kind = commit_result
+                    .as_ref()
+                    .err()
+                    .map(|error| classify_connection_error(error)),
+                "manual SMCP connection commit completed"
+            );
+            commit_result
         }
         .await;
         if result.is_err() {
@@ -607,6 +730,49 @@ pub async fn disconnect_smcp(
 }
 
 pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "disconnect",
+        "SMCP disconnection requested"
+    );
+    let result = disconnect_smcp_inner(state, instance_id, request_id, requested_at).await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SMCP disconnection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(error),
+            error = %redact_text(error),
+            "SMCP disconnection request failed"
+        ),
+    }
+    result
+}
+
+async fn disconnect_smcp_inner(
+    state: &AppState,
+    instance_id: &str,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), String> {
     // Publish the operation while the authoritative runtime is protected, release the global
     // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
     let instance_id = require_instance_id(instance_id)?.to_string();
@@ -625,10 +791,23 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
 
     let current = runtime.connection_snapshot().await;
     if !current.actions.disconnect.enabled {
-        return Err(format!(
+        let error = format!(
             "Connection disconnect action is unavailable: {:?}",
             current.actions.disconnect.disabled_reason
-        ));
+        );
+        tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.operation_rejected",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            connection_revision = current.revision,
+            status = ?current.status,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error),
+            "SMCP disconnection action was unavailable"
+        );
+        return Err(error);
     }
     let operation_token = runtime
         .begin_connection_operation(
@@ -643,11 +822,44 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
                 }),
         )
         .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.disconnect_started",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        connection_revision = current.revision,
+        source_type = current
+            .context
+            .as_ref()
+            .map(|context| context.source_type.as_str())
+            .unwrap_or("unknown"),
+        target_id = current
+            .context
+            .as_ref()
+            .and_then(|context| context.target_id.as_deref())
+            .unwrap_or("none"),
+        "SMCP transport teardown started"
+    );
     if let Err(error) = runtime
         .ensure_runtime_action(ComputerRuntimeAction::Disconnect)
         .await
     {
         let message = error.to_string();
+        tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.disconnect_failed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&message),
+            error = %redact_text(&message),
+            "runtime rejected SMCP disconnection"
+        );
         runtime
             .reconcile_disconnect_failure_for_token(operation_token, message.clone())
             .await;
@@ -658,6 +870,18 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
 
     if runtime.has_smcp_transport().await {
         if let Err(error) = close_smcp_transport(&runtime).await {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.disconnect_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                elapsed_ms = requested_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SMCP transport teardown failed"
+            );
             let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
             let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
             if state
@@ -692,6 +916,19 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
             "Disconnect operation was superseded by a runtime lifecycle change".to_string(),
         );
     }
+
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.disconnect_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        outcome = "succeeded",
+        "SMCP disconnection completed"
+    );
 
     if let Err(error) = state
         .observability
@@ -804,11 +1041,83 @@ pub async fn manager_connect_smcp_core(
     employee_id: u64,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        "Manager Robot SMCP connection requested"
+    );
+    let result = manager_connect_smcp_inner(
+        state,
+        instance_id,
+        employee_id,
+        scope,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot SMCP connection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error.to_string()),
+            error = %redact_text(&error.to_string()),
+            "Manager Robot SMCP connection request failed"
+        ),
+    }
+    result
+}
+
+async fn manager_connect_smcp_inner(
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+    scope: Option<String>,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), ManagerError> {
     let instance_id = require_instance_id(instance_id)
         .map_err(ManagerError::InvalidResponse)?
         .to_string();
     let (runtime, operation_token, profile_snapshot) =
         begin_manager_connect(state, &instance_id, employee_id, None).await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "Manager Robot connection preflight completed"
+    );
     let result = async {
         let manager_generation = state
             .manager_context
@@ -826,9 +1135,24 @@ pub async fn manager_connect_smcp_core(
             scope,
         )
         .await?;
-        log::info!(
-            "manager_connect_smcp: employee_id={employee_id} resolved_robot_account_id={}",
-            params.robot_account_id
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.manager_target_resolved",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            employee_id,
+            endpoint = %sanitize_connection_endpoint(&params.url),
+            office_id = %params.office_id,
+            header_count = params.routing_headers.len(),
+            namespace_present = params
+                .robot_binding
+                .namespace
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            "Manager connection-info resolved"
         );
         runtime
             .ensure_connection_operation(operation_token)
@@ -836,14 +1160,57 @@ pub async fn manager_connect_smcp_core(
             .map_err(ManagerError::InvalidResponse)?;
 
         // 换短 JWT时只使用同一 generation 下刚解析出的 robotAccountId。
-        let token = state
+        let token_exchange_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_started",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial",
+            "Manager Robot token exchange started"
+        );
+        let token_result = state
             .manager_context
             .exchange_token_for_generation(
                 manager_generation,
                 &params.robot_account_id,
                 params.scope.clone(),
             )
-            .await?;
+            .await;
+        if let Err(error) = &token_result {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_exchange_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                manager_generation,
+                auth_phase = "initial",
+                elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+                retryable = false,
+                error_kind = classify_connection_error(&error.to_string()),
+                error = %redact_text(&error.to_string()),
+                "Manager Robot token exchange failed"
+            );
+        }
+        let token = token_result?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_completed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial",
+            elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot token exchange completed"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -878,6 +1245,70 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     employee_id: u64,
     required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        policy_driven = true,
+        "Manager Robot policy connection requested"
+    );
+    let result = connect_manager_robot_target_for_policy_inner(
+        state,
+        instance_id,
+        expected_context_key,
+        employee_id,
+        required_policy_target,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            policy_driven = true,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot policy connection completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            policy_driven = true,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error.to_string()),
+            error = %redact_text(&error.to_string()),
+            "Manager Robot policy connection failed"
+        ),
+    }
+    result
+}
+
+async fn connect_manager_robot_target_for_policy_inner(
+    state: &AppState,
+    instance_id: &str,
+    expected_context_key: &ManagerContextKey,
+    employee_id: u64,
+    required_policy_target: &ComputerConnectionTarget,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), ManagerError> {
     let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
         state,
         instance_id,
@@ -885,6 +1316,20 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
         Some(required_policy_target),
     )
     .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        policy_driven = true,
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "Manager Robot policy connection preflight completed"
+    );
     let result = async {
         let manager_generation = match state
             .manager_context
@@ -932,18 +1377,80 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             None,
         )
         .await?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.manager_target_resolved",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            employee_id,
+            endpoint = %sanitize_connection_endpoint(&params.url),
+            office_id = %params.office_id,
+            header_count = params.routing_headers.len(),
+            namespace_present = params
+                .robot_binding
+                .namespace
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            "Manager connection-info resolved for policy connection"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
-        let token = state
+        let token_exchange_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_started",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial_policy",
+            "Manager Robot policy token exchange started"
+        );
+        let token_result = state
             .manager_context
             .exchange_token_for_generation(
                 manager_generation,
                 &params.robot_account_id,
                 params.scope.clone(),
             )
-            .await?;
+            .await;
+        if let Err(error) = &token_result {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_exchange_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                manager_generation,
+                auth_phase = "initial_policy",
+                elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+                retryable = false,
+                error_kind = classify_connection_error(&error.to_string()),
+                error = %redact_text(&error.to_string()),
+                "Manager Robot policy token exchange failed"
+            );
+        }
+        let token = token_result?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_completed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial_policy",
+            elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot policy token exchange completed"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -1239,6 +1746,7 @@ fn manager_socketio_auth_provider(
     robot_account_id: String,
     scope: Option<String>,
     initial_access_token: String,
+    diagnostics: ManagerAuthDiagnostics,
 ) -> SocketIoAuthProvider {
     let exchange: ManagerTokenExchange = Arc::new(move || {
         let manager_context = manager_context.clone();
@@ -1254,47 +1762,177 @@ fn manager_socketio_auth_provider(
         exchange,
         MANAGER_AUTH_RETRY_INITIAL_DELAY,
         MANAGER_AUTH_RETRY_MAX_DELAY,
+        Some(diagnostics.clone()),
     );
-    seeded_socketio_auth_provider(initial_access_token, refresh_provider)
+    seeded_socketio_auth_provider(initial_access_token, refresh_provider, Some(diagnostics))
 }
 
 fn retrying_manager_socketio_auth_provider(
     exchange: ManagerTokenExchange,
     initial_delay: Duration,
     max_delay: Duration,
+    diagnostics: Option<ManagerAuthDiagnostics>,
 ) -> SocketIoAuthProvider {
     Arc::new(move || {
         let exchange = exchange.clone();
+        let diagnostics = diagnostics.clone();
         Box::pin(async move {
+            let reconnect_attempt_id = uuid::Uuid::new_v4();
+            let reconnect_started = Instant::now();
             let mut retry_delay = initial_delay;
+            let mut attempt = 0_u64;
             loop {
+                attempt += 1;
+                let exchange_started = Instant::now();
+                tracing::debug!(
+                    target: CONNECTION_LOG_TARGET,
+                    event = "connection.auth_exchange_started",
+                    instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                    origin_operation_id = diagnostics
+                        .as_ref()
+                        .map(|value| value.origin_operation_id.to_string()),
+                    origin_operation_epoch = diagnostics
+                        .as_ref()
+                        .map(|value| value.origin_operation_epoch),
+                    reconnect_attempt_id = %reconnect_attempt_id,
+                    runtime_generation = diagnostics.as_ref().map(|value| value.runtime_generation),
+                    manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                    connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                    auth_phase = "refresh",
+                    attempt,
+                    "Manager Socket.IO reconnect auth exchange started"
+                );
                 match exchange().await {
-                    Ok(token) => return serde_json::json!({ "token": token.access_token }),
+                    Ok(token) => {
+                        tracing::debug!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_completed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            origin_operation_epoch = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_epoch),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            runtime_generation = diagnostics.as_ref().map(|value| value.runtime_generation),
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            exchange_elapsed_ms = exchange_started.elapsed().as_millis() as u64,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            outcome = "succeeded",
+                            "Manager Socket.IO reconnect auth exchange completed"
+                        );
+                        return serde_json::json!({ "token": token.access_token });
+                    }
                     Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
                         // Manager Context owns auth-expired publication and credential cleanup. Its
                         // registered consumer disconnects Manager-owned runtimes; returning an empty
                         // auth dict ensures no stale credential is replayed meanwhile.
-                        log::warn!(
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "session_unavailable",
                             "Manager Socket.IO auth stopped because the session is unavailable"
                         );
                         return serde_json::json!({});
                     }
                     Err(ManagerError::ContextChanged) => {
-                        log::info!("Manager Socket.IO auth ignored a stale generation");
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "context_changed",
+                            "Manager Socket.IO auth ignored a stale generation"
+                        );
                         return serde_json::json!({});
                     }
                     Err(
                         ManagerError::SigningUnavailable { .. } | ManagerError::NetworkError(_),
                     ) => {
-                        log::warn!(
-                            "Manager Socket.IO auth exchange failed transiently; retrying in {} ms",
-                            retry_delay.as_millis()
-                        );
+                        if should_warn_manager_auth_retry(attempt) {
+                            tracing::warn!(
+                                target: CONNECTION_LOG_TARGET,
+                                event = "connection.auth_exchange_retry",
+                                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                                origin_operation_id = diagnostics
+                                    .as_ref()
+                                    .map(|value| value.origin_operation_id.to_string()),
+                                reconnect_attempt_id = %reconnect_attempt_id,
+                                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                                auth_phase = "refresh",
+                                attempt,
+                                retryable = true,
+                                retry_delay_ms = retry_delay.as_millis() as u64,
+                                error_kind = "transient_manager_error",
+                                sampling = "power_of_two",
+                                "Manager Socket.IO auth exchange is still retrying"
+                            );
+                        } else {
+                            tracing::debug!(
+                                target: CONNECTION_LOG_TARGET,
+                                event = "connection.auth_exchange_retry",
+                                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                                origin_operation_id = diagnostics
+                                    .as_ref()
+                                    .map(|value| value.origin_operation_id.to_string()),
+                                reconnect_attempt_id = %reconnect_attempt_id,
+                                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                                auth_phase = "refresh",
+                                attempt,
+                                retryable = true,
+                                retry_delay_ms = retry_delay.as_millis() as u64,
+                                error_kind = "transient_manager_error",
+                                sampling = "debug_detail",
+                                "Manager Socket.IO auth exchange failed transiently"
+                            );
+                        }
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = retry_delay.saturating_mul(2).min(max_delay);
                     }
                     Err(_) => {
-                        log::error!("Manager Socket.IO auth exchange failed permanently");
+                        tracing::error!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "terminal_manager_error",
+                            "Manager Socket.IO auth exchange failed permanently"
+                        );
                         return serde_json::json!({});
                     }
                 }
@@ -1306,6 +1944,7 @@ fn retrying_manager_socketio_auth_provider(
 fn seeded_socketio_auth_provider(
     initial_access_token: String,
     refresh_provider: SocketIoAuthProvider,
+    diagnostics: Option<ManagerAuthDiagnostics>,
 ) -> SocketIoAuthProvider {
     // The seed is consumed by the SDK's initial CONNECT while the Manager generation commit lock
     // is held. Later invocations happen only for SDK-driven network reconnects and perform a fresh
@@ -1320,8 +1959,38 @@ fn seeded_socketio_auth_provider(
             }
         };
         if let Some(access_token) = seeded {
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_provider_invoked",
+                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                operation_id = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_id.to_string()),
+                operation_epoch = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_epoch),
+                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                auth_phase = "initial",
+                "Manager Socket.IO auth provider supplied the initial credential"
+            );
             Box::pin(async move { serde_json::json!({ "token": access_token }) })
         } else {
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_provider_invoked",
+                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                origin_operation_id = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_id.to_string()),
+                origin_operation_epoch = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_epoch),
+                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                auth_phase = "refresh",
+                "Manager Socket.IO auth provider requested a refreshed credential"
+            );
             refresh_provider()
         }
     })
@@ -1423,6 +2092,14 @@ async fn establish_manager_connection(
                     params.robot_account_id.clone(),
                     params.scope.clone(),
                     token.access_token.clone(),
+                    ManagerAuthDiagnostics {
+                        instance_id: instance_id.to_string(),
+                        origin_operation_id: operation_token.diagnostic_id(),
+                        origin_operation_epoch: operation_token.epoch(),
+                        runtime_generation: runtime.runtime_generation(),
+                        manager_generation,
+                        connection_generation: generation,
+                    },
                 );
                 build_and_join(runtime, operation_token, &params, auth_provider, generation)
                     .await
@@ -1975,12 +2652,21 @@ mod tests {
                 Box::pin(async move { serde_json::json!({ "token": format!("fresh-{sequence}") }) })
             })
         };
-        let provider = seeded_socketio_auth_provider("initial".to_string(), refresh_provider);
+        let provider = seeded_socketio_auth_provider("initial".to_string(), refresh_provider, None);
 
         assert_eq!(provider().await, serde_json::json!({ "token": "initial" }));
         assert_eq!(provider().await, serde_json::json!({ "token": "fresh-1" }));
         assert_eq!(provider().await, serde_json::json!({ "token": "fresh-2" }));
         assert_eq!(refresh_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn manager_auth_retry_warns_only_at_power_of_two_attempts() {
+        let warned = (1_u64..=10)
+            .filter(|attempt| should_warn_manager_auth_retry(*attempt))
+            .collect::<Vec<_>>();
+
+        assert_eq!(warned, vec![1, 2, 4, 8]);
     }
 
     #[tokio::test]
@@ -2010,6 +2696,7 @@ mod tests {
             exchange,
             Duration::from_millis(1),
             Duration::from_millis(2),
+            None,
         );
 
         let auth = timeout(Duration::from_secs(1), provider())

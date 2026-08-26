@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { debug } from '@tauri-apps/plugin-log';
 import { useComputerStore } from '@/stores/computerStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
@@ -16,6 +17,7 @@ import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
+const mockedDebug = vi.mocked(debug);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,6 +40,7 @@ describe('runtimeStore', () => {
     useSkillStore.getState().reset();
     mockedInvoke.mockReset();
     mockedListen.mockReset();
+    mockedDebug.mockReset();
     mockedListen.mockResolvedValue(() => {});
   });
 
@@ -252,8 +255,25 @@ describe('runtimeStore', () => {
       }],
     });
 
-    useRuntimeStore.getState().receiveSnapshot('computer-a', current);
-    useRuntimeStore.getState().receiveSnapshot('computer-a', stale);
+    const connection = {
+      status: 'connected' as const,
+      present: true,
+      revision: 1,
+      context: null,
+      operation: null,
+      operation_target: null,
+      last_error: null,
+      actions: {
+        connect: { enabled: false, disabled_reason: 'already_connected' as const },
+        disconnect: { enabled: true, disabled_reason: null },
+      },
+    };
+    useRuntimeStore.getState().receiveSnapshot('computer-a', current, connection);
+    useRuntimeStore.getState().receiveSnapshot('computer-a', stale, connection);
+
+    expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.snapshot_received layer=frontend instance_id=computer-a accepted=false',
+    ));
 
     expect(useRuntimeStore.getState().snapshots['computer-a']).toEqual(current);
   });

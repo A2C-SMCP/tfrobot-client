@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { debug, error as logError } from '@tauri-apps/plugin-log';
 import { useConnectionStore } from '@/stores/connectionStore';
 import {
   resetClientConnectionAuthorities,
@@ -7,6 +8,8 @@ import {
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
+const mockedDebug = vi.mocked(debug);
+const mockedLogError = vi.mocked(logError);
 const instanceId = 'computer-a';
 
 function resetStore() {
@@ -22,6 +25,8 @@ describe('connectionStore', () => {
     resetStore();
     resetClientConnectionAuthorities();
     mockedInvoke.mockReset();
+    mockedDebug.mockReset();
+    mockedLogError.mockReset();
   });
 
   it('projects the canonical four-state connection snapshot independently of SDK lifecycle', () => {
@@ -144,6 +149,9 @@ describe('connectionStore', () => {
 
       expect(mockedInvoke).toHaveBeenCalledWith('disconnect_smcp', { instanceId });
       expect(mockedInvoke).toHaveBeenCalledTimes(1);
+      expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+        'connection.request_completed layer=frontend operation=disconnect instance_id=computer-a',
+      ));
     });
 
     it('sets error on failure', async () => {
@@ -155,6 +163,9 @@ describe('connectionStore', () => {
 
       expect(useConnectionStore.getState().error).toBe('disconnect failed');
       expect(useConnectionStore.getState().loading).toBe(false);
+      expect(mockedLogError).toHaveBeenCalledWith(expect.stringContaining(
+        'connection.request_failed layer=frontend operation=disconnect instance_id=computer-a',
+      ));
     });
   });
 });

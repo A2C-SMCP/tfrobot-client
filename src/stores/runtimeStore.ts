@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { create } from 'zustand';
+import { debug } from '@/utils/logger';
 import { useComputerStore } from './computerStore';
 import { useDashboardStore } from './dashboardStore';
 import { useDebugStore } from './debugStore';
@@ -154,6 +155,17 @@ const initialState = {
   error: null as string | null,
 };
 
+function connectionDiagnosticSummary(connection: ClientConnectionAuthorityInput) {
+  return {
+    present: connection.present,
+    status: 'status' in connection
+      ? connection.status
+      : connection.present ? 'connected' : 'disconnected',
+    revision: connection.revision,
+    operation: 'operation' in connection ? connection.operation : null,
+  };
+}
+
 export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   ...initialState,
 
@@ -172,6 +184,14 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // Admission runs first so a trusted post-delete status can explicitly reopen the event fence
     // before its independently versioned connection authority is projected.
     if (connection) applyConnectionAuthority(instanceId, snapshot, connection);
+    if (connection) {
+      const diagnostic = connectionDiagnosticSummary(connection);
+      if (diagnostic.present || diagnostic.operation !== null || !accepted) {
+        debug(
+          `connection.snapshot_received layer=frontend instance_id=${instanceId} accepted=${accepted} status=${diagnostic.status} operation=${diagnostic.operation ?? 'none'} connection_revision=${diagnostic.revision} runtime_incarnation=${snapshot.incarnation} runtime_generation=${snapshot.generation} snapshot_revision=${snapshot.snapshot_revision}`,
+        );
+      }
+    }
     if (!accepted) {
       // A status response may carry a newer independent connection authority together with an
       // older SDK snapshot. Re-project the current SDK authority so that connection-only changes
@@ -204,6 +224,18 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // its own revision plus the paired runtime generation/revision to reject equal-revision
     // observations that arrive out of order.
     applyConnectionAuthority(event.instance_id, event.snapshot, event.connection);
+    const connectionDiagnostic = connectionDiagnosticSummary(event.connection);
+    if (
+      event.cause.kind === 'client_connection_state_changed'
+      || event.cause.kind === 'client_connection_authority_changed'
+      || event.cause.kind === 'handle_replaced'
+      || event.cause.kind === 'resync'
+      || (event.cause.kind === 'lifecycle_changed' && connectionDiagnostic.present)
+    ) {
+      debug(
+        `connection.runtime_event_received layer=frontend instance_id=${event.instance_id} cause=${event.cause.kind} accepted=${accepted} status=${connectionDiagnostic.status} operation=${connectionDiagnostic.operation ?? 'none'} connection_revision=${connectionDiagnostic.revision} runtime_incarnation=${event.snapshot.incarnation} runtime_generation=${event.snapshot.generation} snapshot_revision=${event.snapshot.snapshot_revision}`,
+      );
+    }
     if (!accepted) {
       // Connection authority is versioned independently and has already been projected above.
       // Event history deliberately remains a history of accepted runtime observations so a

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { debug, error as logError } from '@tauri-apps/plugin-log';
 import { useComputerStore } from '@/stores/computerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { resetClientConnectionAuthorities } from '@/stores/connectionAuthority';
@@ -9,6 +10,8 @@ import {
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
+const mockedDebug = vi.mocked(debug);
+const mockedLogError = vi.mocked(logError);
 
 const target: ManualSmcpTarget = {
   id: 'manual-a',
@@ -47,6 +50,8 @@ describe('connectionTargetStore', () => {
   beforeEach(() => {
     resetStores();
     mockedInvoke.mockReset();
+    mockedDebug.mockReset();
+    mockedLogError.mockReset();
   });
 
   it('fetchManualTargets populates manual targets', async () => {
@@ -136,6 +141,9 @@ describe('connectionTargetStore', () => {
     });
     expect(mockedInvoke).toHaveBeenCalledWith('list_computer_instances');
     expect(mockedInvoke).not.toHaveBeenCalledWith('get_connection_status', expect.anything());
+    expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_completed layer=frontend operation=connect source_type=manual_smcp instance_id=computer-a target_id=manual-a',
+    ));
     expect(useConnectionStore.getState().getStatus('computer-a')).toMatchObject({
       status: 'disconnected',
       connected: false,
@@ -158,6 +166,9 @@ describe('connectionTargetStore', () => {
 
     expect(useConnectionTargetStore.getState().error).toBe('connect failed');
     expect(useConnectionTargetStore.getState().loading).toBe(false);
+    expect(mockedLogError).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_failed layer=frontend operation=connect source_type=manual_smcp instance_id=computer-a target_id=manual-a',
+    ));
   });
 
   it('surfaces a partial-success warning when post-connect metadata refresh fails', async () => {
@@ -175,5 +186,14 @@ describe('connectionTargetStore', () => {
       loading: false,
       error: 'Error: Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
     });
+    expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_completed layer=frontend operation=connect source_type=manual_smcp',
+    ));
+    expect(mockedLogError).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.metadata_reconciliation_failed layer=frontend source_type=manual_smcp',
+    ));
+    expect(mockedLogError).not.toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_failed',
+    ));
   });
 });
