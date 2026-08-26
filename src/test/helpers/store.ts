@@ -56,8 +56,9 @@ function runtimeActionsForTest(
           : 'connection_unavailable',
     ),
     manage_mcp: capability(
-      ['started', 'connected', 'joined_office'].includes(lifecycle),
-      lifecycle === 'degraded' ? 'degraded' : inactiveOrTransitionReason,
+      ['started', 'connecting', 'connected', 'joined_office', 'degraded', 'disconnecting']
+        .includes(lifecycle),
+      inactiveOrTransitionReason,
     ),
   };
 }

@@ -185,13 +185,14 @@ describe('ComputerRuntime', () => {
     expect(screen.getByText(
       'Restart unavailable: Wait for the current Runtime operation to finish.',
     )).toBeInTheDocument();
+    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
   });
 
-  it('disables MCP lifecycle controls while the Runtime lifecycle is transitional', () => {
+  it('keeps local MCP lifecycle controls available during a remote connection transition', () => {
     renderRuntime(instance({
       runtime: runtimeSnapshot({ lifecycle: 'connecting' }),
     }));
 
-    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
   });
 });

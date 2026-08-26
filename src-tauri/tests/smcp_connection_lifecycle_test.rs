@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use futures_util::FutureExt;
 use http_body_util::Full;
@@ -25,6 +26,7 @@ use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_connection_target_core, delete_manual_smcp_target_core,
     ConnectionState,
 };
+use tfrobot_client_lib::commands::mcp;
 use tfrobot_client_lib::services::computer::{
     ClientConnectionOperation, ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime,
     ComputerRuntimeState,
@@ -1557,6 +1559,80 @@ async fn dynamic_auth_provider_supplies_fresh_token_on_real_network_reconnect() 
         .expect("clear dynamic auth connection");
     runtime.shutdown().await;
     server.shutdown();
+}
+
+#[tokio::test]
+async fn remote_reconnect_does_not_block_local_mcp_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    let mcp_config = common::echo_server_config("local-mcp-during-remote-reconnect");
+    let bundle_id = resolve_bundle_id(&mcp_config);
+    common::mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, mcp_config)
+        .await
+        .expect("save local MCP server");
+    runtime.start().await.expect("start runtime");
+
+    let server = start_dynamic_auth_reconnect_server().await;
+    let provider: SocketIoAuthProvider =
+        Arc::new(|| Box::pin(async { json!({ "token": "reconnect-test-token" }) }));
+    let operation = runtime
+        .begin_connection_operation(ClientConnectionOperation::Connect, None)
+        .await
+        .expect("begin connect operation");
+    let connection = ConnectionState {
+        profile_name: "reconnect-test-profile".to_string(),
+        url: server.url.clone(),
+        office_id: TEST_OFFICE_ID.to_string(),
+        computer_name: TEST_AGENT_NAME.to_string(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manager_robot".to_string(),
+        target_id: Some("manager-robot:reconnect-test".to_string()),
+        target_name: Some("Reconnect Test Robot".to_string()),
+        employee_id: Some(42),
+        generation: 74,
+    };
+    runtime
+        .connect_and_install_smcp_socketio(
+            operation,
+            &server.url,
+            Some(provider),
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            TEST_OFFICE_ID,
+            TEST_AGENT_NAME,
+            connection,
+        )
+        .await
+        .expect("connect remote SMCP transport");
+    assert!(
+        runtime
+            .complete_connection_operation_for_token(operation)
+            .await
+    );
+
+    server.force_network_disconnect();
+    server.shutdown();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime.runtime_state().await == ComputerRuntimeState::Connecting {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("runtime never entered automatic reconnect state");
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id)
+        .await
+        .expect("remote reconnect must not block local MCP stop");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id)
+        .await
+        .expect("remote reconnect must not block local MCP start");
+
+    runtime.shutdown().await;
 }
 
 #[tokio::test]
