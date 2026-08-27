@@ -89,3 +89,13 @@ harness = false
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Keep local Tauri and test builds debuggable without retaining full type/variable
+# information or rustc's large incremental caches. Release builds are unchanged.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false
