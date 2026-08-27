@@ -309,19 +309,34 @@ impl ComputerRegistry {
         })?;
         let remote_control_policy_changed =
             existing.instance.remote_control != instance.remote_control;
+        let command_line_policy_changed = existing.instance.command_line != instance.command_line;
+        let was_running = existing.is_running().await;
         let runtime = existing.with_instance(instance);
         if let Err(error) = runtime
-            .sync_runtime_for_policy_change(remote_control_policy_changed)
+            .sync_runtime_for_policy_change(
+                remote_control_policy_changed,
+                command_line_policy_changed,
+            )
             .await
         {
             let restore_runtime = existing.with_instance(existing.instance.clone());
             if let Err(restore_error) = restore_runtime
-                .sync_runtime_for_policy_change(remote_control_policy_changed)
+                .sync_runtime_for_policy_change(
+                    remote_control_policy_changed,
+                    command_line_policy_changed,
+                )
                 .await
             {
                 return Err(error.append_context(format!(
                     "additionally failed to restore previous runtime: {restore_error}"
                 )));
+            }
+            if was_running && !restore_runtime.is_running().await {
+                if let Err(restore_error) = restore_runtime.start().await {
+                    return Err(error.append_context(format!(
+                        "previous Computer configuration was restored, but its running state could not be restored: {restore_error}"
+                    )));
+                }
             }
             return Err(error);
         }

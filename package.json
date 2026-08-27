@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "runtime:prepare:tfbash": "node scripts/prepare-tfbash-runtime.mjs",
+    "runtime:verify:tfbash": "node scripts/prepare-tfbash-runtime.mjs --verify",
     "tauri:dev:signed": "CARGO_TARGET_DIR=\"$PWD/src-tauri/target-signed-dev\" CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=\"$PWD/scripts/tauri-dev-sign-runner.sh\" CARGO_TARGET_X86_64_APPLE_DARWIN_RUNNER=\"$PWD/scripts/tauri-dev-sign-runner.sh\" tauri dev",
     "tauri": "tauri",
     "test": "vitest run --maxWorkers=2",

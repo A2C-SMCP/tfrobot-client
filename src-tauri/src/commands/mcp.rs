@@ -1,8 +1,10 @@
 use crate::commands::runtime_error::RuntimeActionError;
+use crate::services::built_in_tools::{COMMAND_LINE_BUNDLE_ID, COMMAND_LINE_PROVIDER};
 use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
 use crate::services::computer::{
-    ComputerInstanceRuntime, ComputerRuntimeAction, ComputerRuntimeActionUnavailable,
-    McpServerManagedBy, McpServerStartOperation, UserMcpServerStartRequest,
+    is_reserved_built_in_bundle_id, ComputerInstanceRuntime, ComputerRuntimeAction,
+    ComputerRuntimeActionUnavailable, McpServerManagedBy, McpServerStartOperation,
+    UserMcpServerStartRequest,
 };
 use crate::services::computer_runtime_events::PublicOAuthStatus;
 use crate::services::input_references::referenced_input_ids;
@@ -141,7 +143,7 @@ pub async fn get_mcp_servers_core(
             continue;
         }
         let bundle_id = resolve_bundle_id(&server.config);
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
             continue;
         }
         metadata
@@ -825,7 +827,7 @@ fn latest_user_mcp_start_snapshot(
         .filter(|server| server.origin != ProvenanceScope::Plugin)
         .filter_map(|server| {
             let bundle_id = resolve_bundle_id(&server.config);
-            (bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID).then_some((
+            (!is_reserved_built_in_bundle_id(bundle_id.as_str())).then_some((
                 bundle_id,
                 LatestUserMcpServer {
                     name: server.name,
@@ -1007,6 +1009,10 @@ async fn mcp_server_runtime_metadata(
             let managed_by = if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
                 Some(McpServerManagedBy::BuiltIn {
                     provider: "robot_control".to_string(),
+                })
+            } else if bundle_id.as_str() == COMMAND_LINE_BUNDLE_ID {
+                Some(McpServerManagedBy::BuiltIn {
+                    provider: COMMAND_LINE_PROVIDER.to_string(),
                 })
             } else {
                 crate::services::computer::sdk_managed_by_to_client(entry.managed_by)

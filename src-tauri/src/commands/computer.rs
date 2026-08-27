@@ -4,6 +4,9 @@ use crate::commands::connection::{
 };
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::commands::runtime_sync::apply_updated_computer_instance;
+use crate::services::built_in_tools::{
+    command_line_server_config, CommandLineToolPolicy, COMMAND_LINE_BUNDLE_ID,
+};
 use crate::services::client_control::RemoteControlPolicy;
 use crate::services::computer::{
     ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
@@ -51,6 +54,7 @@ pub struct ComputerInstanceStatus {
     pub robot_binding: Option<RobotBindingMetadata>,
     pub connection_policy: ComputerConnectionPolicy,
     pub remote_control: RemoteControlPolicy,
+    pub command_line: CommandLineToolPolicy,
     pub connection: Option<ConnectionStateSummary>,
 }
 
@@ -231,6 +235,7 @@ pub async fn create_computer_instance_core(
         local_skills_root: None,
         connection_policy: ComputerConnectionPolicy::default(),
         remote_control: RemoteControlPolicy::default(),
+        command_line: CommandLineToolPolicy::default(),
         robot_binding: None,
     };
 
@@ -327,6 +332,7 @@ pub async fn duplicate_computer_instance_core(
     instance.description = normalize_optional_text(request.description);
     instance.local_skills_root = None;
     instance.remote_control = RemoteControlPolicy::default();
+    instance.command_line = CommandLineToolPolicy::default();
     let destination_skill_root = state.config.default_local_skills_root(&instance.id);
     let destination_storage_root = state.config.computer_instance_storage_root(&instance.id);
     if !request.copy_robot_binding {
@@ -667,6 +673,7 @@ async fn start_computer_instance_core_with_mode(
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let mut instance = preflight_command_line_tool(state, instance).await?;
     let runtime = state
         .computer_registry
         .update_runtime_instance_typed(instance.clone())
@@ -690,8 +697,22 @@ async fn start_computer_instance_core_with_mode(
                 .await
         }
     };
-    start_result.map_err(RuntimeActionError::from)?;
     drop(runtime_lifecycle);
+    if let Err(error) = start_result {
+        let command_line_failed = error.is_command_line_start_failure();
+        let error = RuntimeActionError::from(error);
+        if instance.command_line.enabled && command_line_failed {
+            instance = disable_command_line_after_failure(state, &id, &error.to_string())
+                .await
+                .map_err(|restore_error| {
+                    RuntimeActionError::runtime(format!(
+                        "{error}; command line policy rollback failed: {restore_error}"
+                    ))
+                })?;
+        } else {
+            return Err(error);
+        }
+    }
     record_mcp_start_failure_activities(state, &id, &runtime).await;
     drop(_operation_guard);
     if instance.connection_policy.auto_connect {
@@ -813,6 +834,7 @@ async fn restart_computer_instance_core_with_mode(
     let instance = state
         .hydrate_computer_instance(instance)
         .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+    let mut instance = preflight_command_line_tool(state, instance).await?;
     let runtime = state
         .computer_registry
         .update_runtime_instance_typed(instance.clone())
@@ -836,8 +858,22 @@ async fn restart_computer_instance_core_with_mode(
                 .await
         }
     };
-    restart_result.map_err(RuntimeActionError::from)?;
     drop(runtime_lifecycle);
+    if let Err(error) = restart_result {
+        let command_line_failed = error.is_command_line_start_failure();
+        let error = RuntimeActionError::from(error);
+        if instance.command_line.enabled && command_line_failed {
+            instance = disable_command_line_after_failure(state, &id, &error.to_string())
+                .await
+                .map_err(|restore_error| {
+                    RuntimeActionError::runtime(format!(
+                        "{error}; command line policy rollback failed: {restore_error}"
+                    ))
+                })?;
+        } else {
+            return Err(error);
+        }
+    }
     record_mcp_start_failure_activities(state, &id, &runtime).await;
     drop(_operation_guard);
     if instance.connection_policy.auto_connect {
@@ -890,6 +926,79 @@ async fn record_mcp_start_failure_activities(
             }
         }
     }
+}
+
+async fn preflight_command_line_tool(
+    state: &AppState,
+    instance: ComputerInstance,
+) -> Result<ComputerInstance, RuntimeActionError> {
+    if !instance.command_line.enabled {
+        return Ok(instance);
+    }
+    if let Err(error) = command_line_server_config(
+        &instance.command_line,
+        &state.config.computer_instance_storage_root(&instance.id),
+    ) {
+        return disable_command_line_after_failure(state, &instance.id, &error)
+            .await
+            .map_err(|restore_error| {
+                RuntimeActionError::runtime(format!(
+                    "Command line tool preflight failed: {error}; {restore_error}"
+                ))
+            });
+    }
+    Ok(instance)
+}
+
+async fn disable_command_line_after_failure(
+    state: &AppState,
+    instance_id: &str,
+    failure: &str,
+) -> Result<ComputerInstance, String> {
+    let error_summary = redact_text(failure);
+    let result = async {
+        let restored = state
+            .config
+            .update_computer_instance(instance_id, |instance| {
+                instance.command_line.enabled = false;
+            })
+            .map_err(|restore_error| {
+                format!("failed to disable the persisted setting: {restore_error}")
+            })?;
+        let restored = state.hydrate_computer_instance(restored).map_err(|error| {
+            format!("setting was disabled, but Computer inputs could not be loaded: {error}")
+        })?;
+        state
+            .computer_registry
+            .update_runtime_instance(restored.clone())
+            .await
+            .map_err(|restore_error| {
+                format!(
+                    "setting was disabled in persisted settings, but runtime rollback failed: {restore_error}"
+                )
+            })?;
+        Ok(restored)
+    }
+    .await;
+
+    let mut activity = ActivityEventDraft::computer(
+        instance_id,
+        ActivityLevel::Error,
+        "mcp",
+        "built_in_command_line",
+        "start",
+        ActivityOutcome::Failed,
+        format!("Built-in command line tool failed to start: {error_summary}"),
+    );
+    activity.fields = Some(serde_json::json!({
+        "bundle_id": COMMAND_LINE_BUNDLE_ID,
+        "error": error_summary,
+        "policy_rolled_back": result.is_ok(),
+    }));
+    if let Err(error) = state.observability.record_activity_async(activity).await {
+        log::error!("failed to persist built-in command line startup failure: {error}");
+    }
+    result
 }
 
 #[tauri::command]
@@ -1125,6 +1234,7 @@ async fn status_from_instance(
         robot_binding: instance.robot_binding.clone(),
         connection_policy: instance.connection_policy.clone(),
         remote_control: instance.remote_control.clone(),
+        command_line: instance.command_line.clone(),
         connection: connected.then_some(connection_context).flatten(),
     }
 }

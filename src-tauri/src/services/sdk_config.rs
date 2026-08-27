@@ -1,6 +1,7 @@
 use crate::commands::inputs::{
     input_definition_from_sdk, input_definition_to_sdk, InputDefinition,
 };
+use crate::services::computer::is_reserved_built_in_bundle_id;
 use crate::services::config::ConfigService;
 use crate::services::input_references::{find_project_input_references, referenced_input_ids};
 use crate::services::storage::write_json_atomically;
@@ -112,6 +113,10 @@ pub enum SdkConfigPortabilityError {
         fields: Vec<String>,
         details: String,
     },
+    #[error(
+        "Portable SDK MCP configuration cannot contain reserved built-in server '{bundle_id}'"
+    )]
+    ReservedBuiltIn { bundle_id: String },
     #[error(transparent)]
     Crud(#[from] ConfigCrudError),
 }
@@ -664,6 +669,14 @@ impl SdkConfigService {
         servers: &[MCPServerConfig],
     ) -> Result<Option<ProjectConfigDoc>, SdkConfigPortabilityError> {
         let servers = self.prepare_literal_preserving_mcp_configs(servers)?;
+        if let Some(server) = servers
+            .iter()
+            .find(|server| is_reserved_built_in_bundle_id(resolve_bundle_id(server).as_str()))
+        {
+            return Err(SdkConfigPortabilityError::ReservedBuiltIn {
+                bundle_id: resolve_bundle_id(server).to_string(),
+            });
+        }
         if servers.is_empty() {
             return Ok(None);
         }
@@ -1260,6 +1273,9 @@ impl SdkConfigService {
             let servers = resolved
                 .servers
                 .into_values()
+                .filter(|server| {
+                    !is_reserved_built_in_bundle_id(resolve_bundle_id(&server.config).as_str())
+                })
                 .map(|server| server.config)
                 .collect::<Vec<_>>();
             let prepared = self.prepare_literal_preserving_mcp_configs(&servers)?;
@@ -2759,6 +2775,70 @@ mod tests {
             .and_then(|mcp| mcp.get("servers"))
             .and_then(Value::as_object)
             .is_some_and(|servers| servers.contains_key("valid")));
+    }
+
+    #[test]
+    fn portable_import_rejects_reserved_built_in_bundle_id() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config.init("target").unwrap();
+        let reserved: MCPServerConfig = serde_json::from_value(json!({
+            "type": "stdio",
+            "name": "forged command line",
+            "bundle_id": crate::services::built_in_tools::COMMAND_LINE_BUNDLE_ID,
+            "server_parameters": { "command": "node" }
+        }))
+        .unwrap();
+
+        let error = sdk_config
+            .preflight_import_mcp_configs("target", &[reserved])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SdkConfigPortabilityError::ReservedBuiltIn { bundle_id }
+                if bundle_id == crate::services::built_in_tools::COMMAND_LINE_BUNDLE_ID
+        ));
+    }
+
+    #[test]
+    fn cli_native_export_excludes_reserved_built_in_bundle_id() {
+        let directory = tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let sdk_config = SdkConfigService::new(config);
+        sdk_config
+            .save(
+                "source",
+                &ProjectConfigDoc {
+                    mcp: Some(
+                        json!({
+                            "servers": {
+                                "normal": {
+                                    "type": "stdio",
+                                    "server_parameters": {"command": "node"}
+                                },
+                                "forged": {
+                                    "type": "stdio",
+                                    "bundle_id": crate::services::built_in_tools::COMMAND_LINE_BUNDLE_ID,
+                                    "server_parameters": {"command": "node"}
+                                }
+                            }
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let exported = sdk_config.export_cli_native_mcp("source").unwrap();
+        let servers = SdkConfigService::mcp_configs_from_portable_document(exported).unwrap();
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name(), "normal");
     }
 
     #[test]

@@ -74,6 +74,11 @@ export interface RemoteControlPolicy {
   target_scope: ClientControlTargetScope;
 }
 
+export interface CommandLineToolPolicy {
+  enabled: boolean;
+  workspace_root?: string;
+}
+
 export interface ComputerInstanceStatus {
   id: string;
   name: string;
@@ -93,6 +98,7 @@ export interface ComputerInstanceStatus {
   robot_binding?: RobotBindingMetadata | null;
   connection_policy?: ComputerConnectionPolicy;
   remote_control?: RemoteControlPolicy;
+  command_line?: CommandLineToolPolicy;
   connection?: ConnectionStateSummary | null;
 }
 
@@ -117,6 +123,7 @@ export interface ComputerInstance {
   effectiveSkillHome?: string;
   connectionPolicy: ComputerConnectionPolicy;
   remoteControl?: RemoteControlPolicy;
+  commandLine?: CommandLineToolPolicy;
   mcpServerCount: number;
   runtime: ComputerRuntimeSnapshot;
 }
@@ -206,6 +213,7 @@ function mergeConnectionMetadata(
     robotName: robotBinding?.robot_name,
     connectionPolicy: status.connection_policy ?? instance.connectionPolicy,
     remoteControl: status.remote_control ?? instance.remoteControl,
+    commandLine: status.command_line ?? instance.commandLine,
   };
 }
 
@@ -235,6 +243,7 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     effectiveSkillHome: status.effective_skill_home,
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     remoteControl: status.remote_control,
+    commandLine: status.command_line,
     mcpServerCount: projection.mcpServerCount,
     runtime,
   };

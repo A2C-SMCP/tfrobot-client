@@ -1,4 +1,5 @@
 use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
+use crate::services::built_in_tools::CommandLineToolPolicy;
 use crate::services::client_computers::{
     ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_INPUTS_FILE_NAME,
     COMPUTER_PROFILE_FILE_NAME,
@@ -71,6 +72,8 @@ const LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
 const LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v1.backup.json";
 const PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v2.backup.json";
+const PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION: u32 = 3;
+const PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME: &str = "profile.v3.backup.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +99,22 @@ struct PreviousComputerProfileV2 {
     description: Option<String>,
     #[serde(default)]
     connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_binding: Option<RobotBindingMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PreviousComputerProfileV3 {
+    schema_version: u32,
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default)]
+    remote_control: RemoteControlPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     robot_binding: Option<RobotBindingMetadata>,
 }
@@ -247,6 +266,10 @@ impl ConfigService {
             })?;
         let mut profile = match schema_version {
             COMPUTER_PROFILE_SCHEMA_VERSION => serde_json::from_value(value)?,
+            PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION => {
+                let previous: PreviousComputerProfileV3 = serde_json::from_value(value)?;
+                self.migrate_computer_profile_v3(&path, previous)?
+            }
             PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION => {
                 let previous: PreviousComputerProfileV2 = serde_json::from_value(value)?;
                 self.migrate_computer_profile_v2(&path, previous)?
@@ -332,6 +355,7 @@ impl ConfigService {
             description: previous.description.clone(),
             connection_policy: previous.connection_policy.clone(),
             remote_control: RemoteControlPolicy::default(),
+            command_line: CommandLineToolPolicy::default(),
             robot_binding: previous.robot_binding.clone(),
         };
         validate_computer_profile(&migrated)?;
@@ -344,6 +368,50 @@ impl ConfigService {
                     profile_id: previous.id,
                     reason: format!(
                         "profile v2 migration backup {} does not match the source profile",
+                        backup_path.display()
+                    ),
+                });
+            }
+        } else {
+            write_json_atomically(&backup_path, &previous)?;
+        }
+        write_json_atomically(profile_path, &migrated)?;
+        Ok(migrated)
+    }
+
+    fn migrate_computer_profile_v3(
+        &self,
+        profile_path: &Path,
+        previous: PreviousComputerProfileV3,
+    ) -> Result<ComputerProfile, ConfigError> {
+        if previous.schema_version != PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                actual: previous.schema_version,
+            });
+        }
+        let migrated = ComputerProfile {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: previous.id.clone(),
+            name: previous.name.clone(),
+            description: previous.description.clone(),
+            connection_policy: previous.connection_policy.clone(),
+            remote_control: previous.remote_control.clone(),
+            command_line: CommandLineToolPolicy::default(),
+            robot_binding: previous.robot_binding.clone(),
+        };
+        validate_computer_profile(&migrated)?;
+
+        let backup_path =
+            profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME);
+        if backup_path.exists() {
+            let existing: PreviousComputerProfileV3 = load_required_json_file(&backup_path)?;
+            if existing != previous {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id: previous.id,
+                    reason: format!(
+                        "profile v3 migration backup {} does not match the source profile",
                         backup_path.display()
                     ),
                 });
@@ -1198,6 +1266,7 @@ fn migrate_legacy_computer_profile(
             auto_connect,
         },
         remote_control: RemoteControlPolicy::default(),
+        command_line: CommandLineToolPolicy::default(),
         robot_binding: binding,
     })
 }
@@ -1214,6 +1283,7 @@ fn validate_computer_profile(profile: &ComputerProfile) -> Result<(), ConfigErro
         return Err(invalid("name must be non-empty".to_string()));
     }
     profile.remote_control.validate().map_err(invalid)?;
+    profile.command_line.validate().map_err(invalid)?;
 
     if let Some(target) = profile.connection_policy.target.as_ref() {
         match target {
@@ -1656,9 +1726,44 @@ mod tests {
         assert_eq!(migrated.description.as_deref(), Some("preserved"));
         assert_eq!(migrated.remote_control, RemoteControlPolicy::default());
         assert!(!migrated.remote_control.enabled);
+        assert_eq!(migrated.command_line, CommandLineToolPolicy::default());
         let backup: PreviousComputerProfileV2 = serde_json::from_slice(
             &std::fs::read(profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME))
                 .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup, previous);
+    }
+
+    #[test]
+    fn profile_v3_preserves_robot_policy_and_adds_disabled_command_line_with_backup() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-v3").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let previous = PreviousComputerProfileV3 {
+            schema_version: PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION,
+            id: "computer-v3".to_string(),
+            name: "Robot Computer".to_string(),
+            description: None,
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            remote_control: RemoteControlPolicy {
+                enabled: true,
+                ..RemoteControlPolicy::default()
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-v3").unwrap();
+
+        assert_eq!(migrated.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+        assert!(migrated.remote_control.enabled);
+        assert_eq!(migrated.command_line, CommandLineToolPolicy::default());
+        let backup: PreviousComputerProfileV3 = serde_json::from_slice(
+            &std::fs::read(
+                profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(backup, previous);
@@ -1802,6 +1907,7 @@ mod tests {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
             [
+                "command_line",
                 "connection_policy",
                 "id",
                 "name",

@@ -327,6 +327,14 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("Failed to get app data directory");
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .expect("Failed to get app resource directory");
+            std::env::set_var(
+                services::built_in_tools::BUILT_IN_RESOURCE_ROOT_ENV,
+                resource_dir.join("resources"),
+            );
 
             let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
             let config_service = ConfigService::new_with_client_computers_paths(
@@ -502,6 +510,8 @@ pub fn run() {
             commands::client_control::get_client_control_catalog,
             commands::client_control::get_remote_control_policy,
             commands::client_control::update_remote_control_policy,
+            commands::built_in_tools::get_command_line_tool_state,
+            commands::built_in_tools::update_command_line_tool_policy,
             commands::computer_runtime::enable_computer_runtime_events,
             commands::computer_runtime::get_computer_runtime_snapshots,
             // Config import/export

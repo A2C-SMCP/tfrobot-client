@@ -1,6 +1,6 @@
 use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
 use crate::commands::runtime_error::RuntimeActionError;
-use crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID;
+use crate::services::computer::is_reserved_built_in_bundle_id;
 use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
 use crate::services::sdk_config::is_writable_provenance;
@@ -123,7 +123,7 @@ impl From<ComputerConfigSnapshot> for SdkConfigSnapshotView {
                     .servers
                     .into_iter()
                     .filter(|server| {
-                        resolve_bundle_id(&server.config).as_str() != CLIENT_CONTROL_BUNDLE_ID
+                        !is_reserved_built_in_bundle_id(resolve_bundle_id(&server.config).as_str())
                     })
                     .map(|server| {
                         let origin = server.origin;
@@ -290,10 +290,10 @@ pub async fn upsert_computer_mcp_config_core(
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
     let bundle_id = resolve_bundle_id(&config);
     let server_name = config.name().to_string();
-    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-        return Err(RuntimeActionError::runtime(
-            "bundleId 'client_control' is reserved for the built-in Client Control provider",
-        ));
+    if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+        return Err(RuntimeActionError::runtime(format!(
+            "bundleId '{bundle_id}' is reserved for a built-in provider"
+        )));
     }
     let defined_inputs = state.sdk_config.load_input_definitions(instance_id);
     let referenced_input_ids = referenced_input_ids(&config)?;
@@ -370,10 +370,10 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
     let bundle_id = resolve_bundle_id(&config);
     let server_name = config.name().to_string();
-    if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-        return Err(RuntimeActionError::runtime(
-            "bundleId 'client_control' is reserved for the built-in Client Control provider",
-        ));
+    if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+        return Err(RuntimeActionError::runtime(format!(
+            "bundleId '{bundle_id}' is reserved for a built-in provider"
+        )));
     }
 
     let input_definitions = prepare_portable_input_definitions(&input_definitions)

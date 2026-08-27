@@ -1,5 +1,8 @@
 use crate::commands::connection::ConnectionState;
 use crate::commands::inputs::{InputDefinition, PickOption};
+use crate::services::built_in_tools::{
+    command_line_server_config, CommandLineToolPolicy, COMMAND_LINE_BUNDLE_ID,
+};
 use crate::services::client_control::{
     client_control_server_config, ClientControlBinding, ClientControlMcpClient,
     RemoteControlPolicy, CLIENT_CONTROL_BUNDLE_ID,
@@ -299,13 +302,19 @@ pub struct ComputerInstance {
     pub connection_policy: ComputerConnectionPolicy,
     #[serde(default)]
     pub remote_control: RemoteControlPolicy,
+    #[serde(default)]
+    pub command_line: CommandLineToolPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robot_binding: Option<RobotBindingMetadata>,
 }
 
-pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 3;
+pub const COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 4;
 pub const COMPUTER_INPUTS_SCHEMA_VERSION: u32 = 2;
 pub const SDK_CONTEXT_SCHEMA_VERSION: u32 = 1;
+
+pub(crate) fn is_reserved_built_in_bundle_id(bundle_id: &str) -> bool {
+    matches!(bundle_id, CLIENT_CONTROL_BUNDLE_ID | COMMAND_LINE_BUNDLE_ID)
+}
 
 /// Client-owned, durable metadata for one Computer instance.
 ///
@@ -325,6 +334,8 @@ pub struct ComputerProfile {
     pub connection_policy: ComputerProfileConnectionPolicy,
     #[serde(default)]
     pub remote_control: RemoteControlPolicy,
+    #[serde(default)]
+    pub command_line: CommandLineToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot_binding: Option<RobotBindingMetadata>,
 }
@@ -347,6 +358,7 @@ impl ComputerProfile {
             description: None,
             connection_policy: ComputerProfileConnectionPolicy::default(),
             remote_control: RemoteControlPolicy::default(),
+            command_line: CommandLineToolPolicy::default(),
             robot_binding: None,
         }
     }
@@ -364,6 +376,7 @@ impl From<&ComputerInstance> for ComputerProfile {
                 auto_connect: instance.connection_policy.auto_connect,
             },
             remote_control: instance.remote_control.clone(),
+            command_line: instance.command_line.clone(),
             robot_binding: instance.robot_binding.clone(),
         }
     }
@@ -384,6 +397,7 @@ impl From<ComputerProfile> for ComputerInstance {
                 auto_connect: profile.connection_policy.auto_connect,
             },
             remote_control: profile.remote_control,
+            command_line: profile.command_line,
             robot_binding: profile.robot_binding,
         }
     }
@@ -611,6 +625,7 @@ impl ComputerInstance {
             local_skills_root: None,
             connection_policy: ComputerConnectionPolicy::default(),
             remote_control: RemoteControlPolicy::default(),
+            command_line: CommandLineToolPolicy::default(),
             robot_binding: None,
         }
     }
@@ -767,6 +782,14 @@ struct HandleDeclarations<'a> {
 }
 
 impl ComputerRuntimeStartError {
+    pub(crate) fn is_command_line_start_failure(&self) -> bool {
+        let source = match self {
+            Self::Sdk(source) | Self::SdkWithContext { source, .. } => source,
+            Self::Client(_) => return false,
+        };
+        ComputerInstanceRuntime::is_command_line_start_error(source)
+    }
+
     fn append_context(self, context: impl std::fmt::Display) -> Self {
         let context = context.to_string();
         match self {
@@ -931,6 +954,14 @@ pub struct ComputerInstanceRuntime {
 }
 
 impl ComputerInstanceRuntime {
+    pub(super) fn is_command_line_start_error(error: &ComputerError) -> bool {
+        matches!(
+            error,
+            ComputerError::RuntimeError(message)
+                if message.starts_with("built-in command line tool failed to start:")
+        )
+    }
+
     pub async fn with_runtime_input_interaction<F, T>(
         &self,
         mode: RuntimeInputInteractionMode,
@@ -1150,12 +1181,13 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn sync_runtime(&self) -> Result<(), ComputerRuntimeStartError> {
-        self.sync_runtime_for_policy_change(false).await
+        self.sync_runtime_for_policy_change(false, false).await
     }
 
     pub(super) async fn sync_runtime_for_policy_change(
         &self,
         remote_control_policy_changed: bool,
+        command_line_policy_changed: bool,
     ) -> Result<(), ComputerRuntimeStartError> {
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()
@@ -1169,18 +1201,32 @@ impl ComputerInstanceRuntime {
             .await
             .iter()
             .any(|server| resolve_bundle_id(server).as_str() == CLIENT_CONTROL_BUNDLE_ID);
+        let command_line_is_mounted = self
+            .computer
+            .read()
+            .await
+            .list_mcp_servers()
+            .await
+            .iter()
+            .any(|server| resolve_bundle_id(server).as_str() == COMMAND_LINE_BUNDLE_ID);
         if provider_is_mounted != self.instance.remote_control.enabled
             || (provider_is_mounted && remote_control_policy_changed)
         {
             let was_running = self.is_running().await;
             self.replace_sdk_computer(
                 was_running,
-                "Client Control policy changed",
+                "built-in tool policy changed",
                 HandleReplacementConfig::RetainCurrentGeneration,
                 RuntimeMcpStartFailurePolicy::BestEffort,
             )
             .await?;
             return Ok(());
+        }
+        if command_line_is_mounted != self.instance.command_line.enabled
+            || (command_line_is_mounted && command_line_policy_changed)
+        {
+            self.sync_command_line_tool_inner(command_line_is_mounted)
+                .await?;
         }
 
         // Persisted SDK input definitions belong to the current handle generation. Metadata
@@ -1202,16 +1248,87 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    /// Applies the client-owned command-line provider without replacing the SDK Computer handle.
+    /// Keeping this server-local preserves the Computer lifecycle, SMCP transport, and unrelated
+    /// MCP processes while a setting is enabled, disabled, or rolled back.
+    async fn sync_command_line_tool_inner(
+        &self,
+        command_line_is_mounted: bool,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        let bundle_id = BundleId::try_from(COMMAND_LINE_BUNDLE_ID).map_err(|error| {
+            ComputerRuntimeStartError::Client(format!(
+                "invalid built-in command line bundleId: {error}"
+            ))
+        })?;
+        let computer_running = self.is_running().await;
+
+        if command_line_is_mounted {
+            let server_started = self
+                .computer
+                .read()
+                .await
+                .get_server_runtime_statuses()
+                .await
+                .into_iter()
+                .any(|status| status.bundle_id == bundle_id && status.is_started());
+            if server_started {
+                self.computer
+                    .read()
+                    .await
+                    .stop_mcp_client(&bundle_id)
+                    .await
+                    .map_err(ComputerRuntimeStartError::Sdk)?;
+            }
+            self.computer
+                .read()
+                .await
+                .unmount_server(&bundle_id)
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+            self.sdk_servers.write().await.remove(&bundle_id);
+            self.clear_mcp_start_diagnostic(&bundle_id).await;
+            self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
+        }
+
+        if !self.instance.command_line.enabled {
+            return Ok(());
+        }
+
+        let instance_storage_root = self
+            .skill_home_base
+            .join(instance_storage_dir_name(&self.instance.id));
+        let server =
+            command_line_server_config(&self.instance.command_line, &instance_storage_root)
+                .map_err(ComputerRuntimeStartError::Client)?;
+        let server_name = server.name().to_string();
+        self.computer
+            .read()
+            .await
+            .mount_server(normalize_mcp_server_tool_meta(server))
+            .await
+            .map_err(ComputerRuntimeStartError::Sdk)?;
+        self.sdk_servers
+            .write()
+            .await
+            .insert(bundle_id.clone(), server_name);
+        if computer_running {
+            self.start_mcp_server_inner(&bundle_id)
+                .await
+                .map_err(ComputerRuntimeStartError::Sdk)?;
+        }
+        Ok(())
+    }
+
     pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
         let name = server.name().to_string();
         let bundle_id = resolve_bundle_id(&server);
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-            return Err(ComputerError::InvalidConfiguration(
-                "Plugins cannot use the reserved Client Control bundleId".to_string(),
-            ));
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err(ComputerError::InvalidConfiguration(format!(
+                "Plugins cannot use reserved built-in bundleId '{bundle_id}'"
+            )));
         }
         self.cancel_oauth_before_server_lifecycle_change(&bundle_id)
             .await?;
@@ -1288,10 +1405,10 @@ impl ComputerInstanceRuntime {
         let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
         let bundle_id = resolve_bundle_id(&server);
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-            return Err(ComputerError::InvalidConfiguration(
-                "the Client Control bundleId is reserved".to_string(),
-            ));
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err(ComputerError::InvalidConfiguration(format!(
+                "the built-in bundleId '{bundle_id}' is reserved"
+            )));
         }
         let computer_running = self.is_running().await;
 
@@ -1615,9 +1732,9 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn start_mcp_server(&self, bundle_id: &BundleId) -> ComputerResult<()> {
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
             return Err(ComputerError::InvalidConfiguration(
-                "the reserved Client Control provider is not user-manageable".to_string(),
+                "reserved built-in providers are not user-manageable".to_string(),
             ));
         }
         let _guard = self.lifecycle_lock.lock().await;
@@ -1655,9 +1772,9 @@ impl ComputerInstanceRuntime {
                 bundle_id
             )));
         }
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
             return Err(ComputerError::InvalidConfiguration(
-                "the reserved Client Control provider is not user-manageable".to_string(),
+                "reserved built-in providers are not user-manageable".to_string(),
             ));
         }
         if request.config.disabled() {
@@ -1829,8 +1946,8 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn stop_mcp_server(&self, bundle_id: &BundleId) -> Result<bool, String> {
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-            return Err("the reserved Client Control provider is not user-manageable".to_string());
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err("reserved built-in providers are not user-manageable".to_string());
         }
         let _guard = self.lifecycle_lock.lock().await;
         self.stop_mcp_server_inner(bundle_id).await
@@ -1858,10 +1975,10 @@ impl ComputerInstanceRuntime {
         let _guard = self.lifecycle_lock.lock().await;
         let mut results = Vec::with_capacity(bundle_ids.len());
         for bundle_id in bundle_ids {
-            if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+            if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
                 results.push((
                     bundle_id,
-                    Err("the reserved Client Control provider is not user-manageable".to_string()),
+                    Err("reserved built-in providers are not user-manageable".to_string()),
                 ));
                 continue;
             }
@@ -1961,6 +2078,14 @@ impl ComputerInstanceRuntime {
         failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> ComputerResult<()> {
         self.log_mcp_start_failures(&failures, cause);
+        if let Some((_, error)) = failures
+            .iter()
+            .find(|(bundle_id, _)| bundle_id.as_str() == COMMAND_LINE_BUNDLE_ID)
+        {
+            return Err(ComputerError::RuntimeError(format!(
+                "built-in command line tool failed to start: {error}"
+            )));
+        }
         if failure_policy.propagates_runtime_input_failures() {
             if let Some((_, error)) = failures
                 .into_iter()
@@ -2386,7 +2511,12 @@ impl ComputerInstanceRuntime {
             .await
             .iter()
             .map(|server| (resolve_bundle_id(server), server.clone()))
-            .filter(|(bundle_id, _)| bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID)
+            .filter(|(bundle_id, _)| {
+                !matches!(
+                    bundle_id.as_str(),
+                    CLIENT_CONTROL_BUNDLE_ID | COMMAND_LINE_BUNDLE_ID
+                )
+            })
             .collect()
     }
 
@@ -2410,6 +2540,7 @@ impl ComputerInstanceRuntime {
             .await
             .into_iter()
             .filter(|entry| entry.bundle_id != CLIENT_CONTROL_BUNDLE_ID)
+            .filter(|entry| entry.bundle_id != COMMAND_LINE_BUNDLE_ID)
             .collect()
     }
 
@@ -2606,6 +2737,9 @@ impl ComputerInstanceRuntime {
             if let Err(error) =
                 self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
             {
+                if Self::is_command_line_start_error(&error) {
+                    return Err(ComputerRuntimeStartError::Sdk(error));
+                }
                 let mut start_error = ComputerRuntimeStartError::Sdk(error);
                 if let Err(cleanup_error) = self.try_shutdown_inner().await {
                     start_error = start_error.append_context(format!(
@@ -2683,12 +2817,15 @@ fn build_sdk_computer(
                 // injection/remount.
                 .filter(|server| server.origin != ProvenanceScope::Plugin)
                 .filter(|server| {
-                    let reserved = resolve_bundle_id(&server.config).as_str()
-                        == CLIENT_CONTROL_BUNDLE_ID;
+                    let bundle_id = resolve_bundle_id(&server.config);
+                    let reserved = matches!(
+                        bundle_id.as_str(),
+                        CLIENT_CONTROL_BUNDLE_ID | COMMAND_LINE_BUNDLE_ID
+                    );
                     if reserved {
                         log::warn!(
                             "Ignoring durable MCP declaration with reserved bundleId '{}' for Computer {}",
-                            CLIENT_CONTROL_BUNDLE_ID,
+                            bundle_id,
                             instance.id
                         );
                     }
@@ -2702,6 +2839,23 @@ fn build_sdk_computer(
             CLIENT_CONTROL_BUNDLE_ID.to_string(),
             client_control_server_config(),
         );
+    }
+    if instance.command_line.enabled {
+        match command_line_server_config(&instance.command_line, &instance_storage_root) {
+            Ok(config) => {
+                mcp_servers.insert(COMMAND_LINE_BUNDLE_ID.to_string(), config);
+            }
+            Err(error) => {
+                // Command/update entry points perform the authoritative validation and rollback.
+                // Handle construction remains infallible so a damaged installation does not hide
+                // stopped Computers from settings and repair flows.
+                log::error!(
+                    "Unable to mount built-in command line tool for Computer '{}': {}",
+                    instance.id,
+                    error
+                );
+            }
+        }
     }
     let sdk_servers = mcp_servers
         .values()
@@ -2847,10 +3001,10 @@ impl McpInstallHooks for RuntimeMcpHooks {
     async fn register_server(&self, cfg: MCPServerConfig) -> Result<(), McpHookError> {
         let name = cfg.name().to_string();
         let bundle_id = resolve_bundle_id(&cfg);
-        if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
-            return Err(McpHookError(
-                "Plugin MCP server uses reserved bundleId 'client_control'".to_string(),
-            ));
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err(McpHookError(format!(
+                "Plugin MCP server uses reserved built-in bundleId '{bundle_id}'"
+            )));
         }
         if !self.bundled_server_ids.contains(&bundle_id) {
             return Err(McpHookError(format!(
@@ -3137,6 +3291,29 @@ fn default_skill_home_base() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_start_failure_is_never_downgraded_to_best_effort() {
+        let runtime = ComputerInstanceRuntime::new(
+            ComputerInstance::new("computer-a", "Computer A"),
+            std::env::temp_dir().join("tfrobot-command-line-failure-policy"),
+        );
+        let error = runtime
+            .handle_desired_mcp_start_failures(
+                vec![(
+                    BundleId::try_from(COMMAND_LINE_BUNDLE_ID).unwrap(),
+                    ComputerError::ConnectionError("probe failure".to_string()),
+                )],
+                "test",
+                RuntimeMcpStartFailurePolicy::BestEffort,
+            )
+            .unwrap_err();
+        let error = ComputerRuntimeStartError::Sdk(error);
+        assert!(error.is_command_line_start_failure());
+        assert!(
+            matches!(error, ComputerRuntimeStartError::Sdk(ComputerError::RuntimeError(message)) if message.contains("command line tool"))
+        );
+    }
 
     #[test]
     fn is_expected_oauth_required_classifies_both_sdk_error_paths() {

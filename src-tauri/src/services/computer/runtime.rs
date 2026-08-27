@@ -136,6 +136,9 @@ impl ComputerInstanceRuntime {
         if let Err(error) =
             self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
         {
+            if Self::is_command_line_start_error(&error) {
+                return Err(ComputerRuntimeStartError::Sdk(error));
+            }
             let mut start_error = ComputerRuntimeStartError::Sdk(error);
             if let Err(cleanup_error) = self.try_shutdown_inner().await {
                 start_error = start_error.append_context(format!(

@@ -186,9 +186,9 @@
           "title": "连接策略",
           "description": "选择保存的连接目标与自动连接策略。"
         },
-        "remote-control": {
-          "title": "Robot 控制",
-          "description": "管理当前 Computer 可通过内置 Robot 控制 provider 使用的 Client 能力。"
+        "built-in-tools": {
+          "title": "内建工具",
+          "description": "管理随 TFRobot Client 一起提供的能力，并与普通用户 MCP 声明隔离。"
         }
       }
     },
@@ -214,6 +214,33 @@
         "skills": "User Skills",
         "marketplace_plugins": "Marketplace 与 Plugins",
         "debug_resources": "调试与资源"
+      }
+    },
+    "builtInTools": {
+      "robotControl": {
+        "title": "Robot 控制",
+        "description": "为当前 Computer 的 Robot 授予范围受控且完整审计的 Client 控制能力。"
+      },
+      "commandLine": {
+        "title": "命令行工具",
+        "description": "使用随安装包提供的 tfbash-mcp；Computer 启动时不需要再下载。",
+        "enabled": "启用命令行工具",
+        "enabledDescription": "Computer 运行中会立即启动；Computer 已停止时将在下次启动时生效。",
+        "workspace": "工作目录",
+        "defaultWorkspace": "正在使用当前 Computer 隔离的默认工作目录。",
+        "customWorkspace": "正在使用自定义工作目录。",
+        "chooseWorkspace": "选择工作目录",
+        "useDefaultWorkspace": "恢复默认",
+        "saved": "命令行工具设置已保存",
+        "assetsUnavailable": "内建命令行运行时不可用",
+        "pendingDescription": "设置已保存，命令行工具会在当前 Computer 启动时运行。",
+        "status": {
+          "disabled": "已关闭",
+          "pending": "等待启动",
+          "starting": "启动中",
+          "running": "运行中",
+          "error": "不可用"
+        }
       }
     },
     "workbench": {
@@ -606,6 +633,7 @@
     },
     "source": {
       "user": "用户",
+      "builtIn": "内建工具",
       "robotControl": "内置：Robot 控制",
       "plugin": "插件：{{plugin}}",
       "marketplace": "Marketplace：{{marketplace}}",
@@ -614,7 +642,9 @@
     },
     "builtIn": {
       "robotControlName": "Robot 控制",
-      "robotControlManagedHint": "生命周期由 Robot 控制设置管理。"
+      "robotControlManagedHint": "生命周期由 Robot 控制设置管理。",
+      "commandLineName": "命令行工具",
+      "commandLineManagedHint": "生命周期由内建工具设置管理。"
     },
     "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在 Marketplace 中管理其生命周期。",
     "batch": {

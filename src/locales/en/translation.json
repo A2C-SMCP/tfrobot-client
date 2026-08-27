@@ -186,9 +186,9 @@
           "title": "Connection Policy",
           "description": "Choose the saved connection target and automatic connection policy."
         },
-        "remote-control": {
-          "title": "Robot Control",
-          "description": "Control which client capabilities this Computer may use through its built-in Robot control provider."
+        "built-in-tools": {
+          "title": "Built-in Tools",
+          "description": "Manage capabilities shipped with TFRobot Client. They are isolated from ordinary user MCP declarations."
         }
       }
     },
@@ -214,6 +214,33 @@
         "skills": "User Skills",
         "marketplace_plugins": "Marketplace and Plugins",
         "debug_resources": "Debug and resources"
+      }
+    },
+    "builtInTools": {
+      "robotControl": {
+        "title": "Robot control",
+        "description": "Grant this Computer's Robot a scoped set of audited client-control capabilities."
+      },
+      "commandLine": {
+        "title": "Command line tool",
+        "description": "Run the bundled tfbash-mcp runtime without downloading anything when the Computer starts.",
+        "enabled": "Enable command line tool",
+        "enabledDescription": "When the Computer is running this starts immediately; otherwise it starts on the next Computer start.",
+        "workspace": "Workspace",
+        "defaultWorkspace": "Using this Computer's isolated default workspace.",
+        "customWorkspace": "Using a custom workspace.",
+        "chooseWorkspace": "Choose workspace",
+        "useDefaultWorkspace": "Use default",
+        "saved": "Command line tool setting saved",
+        "assetsUnavailable": "The bundled command line runtime is unavailable",
+        "pendingDescription": "Saved. The command line tool will start when this Computer starts.",
+        "status": {
+          "disabled": "Disabled",
+          "pending": "Pending start",
+          "starting": "Starting",
+          "running": "Running",
+          "error": "Unavailable"
+        }
       }
     },
     "workbench": {
@@ -606,6 +633,7 @@
     },
     "source": {
       "user": "User",
+      "builtIn": "Built-in",
       "robotControl": "Built-in: Robot control",
       "plugin": "Plugin: {{plugin}}",
       "marketplace": "Marketplace: {{marketplace}}",
@@ -614,7 +642,9 @@
     },
     "builtIn": {
       "robotControlName": "Robot control",
-      "robotControlManagedHint": "Managed by the Robot control setting."
+      "robotControlManagedHint": "Managed by the Robot control setting.",
+      "commandLineName": "Command line tool",
+      "commandLineManagedHint": "Managed by the Built-in Tools setting."
     },
     "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
     "batch": {

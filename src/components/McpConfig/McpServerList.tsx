@@ -54,13 +54,25 @@ export function McpServerList({
     });
   };
 
+  const builtInName = (record: McpServerStatus) => (
+    record.managedBy.type === 'built_in' && record.managedBy.provider === 'command_line'
+      ? t('mcp.builtIn.commandLineName')
+      : t('mcp.builtIn.robotControlName')
+  );
+
+  const builtInManagedHint = (record: McpServerStatus) => (
+    record.managedBy.type === 'built_in' && record.managedBy.provider === 'command_line'
+      ? t('mcp.builtIn.commandLineManagedHint')
+      : t('mcp.builtIn.robotControlManagedHint')
+  );
+
   const columns = [
     {
       title: t('mcp.table.source'),
       key: 'source',
       render: (_: unknown, record: McpServerStatus) => {
         if (record.managedBy.type === 'built_in') {
-          return <Tag color="blue">{t('mcp.source.robotControl')}</Tag>;
+          return <Tag color="blue">{t('mcp.source.builtIn')}</Tag>;
         }
         if (record.managedBy.type === 'plugin') {
           return (
@@ -82,7 +94,7 @@ export function McpServerList({
       key: 'name',
       render: (_: unknown, record: McpServerStatus) => (
         record.managedBy.type === 'built_in'
-          ? t('mcp.builtIn.robotControlName')
+          ? builtInName(record)
           : record.name
       ),
     },
@@ -204,7 +216,7 @@ export function McpServerList({
         if (record.managedBy.type === 'built_in') {
           return (
             <Typography.Text type="secondary">
-              {t('mcp.builtIn.robotControlManagedHint')}
+              {builtInManagedHint(record)}
             </Typography.Text>
           );
         }

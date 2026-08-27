@@ -198,7 +198,7 @@ describe('McpRuntimeControls', () => {
 
     render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
 
-    expect(screen.getByText('Built-in: Robot control')).toBeInTheDocument();
+    expect(screen.getByText('Built-in')).toBeInTheDocument();
     expect(screen.getByText('Robot control')).toBeInTheDocument();
     expect(screen.getByText('Managed by the Robot control setting.')).toBeInTheDocument();
     expect(screen.getByText('Available')).toBeInTheDocument();
