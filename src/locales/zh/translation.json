@@ -606,10 +606,15 @@
     },
     "source": {
       "user": "用户",
+      "robotControl": "内置：Robot 控制",
       "plugin": "插件：{{plugin}}",
       "marketplace": "Marketplace：{{marketplace}}",
       "bundled": "插件托管",
       "trusted": "可信来源"
+    },
+    "builtIn": {
+      "robotControlName": "Robot 控制",
+      "robotControlManagedHint": "生命周期由 Robot 控制设置管理。"
     },
     "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在 Marketplace 中管理其生命周期。",
     "batch": {

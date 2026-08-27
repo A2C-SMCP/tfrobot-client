@@ -184,6 +184,30 @@ describe('McpRuntimeControls', () => {
     expect(onOpenPlugin).toHaveBeenCalledWith(owner);
   });
 
+  it('shows the built-in Robot control provider without MCP lifecycle actions', () => {
+    mockStore.servers = [{
+      bundleId: 'client_control',
+      name: 'Client Control',
+      activation_state: 'started',
+      connection_state: 'connected',
+      running: true,
+      status_message: 'connected',
+      disabled: false,
+      managedBy: { type: 'built_in', provider: 'robot_control' },
+    }];
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    expect(screen.getByText('Built-in: Robot control')).toBeInTheDocument();
+    expect(screen.getByText('Robot control')).toBeInTheDocument();
+    expect(screen.getByText('Managed by the Robot control setting.')).toBeInTheDocument();
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.queryByTitle('Start')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Retry connection')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Stop')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Manage/ })).not.toBeInTheDocument();
+  });
+
   it('shows an unauthorized started Plugin server as waiting for authorization', () => {
     mockStore.servers = [{
       bundleId: 'plugin-oauth-server-id',

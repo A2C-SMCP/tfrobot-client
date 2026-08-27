@@ -154,7 +154,7 @@ pub async fn get_mcp_servers_core(
     }
     let mut statuses: Vec<_> = metadata
         .into_iter()
-        .filter(|(_, metadata)| metadata.managed_by.is_plugin_owned() || !metadata.disabled)
+        .filter(|(_, metadata)| !metadata.managed_by.is_user_owned() || !metadata.disabled)
         .map(|(bundle_id, metadata)| {
             let runtime_status = runtime_statuses.get(&bundle_id);
             let activation_state = runtime_status
@@ -801,11 +801,11 @@ async fn ensure_user_managed_server(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> Result<String, String> {
     match mcp_server_runtime_metadata(runtime).await.get(bundle_id) {
-        Some(metadata) if metadata.managed_by.is_plugin_owned() => Err(format!(
-            "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+        Some(metadata) if metadata.managed_by.is_user_owned() => Ok(metadata.name.clone()),
+        Some(metadata) => Err(format!(
+            "MCP server '{}' is not user-manageable",
             metadata.name
         )),
-        Some(metadata) => Ok(metadata.name.clone()),
         None => Err(format!("Server not found: {bundle_id}")),
     }
 }
@@ -849,9 +849,9 @@ async fn latest_user_mcp_server_for_start(
     latest_servers: &std::collections::HashMap<BundleId, LatestUserMcpServer>,
 ) -> Result<LatestUserMcpServer, RuntimeActionError> {
     if let Some(metadata) = mcp_server_runtime_metadata(runtime).await.get(bundle_id) {
-        if metadata.managed_by.is_plugin_owned() {
+        if !metadata.managed_by.is_user_owned() {
             return Err(RuntimeActionError::runtime(format!(
-                "MCP server '{}' is managed by a Marketplace plugin; manage its lifecycle from Marketplace",
+                "MCP server '{}' is not user-manageable",
                 metadata.name
             )));
         }
@@ -930,7 +930,7 @@ async fn mcp_runtime_batch_inventory(
         .count();
     let mut candidates: Vec<_> = metadata
         .into_iter()
-        .filter(|(_, metadata)| !metadata.managed_by.is_plugin_owned() && !metadata.disabled)
+        .filter(|(_, metadata)| metadata.managed_by.is_user_owned() && !metadata.disabled)
         .map(|(bundle_id, metadata)| {
             let runtime_status = runtime_statuses.get(&bundle_id);
             McpBatchCandidate {
@@ -999,23 +999,28 @@ async fn mcp_server_runtime_metadata(
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> std::collections::HashMap<BundleId, McpServerRuntimeMetadata> {
     runtime
-        .sdk_mcp_server_ownership()
+        .sdk_mcp_server_runtime_ownership()
         .await
         .into_iter()
         .filter_map(|entry| {
             let bundle_id = BundleId::try_from(entry.bundle_id.as_str()).ok()?;
-            crate::services::computer::sdk_managed_by_to_client(entry.managed_by).map(
-                |managed_by| {
-                    (
-                        bundle_id,
-                        McpServerRuntimeMetadata {
-                            name: entry.name,
-                            disabled: entry.disabled,
-                            managed_by,
-                        },
-                    )
-                },
-            )
+            let managed_by = if bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID {
+                Some(McpServerManagedBy::BuiltIn {
+                    provider: "robot_control".to_string(),
+                })
+            } else {
+                crate::services::computer::sdk_managed_by_to_client(entry.managed_by)
+            };
+            managed_by.map(|managed_by| {
+                (
+                    bundle_id,
+                    McpServerRuntimeMetadata {
+                        name: entry.name,
+                        disabled: entry.disabled,
+                        managed_by,
+                    },
+                )
+            })
         })
         .collect()
 }

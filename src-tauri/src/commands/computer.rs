@@ -1828,7 +1828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn computer_status_excludes_internal_client_control_from_mcp_counts() {
+    async fn computer_status_includes_internal_client_control_in_mcp_counts() {
         let (state, _dir) = test_state();
         state
             .config
@@ -1840,17 +1840,17 @@ mod tests {
         let stopped = get_computer_instance_status_core(&state, "computer-a".to_string())
             .await
             .unwrap();
-        assert_eq!(stopped.mcp_server_count, 0);
-        assert_eq!(stopped.runtime.mcp_servers, 0);
+        assert_eq!(stopped.mcp_server_count, 1);
+        assert_eq!(stopped.runtime.mcp_servers, 1);
         assert_eq!(stopped.runtime.active_mcp_servers, 0);
 
         let started = start_computer_instance_core(None, &state, "computer-a".to_string())
             .await
             .unwrap();
 
-        assert_eq!(started.mcp_server_count, 0);
-        assert_eq!(started.runtime.mcp_servers, 0);
-        assert_eq!(started.runtime.active_mcp_servers, 0);
+        assert_eq!(started.mcp_server_count, 1);
+        assert_eq!(started.runtime.mcp_servers, 1);
+        assert_eq!(started.runtime.active_mcp_servers, 1);
 
         state
             .sdk_config
@@ -1869,8 +1869,8 @@ mod tests {
         let restarted = restart_computer_instance_core(None, &state, "computer-a".to_string())
             .await
             .unwrap();
-        assert_eq!(restarted.mcp_server_count, 1);
-        assert_eq!(restarted.runtime.mcp_servers, 1);
+        assert_eq!(restarted.mcp_server_count, 2);
+        assert_eq!(restarted.runtime.mcp_servers, 2);
     }
 
     #[tokio::test]

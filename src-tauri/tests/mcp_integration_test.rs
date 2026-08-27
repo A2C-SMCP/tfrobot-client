@@ -27,12 +27,14 @@ use std::sync::{Arc, Mutex};
 use tfrobot_client_lib::commands::connection::ConnectionState;
 use tfrobot_client_lib::commands::runtime_error::RuntimeActionError;
 use tfrobot_client_lib::commands::{
+    client_control::{self, UpdateRemoteControlPolicyRequest},
     computer::{self, start_computer_instance_core},
     config_io,
     dashboard::get_dashboard_data_core,
     debug, inputs, sdk_config,
 };
-use tfrobot_client_lib::services::computer::ComputerInstance;
+use tfrobot_client_lib::services::client_control::{RemoteControlPolicy, CLIENT_CONTROL_BUNDLE_ID};
+use tfrobot_client_lib::services::computer::{ComputerInstance, McpServerManagedBy};
 use tfrobot_client_lib::services::computer_runtime_events::{
     ComputerRuntimeAffectedCapability, ComputerRuntimeEventCause, ComputerRuntimeEventSink,
     ComputerRuntimeProblemMessage, ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
@@ -4916,6 +4918,74 @@ async fn test_cli_native_import_persists_sdk_inputs_without_hot_updating_runtime
 // Echo server uses newline-delimited JSON framing (MCP spec 2025-03-26).
 
 const MCP_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[tokio::test]
+async fn test_robot_control_provider_is_visible_but_not_user_manageable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    client_control::update_remote_control_policy_core(
+        &state,
+        UpdateRemoteControlPolicyRequest {
+            computer_id: TEST_INSTANCE_ID.to_string(),
+            policy: RemoteControlPolicy {
+                enabled: true,
+                ..RemoteControlPolicy::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    state
+        .computer_registry
+        .start_runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let snapshot = runtime.runtime_snapshot().await;
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let provider = servers
+        .iter()
+        .find(|server| server.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID)
+        .expect("Robot control provider should be projected into the MCP runtime list");
+
+    assert_eq!(snapshot.mcp_servers, 1);
+    assert_eq!(snapshot.active_mcp_servers, 1);
+    assert_eq!(provider.name, "Client Control");
+    assert_eq!(
+        provider.managed_by,
+        McpServerManagedBy::BuiltIn {
+            provider: "robot_control".to_string(),
+        }
+    );
+    assert_eq!(provider.activation_state, MCPServerActivationState::Started);
+    assert_eq!(
+        provider.connection_state,
+        MCPServerConnectionState::Connected
+    );
+
+    let start_all = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let stop_all = mcp::stop_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(start_all.candidate_count, 0);
+    assert_eq!(stop_all.candidate_count, 0);
+    assert!(runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .into_iter()
+        .any(|status| {
+            status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
+        }));
+}
 
 #[tokio::test]
 async fn test_sdk_computer_add_and_start_server() {

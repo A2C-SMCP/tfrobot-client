@@ -80,6 +80,7 @@ export type HttpAuthPolicy = 'auto' | 'oauth' | 'disabled';
 
 export type McpServerManagedBy =
   | { type: 'user' }
+  | { type: 'built_in'; provider: 'robot_control' | string }
   | { type: 'plugin'; marketplace: string; plugin: string; pluginId?: string | null };
 
 export interface McpBatchFailure {

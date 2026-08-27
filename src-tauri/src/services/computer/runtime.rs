@@ -707,28 +707,13 @@ impl ComputerRuntimeLifecycleLease<'_> {
 }
 
 /// Projects the SDK's complete runtime inventory into the client-facing capability view.
-/// Internal providers remain mounted in the SDK but must not appear as user-manageable MCP
-/// servers in snapshots consumed by the UI.
+/// Built-in providers are part of the observable MCP runtime even though their lifecycle remains
+/// owned by the feature that mounted them.
 async fn user_visible_sdk_status_snapshot(
     computer: &RwLock<Computer<InstanceSession>>,
 ) -> ComputerStatusSnapshot {
     let computer = computer.read().await;
-    let mut snapshot = computer.status().await;
-    snapshot.mcp_servers = computer
-        .list_mcp_servers()
-        .await
-        .iter()
-        .filter(|config| resolve_bundle_id(config).as_str() != CLIENT_CONTROL_BUNDLE_ID)
-        .count();
-    snapshot.active_mcp_servers = computer
-        .get_server_runtime_statuses()
-        .await
-        .iter()
-        .filter(|status| {
-            status.bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
-        })
-        .count();
-    snapshot
+    computer.status().await
 }
 
 async fn collect_runtime_problems(

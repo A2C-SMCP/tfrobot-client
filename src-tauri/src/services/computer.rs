@@ -207,6 +207,9 @@ pub struct ComputerConnectionPolicy {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpServerManagedBy {
     User,
+    BuiltIn {
+        provider: String,
+    },
     Plugin {
         marketplace: String,
         plugin: String,
@@ -218,6 +221,10 @@ pub enum McpServerManagedBy {
 impl McpServerManagedBy {
     pub fn is_plugin_owned(&self) -> bool {
         matches!(self, Self::Plugin { .. })
+    }
+
+    pub fn is_user_owned(&self) -> bool {
+        matches!(self, Self::User)
     }
 }
 
@@ -2404,6 +2411,10 @@ impl ComputerInstanceRuntime {
             .into_iter()
             .filter(|entry| entry.bundle_id != CLIENT_CONTROL_BUNDLE_ID)
             .collect()
+    }
+
+    pub(crate) async fn sdk_mcp_server_runtime_ownership(&self) -> Vec<McpServerWithMetadata> {
+        self.sdk_mcp_server_ownership_internal().await
     }
 
     async fn sdk_mcp_server_ownership_internal(&self) -> Vec<McpServerWithMetadata> {

@@ -59,6 +59,9 @@ export function McpServerList({
       title: t('mcp.table.source'),
       key: 'source',
       render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'built_in') {
+          return <Tag color="blue">{t('mcp.source.robotControl')}</Tag>;
+        }
         if (record.managedBy.type === 'plugin') {
           return (
             <Space direction="vertical" size={2}>
@@ -76,8 +79,12 @@ export function McpServerList({
     },
     {
       title: t('mcp.table.name'),
-      dataIndex: 'name',
       key: 'name',
+      render: (_: unknown, record: McpServerStatus) => (
+        record.managedBy.type === 'built_in'
+          ? t('mcp.builtIn.robotControlName')
+          : record.name
+      ),
     },
     {
       title: t('mcp.table.status'),
@@ -194,6 +201,13 @@ export function McpServerList({
       title: t('mcp.table.actions'),
       key: 'actions',
       render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'built_in') {
+          return (
+            <Typography.Text type="secondary">
+              {t('mcp.builtIn.robotControlManagedHint')}
+            </Typography.Text>
+          );
+        }
         if (record.managedBy.type === 'plugin') {
           return (
             <Space direction="vertical" size={2}>

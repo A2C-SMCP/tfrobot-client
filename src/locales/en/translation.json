@@ -606,10 +606,15 @@
     },
     "source": {
       "user": "User",
+      "robotControl": "Built-in: Robot control",
       "plugin": "Plugin: {{plugin}}",
       "marketplace": "Marketplace: {{marketplace}}",
       "bundled": "Bundled",
       "trusted": "Trusted"
+    },
+    "builtIn": {
+      "robotControlName": "Robot control",
+      "robotControlManagedHint": "Managed by the Robot control setting."
     },
     "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
     "batch": {
