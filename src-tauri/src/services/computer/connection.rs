@@ -1636,8 +1636,10 @@ mod tests {
     #[test]
     fn explicit_connection_operation_precedes_sdk_lifecycle_projection() {
         let connection = connection_state();
-        let mut operation = ClientConnectionOperationState::default();
-        operation.operation = Some(ClientConnectionOperation::Reconnect);
+        let operation = ClientConnectionOperationState {
+            operation: Some(ClientConnectionOperation::Reconnect),
+            ..Default::default()
+        };
 
         let snapshot = ClientConnectionStateSnapshot::from_parts(
             1,

@@ -46,7 +46,7 @@ pids/
 coverage/
 
 # Local experiments
-experiments/
+/experiments/
 
 # Playwright
 test-results/

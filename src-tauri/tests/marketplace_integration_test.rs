@@ -1337,7 +1337,7 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
     let start_error = mcp::start_mcp_server_core(&restarted, TEST_INSTANCE_ID, &audit_bundle_id)
         .await
         .unwrap_err();
-    assert!(start_error.to_string().contains("Marketplace plugin"));
+    assert!(start_error.to_string().contains("not user-manageable"));
 
     disable_plugin_core(&restarted, TEST_INSTANCE_ID, request.clone())
         .await

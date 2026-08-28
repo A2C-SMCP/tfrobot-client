@@ -718,7 +718,7 @@ mod tests {
             bundle_id: bundle_id.clone(),
             status: MCPServerRuntimeStatus {
                 bundle_id,
-                name: ServerName::try_from("Server A").unwrap(),
+                name: ServerName::from("Server A"),
                 activation: MCPServerActivationState::Started,
                 connection: MCPServerConnectionState::Connected,
             },
