@@ -186,9 +186,9 @@ impl From<ComputerError> for RuntimeActionError {
 impl From<ComputerRuntimeStartError> for RuntimeActionError {
     fn from(error: ComputerRuntimeStartError) -> Self {
         match error {
-            ComputerRuntimeStartError::Sdk(error) => error.into(),
+            ComputerRuntimeStartError::Sdk(error) => (*error).into(),
             ComputerRuntimeStartError::SdkWithContext { source, context } => {
-                Self::from(source).append_context(context)
+                Self::from(*source).append_context(context)
             }
             ComputerRuntimeStartError::Client(message) => Self::runtime(message),
         }
@@ -302,11 +302,13 @@ mod tests {
     #[test]
     fn preserves_missing_input_fields_when_runtime_restore_adds_context() {
         let error = RuntimeActionError::from(ComputerRuntimeStartError::SdkWithContext {
-            source: ComputerError::InputResolution(InputResolutionError::Missing {
-                id: "audit@acme/api-key".to_string(),
-                kind: InputKind::Secret,
-                env_hint: "A2C_SMCP_audit_acme_api_key".to_string(),
-            }),
+            source: Box::new(ComputerError::InputResolution(
+                InputResolutionError::Missing {
+                    id: "audit@acme/api-key".to_string(),
+                    kind: InputKind::Secret,
+                    env_hint: "A2C_SMCP_audit_acme_api_key".to_string(),
+                },
+            )),
             context: "previous runtime restore also failed".to_string(),
         });
 

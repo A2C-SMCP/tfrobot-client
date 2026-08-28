@@ -726,14 +726,20 @@ fn default_schema_version() -> u32 {
 #[derive(Debug, thiserror::Error)]
 pub enum ComputerRuntimeStartError {
     #[error(transparent)]
-    Sdk(#[from] ComputerError),
+    Sdk(Box<ComputerError>),
     #[error("{source}; {context}")]
     SdkWithContext {
-        source: ComputerError,
+        source: Box<ComputerError>,
         context: String,
     },
     #[error("{0}")]
     Client(String),
+}
+
+impl From<ComputerError> for ComputerRuntimeStartError {
+    fn from(error: ComputerError) -> Self {
+        Self::Sdk(Box::new(error))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1243,7 +1249,7 @@ impl ComputerInstanceRuntime {
         if self.is_running().await {
             self.reconcile_sdk_governance_inner()
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
+                .map_err(ComputerRuntimeStartError::from)?;
         }
         Ok(())
     }
@@ -1277,14 +1283,14 @@ impl ComputerInstanceRuntime {
                     .await
                     .stop_mcp_client(&bundle_id)
                     .await
-                    .map_err(ComputerRuntimeStartError::Sdk)?;
+                    .map_err(ComputerRuntimeStartError::from)?;
             }
             self.computer
                 .read()
                 .await
                 .unmount_server(&bundle_id)
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
+                .map_err(ComputerRuntimeStartError::from)?;
             self.sdk_servers.write().await.remove(&bundle_id);
             self.clear_mcp_start_diagnostic(&bundle_id).await;
             self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
@@ -1306,7 +1312,7 @@ impl ComputerInstanceRuntime {
             .await
             .mount_server(normalize_mcp_server_tool_meta(server))
             .await
-            .map_err(ComputerRuntimeStartError::Sdk)?;
+            .map_err(ComputerRuntimeStartError::from)?;
         self.sdk_servers
             .write()
             .await
@@ -1314,7 +1320,7 @@ impl ComputerInstanceRuntime {
         if computer_running {
             self.start_mcp_server_inner(&bundle_id)
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
+                .map_err(ComputerRuntimeStartError::from)?;
         }
         Ok(())
     }
@@ -2720,12 +2726,12 @@ impl ComputerInstanceRuntime {
                 .await
                 .boot_up()
                 .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
+                .map_err(ComputerRuntimeStartError::from)?;
             if let Err(error) = self
                 .reconcile_governance_for_computer_start(reason, failure_policy)
                 .await
             {
-                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                let mut start_error = ComputerRuntimeStartError::from(error);
                 if let Err(cleanup_error) = self.try_shutdown_inner().await {
                     start_error = start_error.append_context(format!(
                         "failed to roll back the partially restarted Computer: {cleanup_error}"
@@ -2738,9 +2744,9 @@ impl ComputerInstanceRuntime {
                 self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
             {
                 if Self::is_command_line_start_error(&error) {
-                    return Err(ComputerRuntimeStartError::Sdk(error));
+                    return Err(ComputerRuntimeStartError::from(error));
                 }
-                let mut start_error = ComputerRuntimeStartError::Sdk(error);
+                let mut start_error = ComputerRuntimeStartError::from(error);
                 if let Err(cleanup_error) = self.try_shutdown_inner().await {
                     start_error = start_error.append_context(format!(
                         "failed to roll back the partially restarted Computer: {cleanup_error}"
@@ -3308,10 +3314,10 @@ mod tests {
                 RuntimeMcpStartFailurePolicy::BestEffort,
             )
             .unwrap_err();
-        let error = ComputerRuntimeStartError::Sdk(error);
+        let error = ComputerRuntimeStartError::from(error);
         assert!(error.is_command_line_start_failure());
         assert!(
-            matches!(error, ComputerRuntimeStartError::Sdk(ComputerError::RuntimeError(message)) if message.contains("command line tool"))
+            matches!(error, ComputerRuntimeStartError::Sdk(source) if matches!(source.as_ref(), ComputerError::RuntimeError(message) if message.contains("command line tool")))
         );
     }
 

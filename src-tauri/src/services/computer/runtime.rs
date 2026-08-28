@@ -90,14 +90,14 @@ impl ComputerInstanceRuntime {
                 failure_policy,
             )
             .await
-            .map_err(ComputerRuntimeStartError::Sdk)?;
+            .map_err(ComputerRuntimeStartError::from)?;
             let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
             self.handle_desired_mcp_start_failures(
                 failures,
                 "idempotent Computer startup",
                 failure_policy,
             )
-            .map_err(ComputerRuntimeStartError::Sdk)?;
+            .map_err(ComputerRuntimeStartError::from)?;
             return Ok(());
         } else if matches!(
             lifecycle,
@@ -114,7 +114,7 @@ impl ComputerInstanceRuntime {
         self.start_runtime_event_relay().await;
 
         if let Err(error) = self.computer.read().await.boot_up().await {
-            return Err(ComputerRuntimeStartError::Sdk(error));
+            return Err(ComputerRuntimeStartError::from(error));
         }
         if let Err(error) = self
             .reconcile_governance_for_computer_start("Computer startup", failure_policy)
@@ -124,7 +124,7 @@ impl ComputerInstanceRuntime {
             // still a failed Computer start transaction, so roll the partially started handle
             // back to Shutdown; otherwise the public Start action becomes unavailable and the
             // user cannot save the missing runtime input and retry.
-            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            let mut start_error = ComputerRuntimeStartError::from(error);
             if let Err(cleanup_error) = self.try_shutdown_inner().await {
                 start_error = start_error.append_context(format!(
                     "failed to roll back the partially started Computer: {cleanup_error}"
@@ -137,9 +137,9 @@ impl ComputerInstanceRuntime {
             self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
         {
             if Self::is_command_line_start_error(&error) {
-                return Err(ComputerRuntimeStartError::Sdk(error));
+                return Err(ComputerRuntimeStartError::from(error));
             }
-            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            let mut start_error = ComputerRuntimeStartError::from(error);
             if let Err(cleanup_error) = self.try_shutdown_inner().await {
                 start_error = start_error.append_context(format!(
                     "failed to roll back the partially started Computer: {cleanup_error}"
