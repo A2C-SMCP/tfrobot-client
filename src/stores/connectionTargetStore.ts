@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import { debug, error as logError } from '@/utils/logger';
 import { useComputerStore } from './computerStore';
 
 export interface ManualSmcpTarget {
@@ -76,14 +77,24 @@ export const useConnectionTargetStore = create<ConnectionTargetState>((set, get)
   },
 
   connectTarget: async (instanceId, targetId) => {
+    const startedAt = Date.now();
+    debug(`connection.requested layer=frontend operation=connect source_type=manual_smcp instance_id=${instanceId} target_id=${targetId}`);
     set({ loading: true, error: null });
     try {
       await invoke('connect_connection_target', { instanceId, targetId });
+      debug(`connection.request_completed layer=frontend operation=connect source_type=manual_smcp instance_id=${instanceId} target_id=${targetId} elapsed_ms=${Date.now() - startedAt} outcome=succeeded`);
+    } catch (e) {
+      logError(`connection.request_failed layer=frontend operation=connect source_type=manual_smcp instance_id=${instanceId} target_id=${targetId} elapsed_ms=${Date.now() - startedAt}`);
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+    try {
       // The runtime event owns connection state. This one-shot reconciliation is only for the
       // persisted connection policy changed by the command.
       await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
       set({ loading: false });
     } catch (e) {
+      logError(`connection.metadata_reconciliation_failed layer=frontend source_type=manual_smcp instance_id=${instanceId} target_id=${targetId} elapsed_ms=${Date.now() - startedAt} connection_outcome=succeeded`);
       set({ error: String(e), loading: false });
       throw e;
     }

@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { App, Alert, Button, Card, Empty, Form, Input, List, Modal, Skeleton, Space, Tag, Typography } from 'antd';
 import {
   CloudDownloadOutlined,
   DeleteOutlined,
   EditOutlined,
+  LoadingOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   formatInvokeError,
   useSkillStore,
@@ -20,10 +20,7 @@ import {
   type SkillRef,
   type SkillResource,
 } from '@/stores/skillStore';
-import {
-  isMissingRuntimeInputError,
-  type MissingRuntimeInputError,
-} from '@/utils/runtimeActionError';
+import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import styles from './MarketplaceTab.module.css';
 
 const { Text, Title, Paragraph } = Typography;
@@ -99,11 +96,7 @@ export function MarketplaceTab({
   const [skillPreview, setSkillPreview] = useState<SkillResource | null>(null);
   const [loadingSkillPreview, setLoadingSkillPreview] = useState(false);
   const [skillPreviewError, setSkillPreviewError] = useState<string | null>(null);
-  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
-    error: MissingRuntimeInputError;
-    action: 'install' | 'enable' | 'disable' | 'uninstall';
-    plugin: PluginSummary;
-  } | null>(null);
+  const currentInstanceIdRef = useRef<string | null>(instanceId);
   const {
     recordsByInstanceId,
     fetchMarketplaceGovernance,
@@ -124,7 +117,16 @@ export function MarketplaceTab({
   const recordSkills = recordsByInstanceId[instanceId]?.skills;
   const skills = Array.isArray(recordSkills) ? recordSkills : EMPTY_SKILLS;
   const loadingMarketplace = recordsByInstanceId[instanceId]?.loadingMarketplace ?? false;
+  const marketplaceOperation = recordsByInstanceId[instanceId]?.marketplaceOperation ?? null;
+  const marketplaceBusy = loadingMarketplace || marketplaceOperation !== null;
   const marketplaceError = recordsByInstanceId[instanceId]?.marketplaceError ?? null;
+
+  useLayoutEffect(() => {
+    currentInstanceIdRef.current = instanceId;
+    return () => {
+      currentInstanceIdRef.current = null;
+    };
+  }, [instanceId]);
 
   useEffect(() => {
     fetchMarketplaceGovernance(instanceId);
@@ -229,19 +231,24 @@ export function MarketplaceTab({
 
   const handleSubmitMarketplace = async () => {
     const values = await marketplaceForm.validateFields();
+    const marketplaceName = editingMarketplace ?? values.name;
+    const successMessage = editingMarketplace
+      ? 'marketplace.messages.updated'
+      : 'marketplace.messages.added';
+    marketplaceForm.resetFields();
+    setEditingMarketplace(null);
+    setMarketplaceModalOpen(false);
     try {
       if (editingMarketplace) {
         await updateMarketplace(instanceId, { ...values, name: editingMarketplace });
-        setSelectedMarketplaceName(editingMarketplace);
       } else {
         await addMarketplace(instanceId, values);
-        setSelectedMarketplaceName(values.name);
       }
-      marketplaceForm.resetFields();
-      setEditingMarketplace(null);
-      setMarketplaceModalOpen(false);
-      message.success(t(editingMarketplace ? 'marketplace.messages.updated' : 'marketplace.messages.added'));
+      if (currentInstanceIdRef.current !== instanceId) return;
+      setSelectedMarketplaceName(marketplaceName);
+      message.success(t(successMessage));
     } catch (e) {
+      if (currentInstanceIdRef.current !== instanceId) return;
       message.error(formatInvokeError(e));
     }
   };
@@ -267,8 +274,10 @@ export function MarketplaceTab({
   const handleRefreshMarketplace = async (marketplace: string) => {
     try {
       await refreshMarketplace(instanceId, marketplace);
+      if (currentInstanceIdRef.current !== instanceId) return;
       message.success(t('marketplace.messages.refreshed'));
     } catch (error) {
+      if (currentInstanceIdRef.current !== instanceId) return;
       message.error(formatInvokeError(error));
     }
   };
@@ -283,13 +292,11 @@ export function MarketplaceTab({
       if (action === 'enable') await enablePlugin(instanceId, request);
       if (action === 'disable') await disablePlugin(instanceId, request);
       if (action === 'uninstall') await uninstallPlugin(instanceId, request);
-      setRuntimeInputPrompt(null);
+      if (currentInstanceIdRef.current !== instanceId) return;
       message.success(t(`marketplace.messages.${action}`));
     } catch (e) {
-      if (isMissingRuntimeInputError(e)) {
-        setRuntimeInputPrompt({ error: e, action, plugin });
-        return;
-      }
+      if (currentInstanceIdRef.current !== instanceId) return;
+      if (isRuntimeInputCancelledError(e)) return;
       message.error(formatInvokeError(e));
     }
   };
@@ -319,7 +326,7 @@ export function MarketplaceTab({
         <Button
           size="small"
           icon={<CloudDownloadOutlined />}
-          disabled={!canRunOperation('install_plugin')}
+          disabled={marketplaceBusy || !canRunOperation('install_plugin')}
           loading={loadingMarketplace}
           onClick={(event) => {
             event.stopPropagation();
@@ -332,7 +339,7 @@ export function MarketplaceTab({
         <Button
           size="small"
           icon={<PlayCircleOutlined />}
-          disabled={!canRunOperation('enable_plugin') || plugin.enabled}
+          disabled={marketplaceBusy || !canRunOperation('enable_plugin') || plugin.enabled}
           loading={loadingMarketplace}
           onClick={(event) => {
             event.stopPropagation();
@@ -346,7 +353,7 @@ export function MarketplaceTab({
         <Button
           size="small"
           icon={<PauseCircleOutlined />}
-          disabled={!canRunOperation('disable_plugin') || !plugin.enabled}
+          disabled={marketplaceBusy || !canRunOperation('disable_plugin') || !plugin.enabled}
           loading={loadingMarketplace}
           onClick={(event) => {
             event.stopPropagation();
@@ -361,7 +368,7 @@ export function MarketplaceTab({
           size="small"
           danger
           icon={<DeleteOutlined />}
-          disabled={!canRunOperation('uninstall_plugin')}
+          disabled={marketplaceBusy || !canRunOperation('uninstall_plugin')}
           loading={loadingMarketplace}
           onClick={(event) => {
             event.stopPropagation();
@@ -434,6 +441,7 @@ export function MarketplaceTab({
         <Button
           icon={<ReloadOutlined />}
           loading={loadingMarketplace}
+          disabled={marketplaceBusy}
           onClick={handleRefresh}
         >
           {t('common.refresh')}
@@ -442,6 +450,22 @@ export function MarketplaceTab({
 
       {marketplaceError && (
         <Alert type="error" showIcon message={t('common.error')} description={marketplaceError} />
+      )}
+
+      {marketplaceOperation && (
+        <Alert
+          type="info"
+          showIcon
+          icon={<LoadingOutlined spin />}
+          message={t(`marketplace.operations.${marketplaceOperation.kind}`, {
+            target: marketplaceOperation.target,
+          })}
+          description={t(
+            marketplaceOperation.kind === 'add' || marketplaceOperation.kind === 'update'
+              ? 'marketplace.operations.cloneDescription'
+              : 'marketplace.operations.defaultDescription',
+          )}
+        />
       )}
 
       <div className={styles.columns}>
@@ -454,7 +478,7 @@ export function MarketplaceTab({
               size="small"
               type="primary"
               icon={<PlusOutlined />}
-              disabled={!canRunOperation('add_marketplace')}
+              disabled={!canRunOperation('add_marketplace') || marketplaceBusy}
               onClick={handleOpenAddMarketplace}
             >
               {t('common.add')}
@@ -500,6 +524,7 @@ export function MarketplaceTab({
                               icon={<ReloadOutlined />}
                               aria-label={t('marketplace.actions.refreshMarketplace')}
                               title={t('marketplace.actions.refreshMarketplace')}
+                              disabled={marketplaceBusy}
                               loading={loadingMarketplace}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -513,7 +538,7 @@ export function MarketplaceTab({
                             icon={<EditOutlined />}
                             aria-label={t('common.edit')}
                             title={t('common.edit')}
-                            disabled={!canRunOperation('update_marketplace')}
+                            disabled={marketplaceBusy || !canRunOperation('update_marketplace')}
                             loading={loadingMarketplace}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -527,7 +552,7 @@ export function MarketplaceTab({
                             icon={<DeleteOutlined />}
                             aria-label={t('marketplace.actions.removeMarketplace')}
                             title={t('marketplace.actions.removeMarketplace')}
-                            disabled={!canRunOperation('remove_marketplace')}
+                            disabled={marketplaceBusy || !canRunOperation('remove_marketplace')}
                             loading={loadingMarketplace}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -656,7 +681,8 @@ export function MarketplaceTab({
         cancelText={t('common.cancel')}
         confirmLoading={loadingMarketplace}
         okButtonProps={{
-          disabled: !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace')),
+          disabled: marketplaceBusy
+            || !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace')),
         }}
         onOk={handleSubmitMarketplace}
         onCancel={handleCancelEditMarketplace}
@@ -668,7 +694,7 @@ export function MarketplaceTab({
             label={t('marketplace.form.name')}
             rules={[{ required: true, whitespace: true, message: t('marketplace.form.nameRequired') }]}
           >
-            <Input disabled={!!editingMarketplace || !canRunOperation('add_marketplace')} />
+            <Input disabled={marketplaceBusy || !!editingMarketplace || !canRunOperation('add_marketplace')} />
           </Form.Item>
           <Form.Item
             name="gitUrl"
@@ -676,22 +702,10 @@ export function MarketplaceTab({
             rules={[{ required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') }]}
             extra={editingMarketplace ? t('marketplace.form.gitUrlEditHelp') : undefined}
           >
-            <Input disabled={!(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
+            <Input disabled={marketplaceBusy || !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
           </Form.Item>
         </Form>
       </Modal>
-      {runtimeInputPrompt && (
-        <RuntimeInputPrompt
-          instanceId={instanceId}
-          error={runtimeInputPrompt.error}
-          allowPersistentDefinitionCreation={false}
-          onCancel={() => setRuntimeInputPrompt(null)}
-          onSubmitted={() => handlePluginAction(
-            runtimeInputPrompt.action,
-            runtimeInputPrompt.plugin,
-          )}
-        />
-      )}
     </Space>
   );
 }

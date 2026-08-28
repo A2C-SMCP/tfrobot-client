@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { debug, error as logError } from '@tauri-apps/plugin-log';
 import {
   currentEmployeeResource,
   managerContextScope,
@@ -15,6 +16,8 @@ import { useComputerStore } from '@/stores/computerStore';
 import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
+const mockedDebug = vi.mocked(debug);
+const mockedLogError = vi.mocked(logError);
 
 const employeeA: DigitalEmployeeBrief = {
   id: 11,
@@ -115,6 +118,8 @@ describe('managerStore authoritative Context', () => {
     useManagerStore.setState(useManagerStore.getInitialState(), true);
     useComputerStore.setState(useComputerStore.getInitialState(), true);
     mockedInvoke.mockReset();
+    mockedDebug.mockReset();
+    mockedLogError.mockReset();
   });
 
   it('accepts only monotonic backend snapshots and derives the legacy display session', () => {
@@ -429,6 +434,32 @@ describe('managerStore authoritative Context', () => {
       scope: null,
     });
     expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'list_computer_instances');
+  });
+
+  it('logs metadata reconciliation failure separately after Manager connection succeeds', async () => {
+    setContextWithEmployees(authenticatedContext(1), [employeeA]);
+    mockedInvoke
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce('metadata unavailable');
+
+    await expect(
+      useManagerStore.getState().selectEmployeeAndConnect('computer-a', employeeA.id),
+    ).rejects.toMatchObject({
+      kind: 'other',
+      detail: {
+        body: 'Error: Connection succeeded, but refreshing its saved binding and policy failed: metadata unavailable',
+      },
+    });
+
+    expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_completed layer=frontend operation=connect source_type=manager_robot',
+    ));
+    expect(mockedLogError).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.metadata_reconciliation_failed layer=frontend source_type=manager_robot',
+    ));
+    expect(mockedLogError).not.toHaveBeenCalledWith(expect.stringContaining(
+      'connection.request_failed',
+    ));
   });
 
   it('auth-expired never synthesizes identity and reconciles the backend snapshot', async () => {

@@ -96,11 +96,11 @@ pub async fn get_desktop_core(
         .into_iter()
         .map(|(bundle_id, server, resource)| DesktopWindow {
             bundle_id,
-            uri: resource.raw.uri.clone(),
-            title: resource.raw.name.clone(),
+            uri: resource.uri.clone(),
+            title: resource.name.clone(),
             server,
-            description: resource.raw.description.clone(),
-            mime_type: resource.raw.mime_type.clone(),
+            description: resource.description.clone(),
+            mime_type: resource.mime_type.clone(),
         })
         .collect();
 
@@ -159,31 +159,35 @@ pub async fn get_window_detail_core(
     let contents: Vec<WindowContent> = result
         .contents
         .into_iter()
-        .map(|rc| match rc {
+        .filter_map(|rc| match rc {
             ResourceContents::TextResourceContents {
                 uri,
                 mime_type,
                 text,
                 ..
-            } => WindowContent {
+            } => Some(WindowContent {
                 content_type: "text".to_string(),
                 uri,
                 mime_type,
                 text: Some(text),
                 blob: None,
-            },
+            }),
             ResourceContents::BlobResourceContents {
                 uri,
                 mime_type,
                 blob,
                 ..
-            } => WindowContent {
+            } => Some(WindowContent {
                 content_type: "blob".to_string(),
                 uri,
                 mime_type,
                 text: None,
                 blob: Some(blob),
-            },
+            }),
+            _ => {
+                log::warn!("Ignoring unsupported MCP resource content variant");
+                None
+            }
         })
         .collect();
 

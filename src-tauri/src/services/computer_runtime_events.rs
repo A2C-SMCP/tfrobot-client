@@ -2,10 +2,39 @@ use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationError, ClientConnectionStateSnapshot,
     ClientConnectionStatus, ComputerRuntimeActionCapabilities, ComputerRuntimeUserState,
 };
+use crate::services::observability::redact_text;
+use a2c_smcp::smcp_computer::oauth::OAuthStatus;
 use a2c_smcp::smcp_computer::{ComputerEvent, ComputerStatusSnapshot, LifecycleState};
 use serde::{Deserialize, Serialize};
 
 pub const COMPUTER_RUNTIME_STATUS_EVENT: &str = "computer-runtime-status";
+
+/// OAuth state safe to expose through client IPC. SDK diagnostic messages stay in backend logs
+/// and must never be retained in frontend runtime-event history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PublicOAuthStatus {
+    NotApplicable,
+    Unauthorized,
+    AuthorizationPending,
+    Authorized { scopes: Vec<String> },
+    ReauthorizationRequired { required_scope: String },
+    Error,
+}
+
+impl From<OAuthStatus> for PublicOAuthStatus {
+    fn from(status: OAuthStatus) -> Self {
+        match status {
+            OAuthStatus::Unauthorized => Self::Unauthorized,
+            OAuthStatus::AuthorizationPending => Self::AuthorizationPending,
+            OAuthStatus::Authorized { scopes } => Self::Authorized { scopes },
+            OAuthStatus::ReauthorizationRequired { required_scope } => {
+                Self::ReauthorizationRequired { required_scope }
+            }
+            OAuthStatus::Error { .. } => Self::Error,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +96,9 @@ pub struct ComputerRuntimeProblem {
     pub current: bool,
     pub message: ComputerRuntimeProblemMessage,
     pub recommended_actions: Vec<ComputerRuntimeProblemAction>,
+    /// Redacted MCP startup detail intended for the ordinary problem alert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub technical_detail: Option<String>,
 }
@@ -188,6 +220,7 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::StartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail: None,
             technical_detail: observation.technical_detail,
         }
     }
@@ -206,6 +239,7 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::RestartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail: None,
             technical_detail: observation.technical_detail,
         }
     }
@@ -243,6 +277,7 @@ impl ComputerRuntimeProblem {
             current: true,
             message,
             recommended_actions,
+            presentation_detail: None,
             technical_detail: Some(error.message.clone()),
         }
     }
@@ -273,6 +308,7 @@ impl ComputerRuntimeProblem {
             current: true,
             message,
             recommended_actions: vec![retry_action, ComputerRuntimeProblemAction::ViewLogs],
+            presentation_detail: None,
             technical_detail: Some(diagnostic.message),
         }
     }
@@ -283,6 +319,11 @@ impl ComputerRuntimeProblem {
         name: Option<String>,
         diagnostic: RuntimeDiagnosticRecord,
     ) -> Self {
+        let presentation_detail = if diagnostic.operation == "apply_configuration" {
+            None
+        } else {
+            mcp_presentation_detail(&diagnostic.message)
+        };
         let message = if diagnostic.operation == "apply_configuration" {
             ComputerRuntimeProblemMessage::McpConfigurationApplyFailed
         } else {
@@ -304,9 +345,16 @@ impl ComputerRuntimeProblem {
                 ComputerRuntimeProblemAction::RestartRuntime,
                 ComputerRuntimeProblemAction::ViewLogs,
             ],
+            presentation_detail,
             technical_detail: Some(diagnostic.message),
         }
     }
+}
+
+fn mcp_presentation_detail(detail: &str) -> Option<String> {
+    let detail = redact_text(detail);
+    let detail = detail.trim();
+    (!detail.is_empty()).then(|| detail.to_string())
 }
 
 fn client_connection_operation_name(operation: ClientConnectionOperation) -> &'static str {
@@ -327,6 +375,7 @@ pub struct ComputerRuntimeSnapshot {
     pub actions: ComputerRuntimeActionCapabilities,
     pub config_revision: u64,
     pub capability_revision: u64,
+    pub diagnostics_revision: u64,
     pub mcp_servers: usize,
     pub active_mcp_servers: usize,
     pub tools: usize,
@@ -353,6 +402,7 @@ impl ComputerRuntimeSnapshot {
             actions: ComputerRuntimeActionCapabilities::for_lifecycle(lifecycle),
             config_revision: snapshot.config_revision,
             capability_revision: snapshot.capability_revision,
+            diagnostics_revision: snapshot.diagnostics_revision,
             mcp_servers: snapshot.mcp_servers,
             active_mcp_servers: snapshot.active_mcp_servers,
             tools: snapshot.tools,
@@ -391,6 +441,14 @@ pub enum ComputerRuntimeEventCause {
     CapabilityRevisionBumped {
         revision: u64,
     },
+    DiagnosticsChanged {
+        revision: u64,
+    },
+    #[serde(rename = "oauth_status_changed")]
+    OAuthStatusChanged {
+        bundle_id: String,
+        status: PublicOAuthStatus,
+    },
     ClientConnectionStateChanged {
         revision: u64,
         status: ClientConnectionStatus,
@@ -423,6 +481,14 @@ impl From<ComputerEvent> for ComputerRuntimeEventCause {
             ComputerEvent::CapabilityRevisionBumped { revision } => {
                 Self::CapabilityRevisionBumped { revision }
             }
+            // Per-server status is not part of the public runtime event contract yet. Still emit
+            // an observation so consumers refresh from the authoritative aggregate snapshot.
+            ComputerEvent::MCPServerStatusChanged { .. } => Self::ObservationAdvanced,
+            ComputerEvent::DiagnosticsChanged { revision } => Self::DiagnosticsChanged { revision },
+            ComputerEvent::OAuthStatusChanged { bundle_id, status } => Self::OAuthStatusChanged {
+                bundle_id: bundle_id.into_string(),
+                status: status.into(),
+            },
         }
     }
 }
@@ -439,6 +505,8 @@ impl ComputerRuntimeEventCause {
             Self::CapabilityRevisionBumped { revision } => {
                 snapshot.capability_revision == *revision
             }
+            Self::DiagnosticsChanged { revision } => snapshot.diagnostics_revision == *revision,
+            Self::OAuthStatusChanged { .. } => true,
             Self::ClientConnectionStateChanged { revision, status } => {
                 connection.revision == *revision && connection.status == *status
             }
@@ -520,18 +588,25 @@ mod tests {
         ClientConnectionActionCapabilities, ClientConnectionActionCapability,
         ClientConnectionActionDisabledReason,
     };
+    use a2c_smcp::smcp_computer::mcp_clients::model::{
+        BundleId, MCPServerActivationState, MCPServerConnectionState, MCPServerRuntimeStatus,
+        ServerName,
+    };
 
     fn sdk_snapshot(lifecycle: LifecycleState) -> ComputerStatusSnapshot {
         ComputerStatusSnapshot {
             lifecycle,
             config_revision: 2,
             capability_revision: 3,
+            server_status_revision: 0,
             mcp_servers: 4,
             active_mcp_servers: 1,
             tools: 5,
             skills: 6,
             last_error: Some("runtime_error".to_string()),
             degraded_reason: None,
+            diagnostics_revision: 0,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -576,6 +651,7 @@ mod tests {
         assert_eq!(snapshot.user_state, ComputerRuntimeUserState::Degraded);
         assert_eq!(snapshot.config_revision, 2);
         assert_eq!(snapshot.capability_revision, 3);
+        assert_eq!(snapshot.diagnostics_revision, 0);
         assert!(snapshot.is_running());
     }
 
@@ -600,6 +676,70 @@ mod tests {
 
         assert_eq!(snapshot.last_error.as_deref(), Some("runtime_error"));
         assert!(snapshot.problems.is_empty());
+    }
+
+    #[test]
+    fn oauth_error_event_projection_drops_sdk_diagnostic_message() {
+        let cause = ComputerRuntimeEventCause::from(ComputerEvent::OAuthStatusChanged {
+            bundle_id: a2c_smcp::smcp_computer::mcp_clients::model::BundleId::try_from("protected")
+                .unwrap(),
+            status: OAuthStatus::Error {
+                message: "sensitive-provider-diagnostic".to_string(),
+            },
+        });
+        let value = serde_json::to_value(cause).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "oauth_status_changed",
+                "bundle_id": "protected",
+                "status": { "state": "error" }
+            })
+        );
+        assert!(!value.to_string().contains("sensitive-provider-diagnostic"));
+    }
+
+    #[test]
+    fn diagnostics_changed_event_is_forwarded_as_a_secret_free_resync_hint() {
+        let cause =
+            ComputerRuntimeEventCause::from(ComputerEvent::DiagnosticsChanged { revision: 17 });
+
+        assert_eq!(
+            serde_json::to_value(cause).unwrap(),
+            serde_json::json!({ "kind": "diagnostics_changed", "revision": 17 })
+        );
+    }
+
+    #[test]
+    fn mcp_server_status_event_requests_an_aggregate_snapshot_refresh() {
+        let bundle_id = BundleId::try_from("server-a").unwrap();
+        let cause = ComputerRuntimeEventCause::from(ComputerEvent::MCPServerStatusChanged {
+            bundle_id: bundle_id.clone(),
+            status: MCPServerRuntimeStatus {
+                bundle_id,
+                name: ServerName::from("Server A"),
+                activation: MCPServerActivationState::Started,
+                connection: MCPServerConnectionState::Connected,
+            },
+            revision: 9,
+        });
+
+        assert_eq!(cause, ComputerRuntimeEventCause::ObservationAdvanced);
+    }
+
+    #[test]
+    fn stale_diagnostics_cause_is_not_attached_to_a_newer_snapshot() {
+        let mut snapshot = sdk_snapshot(LifecycleState::Started);
+        snapshot.diagnostics_revision = 18;
+        let event = ComputerRuntimeStatusEvent::from_observation(
+            "computer-a".to_string(),
+            ComputerRuntimeEventCause::DiagnosticsChanged { revision: 17 },
+            ComputerRuntimeSnapshot::from_sdk(1, 1, 1, snapshot),
+            connection_state(0, false),
+        );
+
+        assert_eq!(event.cause, ComputerRuntimeEventCause::ObservationAdvanced);
     }
 
     #[test]
@@ -700,6 +840,34 @@ mod tests {
         assert!(problem
             .recommended_actions
             .contains(&ComputerRuntimeProblemAction::RetryConnection));
+    }
+
+    #[test]
+    fn mcp_start_problem_exposes_a_redacted_presentation_detail() {
+        let problem = ComputerRuntimeProblem::mcp(
+            3,
+            "browser",
+            Some("Browser MCP".to_string()),
+            RuntimeDiagnosticRecord {
+                operation: "start".to_string(),
+                message: "Start failed: Authorization: Bearer private-token".to_string(),
+                occurred_at: "2026-08-19T09:00:00Z".to_string(),
+                mcp_server_name: None,
+            },
+        );
+
+        assert_eq!(
+            problem.presentation_detail.as_deref(),
+            Some("Start failed: Authorization: [REDACTED]")
+        );
+        assert_eq!(
+            problem.technical_detail.as_deref(),
+            Some("Start failed: Authorization: Bearer private-token")
+        );
+        assert_eq!(
+            serde_json::to_value(&problem).unwrap()["presentation_detail"],
+            "Start failed: Authorization: [REDACTED]"
+        );
     }
 
     #[test]

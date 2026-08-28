@@ -43,6 +43,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup uv for the bundled tfbash runtime
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -51,6 +56,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
+
+      - name: Prepare and verify offline tfbash runtime
+        run: pnpm runtime:prepare:tfbash -- ${{ matrix.target }}
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0

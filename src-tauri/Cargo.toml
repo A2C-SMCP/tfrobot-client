@@ -1,6 +1,6 @@
 [package]
 name = "tfrobot-client"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "TFRobot Client - A2C-SMCP Computer GUI"
 authors = ["TFRobot Team"]
@@ -21,7 +21,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "ff544d1c3eba205953cb9f4c643bad6e1bab51db", features = ["computer"] }
+a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "b10afff61c9cf9004cc6883a7b4e13ef8291c2f1", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +34,8 @@ tokio = { version = "1", features = ["full"] }
 # Logging
 tauri-plugin-log = "2"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 # Cross-platform keychain
 keyring = "3"
@@ -62,18 +64,22 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Hashing for keychain key derivation (base_url → stable short hash)
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 tempfile = "3"
+futures-util = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
-futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
 smcp-server-core = "0.2.3"
 socketioxide = { version = "0.16.3", features = ["state"] }
-tf-rust-socketio = "0.8.1"
+tf-rust-socketio = "0.9.0"
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
@@ -83,3 +89,13 @@ harness = false
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Keep local Tauri and test builds debuggable without retaining full type/variable
+# information or rustc's large incremental caches. Release builds are unchanged.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false

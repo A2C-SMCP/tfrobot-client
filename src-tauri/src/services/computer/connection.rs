@@ -1,6 +1,10 @@
 use super::*;
-use std::time::Duration;
+use crate::services::observability::{
+    classify_connection_error, redact_text, sanitize_connection_endpoint, CONNECTION_LOG_TARGET,
+};
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
+use uuid::Uuid;
 
 const SMCP_TRANSPORT_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -56,6 +60,17 @@ pub struct ClientConnectionOperationToken {
     operation: ClientConnectionOperation,
     epoch: u64,
     runtime_generation: u64,
+    diagnostic_id: Uuid,
+}
+
+impl ClientConnectionOperationToken {
+    pub fn diagnostic_id(self) -> Uuid {
+        self.diagnostic_id
+    }
+
+    pub fn epoch(self) -> u64 {
+        self.epoch
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,8 +186,26 @@ impl ClientConnectionStateSnapshot {
                 ClientConnectionStatus::Connecting
             }
             Some(ClientConnectionOperation::Disconnect) => ClientConnectionStatus::Disconnecting,
-            None if connection.is_some() => ClientConnectionStatus::Connected,
-            None => ClientConnectionStatus::Disconnected,
+            None if connection.is_none() => ClientConnectionStatus::Disconnected,
+            // A local ConnectionState is durable client context, not transport-liveness proof.
+            // Only the SDK's JoinedOffice lifecycle confirms both a live namespace connection and
+            // current Office membership. Only the SDK's explicit Connecting state is projected as
+            // an SDK-driven reconnect attempt; every other non-member state is disconnected.
+            None => match runtime_state {
+                ComputerRuntimeState::JoinedOffice => ClientConnectionStatus::Connected,
+                ComputerRuntimeState::Connecting => ClientConnectionStatus::Connecting,
+                ComputerRuntimeState::Created
+                | ComputerRuntimeState::Starting
+                | ComputerRuntimeState::Started
+                | ComputerRuntimeState::Connected
+                | ComputerRuntimeState::Syncing
+                | ComputerRuntimeState::Degraded
+                | ComputerRuntimeState::Disconnecting
+                | ComputerRuntimeState::Stopping
+                | ComputerRuntimeState::Stopped
+                | ComputerRuntimeState::Shutdown
+                | ComputerRuntimeState::Error => ClientConnectionStatus::Disconnected,
+            },
         };
         let transition_disabled = ClientConnectionActionCapability::disabled(
             ClientConnectionActionDisabledReason::TransitionInProgress,
@@ -258,6 +291,7 @@ impl ComputerInstanceRuntime {
         &self,
         token: ClientConnectionOperationToken,
         url: &str,
+        auth_provider: Option<SocketIoAuthProvider>,
         auth_payload: Option<serde_json::Value>,
         headers: HashMap<String, String>,
         namespace: Option<String>,
@@ -265,11 +299,45 @@ impl ComputerInstanceRuntime {
         computer_name: &str,
         connection_state: ConnectionState,
     ) -> Result<(), String> {
+        let started_at = Instant::now();
+        let endpoint = sanitize_connection_endpoint(url);
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_connect_started",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?token.operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            endpoint = %endpoint,
+            office_id = %office_id,
+            namespace = %namespace.as_deref().unwrap_or("<default>"),
+            auth_mode = if auth_provider.is_some() { "provider" } else if auth_payload.is_some() { "payload" } else { "none" },
+            header_count = headers.len(),
+            "starting SMCP transport connection"
+        );
         let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_connection_operation(token).await?;
+        if let Err(error) = self.ensure_connection_operation(token).await {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.operation_rejected",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "connection operation became stale before transport connect"
+            );
+            return Err(error);
+        }
         if let Err(error) = self
             .connect_smcp_socketio_inner(
+                Some(token),
                 url,
+                auth_provider,
                 auth_payload,
                 headers,
                 namespace,
@@ -278,6 +346,20 @@ impl ComputerInstanceRuntime {
             )
             .await
         {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.transport_connect_failed",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                endpoint = %endpoint,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SMCP transport connection failed"
+            );
             self.set_client_runtime_diagnostic(
                 "connect",
                 Some("SMCP connection failed; see logs for details".to_string()),
@@ -285,15 +367,64 @@ impl ComputerInstanceRuntime {
             .await;
             return Err(error);
         }
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_ready",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?token.operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            office_id = %office_id,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SMCP transport connected and Office membership confirmed"
+        );
         if let Err(error) = self.ensure_connection_operation(token).await {
             let _ = self.disconnect_smcp_socketio_bounded_inner().await;
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.operation_superseded",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "connection operation was superseded after Office join; transport cleaned up"
+            );
             return Err(error);
         }
         if let Err(error) = self.install_connection_state(connection_state).await {
             let _ = self.disconnect_smcp_socketio_bounded_inner().await;
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.state_install_failed",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SMCP transport connected but client connection authority could not be installed"
+            );
             return Err(error);
         }
         self.set_client_runtime_diagnostic("connect", None).await;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_connect_completed",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?token.operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SMCP transport connection committed to client authority"
+        );
         Ok(())
     }
 
@@ -310,7 +441,9 @@ impl ComputerInstanceRuntime {
         self.ensure_active()?;
         let result = self
             .connect_smcp_socketio_inner(
+                None,
                 url,
+                None,
                 auth_payload,
                 headers,
                 namespace,
@@ -370,8 +503,8 @@ impl ComputerInstanceRuntime {
 
     /// Clears only a Manager-owned connection/operation during an identity transaction.
     ///
-    /// Remote teardown is best-effort: even when the SDK reports an error, the refresh task,
-    /// socket handle and client-owned connection authority are removed locally so credentials
+    /// Remote teardown is best-effort: even when the SDK reports an error, the socket handle and
+    /// client-owned connection authority are removed locally so credentials
     /// from the departing Context cannot remain usable. Manual SMCP state is never touched.
     pub async fn clear_manager_connection_for_context_transaction(&self) -> Result<bool, String> {
         const MANAGER_SOURCE: &str = "manager_robot";
@@ -393,7 +526,6 @@ impl ComputerInstanceRuntime {
             return Ok(false);
         }
 
-        self.abort_refresh_task().await;
         let teardown_error = if self.has_smcp_transport().await {
             self.disconnect_smcp_socketio_bounded_inner().await.err()
         } else {
@@ -444,119 +576,6 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn reconnect_smcp_socketio_for_generation(
-        &self,
-        generation: u64,
-        url: &str,
-        auth_payload: Option<serde_json::Value>,
-        headers: HashMap<String, String>,
-        namespace: Option<String>,
-        office_id: &str,
-        computer_name: &str,
-        expires_in: i64,
-    ) -> Result<SmcpReconnectOutcome, String> {
-        let _guard = self.lifecycle_lock.lock().await;
-        self.ensure_active()?;
-        {
-            let guard = self.connection.read().await;
-            match guard.as_ref() {
-                Some(connection) if connection.generation == generation => {}
-                _ => return Ok(SmcpReconnectOutcome::Stale),
-            }
-        }
-
-        if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-
-        if let Err(error) = self
-            .connect_smcp_socketio_inner(
-                url,
-                auth_payload,
-                headers,
-                namespace,
-                office_id,
-                computer_name,
-            )
-            .await
-        {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-        if self
-            .refresh_connection_timestamp_for_generation(generation)
-            .await
-        {
-            return Ok(SmcpReconnectOutcome::Reconnected { expires_in });
-        }
-        if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
-            self.set_client_runtime_diagnostic(
-                "reconnect",
-                Some("SMCP reconnect failed; retrying".to_string()),
-            )
-            .await;
-            return Err(error);
-        }
-        Ok(SmcpReconnectOutcome::Stale)
-    }
-
-    pub async fn set_refresh_task(&self, task: tokio::task::JoinHandle<()>) {
-        if self.is_retired() {
-            task.abort();
-            return;
-        }
-        let mut lock = self.refresh_task.lock().await;
-        if self.is_retired() {
-            task.abort();
-            return;
-        }
-        if let Some(previous) = lock.replace(task) {
-            previous.abort();
-        }
-    }
-
-    pub async fn set_refresh_task_for_generation(
-        &self,
-        generation: u64,
-        task: tokio::task::JoinHandle<()>,
-    ) -> Result<(), String> {
-        let _guard = self.lifecycle_lock.lock().await;
-        if self
-            .connection
-            .read()
-            .await
-            .as_ref()
-            .is_none_or(|connection| connection.generation != generation)
-        {
-            task.abort();
-            return Err("Connection was replaced before refresh ownership was installed".into());
-        }
-        self.set_refresh_task(task).await;
-        Ok(())
-    }
-
-    pub async fn abort_refresh_task(&self) {
-        if let Some(task) = self.refresh_task.lock().await.take() {
-            // A refresh-triggered 401 enters the same Context cleanup transaction from inside
-            // this task. Aborting itself would cancel that transaction at its next await before
-            // the signed-out Context is committed; detach instead and let its Unauthorized path
-            // return normally.
-            if tokio::task::try_id() != Some(task.id()) {
-                task.abort();
-            }
-        }
-    }
-
     pub async fn is_connected(&self) -> bool {
         self.runtime_state().await == ComputerRuntimeState::JoinedOffice
             && self.connection.read().await.is_some()
@@ -570,8 +589,8 @@ impl ComputerInstanceRuntime {
     }
 
     /// Returns the client-owned logical connection context independently of SDK transport state.
-    /// During token refresh the SDK temporarily leaves JoinedOffice while this context remains the
-    /// authority that allows a later JoinedOffice event to restore business connectivity.
+    /// The context is the client-owned logical connection authority independently of a brief SDK
+    /// transport transition during automatic reconnect.
     pub async fn connection_context(&self) -> Option<ConnectionStateSummary> {
         self.connection_snapshot().await.context
     }
@@ -600,6 +619,29 @@ impl ComputerInstanceRuntime {
 
     async fn publish_connection_state(&self) {
         let snapshot = self.connection_snapshot().await;
+        let connection_generation = self
+            .connection
+            .read()
+            .await
+            .as_ref()
+            .map(|connection| connection.generation);
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.state_changed",
+            instance_id = %self.instance.id,
+            runtime_incarnation = self.runtime_incarnation,
+            runtime_generation = self.runtime_generation(),
+            connection_generation,
+            connection_revision = snapshot.revision,
+            status = ?snapshot.status,
+            operation = ?snapshot.operation,
+            present = snapshot.present,
+            error_kind = snapshot
+                .last_error
+                .as_ref()
+                .map(|error| classify_connection_error(&error.message)),
+            "publishing client connection authority"
+        );
         self.publish_runtime_status(ComputerRuntimeEventCause::ClientConnectionStateChanged {
             revision: snapshot.revision,
             status: snapshot.status,
@@ -630,7 +672,32 @@ impl ComputerInstanceRuntime {
             operation,
             epoch: state.epoch,
             runtime_generation: self.runtime_generation(),
+            diagnostic_id: Uuid::new_v4(),
         };
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.operation_started",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            source_type = state
+                .operation_target
+                .as_ref()
+                .map(|target| target.source_type.as_str())
+                .unwrap_or("unknown"),
+            target_id = state
+                .operation_target
+                .as_ref()
+                .and_then(|target| target.target_id.as_deref())
+                .unwrap_or("none"),
+            employee_id = state
+                .operation_target
+                .as_ref()
+                .and_then(|target| target.employee_id),
+            "connection operation entered an in-flight state"
+        );
         self.advance_connection_revision();
         drop(state);
         self.publish_connection_state().await;
@@ -704,6 +771,17 @@ impl ComputerInstanceRuntime {
             || state.operation != Some(token.operation)
             || state.epoch != token.epoch
         {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.operation_superseded",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                current_runtime_generation = self.runtime_generation(),
+                "connection operation completion was rejected as stale"
+            );
             return false;
         }
         state.operation = None;
@@ -711,6 +789,17 @@ impl ComputerInstanceRuntime {
         state.generation = None;
         state.last_error = None;
         self.advance_connection_revision();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.operation_completed",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?token.operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            outcome = "succeeded",
+            "connection operation completed"
+        );
         drop(state);
         self.publish_connection_state().await;
         true
@@ -752,6 +841,17 @@ impl ComputerInstanceRuntime {
             || state.operation != Some(token.operation)
             || state.epoch != token.epoch
         {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.operation_superseded",
+                operation_id = %token.diagnostic_id(),
+                instance_id = %self.instance.id,
+                operation = ?token.operation,
+                operation_epoch = token.epoch(),
+                runtime_generation = token.runtime_generation,
+                current_runtime_generation = self.runtime_generation(),
+                "connection failure settlement was rejected as stale"
+            );
             return false;
         }
         connection.take();
@@ -761,8 +861,21 @@ impl ComputerInstanceRuntime {
         ClientConnectionOperationError::replace_current(
             &mut state.last_error,
             token.operation,
-            message,
+            message.clone(),
             retryable,
+        );
+        tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.operation_failed",
+            operation_id = %token.diagnostic_id(),
+            instance_id = %self.instance.id,
+            operation = ?token.operation,
+            operation_epoch = token.epoch(),
+            runtime_generation = token.runtime_generation,
+            retryable,
+            error_kind = classify_connection_error(&message),
+            error = %redact_text(&message),
+            "connection operation failed"
         );
         self.advance_connection_revision();
         drop(state);
@@ -951,9 +1064,8 @@ impl ComputerInstanceRuntime {
         true
     }
 
-    /// Closes the transport owned by a failed refresh generation and then settles its logical
-    /// authority. This intentionally does not abort `refresh_task`: it is called from that task's
-    /// own terminal branch.
+    /// Closes the transport owned by a failed reconnect generation and settles its logical
+    /// authority.
     pub async fn terminate_reconnect_for_generation(
         &self,
         generation: u64,
@@ -1093,19 +1205,25 @@ impl ComputerInstanceRuntime {
         previous
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn connect_smcp_socketio_inner(
         &self,
+        diagnostic_token: Option<ClientConnectionOperationToken>,
         url: &str,
+        auth_provider: Option<SocketIoAuthProvider>,
         auth_payload: Option<serde_json::Value>,
         headers: HashMap<String, String>,
         namespace: Option<String>,
         office_id: &str,
         computer_name: &str,
     ) -> Result<(), String> {
+        let endpoint = sanitize_connection_endpoint(url);
         let options = ConnectOptions {
+            auth_provider,
             auth_payload,
             headers: headers_to_connect_options(headers),
             namespace: namespace.unwrap_or_default(),
+            ..ConnectOptions::default()
         };
         let options = if options.namespace.trim().is_empty() {
             ConnectOptions {
@@ -1116,6 +1234,18 @@ impl ComputerInstanceRuntime {
             options
         };
 
+        let connect_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_sdk_call_started",
+            operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+            operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            endpoint = %endpoint,
+            phase = "socket_connect",
+            "calling SDK Socket.IO connect"
+        );
         if let Err(error) = self
             .computer
             .read()
@@ -1123,8 +1253,47 @@ impl ComputerInstanceRuntime {
             .connect_socketio(url, options)
             .await
         {
-            return Err(error.to_string());
+            let error = error.to_string();
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.transport_sdk_call_failed",
+                operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+                operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                endpoint = %endpoint,
+                phase = "socket_connect",
+                elapsed_ms = connect_started.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SDK Socket.IO connect failed"
+            );
+            return Err(error);
         }
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_sdk_call_completed",
+            operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+            operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            endpoint = %endpoint,
+            phase = "socket_connect",
+            elapsed_ms = connect_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SDK Socket.IO connect completed"
+        );
+        let join_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.office_join_started",
+            operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+            operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            office_id = %office_id,
+            "calling SDK join_office"
+        );
         if let Err(error) = self
             .computer
             .read()
@@ -1132,24 +1301,90 @@ impl ComputerInstanceRuntime {
             .join_office(office_id, computer_name)
             .await
         {
+            let error = error.to_string();
             if let Err(disconnect_error) = self.disconnect_smcp_socketio_bounded_inner().await {
-                log::warn!(
-                    "Failed to disconnect Socket.IO after join_office failure for instance {}: {}",
-                    self.instance.id,
-                    disconnect_error
+                tracing::warn!(
+                    target: CONNECTION_LOG_TARGET,
+                    event = "connection.cleanup_failed",
+                    operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+                    operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+                    instance_id = %self.instance.id,
+                    runtime_generation = self.runtime_generation(),
+                    phase = "join_failure_transport_cleanup",
+                    error_kind = classify_connection_error(&disconnect_error),
+                    error = %redact_text(&disconnect_error),
+                    "failed to disconnect Socket.IO after join_office failure"
                 );
             }
-            return Err(error.to_string());
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.office_join_failed",
+                operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+                operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                office_id = %office_id,
+                elapsed_ms = join_started.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SDK join_office failed"
+            );
+            return Err(error);
         }
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.office_join_completed",
+            operation_id = diagnostic_token.map(|token| token.diagnostic_id().to_string()),
+            operation_epoch = diagnostic_token.map(ClientConnectionOperationToken::epoch),
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            office_id = %office_id,
+            elapsed_ms = join_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SDK join_office completed"
+        );
         Ok(())
     }
 
     pub(super) async fn disconnect_smcp_socketio_inner(&self) -> Result<(), String> {
+        let started_at = Instant::now();
+        let connection_generation = self
+            .connection
+            .read()
+            .await
+            .as_ref()
+            .map(|connection| connection.generation);
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.office_leave_started",
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            connection_generation,
+            "calling SDK leave_office"
+        );
         if let Err(error) = self.computer.read().await.leave_office().await {
-            log::warn!(
-                "Failed to leave SMCP office for instance {}: {}",
-                self.instance.id,
-                error
+            let error = error.to_string();
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.office_leave_failed",
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                connection_generation,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SDK leave_office failed; continuing transport teardown"
+            );
+        } else {
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.office_leave_completed",
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                connection_generation,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                outcome = "succeeded",
+                "SDK leave_office completed"
             );
         }
         #[cfg(debug_assertions)]
@@ -1160,13 +1395,46 @@ impl ComputerInstanceRuntime {
         if self.fail_smcp_disconnect_once.swap(false, Ordering::SeqCst) {
             return Err("Injected Socket.IO disconnect failure".to_string());
         }
-        self.computer
+        let disconnect_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.transport_disconnect_started",
+            instance_id = %self.instance.id,
+            runtime_generation = self.runtime_generation(),
+            connection_generation,
+            "calling SDK Socket.IO disconnect"
+        );
+        let result = self
+            .computer
             .read()
             .await
             .disconnect_socketio()
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .map_err(|error| error.to_string());
+        match &result {
+            Ok(()) => tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.transport_disconnect_completed",
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                connection_generation,
+                elapsed_ms = disconnect_started.elapsed().as_millis() as u64,
+                outcome = "succeeded",
+                "SDK Socket.IO disconnect completed"
+            ),
+            Err(error) => tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.transport_disconnect_failed",
+                instance_id = %self.instance.id,
+                runtime_generation = self.runtime_generation(),
+                connection_generation,
+                elapsed_ms = disconnect_started.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(error),
+                error = %redact_text(error),
+                "SDK Socket.IO disconnect failed"
+            ),
+        }
+        result
     }
 
     pub(super) async fn disconnect_smcp_socketio_bounded_inner(&self) -> Result<(), String> {
@@ -1196,7 +1464,6 @@ impl ComputerInstanceRuntime {
     pub(super) async fn clear_smcp_connection_inner(&self) -> Result<(), String> {
         match self.disconnect_smcp_socketio_bounded_inner().await {
             Ok(()) => {
-                self.abort_refresh_task().await;
                 let mut connection = self.connection.write().await;
                 let generation = connection.as_ref().map(|state| state.generation);
                 let connection_changed = connection.take().is_some();
@@ -1270,5 +1537,119 @@ impl ComputerInstanceRuntime {
 
     pub(super) async fn clear_client_runtime_diagnostic_silent(&self) {
         self.client_runtime_diagnostic.write().await.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection_state() -> ConnectionState {
+        ConnectionState {
+            profile_name: "manager:123".to_string(),
+            url: "https://smcp.invalid".to_string(),
+            office_id: "office-beta".to_string(),
+            computer_name: "公文写作".to_string(),
+            connected_at: chrono::Utc::now(),
+            source_type: "manager_robot".to_string(),
+            target_id: Some("manager:123".to_string()),
+            target_name: Some("Beta Robot".to_string()),
+            employee_id: Some(123),
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn retained_context_follows_sdk_transport_and_office_lifecycle() {
+        let connection = connection_state();
+        let operation = ClientConnectionOperationState::default();
+        let cases = [
+            (
+                ComputerRuntimeState::Created,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Starting,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::JoinedOffice,
+                ClientConnectionStatus::Connected,
+            ),
+            (
+                ComputerRuntimeState::Connecting,
+                ClientConnectionStatus::Connecting,
+            ),
+            (
+                ComputerRuntimeState::Connected,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Syncing,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Degraded,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Started,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Disconnecting,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Stopping,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Stopped,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Shutdown,
+                ClientConnectionStatus::Disconnected,
+            ),
+            (
+                ComputerRuntimeState::Error,
+                ClientConnectionStatus::Disconnected,
+            ),
+        ];
+
+        for (runtime_state, expected) in cases {
+            let snapshot = ClientConnectionStateSnapshot::from_parts(
+                1,
+                Some(&connection),
+                &operation,
+                runtime_state,
+            );
+            assert_eq!(
+                snapshot.status, expected,
+                "unexpected projection for SDK lifecycle {runtime_state}"
+            );
+            assert!(snapshot.present, "retained context must remain inspectable");
+        }
+    }
+
+    #[test]
+    fn explicit_connection_operation_precedes_sdk_lifecycle_projection() {
+        let connection = connection_state();
+        let operation = ClientConnectionOperationState {
+            operation: Some(ClientConnectionOperation::Reconnect),
+            ..Default::default()
+        };
+
+        let snapshot = ClientConnectionStateSnapshot::from_parts(
+            1,
+            Some(&connection),
+            &operation,
+            ComputerRuntimeState::JoinedOffice,
+        );
+
+        assert_eq!(snapshot.status, ClientConnectionStatus::Connecting);
+        assert!(!snapshot.actions.connect.enabled);
+        assert!(!snapshot.actions.disconnect.enabled);
     }
 }

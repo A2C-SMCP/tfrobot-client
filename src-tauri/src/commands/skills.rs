@@ -134,6 +134,7 @@ pub async fn refresh_skills_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<(), SkillCommandError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = runtime_for_instance(state, instance_id).await?;
     runtime.mark_sdk_skills_dirty().await;
@@ -217,6 +218,7 @@ pub async fn open_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let root = local_user_skills_root(state, instance_id).await?;
     std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
@@ -305,7 +307,7 @@ mod tests {
     use super::*;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
-    use crate::services::logger::LogService;
+    use crate::services::observability::ObservabilityService;
     use crate::services::settings::SettingsService;
     use tempfile::TempDir;
 
@@ -325,7 +327,7 @@ mod tests {
             "---\nname: example-skill\ndescription: Example skill\n---\nBody\n",
         )
         .unwrap();
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
     }
@@ -373,7 +375,7 @@ mod tests {
         config.add_computer_instance(computer_b).unwrap();
         write_skill(&custom_a, "a-only", "A helper", "A body");
         write_skill(&custom_b, "b-only", "B helper", "B body");
-        let log_service = LogService::new(dir.path()).unwrap();
+        let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         let state = AppState::new(config, log_service, settings_service);
         state

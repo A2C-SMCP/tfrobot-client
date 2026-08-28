@@ -36,6 +36,7 @@ export const COMPUTER_SETTINGS_SECTIONS = [
   'mcp',
   'inputs',
   'connection',
+  'built-in-tools',
 ] as const;
 
 export type ComputerSettingsSection = (typeof COMPUTER_SETTINGS_SECTIONS)[number];
@@ -47,6 +48,7 @@ const LEGACY_SETTINGS_TABS: Partial<Record<string, ComputerSettingsSection>> = {
   inputs: 'inputs',
   connection: 'connection',
   configuration: 'skills',
+  'remote-control': 'built-in-tools',
 };
 
 export function toComputerSettingsSection(value: string | undefined): ComputerSettingsSection {

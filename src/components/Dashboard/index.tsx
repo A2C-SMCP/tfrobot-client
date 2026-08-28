@@ -154,7 +154,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         >
           <List
             size="small"
-            dataSource={data.recent_logs}
+            dataSource={data.recent_activity}
             locale={{ emptyText: t('dashboard.noActivity') }}
             renderItem={(log) => (
                 <List.Item>

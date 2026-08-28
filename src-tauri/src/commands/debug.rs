@@ -1,7 +1,11 @@
-use crate::services::logger::{LogEntry, LogFilter};
+pub use crate::services::observability::ToolCallHistoryRecord;
+use crate::services::observability::{
+    redact_json as redact_sensitive_parameters, redact_text as redact_sensitive_text,
+    ActivityEventDraft, ActivityLevel, ActivityOutcome, ToolCallHistoryDraft,
+};
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
-    BundleId, CallToolResult, Content, RawContent, Resource, ServerName, Tool,
+    BundleId, CallToolResult, Content, MCPServerRuntimeStatus, Resource, ServerName, Tool,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -39,21 +43,6 @@ pub struct ToolCallResponse {
     pub duration_ms: u64,
 }
 
-/// Tool call history record
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallHistoryRecord {
-    pub timestamp: String,
-    pub req_id: String,
-    pub computer_instance_id: String,
-    pub server: String,
-    pub tool: String,
-    pub parameters: serde_json::Value,
-    pub timeout: Option<f64>,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugResourceInfo {
     pub server: String,
@@ -70,18 +59,6 @@ pub struct DebugResourcesResponse {
     pub resources: Vec<DebugResourceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolCallHistoryDetails {
-    pub req_id: String,
-    pub computer_instance_id: String,
-    pub server: String,
-    pub tool: String,
-    pub parameters: serde_json::Value,
-    pub timeout: Option<f64>,
-    pub success: bool,
-    pub error: Option<String>,
 }
 
 /// Get all available tools from running MCP servers
@@ -103,7 +80,7 @@ pub async fn get_available_tools_core(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     let tools: Vec<Tool> = runtime.available_tools().await?;
-    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
+    let running_servers = connected_mcp_servers(runtime.mcp_server_runtime_statuses().await);
 
     let result = tools
         .into_iter()
@@ -153,7 +130,16 @@ pub async fn get_debug_resources(
     bundle_id: BundleId,
     cursor: Option<String>,
 ) -> Result<DebugResourcesResponse, String> {
-    let instance_id = require_instance_id(&instance_id)?.to_string();
+    get_debug_resources_core(&state, &instance_id, &bundle_id, cursor).await
+}
+
+pub async fn get_debug_resources_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    cursor: Option<String>,
+) -> Result<DebugResourcesResponse, String> {
+    let instance_id = require_instance_id(instance_id)?.to_string();
 
     let runtime = state
         .computer_registry
@@ -161,11 +147,11 @@ pub async fn get_debug_resources(
         .await
         .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
     let server_name = runtime
-        .mcp_server_display_name(&bundle_id)
+        .mcp_server_display_name(bundle_id)
         .await
         .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
-    let (resources, next_cursor) = runtime.resources(&bundle_id, cursor).await?;
+    let (resources, next_cursor) = runtime.resources(bundle_id, cursor).await?;
 
     Ok(DebugResourcesResponse {
         resources: resources
@@ -179,12 +165,21 @@ pub async fn get_debug_resources(
 fn resource_to_debug_info(server: &str, resource: Resource) -> DebugResourceInfo {
     DebugResourceInfo {
         server: server.to_string(),
-        uri: resource.raw.uri,
-        name: resource.raw.name,
-        description: resource.raw.description,
-        mime_type: resource.raw.mime_type,
+        uri: resource.uri,
+        name: resource.name,
+        description: resource.description,
+        mime_type: resource.mime_type,
     }
 }
+
+/// Default deadline (seconds) applied when a tool caller omits `timeout`.
+///
+/// Safety net against MCP transports that strand a response when their
+/// server→client channel dies mid-stream — notably Streamable-HTTP/SSE servers
+/// (e.g. Atlassian) whose edge resets the long-lived GET connection. The
+/// pending tool response is lost on the flap, so without a deadline the call
+/// hangs forever. See `experiments/codex-sse-flap-hang-repro`.
+const DEFAULT_TOOL_TIMEOUT_SECS: f64 = 120.0;
 
 /// Execute a tool call for testing
 #[tauri::command]
@@ -208,6 +203,11 @@ pub async fn execute_tool_core(
     let instance_id = require_instance_id(instance_id)?.to_string();
     log::info!("Executing tool for instance {}: {}", instance_id, tool_name);
 
+    // An explicit caller timeout always wins; only a missing timeout falls back
+    // to the default deadline so a dead/flapping transport fails fast instead of
+    // hanging the invoke forever.
+    let timeout = timeout.or(Some(DEFAULT_TOOL_TIMEOUT_SECS));
+
     let runtime = state
         .computer_registry
         .runtime(&instance_id)
@@ -217,7 +217,7 @@ pub async fn execute_tool_core(
     let start = std::time::Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
     let tools = runtime.available_tools().await.unwrap_or_default();
-    let running_servers = running_mcp_servers(runtime.mcp_server_statuses().await);
+    let running_servers = connected_mcp_servers(runtime.mcp_server_runtime_statuses().await);
     let fallback_server = resolve_tool_server(&tools, &running_servers, tool_name);
     let history_parameters = redact_sensitive_parameters(params.clone());
 
@@ -247,23 +247,43 @@ pub async fn execute_tool_core(
             } else {
                 tool_result_error_summary(&call_result).map(|text| redact_sensitive_text(&text))
             };
-            let details = ToolCallHistoryDetails {
-                req_id,
-                computer_instance_id: instance_id.clone(),
-                server,
-                tool: history_tool,
-                parameters: history_parameters,
-                timeout,
-                success,
-                error,
-            };
-            let _ = state.log_service.write_for_instance(
-                if success { "info" } else { "error" },
+            let mut activity = ActivityEventDraft::computer(
+                &instance_id,
+                if success {
+                    ActivityLevel::Info
+                } else {
+                    ActivityLevel::Error
+                },
                 "tool",
-                &format!("Tool {} executed ({}ms)", tool_name, duration_ms),
-                serde_json::to_string(&details).ok().as_deref(),
-                Some(&instance_id),
+                "tool_call",
+                history_tool.clone(),
+                if success {
+                    ActivityOutcome::Succeeded
+                } else {
+                    ActivityOutcome::Failed
+                },
+                format!("Tool {tool_name} executed ({duration_ms}ms)"),
             );
+            activity.correlation_id = Some(req_id.clone());
+            if let Err(persist_error) = state
+                .observability
+                .record_tool_call_async(
+                    activity,
+                    ToolCallHistoryDraft {
+                        req_id,
+                        computer_instance_id: instance_id.clone(),
+                        server,
+                        tool: history_tool,
+                        parameters: history_parameters,
+                        timeout,
+                        success,
+                        error,
+                    },
+                )
+                .await
+            {
+                log::error!("failed to persist tool call history: {persist_error}");
+            }
             let response_result = redact_tool_call_result_for_display(&call_result);
             Ok(ToolCallResponse {
                 success,
@@ -275,23 +295,35 @@ pub async fn execute_tool_core(
         Err(e) => {
             let error = e.to_string();
             let redacted_error = redact_sensitive_text(&error);
-            let details = ToolCallHistoryDetails {
-                req_id,
-                computer_instance_id: instance_id.clone(),
-                server,
-                tool: history_tool,
-                parameters: history_parameters,
-                timeout,
-                success: false,
-                error: Some(redacted_error.clone()),
-            };
-            let _ = state.log_service.write_for_instance(
-                "error",
+            let mut activity = ActivityEventDraft::computer(
+                &instance_id,
+                ActivityLevel::Error,
                 "tool",
-                &format!("Tool {} failed: {}", tool_name, redacted_error),
-                serde_json::to_string(&details).ok().as_deref(),
-                Some(&instance_id),
+                "tool_call",
+                history_tool.clone(),
+                ActivityOutcome::Failed,
+                format!("Tool {tool_name} failed: {redacted_error}"),
             );
+            activity.correlation_id = Some(req_id.clone());
+            if let Err(persist_error) = state
+                .observability
+                .record_tool_call_async(
+                    activity,
+                    ToolCallHistoryDraft {
+                        req_id,
+                        computer_instance_id: instance_id.clone(),
+                        server,
+                        tool: history_tool,
+                        parameters: history_parameters,
+                        timeout,
+                        success: false,
+                        error: Some(redacted_error.clone()),
+                    },
+                )
+                .await
+            {
+                log::error!("failed to persist failed tool call history: {persist_error}");
+            }
             Ok(ToolCallResponse {
                 success: false,
                 result: None,
@@ -318,30 +350,10 @@ fn redact_tool_call_result_for_display(result: &CallToolResult) -> CallToolResul
 }
 
 fn redact_tool_content_for_display(mut content: Content) -> Content {
-    if let RawContent::Text(text) = &mut content.raw {
+    if let Content::Text(text) = &mut content {
         text.text = redact_sensitive_text(&text.text);
     }
     content
-}
-
-fn redact_sensitive_parameters(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(key, value)| {
-                    if is_sensitive_key(&key) {
-                        (key, serde_json::Value::String("[REDACTED]".to_string()))
-                    } else {
-                        (key, redact_sensitive_parameters(value))
-                    }
-                })
-                .collect(),
-        ),
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(redact_sensitive_parameters).collect())
-        }
-        other => other,
-    }
 }
 
 fn tool_result_error_summary(result: &CallToolResult) -> Option<String> {
@@ -379,77 +391,14 @@ fn truncate_error_summary(text: &str) -> String {
     }
 }
 
-fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|c| *c != '_' && *c != '-' && *c != ' ')
-        .collect::<String>()
-        .to_ascii_lowercase();
-    [
-        "token",
-        "password",
-        "passwd",
-        "secret",
-        "apikey",
-        "authorization",
-        "cookie",
-        "credential",
-    ]
-    .iter()
-    .any(|pattern| normalized.contains(pattern))
-}
-
-fn redact_sensitive_text(text: &str) -> String {
-    text.lines()
-        .map(redact_sensitive_line)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn redact_sensitive_line(line: &str) -> String {
-    if !is_sensitive_key(line) {
-        return line.to_string();
-    }
-
-    let lower = line.to_ascii_lowercase();
-    let sensitive_pos = [
-        "access_token",
-        "access-token",
-        "api_key",
-        "api-key",
-        "apikey",
-        "authorization",
-        "credential",
-        "password",
-        "passwd",
-        "secret",
-        "cookie",
-        "token",
-    ]
-    .iter()
-    .filter_map(|pattern| lower.find(pattern))
-    .min();
-
-    let Some(pos) = sensitive_pos else {
-        return "[REDACTED]".to_string();
-    };
-
-    let delimiter_pos = line[pos..]
-        .char_indices()
-        .find_map(|(offset, ch)| (ch == ':' || ch == '=').then_some(pos + offset));
-
-    match delimiter_pos {
-        Some(idx) => format!("{} [REDACTED]", &line[..=idx]),
-        None => "[REDACTED]".to_string(),
-    }
-}
-
-fn running_mcp_servers(
-    statuses: Vec<(BundleId, ServerName, bool, String)>,
-) -> Vec<(BundleId, ServerName)> {
+fn connected_mcp_servers(statuses: Vec<MCPServerRuntimeStatus>) -> Vec<(BundleId, ServerName)> {
     statuses
         .into_iter()
-        .filter_map(|(bundle_id, name, running, _)| running.then_some((bundle_id, name)))
+        .filter_map(|status| {
+            status
+                .is_connected()
+                .then_some((status.bundle_id, status.name))
+        })
         .collect()
 }
 
@@ -496,51 +445,19 @@ pub async fn get_tool_history(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<Vec<ToolCallHistoryRecord>, String> {
-    get_tool_history_core(&state, &instance_id)
+    let instance_id = require_instance_id(&instance_id)?.to_string();
+    let service = state.observability.as_ref().clone();
+    tauri::async_runtime::spawn_blocking(move || service.tool_history(&instance_id, 100))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 pub fn get_tool_history_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<Vec<ToolCallHistoryRecord>, String> {
-    let instance_id = require_instance_id(instance_id)?.to_string();
-    let logs = state.log_service.query(&LogFilter {
-        categories: Some(vec!["tool".to_string()]),
-        computer_instance_id: Some(instance_id.clone()),
-        limit: Some(100),
-        ..Default::default()
-    })?;
-
-    Ok(tool_history_records_from_logs(logs, &instance_id))
-}
-
-fn tool_history_records_from_logs(
-    logs: Vec<LogEntry>,
-    instance_id: &str,
-) -> Vec<ToolCallHistoryRecord> {
-    logs.into_iter()
-        .filter_map(|entry| {
-            if entry.category != "tool" {
-                return None;
-            }
-            let details = entry.details.as_deref()?;
-            let details = serde_json::from_str::<ToolCallHistoryDetails>(details).ok()?;
-            if details.computer_instance_id != instance_id {
-                return None;
-            }
-            Some(ToolCallHistoryRecord {
-                timestamp: entry.timestamp,
-                req_id: details.req_id,
-                computer_instance_id: details.computer_instance_id,
-                server: details.server,
-                tool: details.tool,
-                parameters: details.parameters,
-                timeout: details.timeout,
-                success: details.success,
-                error: details.error,
-            })
-        })
-        .collect()
+    let instance_id = require_instance_id(instance_id)?;
+    state.observability.tool_history(instance_id, 100)
 }
 
 #[cfg(test)]
@@ -670,67 +587,5 @@ mod tests {
         let display = redact_tool_call_result_for_display(&result);
 
         assert_eq!(display, result);
-    }
-
-    #[test]
-    fn builds_tool_history_only_from_valid_matching_tool_logs() {
-        let matching_details = serde_json::to_string(&ToolCallHistoryDetails {
-            req_id: "req-a".to_string(),
-            computer_instance_id: "computer-a".to_string(),
-            server: "fs".to_string(),
-            tool: "read_file".to_string(),
-            parameters: json!({ "path": "/tmp/readme.md" }),
-            timeout: Some(3.0),
-            success: true,
-            error: None,
-        })
-        .unwrap();
-        let wrong_instance_details = serde_json::to_string(&ToolCallHistoryDetails {
-            req_id: "req-b".to_string(),
-            computer_instance_id: "computer-b".to_string(),
-            server: "fs".to_string(),
-            tool: "write_file".to_string(),
-            parameters: json!({ "path": "/tmp/readme.md" }),
-            timeout: None,
-            success: false,
-            error: Some("failed".to_string()),
-        })
-        .unwrap();
-
-        let history = tool_history_records_from_logs(
-            vec![
-                test_log_entry(1, "tool", Some(&matching_details), Some("computer-a")),
-                test_log_entry(2, "connection", Some(&matching_details), Some("computer-a")),
-                test_log_entry(3, "tool", Some("not json"), Some("computer-a")),
-                test_log_entry(4, "tool", Some(&wrong_instance_details), Some("computer-b")),
-                test_log_entry(5, "tool", None, Some("computer-a")),
-            ],
-            "computer-a",
-        );
-
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].req_id, "req-a");
-        assert_eq!(history[0].computer_instance_id, "computer-a");
-        assert_eq!(history[0].server, "fs");
-        assert_eq!(history[0].tool, "read_file");
-        assert_eq!(history[0].parameters["path"], "/tmp/readme.md");
-        assert!(history[0].success);
-    }
-
-    fn test_log_entry(
-        id: i64,
-        category: &str,
-        details: Option<&str>,
-        computer_instance_id: Option<&str>,
-    ) -> LogEntry {
-        LogEntry {
-            id,
-            timestamp: format!("2026-01-01T00:00:0{id}Z"),
-            level: "info".to_string(),
-            category: category.to_string(),
-            message: "log message".to_string(),
-            details: details.map(ToString::to_string),
-            computer_instance_id: computer_instance_id.map(ToString::to_string),
-        }
     }
 }

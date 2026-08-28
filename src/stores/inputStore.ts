@@ -7,9 +7,14 @@ export interface PickOption {
 }
 
 export type InputDefinition =
-  | { type: 'PromptString'; id: string; label: string; description?: string; default?: string; password?: boolean }
-  | { type: 'PickString'; id: string; label: string; description?: string; options: PickOption[]; default?: string }
-  | { type: 'Command'; id: string; label: string; command: string; args?: string[] };
+  | { type: 'PromptString'; id: string; label?: string; description?: string; default?: string; password?: boolean }
+  | { type: 'PickString'; id: string; label?: string; description?: string; options: PickOption[]; default?: string }
+  | { type: 'Command'; id: string; label?: string; command: string; args?: string[] };
+
+export interface InputDefinitionChanges {
+  upsert: InputDefinition[];
+  removeIfUnused: string[];
+}
 
 export function getInputId(input: InputDefinition): string {
   return input.id;
@@ -17,21 +22,51 @@ export function getInputId(input: InputDefinition): string {
 
 export interface InputValueView {
   configured: boolean;
+  status: 'configured' | 'using_default' | 'first_option' | 'invalid_selection' | 'missing' | 'runtime_command';
   value?: unknown;
+}
+
+export interface InputEntry {
+  key: string;
+  secret: boolean;
+  value?: string;
+}
+
+export interface InputReferenceIssue {
+  inputId: string;
+  serverName: string;
+  layer: 'project' | 'local';
+  fieldPath: string;
 }
 
 interface InputState {
   inputs: InputDefinition[];
+  entries: InputEntry[];
   values: Record<string, InputValueView>;
+  referenceIssues: InputReferenceIssue[];
   loading: boolean;
   error: string | null;
+  valuesLoading: boolean;
+  valuesLoadedInstanceId: string | null;
+  valuesError: string | null;
   activeInstanceId: string | null;
   inputsRequestId: number;
   valuesRequestId: number;
+  entriesLoading: boolean;
+  entriesLoadedInstanceId: string | null;
+  entriesError: string | null;
+  entriesRequestId: number;
 
   fetchInputs: (instanceId: string) => Promise<void>;
+  fetchEntries: (instanceId: string) => Promise<void>;
+  getEntry: (instanceId: string, key: string) => Promise<InputEntry | null>;
+  upsertEntry: (instanceId: string, key: string, value: string | undefined, secret: boolean) => Promise<void>;
+  deleteEntry: (instanceId: string, key: string) => Promise<void>;
   fetchValues: (instanceId: string) => Promise<void>;
+  refreshValues: (instanceId: string) => Promise<void>;
+  fetchReferenceIssues: (instanceId: string) => Promise<void>;
   getInput: (instanceId: string, id: string) => Promise<InputDefinition | null>;
+  getRuntimeInput: (instanceId: string, id: string) => Promise<InputDefinition | null>;
   addOrUpdateInput: (instanceId: string, input: InputDefinition) => Promise<void>;
   removeInput: (instanceId: string, id: string) => Promise<void>;
   setValue: (instanceId: string, id: string, value: unknown) => Promise<void>;
@@ -44,12 +79,21 @@ interface InputState {
 
 const initialState = {
   inputs: [] as InputDefinition[],
+  entries: [] as InputEntry[],
   values: {} as Record<string, InputValueView>,
+  referenceIssues: [] as InputReferenceIssue[],
   loading: false,
   error: null as string | null,
+  valuesLoading: false,
+  valuesLoadedInstanceId: null as string | null,
+  valuesError: null as string | null,
   activeInstanceId: null as string | null,
   inputsRequestId: 0,
   valuesRequestId: 0,
+  entriesLoading: false,
+  entriesLoadedInstanceId: null as string | null,
+  entriesError: null as string | null,
+  entriesRequestId: 0,
 };
 
 export const useInputStore = create<InputState>((set, get) => ({
@@ -57,14 +101,71 @@ export const useInputStore = create<InputState>((set, get) => ({
 
   reset: () => set(initialState),
 
+  fetchEntries: async (instanceId: string) => {
+    const requestId = get().entriesRequestId + 1;
+    set({
+      activeInstanceId: instanceId,
+      entriesRequestId: requestId,
+      entries: [],
+      entriesLoading: true,
+      entriesLoadedInstanceId: null,
+      entriesError: null,
+    });
+    try {
+      const entries = await invoke<InputEntry[]>('list_input_entries', { instanceId });
+      if (get().entriesRequestId !== requestId || get().activeInstanceId !== instanceId) return;
+      set({ entries, entriesLoading: false, entriesLoadedInstanceId: instanceId });
+    } catch (e) {
+      if (get().entriesRequestId !== requestId || get().activeInstanceId !== instanceId) return;
+      set({ entriesError: String(e), entriesLoading: false });
+    }
+  },
+
+  getEntry: async (instanceId: string, key: string) => {
+    const entries = await invoke<InputEntry[]>('list_input_entries', { instanceId });
+    return entries.find((entry) => entry.key === key) ?? null;
+  },
+
+  upsertEntry: async (instanceId, key, value, secret) => {
+    try {
+      await invoke('upsert_input_entry', {
+        instanceId,
+        key,
+        value: value === undefined ? null : value,
+        secret,
+      });
+      if (get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
+    } catch (e) {
+      if (get().activeInstanceId === instanceId) set({ entriesError: String(e) });
+      throw e;
+    }
+  },
+
+  deleteEntry: async (instanceId, key) => {
+    try {
+      await invoke('delete_input_entry', { instanceId, key });
+      if (get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
+    } catch (e) {
+      if (get().activeInstanceId === instanceId) set({ entriesError: String(e) });
+      throw e;
+    }
+  },
+
   fetchInputs: async (instanceId: string) => {
     const requestId = get().inputsRequestId + 1;
+    const changingInstance = get().activeInstanceId !== instanceId;
     set({
       activeInstanceId: instanceId,
       inputsRequestId: requestId,
       inputs: [],
       loading: true,
       error: null,
+      ...(changingInstance ? {
+        values: {},
+        valuesLoading: false,
+        valuesLoadedInstanceId: null,
+        valuesError: null,
+      } : {}),
     });
     try {
       const inputs = await invoke<InputDefinition[]>('list_inputs', { instanceId });
@@ -86,18 +187,47 @@ export const useInputStore = create<InputState>((set, get) => ({
       activeInstanceId: instanceId,
       valuesRequestId: requestId,
       values: {},
-      error: null,
+      valuesLoading: true,
+      valuesLoadedInstanceId: null,
+      valuesError: null,
     });
     try {
       const values = await invoke<Record<string, InputValueView>>('list_input_values', { instanceId });
       if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ values });
+      set({ values, valuesLoading: false, valuesLoadedInstanceId: instanceId });
     } catch (e) {
       if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
+      set({ valuesError: String(e), valuesLoading: false, valuesLoadedInstanceId: null });
+    }
+  },
+
+  refreshValues: async (instanceId: string) => {
+    if (get().activeInstanceId !== instanceId) return;
+    const requestId = get().valuesRequestId + 1;
+    set({ valuesRequestId: requestId, valuesLoading: true, valuesError: null });
+    try {
+      const values = await invoke<Record<string, InputValueView>>('list_input_values', { instanceId });
+      if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
+      set({ values, valuesLoading: false, valuesLoadedInstanceId: instanceId });
+    } catch (e) {
+      if (get().valuesRequestId !== requestId || get().activeInstanceId !== instanceId) {
+        return;
+      }
+      set({ valuesError: String(e), valuesLoading: false, valuesLoadedInstanceId: null });
+    }
+  },
+
+  fetchReferenceIssues: async (instanceId: string) => {
+    try {
+      const referenceIssues = await invoke<InputReferenceIssue[]>('list_input_reference_issues', { instanceId });
+      if (get().activeInstanceId === instanceId) set({ referenceIssues });
+    } catch (e) {
       set({ error: String(e) });
     }
   },
@@ -106,11 +236,15 @@ export const useInputStore = create<InputState>((set, get) => ({
     invoke<InputDefinition | null>('get_input', { instanceId, id })
   ),
 
+  getRuntimeInput: async (instanceId: string, id: string) => (
+    invoke<InputDefinition | null>('get_runtime_input', { instanceId, id })
+  ),
+
   addOrUpdateInput: async (instanceId: string, input: InputDefinition) => {
     set({ loading: true, error: null });
     try {
       await invoke('add_or_update_input', { instanceId, input });
-      await get().fetchInputs(instanceId);
+      if (get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
@@ -121,8 +255,11 @@ export const useInputStore = create<InputState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke('remove_input', { instanceId, id });
-      await get().fetchInputs(instanceId);
-      await get().fetchValues(instanceId);
+      if (get().activeInstanceId === instanceId) {
+        await get().fetchInputs(instanceId);
+        await get().refreshValues(instanceId);
+        await get().fetchReferenceIssues(instanceId);
+      }
     } catch (e) {
       set({ error: String(e), loading: false });
       throw e;
@@ -132,9 +269,9 @@ export const useInputStore = create<InputState>((set, get) => ({
   setValue: async (instanceId: string, id: string, value: unknown) => {
     try {
       await invoke('set_input_value', { instanceId, id, value });
-      await get().fetchValues(instanceId);
+      await get().refreshValues(instanceId);
     } catch (e) {
-      set({ error: String(e) });
+      if (get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
@@ -143,7 +280,7 @@ export const useInputStore = create<InputState>((set, get) => ({
     try {
       return await invoke<boolean>('set_runtime_input_value', { instanceId, id, value });
     } catch (e) {
-      set({ error: String(e) });
+      if (get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
@@ -151,9 +288,9 @@ export const useInputStore = create<InputState>((set, get) => ({
   removeValue: async (instanceId: string, id: string) => {
     try {
       await invoke('remove_input_value', { instanceId, id });
-      await get().fetchValues(instanceId);
+      await get().refreshValues(instanceId);
     } catch (e) {
-      set({ error: String(e) });
+      if (get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
@@ -161,9 +298,9 @@ export const useInputStore = create<InputState>((set, get) => ({
   clearValues: async (instanceId: string) => {
     try {
       await invoke('clear_input_values', { instanceId });
-      set({ values: {} });
+      await get().refreshValues(instanceId);
     } catch (e) {
-      set({ error: String(e) });
+      if (get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
@@ -172,7 +309,7 @@ export const useInputStore = create<InputState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const count = await invoke<number>('import_inputs', { instanceId, path });
-      await get().fetchInputs(instanceId);
+      if (get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
       return count;
     } catch (e) {
       set({ error: String(e), loading: false });

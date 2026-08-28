@@ -4,16 +4,17 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
+use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
+use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::{events, A2CSkillRef, AgentCallData, GetSkillReq, GetSkillsReq, ReqId, Role};
 use futures_util::FutureExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use serde_json::{json, Value};
 use smcp_server_core::{DefaultAuthenticationProvider, SmcpServerBuilder};
-use socketioxide::extract::{AckSender, SocketRef};
+use socketioxide::extract::{AckSender, SocketRef, TryData};
 use socketioxide::SocketIo;
 use tf_rust_socketio::asynchronous::{Client, ClientBuilder};
 use tf_rust_socketio::{Payload, TransportType};
@@ -23,23 +24,20 @@ use tfrobot_client_lib::commands::computer::{
 };
 use tfrobot_client_lib::commands::connection::{
     close_smcp_connection, connect_connection_target_core, delete_manual_smcp_target_core,
-    reconnect_with_token, try_install_refreshed_client, ConnectionState, ManagerConnectionParams,
-    RefreshOutcome, SwapResult,
+    ConnectionState,
 };
+use tfrobot_client_lib::commands::mcp;
 use tfrobot_client_lib::services::computer::{
-    ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeState,
-    ManagerRobotBindingState, RobotBindingMetadata,
-};
-use tfrobot_client_lib::services::computer_runtime_events::{
-    ComputerRuntimeAffectedCapability, ComputerRuntimeProblemMessage,
-    ComputerRuntimeProblemSeverity, ComputerRuntimeProblemSource,
+    ClientConnectionOperation, ClientConnectionStatus, ComputerInstance, ComputerInstanceRuntime,
+    ComputerRuntimeState,
 };
 use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
-use tfrobot_client_lib::services::manager_client::ExchangedToken;
 use tfrobot_client_lib::AppState;
-use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::io::copy_bidirectional;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::AbortHandle;
+use tokio::time::{sleep, timeout, Duration};
 use tower::service_fn;
 use tower::Layer;
 
@@ -168,6 +166,120 @@ async fn start_smcp_socket_server_with_join_delay(
     (url, stats)
 }
 
+struct DynamicAuthReconnectServer {
+    url: String,
+    auth_rx: mpsc::UnboundedReceiver<Value>,
+    connection_tasks: Arc<StdMutex<Vec<AbortHandle>>>,
+    backend_shutdown_tx: oneshot::Sender<()>,
+    proxy_shutdown_tx: oneshot::Sender<()>,
+}
+
+impl DynamicAuthReconnectServer {
+    async fn next_auth(&mut self) -> Value {
+        timeout(Duration::from_secs(10), self.auth_rx.recv())
+            .await
+            .expect("timed out waiting for Socket.IO CONNECT auth")
+            .expect("capture server stopped before receiving auth")
+    }
+
+    fn force_network_disconnect(&self) {
+        let handles = std::mem::take(&mut *self.connection_tasks.lock().unwrap());
+        assert!(
+            !handles.is_empty(),
+            "capture server must have a TCP connection to interrupt"
+        );
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
+    fn shutdown(self) {
+        let _ = self.proxy_shutdown_tx.send(());
+        let _ = self.backend_shutdown_tx.send(());
+    }
+}
+
+async fn start_dynamic_auth_reconnect_server() -> DynamicAuthReconnectServer {
+    let backend_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind backend");
+    let backend_addr = backend_listener.local_addr().expect("backend address");
+    let (auth_tx, auth_rx) = mpsc::unbounded_channel();
+    let (socket_layer, io) = SocketIo::new_layer();
+    io.ns(
+        "/smcp",
+        move |socket: SocketRef, TryData(auth): TryData<Value>| {
+            let auth_tx = auth_tx.clone();
+            async move {
+                if let Ok(auth) = auth {
+                    let _ = auth_tx.send(auth);
+                }
+                socket.on(SERVER_JOIN_OFFICE, |ack: AckSender| async move {
+                    let _ = ack.send(&(true, Option::<String>::None));
+                });
+            }
+        },
+    );
+
+    let fallback = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+        Ok::<_, Infallible>(hyper::Response::new(Full::<Bytes>::new(Bytes::new())))
+    });
+    let service = socket_layer.layer(fallback);
+    let (backend_shutdown_tx, mut backend_shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = backend_listener.accept() => {
+                    if let Ok((stream, _)) = result {
+                        let stream = hyper_util::rt::TokioIo::new(stream);
+                        let service = hyper_util::service::TowerToHyperService::new(service.clone());
+                        tokio::spawn(async move {
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(stream, service)
+                                .with_upgrades()
+                                .await;
+                        });
+                    }
+                }
+                _ = &mut backend_shutdown_rx => break,
+            }
+        }
+    });
+
+    // Interrupting a proxy copy task closes the live transport without sending a manual
+    // Socket.IO disconnect, which exercises the SDK's automatic reconnect path.
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy_addr = proxy_listener.local_addr().expect("proxy address");
+    let connection_tasks = Arc::new(StdMutex::new(Vec::new()));
+    let task_handles = connection_tasks.clone();
+    let (proxy_shutdown_tx, mut proxy_shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = proxy_listener.accept() => {
+                    if let Ok((mut downstream, _)) = result {
+                        let task = tokio::spawn(async move {
+                            if let Ok(mut upstream) = TcpStream::connect(backend_addr).await {
+                                let _ = copy_bidirectional(&mut downstream, &mut upstream).await;
+                            }
+                        });
+                        task_handles.lock().unwrap().push(task.abort_handle());
+                    }
+                }
+                _ = &mut proxy_shutdown_rx => break,
+            }
+        }
+    });
+
+    DynamicAuthReconnectServer {
+        url: format!("http://{proxy_addr}"),
+        auth_rx,
+        connection_tasks,
+        backend_shutdown_tx,
+        proxy_shutdown_tx,
+    }
+}
+
 async fn wait_for(timeout_message: &str, predicate: impl Fn() -> bool) {
     for _ in 0..40 {
         if predicate() {
@@ -281,7 +393,7 @@ async fn agent_client_with_skill_update_listener(
 
 fn ack_cb(
     tx: oneshot::Sender<Value>,
-) -> impl FnMut(Payload, Client) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync {
+) -> impl Fn(Payload, Client) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync {
     let tx = Arc::new(Mutex::new(Some(tx)));
     move |payload: Payload, _client: Client| {
         let tx = tx.clone();
@@ -440,6 +552,7 @@ fn skill_ref(name: &str, source: &str, description: &str, path: &Path) -> A2CSki
         license: None,
         compatibility: None,
         allowed_tools: None,
+        tags: None,
         version: None,
         skill_metadata: None,
     }
@@ -884,10 +997,6 @@ async fn failed_delete_quarantine_preserves_joined_runtime_and_connection() {
     })
     .await;
     assert!(runtime.is_connected().await);
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
-    assert!(runtime.has_refresh_task_for_test().await);
     let incarnation = runtime.runtime_snapshot().await.incarnation;
 
     let storage_root = state
@@ -919,10 +1028,6 @@ async fn failed_delete_quarantine_preserves_joined_runtime_and_connection() {
         .read_owned()
         .await
         .is_some());
-    assert!(
-        preserved.has_refresh_task_for_test().await,
-        "reversible deletion failure aborted the Manager refresh task"
-    );
     assert_eq!(stats.active(), 1, "failed deletion disconnected the socket");
 
     std::fs::remove_file(trash_blocker).expect("remove trash blocker");
@@ -945,15 +1050,15 @@ async fn delete_succeeds_while_socket_reference_is_shared() {
     .await
     .expect("register MCP server");
     runtime
-        .start_mcp_server(&BundleId::try_from("commit-echo").unwrap())
+        .restart()
         .await
-        .expect("start MCP server");
+        .expect("restart runtime with saved MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "commit-echo" && *running),
+            .any(|status| status.name == "commit-echo" && status.is_connected()),
         "commit MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -980,9 +1085,6 @@ async fn delete_succeeds_while_socket_reference_is_shared() {
         employee_id: Some(1),
         generation: 9,
     });
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
     let held_socket = runtime
         .clone_sdk_socketio_client_for_test()
         .await
@@ -1029,15 +1131,15 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
     .await
     .expect("register cleanup MCP server");
     runtime
-        .start_mcp_server(&BundleId::try_from("cleanup-echo").unwrap())
+        .restart()
         .await
-        .expect("start cleanup MCP server");
+        .expect("restart runtime with saved cleanup MCP server");
     assert!(
         runtime
-            .mcp_server_statuses()
+            .mcp_server_runtime_statuses()
             .await
             .iter()
-            .any(|(_bundle_id, name, running, _)| name == "cleanup-echo" && *running),
+            .any(|status| status.name == "cleanup-echo" && status.is_connected()),
         "cleanup MCP server never started"
     );
     let (server_url, stats) = start_smcp_socket_server().await;
@@ -1067,9 +1169,6 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         })
         .await
         .expect("install business connection");
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
     let storage_root = state
         .config
         .computer_instance_storage_root(TEST_INSTANCE_ID);
@@ -1091,7 +1190,6 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         .get_computer_instance(TEST_INSTANCE_ID)
         .is_err());
     assert!(!storage_root.exists());
-    assert!(!runtime.has_refresh_task_for_test().await);
     assert!(runtime
         .connection_handle_for_test()
         .read_owned()
@@ -1102,7 +1200,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
         ComputerRuntimeState::Shutdown
     );
     assert!(
-        runtime.mcp_server_statuses().await.is_empty(),
+        runtime.mcp_server_runtime_statuses().await.is_empty(),
         "committed deletion retained SDK MCP runtime state"
     );
     wait_for("committed deletion left the SMCP socket active", || {
@@ -1393,6 +1491,151 @@ async fn profile_connect_uses_computer_instance_name_as_connection_identity() {
 }
 
 #[tokio::test]
+async fn dynamic_auth_provider_supplies_fresh_token_on_real_network_reconnect() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.expect("start runtime");
+    let mut server = start_dynamic_auth_reconnect_server().await;
+
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let provider: SocketIoAuthProvider = {
+        let provider_calls = provider_calls.clone();
+        Arc::new(move || {
+            let attempt = provider_calls.fetch_add(1, Ordering::SeqCst);
+            let token = if attempt == 0 { "token-a" } else { "token-b" };
+            Box::pin(async move { json!({ "token": token }) })
+        })
+    };
+    let operation = runtime
+        .begin_connection_operation(ClientConnectionOperation::Connect, None)
+        .await
+        .expect("begin connect operation");
+    let office_id = "dynamic-auth-office".to_string();
+    let computer_name = "dynamic-auth-computer".to_string();
+    let connection = ConnectionState {
+        profile_name: "dynamic-auth-profile".to_string(),
+        url: server.url.clone(),
+        office_id: office_id.clone(),
+        computer_name: computer_name.clone(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manager_robot".to_string(),
+        target_id: Some("manager-robot:42".to_string()),
+        target_name: Some("Dynamic Auth Robot".to_string()),
+        employee_id: Some(42),
+        generation: 73,
+    };
+
+    runtime
+        .connect_and_install_smcp_socketio(
+            operation,
+            &server.url,
+            Some(provider),
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            &office_id,
+            &computer_name,
+            connection,
+        )
+        .await
+        .expect("connect with dynamic auth provider");
+    assert!(
+        runtime
+            .complete_connection_operation_for_token(operation)
+            .await
+    );
+    assert_eq!(server.next_auth().await, json!({ "token": "token-a" }));
+
+    server.force_network_disconnect();
+    assert_eq!(server.next_auth().await, json!({ "token": "token-b" }));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+
+    // rust-sdk#204 tracks office rejoin after this transport recovery. This test deliberately
+    // verifies only TFRC-123's client-to-SDK dynamic auth contract until that issue is resolved.
+    runtime
+        .clear_smcp_connection()
+        .await
+        .expect("clear dynamic auth connection");
+    runtime.shutdown().await;
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn remote_reconnect_does_not_block_local_mcp_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = common::create_test_app_state(tmp.path());
+    let runtime = create_test_runtime(&state).await;
+    let mcp_config = common::echo_server_config("local-mcp-during-remote-reconnect");
+    let bundle_id = resolve_bundle_id(&mcp_config);
+    common::mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, mcp_config)
+        .await
+        .expect("save local MCP server");
+    runtime.start().await.expect("start runtime");
+
+    let server = start_dynamic_auth_reconnect_server().await;
+    let provider: SocketIoAuthProvider =
+        Arc::new(|| Box::pin(async { json!({ "token": "reconnect-test-token" }) }));
+    let operation = runtime
+        .begin_connection_operation(ClientConnectionOperation::Connect, None)
+        .await
+        .expect("begin connect operation");
+    let connection = ConnectionState {
+        profile_name: "reconnect-test-profile".to_string(),
+        url: server.url.clone(),
+        office_id: TEST_OFFICE_ID.to_string(),
+        computer_name: TEST_AGENT_NAME.to_string(),
+        connected_at: chrono::Utc::now(),
+        source_type: "manager_robot".to_string(),
+        target_id: Some("manager-robot:reconnect-test".to_string()),
+        target_name: Some("Reconnect Test Robot".to_string()),
+        employee_id: Some(42),
+        generation: 74,
+    };
+    runtime
+        .connect_and_install_smcp_socketio(
+            operation,
+            &server.url,
+            Some(provider),
+            None,
+            HashMap::new(),
+            Some("/smcp".to_string()),
+            TEST_OFFICE_ID,
+            TEST_AGENT_NAME,
+            connection,
+        )
+        .await
+        .expect("connect remote SMCP transport");
+    assert!(
+        runtime
+            .complete_connection_operation_for_token(operation)
+            .await
+    );
+
+    server.force_network_disconnect();
+    server.shutdown();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime.runtime_state().await == ComputerRuntimeState::Connecting {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("runtime never entered automatic reconnect state");
+
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id)
+        .await
+        .expect("remote reconnect must not block local MCP stop");
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id)
+        .await
+        .expect("remote reconnect must not block local MCP start");
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn profile_connect_exposes_backend_connecting_state_until_join_office_succeeds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
@@ -1656,111 +1899,6 @@ async fn rename_during_connect_supersedes_stale_connection_commit() {
 }
 
 #[tokio::test]
-async fn reconnect_terminal_failure_closes_transport_or_exposes_orphan_cleanup() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, stats) = start_smcp_socket_server().await;
-
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "terminal-office",
-            "terminal-computer",
-        )
-        .await
-        .expect("connect terminal socket");
-    runtime
-        .install_connection_state(ConnectionState {
-            profile_name: "manager:1".to_string(),
-            url: server_url.clone(),
-            office_id: "terminal-office".to_string(),
-            computer_name: "terminal-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:1".to_string()),
-            target_name: Some("Terminal Robot".to_string()),
-            employee_id: Some(1),
-            generation: 80,
-        })
-        .await
-        .expect("install terminal authority");
-    assert!(runtime.begin_reconnect_for_generation(80).await);
-    assert!(
-        runtime
-            .terminate_reconnect_for_generation(80, "Manager session expired".to_string(), false,)
-            .await
-    );
-    wait_for("terminal reconnect failure left the socket active", || {
-        stats.active() == 0
-    })
-    .await;
-    let settled = runtime.connection_snapshot().await;
-    assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
-    assert!(!settled.present);
-    assert!(!settled.actions.disconnect.enabled);
-
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "orphan-office",
-            "orphan-computer",
-        )
-        .await
-        .expect("connect orphan socket");
-    runtime
-        .install_connection_state(ConnectionState {
-            profile_name: "manager:2".to_string(),
-            url: server_url,
-            office_id: "orphan-office".to_string(),
-            computer_name: "orphan-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:2".to_string()),
-            target_name: Some("Orphan Robot".to_string()),
-            employee_id: Some(2),
-            generation: 81,
-        })
-        .await
-        .expect("install orphan authority");
-    assert!(runtime.begin_reconnect_for_generation(81).await);
-    runtime.fail_next_smcp_disconnect_for_test();
-    assert!(
-        runtime
-            .terminate_reconnect_for_generation(
-                81,
-                "SMCP reconnect retry limit exhausted".to_string(),
-                true,
-            )
-            .await
-    );
-    let orphan = runtime.connection_snapshot().await;
-    assert_eq!(orphan.status, ClientConnectionStatus::Disconnected);
-    assert!(!orphan.present);
-    assert!(orphan.actions.disconnect.enabled);
-    assert!(orphan.last_error.as_ref().is_some_and(|error| error
-        .message
-        .contains("failed to close stale SMCP transport")));
-    assert!(runtime.clone_sdk_socketio_client_for_test().await.is_some());
-
-    runtime
-        .clear_smcp_connection()
-        .await
-        .expect("manual orphan cleanup");
-    wait_for("manual orphan cleanup left the socket active", || {
-        stats.active() == 0
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn disconnect_failure_fails_closed_when_transport_liveness_is_unproven() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
@@ -1830,89 +1968,6 @@ async fn disconnect_failure_fails_closed_when_transport_liveness_is_unproven() {
 }
 
 #[tokio::test]
-async fn reconnect_teardown_timeout_bounds_attempt_and_terminal_settlement() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, stats) = start_smcp_socket_server().await;
-
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "timeout-office",
-            "timeout-computer",
-        )
-        .await
-        .expect("connect timeout socket");
-    runtime
-        .install_connection_state(ConnectionState {
-            profile_name: "manager:3".to_string(),
-            url: server_url.clone(),
-            office_id: "timeout-office".to_string(),
-            computer_name: "timeout-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:3".to_string()),
-            target_name: Some("Timeout Robot".to_string()),
-            employee_id: Some(3),
-            generation: 83,
-        })
-        .await
-        .expect("install timeout authority");
-    assert!(runtime.begin_reconnect_for_generation(83).await);
-
-    runtime.hang_next_smcp_disconnect_for_test();
-    let attempt = tokio::time::timeout(
-        Duration::from_secs(7),
-        runtime.reconnect_smcp_socketio_for_generation(
-            83,
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "timeout-office",
-            "timeout-computer",
-            60,
-        ),
-    )
-    .await
-    .expect("reconnect attempt teardown must be bounded")
-    .expect_err("timed-out teardown must fail the attempt");
-    assert!(attempt.contains("Timed out disconnecting SMCP socket"));
-
-    runtime.hang_next_smcp_disconnect_for_test();
-    let terminated = tokio::time::timeout(
-        Duration::from_secs(7),
-        runtime.terminate_reconnect_for_generation(
-            83,
-            "SMCP reconnect retry limit exhausted".to_string(),
-            true,
-        ),
-    )
-    .await
-    .expect("terminal reconnect teardown must be bounded");
-    assert!(terminated);
-
-    let settled = runtime.connection_snapshot().await;
-    assert_eq!(settled.status, ClientConnectionStatus::Disconnected);
-    assert!(!settled.present);
-    assert!(settled.actions.disconnect.enabled);
-    assert!(settled.last_error.as_ref().is_some_and(|error| error
-        .message
-        .contains("Timed out disconnecting SMCP socket")));
-
-    runtime
-        .clear_smcp_connection()
-        .await
-        .expect("cleanup timeout orphan");
-    wait_for("timeout orphan remained connected", || stats.active() == 0).await;
-}
-
-#[tokio::test]
 async fn runtime_stop_bounds_pending_transport_teardown_and_clears_authority() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
@@ -1967,121 +2022,6 @@ async fn runtime_stop_bounds_pending_transport_teardown_and_clears_authority() {
         stats.active() == 0
     })
     .await;
-}
-
-#[tokio::test]
-async fn stale_snapshot_after_reconnect_failure_does_not_block_manual_reconnect() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, stats) = start_smcp_socket_server().await;
-
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "stale-office",
-            "stale-computer",
-        )
-        .await
-        .expect("connect old socket");
-
-    wait_for("server never observed the original SMCP socket", || {
-        stats.active() == 1 && stats.connected() == 1 && stats.join_events() == 1
-    })
-    .await;
-
-    let target = state
-        .config
-        .save_manual_smcp_target(ManualSmcpTarget {
-            id: "stale-target".to_string(),
-            name: "stale-target".to_string(),
-            url: server_url.clone(),
-            namespace: "/smcp".to_string(),
-            office_id: "stale-office".to_string(),
-            headers: HashMap::new(),
-        })
-        .expect("save target");
-
-    {
-        let mut conn = runtime.connection_handle_for_test().write_owned().await;
-        *conn = Some(ConnectionState {
-            profile_name: "stale-target".to_string(),
-            url: server_url.clone(),
-            office_id: "stale-office".to_string(),
-            computer_name: "stale-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manual_smcp".to_string(),
-            target_id: Some(target.id.clone()),
-            target_name: Some("stale-target".to_string()),
-            employee_id: None,
-            generation: 5,
-        });
-    }
-
-    let dead_url = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{}", addr)
-    };
-    let params = ManagerConnectionParams {
-        url: dead_url,
-        office_id: "stale-office".to_string(),
-        routing_headers: HashMap::new(),
-        employee_id: 1,
-        robot_account_id: "org-legacy-18:account-24".to_string(),
-        scope: None,
-        robot_binding: RobotBindingMetadata {
-            context_key: None,
-            state: ManagerRobotBindingState::NeedsRebind,
-            employee_id: 1,
-            robot_id: Some("stale-office".to_string()),
-            last_resolved_robot_account_id: Some("org-legacy-18:account-24".to_string()),
-            namespace: Some("tfrobotserver".to_string()),
-            robot_name: Some("Robot".to_string()),
-        },
-    };
-    let token = ExchangedToken {
-        access_token: "new-jwt".to_string(),
-        token_type: "Bearer".to_string(),
-        expires_in: 300,
-        scope: None,
-    };
-
-    let outcome = reconnect_with_token(&runtime, &params, 5, &token).await;
-    assert!(matches!(outcome, RefreshOutcome::Retry));
-    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
-    assert!(!runtime.is_connected().await);
-    wait_for("old socket should be closed after failed reconnect", || {
-        stats.active() == 0 && stats.disconnected() == 1
-    })
-    .await;
-
-    connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
-        .await
-        .expect("manual reconnect should rebuild socket despite stale snapshot");
-
-    wait_for("manual reconnect should open a fresh socket", || {
-        stats.active() == 1 && stats.connected() == 2 && stats.join_events() == 2
-    })
-    .await;
-    assert!(runtime.is_connected().await);
-    assert_eq!(runtime.runtime_snapshot().await.last_error, None);
-
-    let final_connection = runtime
-        .connection_handle_for_test()
-        .write_owned()
-        .await
-        .take();
-    if let Some(connection) = final_connection {
-        close_smcp_connection(&runtime, connection)
-            .await
-            .expect("close final socket");
-    }
 }
 
 #[tokio::test]
@@ -2271,159 +2211,6 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
 }
 
 #[tokio::test]
-async fn profile_connect_rejects_robot_owned_by_refreshing_instance() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let owner_runtime = create_test_runtime(&state).await;
-    owner_runtime.start().await.expect("start owner runtime");
-    let (old_server_url, old_stats) = start_smcp_socket_server().await;
-    let (refresh_server_url, refresh_stats) =
-        start_smcp_socket_server_with_join_delay(Duration::from_millis(600)).await;
-
-    owner_runtime
-        .connect_smcp_socketio(
-            &old_server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "refreshing-office",
-            "owner-computer",
-        )
-        .await
-        .expect("connect owner socket");
-    wait_for("server never observed owner socket", || {
-        old_stats.active() == 1 && old_stats.connected() == 1
-    })
-    .await;
-
-    let target_id = "refreshing-target";
-    {
-        let mut conn = owner_runtime
-            .connection_handle_for_test()
-            .write_owned()
-            .await;
-        *conn = Some(ConnectionState {
-            profile_name: "owner-profile".to_string(),
-            url: old_server_url,
-            office_id: "refreshing-office".to_string(),
-            computer_name: "owner-computer".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manual_smcp".to_string(),
-            target_id: Some(target_id.to_string()),
-            target_name: Some("owner-profile".to_string()),
-            employee_id: None,
-            generation: 77,
-        });
-    }
-
-    let params = ManagerConnectionParams {
-        url: refresh_server_url.clone(),
-        office_id: "refreshing-office".to_string(),
-        routing_headers: HashMap::new(),
-        employee_id: 1,
-        robot_account_id: "42".to_string(),
-        scope: None,
-        robot_binding: RobotBindingMetadata {
-            context_key: None,
-            state: ManagerRobotBindingState::NeedsRebind,
-            employee_id: 1,
-            robot_id: Some("refreshing-office".to_string()),
-            last_resolved_robot_account_id: Some("42".to_string()),
-            namespace: Some("tfrobotserver".to_string()),
-            robot_name: Some("Robot".to_string()),
-        },
-    };
-    let token = ExchangedToken {
-        access_token: "new-jwt".to_string(),
-        token_type: "Bearer".to_string(),
-        expires_in: 300,
-        scope: None,
-    };
-    let owner_runtime_for_refresh = owner_runtime.clone();
-    let refresh_task = tokio::spawn(async move {
-        reconnect_with_token(&owner_runtime_for_refresh, &params, 77, &token).await
-    });
-
-    for _ in 0..40 {
-        if refresh_stats.connected() == 1
-            && refresh_stats.join_events() == 1
-            && owner_runtime.runtime_state().await == ComputerRuntimeState::Connected
-        {
-            break;
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        owner_runtime.runtime_state().await,
-        ComputerRuntimeState::Connected,
-        "owner runtime never entered refresh join window"
-    );
-
-    let challenger_instance_id = "challenger-computer";
-    state
-        .config
-        .add_computer_instance(ComputerInstance::new(
-            challenger_instance_id,
-            "Challenger Computer",
-        ))
-        .unwrap();
-    let challenger_runtime = state
-        .computer_registry
-        .upsert_runtime(
-            state
-                .config
-                .get_computer_instance(challenger_instance_id)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    challenger_runtime
-        .start()
-        .await
-        .expect("start challenger runtime");
-
-    let target = state
-        .config
-        .save_manual_smcp_target(ManualSmcpTarget {
-            id: target_id.to_string(),
-            name: "refreshing-target".to_string(),
-            url: refresh_server_url,
-            namespace: "/smcp".to_string(),
-            office_id: "refreshing-office".to_string(),
-            headers: HashMap::new(),
-        })
-        .expect("save target");
-
-    let err = connect_connection_target_core(&state, challenger_instance_id, &target.id)
-        .await
-        .expect_err("refreshing owner should still block another instance");
-    assert!(
-        err.contains("Test Computer"),
-        "error should identify the refreshing owner, got: {err}"
-    );
-
-    assert_eq!(
-        refresh_stats.connected(),
-        1,
-        "rejected challenger must not open another socket"
-    );
-
-    let outcome = refresh_task.await.expect("refresh task should complete");
-    assert!(matches!(outcome, RefreshOutcome::Renewed(300)));
-
-    let owner_connection = owner_runtime
-        .connection_handle_for_test()
-        .write_owned()
-        .await
-        .take();
-    if let Some(connection) = owner_connection {
-        close_smcp_connection(&owner_runtime, connection)
-            .await
-            .expect("close owner socket");
-    }
-}
-
-#[tokio::test]
 async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
@@ -2496,448 +2283,10 @@ async fn concurrent_profile_connect_same_robot_allows_only_one_instance() {
     }
 }
 
-// ───────────────────── 预刷新重连：generation 守卫 + abort（TFRC-11 / C1） ─────────────────────
-
-/// generation 守卫：换连接仅在代际匹配时生效；用户期间断开/改连（代际不符）时旧刷新任务
-/// 走 Stale 分支、不覆盖新连接。
-#[tokio::test]
-async fn try_install_refreshed_client_respects_generation_guard() {
-    let runtime = ComputerInstanceRuntime::new(
-        ComputerInstance::new("generation-guard", "Generation Guard"),
-        tempfile::tempdir().unwrap().path().to_path_buf(),
-    );
-    runtime
-        .install_connection_state(ConnectionState {
-            profile_name: "p".to_string(),
-            url: "http://127.0.0.1:1".to_string(),
-            office_id: "office".to_string(),
-            computer_name: "gen-test".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:1".to_string()),
-            target_name: Some("Robot".to_string()),
-            employee_id: Some(1),
-            generation: 7,
-        })
-        .await
-        .unwrap();
-
-    // 代际匹配 → Replaced（更新业务 snapshot 时间戳）。
-    match try_install_refreshed_client(&runtime, 7).await {
-        SwapResult::Replaced => {}
-        SwapResult::Stale => panic!("expected Replaced on matching generation"),
-    }
-
-    // 代际不符（模拟用户已改连别的机器人）→ Stale（不覆盖现连接）。
-    match try_install_refreshed_client(&runtime, 999).await {
-        SwapResult::Stale => {}
-        SwapResult::Replaced => panic!("expected Stale on non-matching generation"),
-    }
-
-    // 现连接仍是代际 7（client B）。
-    {
-        assert_eq!(
-            runtime
-                .connection_state_snapshot()
-                .await
-                .as_ref()
-                .map(|c| c.generation),
-            Some(7)
-        );
-    }
-}
-
-/// TFRC-51 gives failed token pre-refresh a clear runtime state: reconnect failure returns `Retry`,
-/// leaves the business snapshot guarded by generation, and records a client runtime diagnostic.
-#[tokio::test]
-async fn reconnect_with_token_records_diagnostic_on_sdk_build_failure() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, stats) = start_smcp_socket_server().await;
-
-    // 旧连接连到「好」server（initial join → join_events = 1）。
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "office",
-            "rollback-test",
-        )
-        .await
-        .expect("connect old socket");
-    {
-        let mut guard = runtime.connection_handle_for_test().write_owned().await;
-        *guard = Some(ConnectionState {
-            profile_name: "p".to_string(),
-            url: server_url.clone(),
-            office_id: "office".to_string(),
-            computer_name: "rollback-test".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:1".to_string()),
-            target_name: Some("Robot".to_string()),
-            employee_id: Some(1),
-            generation: 5,
-        });
-    }
-
-    // 预刷新参数指向一个「死」地址 → build_and_join 必失败。
-    let dead_url = {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        drop(l);
-        format!("http://{}", addr)
-    };
-    let params = ManagerConnectionParams {
-        url: dead_url,
-        office_id: "office".to_string(),
-        routing_headers: HashMap::new(),
-        employee_id: 1,
-        robot_account_id: "42".to_string(),
-        scope: None,
-        robot_binding: RobotBindingMetadata {
-            context_key: None,
-            state: ManagerRobotBindingState::NeedsRebind,
-            employee_id: 1,
-            robot_id: Some("office".to_string()),
-            last_resolved_robot_account_id: Some("42".to_string()),
-            namespace: Some("tfrobotserver".to_string()),
-            robot_name: Some("Robot".to_string()),
-        },
-    };
-    let token = ExchangedToken {
-        access_token: "new-jwt".to_string(),
-        token_type: "Bearer".to_string(),
-        expires_in: 300,
-        scope: None,
-    };
-
-    let outcome = reconnect_with_token(&runtime, &params, 5, &token).await;
-
-    // build 失败 → Retry（不替换连接）；SDK 回到 Started，client diagnostic 保留失败信息。
-    assert!(
-        matches!(outcome, RefreshOutcome::Retry),
-        "expected Retry on build failure"
-    );
-    assert_eq!(runtime.runtime_state().await, ComputerRuntimeState::Started);
-    let snapshot = runtime.runtime_snapshot().await;
-    assert_eq!(
-        snapshot.last_error, None,
-        "client-owned diagnostics must not be projected as SDK last_error"
-    );
-    let problem = snapshot
-        .problems
-        .iter()
-        .find(|problem| problem.source == ComputerRuntimeProblemSource::ClientConnection)
-        .expect("failed reconnect should surface a current structured problem");
-    assert_eq!(problem.severity, ComputerRuntimeProblemSeverity::Degraded);
-    assert_eq!(
-        problem.message,
-        ComputerRuntimeProblemMessage::ReconnectionFailed
-    );
-    assert_eq!(problem.operation, "reconnect");
-    assert!(problem.current);
-    assert!(problem.occurred_at.contains('T'));
-    assert_eq!(
-        problem.affected_capabilities,
-        vec![ComputerRuntimeAffectedCapability::Connection]
-    );
-    assert_eq!(
-        problem.technical_detail.as_deref(),
-        Some("SMCP reconnect failed; retrying")
-    );
-    assert!(!runtime.is_connected().await);
-    assert!(
-        runtime.connection_status().await.is_none(),
-        "failed reconnect must not expose a healthy connection status"
-    );
-
-    wait_for(
-        "expected old socket to leave before reconnect retry",
-        || stats.leave_events() == 1,
-    )
-    .await;
-    wait_for(
-        "expected old socket to disconnect after reconnect failure",
-        || stats.active() == 0 && stats.disconnected() == 1,
-    )
-    .await;
-
-    // 现连接仍是同一代际、未变僵尸 None。
-    {
-        let connection = runtime.connection_state_snapshot().await;
-        assert_eq!(
-            connection.as_ref().map(|c| c.generation),
-            Some(5),
-            "old connection must remain at its generation after rollback"
-        );
-    }
-
-    let final_conn = runtime.take_connection_state().await;
-    if let Some(cs) = final_conn {
-        close_smcp_connection(&runtime, cs)
-            .await
-            .expect("close reconnect socket");
-    }
-}
+// ───────────────────── Manager Context cleanup boundaries ─────────────────────
 
 #[tokio::test]
-async fn reconnect_with_token_reconnects_socket_and_refreshes_snapshot() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (old_server_url, old_stats) = start_smcp_socket_server().await;
-    let (new_server_url, new_stats) = start_smcp_socket_server().await;
-
-    runtime
-        .connect_smcp_socketio(
-            &old_server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "office",
-            "refresh-test",
-        )
-        .await
-        .expect("connect old socket");
-    wait_for("server never observed the old SMCP socket", || {
-        old_stats.active() == 1 && old_stats.connected() == 1
-    })
-    .await;
-
-    let connected_at = chrono::Utc::now() - chrono::Duration::seconds(5);
-    {
-        let mut guard = runtime.connection_handle_for_test().write_owned().await;
-        *guard = Some(ConnectionState {
-            profile_name: "p".to_string(),
-            url: old_server_url,
-            office_id: "office".to_string(),
-            computer_name: "refresh-test".to_string(),
-            connected_at,
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:1".to_string()),
-            target_name: Some("Robot".to_string()),
-            employee_id: Some(1),
-            generation: 8,
-        });
-    }
-    let params = ManagerConnectionParams {
-        url: new_server_url.clone(),
-        office_id: "office".to_string(),
-        routing_headers: HashMap::new(),
-        employee_id: 1,
-        robot_account_id: "42".to_string(),
-        scope: None,
-        robot_binding: RobotBindingMetadata {
-            context_key: None,
-            state: ManagerRobotBindingState::NeedsRebind,
-            employee_id: 1,
-            robot_id: Some("office".to_string()),
-            last_resolved_robot_account_id: Some("42".to_string()),
-            namespace: Some("tfrobotserver".to_string()),
-            robot_name: Some("Robot".to_string()),
-        },
-    };
-    let token = ExchangedToken {
-        access_token: "new-jwt".to_string(),
-        token_type: "Bearer".to_string(),
-        expires_in: 300,
-        scope: None,
-    };
-
-    let outcome = reconnect_with_token(&runtime, &params, 8, &token).await;
-    assert!(
-        matches!(outcome, RefreshOutcome::Renewed(300)),
-        "expected successful renewal"
-    );
-    assert_eq!(
-        runtime.runtime_state().await,
-        ComputerRuntimeState::JoinedOffice
-    );
-    assert!(runtime.is_connected().await);
-    assert!(
-        runtime.connection_status().await.is_some(),
-        "successful refresh should expose healthy connection status"
-    );
-
-    wait_for("old socket should be closed during refresh", || {
-        old_stats.leave_events() == 1 && old_stats.active() == 0 && old_stats.disconnected() == 1
-    })
-    .await;
-    wait_for("new socket should be connected and joined", || {
-        new_stats.active() == 1 && new_stats.connected() == 1 && new_stats.join_events() == 1
-    })
-    .await;
-
-    {
-        let connection = runtime.connection_state_snapshot().await;
-        let snapshot = connection
-            .as_ref()
-            .expect("connection snapshot should remain");
-        assert_eq!(snapshot.generation, 8);
-        assert_eq!(snapshot.computer_name, "refresh-test");
-        assert!(
-            snapshot.connected_at > connected_at,
-            "successful refresh should update connected_at"
-        );
-    }
-
-    let final_conn = runtime.take_connection_state().await;
-    if let Some(cs) = final_conn {
-        close_smcp_connection(&runtime, cs)
-            .await
-            .expect("close refreshed socket");
-    }
-}
-
-#[tokio::test]
-async fn reconnect_with_token_stale_generation_does_not_touch_socket() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, stats) = start_smcp_socket_server().await;
-
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "office",
-            "stale-test",
-        )
-        .await
-        .expect("connect socket");
-    wait_for("server never observed the SMCP socket", || {
-        stats.active() == 1 && stats.connected() == 1
-    })
-    .await;
-
-    {
-        let mut guard = runtime.connection_handle_for_test().write_owned().await;
-        *guard = Some(ConnectionState {
-            profile_name: "p".to_string(),
-            url: server_url.clone(),
-            office_id: "office".to_string(),
-            computer_name: "stale-test".to_string(),
-            connected_at: chrono::Utc::now(),
-            source_type: "manager_robot".to_string(),
-            target_id: Some("manager:1".to_string()),
-            target_name: Some("Robot".to_string()),
-            employee_id: Some(1),
-            generation: 99,
-        });
-    }
-    let params = ManagerConnectionParams {
-        url: server_url.clone(),
-        office_id: "office".to_string(),
-        routing_headers: HashMap::new(),
-        employee_id: 1,
-        robot_account_id: "42".to_string(),
-        scope: None,
-        robot_binding: RobotBindingMetadata {
-            context_key: None,
-            state: ManagerRobotBindingState::NeedsRebind,
-            employee_id: 1,
-            robot_id: Some("office".to_string()),
-            last_resolved_robot_account_id: Some("42".to_string()),
-            namespace: Some("tfrobotserver".to_string()),
-            robot_name: Some("Robot".to_string()),
-        },
-    };
-    let token = ExchangedToken {
-        access_token: "new-jwt".to_string(),
-        token_type: "Bearer".to_string(),
-        expires_in: 300,
-        scope: None,
-    };
-
-    let outcome = reconnect_with_token(&runtime, &params, 5, &token).await;
-    assert!(
-        matches!(outcome, RefreshOutcome::Gone),
-        "stale refresh task should exit"
-    );
-    assert_eq!(
-        runtime.runtime_state().await,
-        ComputerRuntimeState::JoinedOffice
-    );
-    assert_eq!(stats.active(), 1);
-    assert_eq!(stats.leave_events(), 0);
-    assert_eq!(stats.disconnected(), 0);
-
-    let final_conn = runtime.take_connection_state().await;
-    if let Some(cs) = final_conn {
-        close_smcp_connection(&runtime, cs)
-            .await
-            .expect("close stale socket");
-    }
-}
-
-/// `close_smcp_connection` 必须 abort 预刷新任务——断开后不得有后台任务继续 revive 连接。
-#[tokio::test]
-async fn close_smcp_connection_aborts_refresh_task() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = common::create_test_app_state(tmp.path());
-    let runtime = create_test_runtime(&state).await;
-    runtime.start().await.expect("start runtime");
-    let (server_url, _stats) = start_smcp_socket_server().await;
-    runtime
-        .connect_smcp_socketio(
-            &server_url,
-            None,
-            HashMap::new(),
-            Some("/smcp".to_string()),
-            "office",
-            "abort-test",
-        )
-        .await
-        .expect("connect socket");
-
-    // 代表预刷新任务的长驻后台循环；abort 后计数应停止增长。
-    let counter = Arc::new(AtomicUsize::new(0));
-    let counter_in_task = counter.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            counter_in_task.fetch_add(1, Ordering::SeqCst);
-            sleep(Duration::from_millis(10)).await;
-        }
-    });
-    runtime.set_refresh_task(task).await;
-
-    let cs = ConnectionState {
-        profile_name: "p".to_string(),
-        url: server_url,
-        office_id: "office".to_string(),
-        computer_name: "abort-test".to_string(),
-        connected_at: chrono::Utc::now(),
-        source_type: "manager_robot".to_string(),
-        target_id: Some("manager:1".to_string()),
-        target_name: Some("Robot".to_string()),
-        employee_id: Some(1),
-        generation: 1,
-    };
-
-    close_smcp_connection(&runtime, cs)
-        .await
-        .expect("close socket and abort refresh task");
-
-    let snapshot = counter.load(Ordering::SeqCst);
-    sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        snapshot,
-        "refresh task must be aborted by close_smcp_connection (no revive)"
-    );
-}
-
-#[tokio::test]
-async fn manager_context_cleanup_disconnects_manager_and_aborts_refresh_task() {
+async fn manager_context_cleanup_disconnects_manager_connection() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());
     let runtime = create_test_runtime(&state).await;
@@ -2969,10 +2318,6 @@ async fn manager_context_cleanup_disconnects_manager_and_aborts_refresh_task() {
         })
         .await
         .expect("install manager connection authority");
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
-
     assert!(runtime
         .clear_manager_connection_for_context_transaction()
         .await
@@ -2982,7 +2327,6 @@ async fn manager_context_cleanup_disconnects_manager_and_aborts_refresh_task() {
         .read_owned()
         .await
         .is_none());
-    assert!(!runtime.has_refresh_task_for_test().await);
     assert_eq!(
         runtime.connection_snapshot().await.status,
         ClientConnectionStatus::Disconnected
@@ -3026,9 +2370,6 @@ async fn manager_context_cleanup_failure_still_drops_local_connection_authority(
         })
         .await
         .expect("install manager connection authority");
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
     runtime.fail_next_smcp_disconnect_for_test();
 
     let error = runtime
@@ -3042,7 +2383,6 @@ async fn manager_context_cleanup_failure_still_drops_local_connection_authority(
         .await
         .is_none());
     assert!(runtime.clone_sdk_socketio_client_for_test().await.is_none());
-    assert!(!runtime.has_refresh_task_for_test().await);
     let connection = runtime.connection_snapshot().await;
     assert_eq!(connection.status, ClientConnectionStatus::Disconnected);
     assert!(connection.last_error.as_ref().is_some_and(|error| {
@@ -3089,16 +2429,11 @@ async fn manager_context_cleanup_leaves_manual_smcp_connection_untouched() {
         })
         .await
         .expect("install manual connection authority");
-    runtime
-        .set_refresh_task(tokio::spawn(std::future::pending()))
-        .await;
-
     assert!(!runtime
         .clear_manager_connection_for_context_transaction()
         .await
         .unwrap());
     assert_eq!(stats.active(), 1);
-    assert!(runtime.has_refresh_task_for_test().await);
     let connection = runtime.connection_snapshot().await;
     assert_eq!(connection.status, ClientConnectionStatus::Connected);
     assert_eq!(

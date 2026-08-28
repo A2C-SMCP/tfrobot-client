@@ -16,7 +16,10 @@ function resetStore() {
 const mockSettings: AppSettings = {
   theme: 'system',
   language: 'en',
-  log_retention_days: 30,
+  diagnostic_log_level: 'info',
+  diagnostic_retention_days: 7,
+  activity_retention_days: 30,
+  tool_history_retention_days: 90,
   custom_runtime_paths: {},
 };
 

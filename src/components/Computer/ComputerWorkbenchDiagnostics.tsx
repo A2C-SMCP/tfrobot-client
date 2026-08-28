@@ -2,7 +2,7 @@ import { Collapse } from 'antd';
 import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { DebugPanel } from '@/components/DebugPanel';
-import { LogViewer } from '@/components/LogViewer';
+import { ActivityViewer } from '@/components/ActivityViewer';
 import type { ComputerRuntimeSnapshot } from '@/stores/runtimeSnapshot';
 import type { ComputerRuntimeEventRecord } from '@/stores/runtimeStore';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
@@ -52,7 +52,7 @@ export function ComputerWorkbenchDiagnostics({
             label: t('logs.title'),
             children: (
               <div ref={logsRef} tabIndex={-1}>
-                <LogViewer instanceId={instanceId} />
+                <ActivityViewer instanceId={instanceId} />
               </div>
             ),
           },

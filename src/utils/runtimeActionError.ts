@@ -1,12 +1,27 @@
 export type MissingRuntimeInputError = {
-  code: 'missing_input' | 'missing_secret';
+  code: 'missing_input' | 'missing_secret' | 'invalid_selection';
   input_id: string;
-  env_hint: string;
+  env_hint?: string;
+  value?: string;
   message: string;
+  requesting_mcp?: {
+    bundle_id: string;
+    name: string;
+  };
 };
 
-export type RuntimeActionError = MissingRuntimeInputError | {
-  code: 'resolver_failed' | 'runtime_error';
+export type MissingInputDefinitionError = {
+  code: 'missing_input_definition';
+  input_id: string;
+  message: string;
+  requesting_mcp?: {
+    bundle_id: string;
+    name: string;
+  };
+};
+
+export type RuntimeActionError = MissingRuntimeInputError | MissingInputDefinitionError | {
+  code: 'resolver_failed' | 'runtime_input_cancelled' | 'runtime_error';
   input_id?: string;
   message: string;
 } | {
@@ -17,12 +32,27 @@ export type RuntimeActionError = MissingRuntimeInputError | {
   message: string;
 };
 
+export function isRuntimeInputCancelledError(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object'
+    && (error as Partial<RuntimeActionError>).code === 'runtime_input_cancelled');
+}
+
 export function isMissingRuntimeInputError(error: unknown): error is MissingRuntimeInputError {
   if (!error || typeof error !== 'object') return false;
   const candidate = error as Partial<MissingRuntimeInputError>;
-  return (candidate.code === 'missing_input' || candidate.code === 'missing_secret')
+  return (candidate.code === 'missing_input'
+    || candidate.code === 'missing_secret'
+    || candidate.code === 'invalid_selection')
     && typeof candidate.input_id === 'string'
-    && typeof candidate.env_hint === 'string'
+    && (candidate.code === 'invalid_selection' || typeof candidate.env_hint === 'string')
+    && typeof candidate.message === 'string';
+}
+
+export function isMissingInputDefinitionError(error: unknown): error is MissingInputDefinitionError {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as Partial<MissingInputDefinitionError>;
+  return candidate.code === 'missing_input_definition'
+    && typeof candidate.input_id === 'string'
     && typeof candidate.message === 'string';
 }
 

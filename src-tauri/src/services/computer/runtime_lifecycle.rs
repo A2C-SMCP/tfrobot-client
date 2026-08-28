@@ -140,6 +140,14 @@ impl ComputerRuntimeActionCapabilities {
                 | LifecycleState::JoinedOffice
                 | LifecycleState::Degraded
         );
+        // The SDK's Socket.IO lifecycle is orthogonal to its local MCP process gate. In
+        // particular, an unexpected remote transport close moves the raw lifecycle to Connecting
+        // while the already-booted MCP manager remains open. Reuse the stable user-facing Runtime
+        // projection so connection transitions cannot silently revoke local MCP management.
+        let mcp_operational = matches!(
+            ComputerRuntimeUserState::from(lifecycle),
+            ComputerRuntimeUserState::Running | ComputerRuntimeUserState::Degraded
+        );
 
         let inactive_or_transition_reason = || {
             if transitioning {
@@ -194,19 +202,10 @@ impl ComputerRuntimeActionCapabilities {
                     Disabled::ConnectionUnavailable
                 })
             },
-            manage_mcp: if matches!(
-                lifecycle,
-                LifecycleState::Started | LifecycleState::Connected | LifecycleState::JoinedOffice
-            ) {
+            manage_mcp: if mcp_operational {
                 ComputerRuntimeActionCapability::enabled()
             } else {
-                ComputerRuntimeActionCapability::disabled(
-                    if lifecycle == LifecycleState::Degraded {
-                        Disabled::Degraded
-                    } else {
-                        inactive_or_transition_reason()
-                    },
-                )
+                ComputerRuntimeActionCapability::disabled(inactive_or_transition_reason())
             },
         }
     }
@@ -349,7 +348,7 @@ mod tests {
                     restart: disabled(Disabled::TransitionInProgress),
                     connect: disabled(Disabled::TransitionInProgress),
                     disconnect: disabled(Disabled::TransitionInProgress),
-                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: enabled(),
                 },
             ),
             (
@@ -393,7 +392,7 @@ mod tests {
                     restart: enabled(),
                     connect: disabled(Disabled::ConnectionUnavailable),
                     disconnect: enabled(),
-                    manage_mcp: disabled(Disabled::Degraded),
+                    manage_mcp: enabled(),
                 },
             ),
             (
@@ -404,7 +403,7 @@ mod tests {
                     restart: disabled(Disabled::TransitionInProgress),
                     connect: disabled(Disabled::TransitionInProgress),
                     disconnect: disabled(Disabled::TransitionInProgress),
-                    manage_mcp: disabled(Disabled::TransitionInProgress),
+                    manage_mcp: enabled(),
                 },
             ),
             (

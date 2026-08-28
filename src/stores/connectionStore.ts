@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import { info } from '@/utils/logger';
+import { debug, error as logError, info } from '@/utils/logger';
 import {
   getClientConnectionAuthority,
   type ClientConnectionActionCapabilities,
@@ -104,12 +104,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   reset: () => set(initialState),
 
   disconnect: async (instanceId: string) => {
+    const startedAt = Date.now();
+    debug(`connection.requested layer=frontend operation=disconnect instance_id=${instanceId}`);
     set({ loading: true, error: null });
     try {
       await invoke('disconnect_smcp', { instanceId });
       info('SMCP disconnected');
+      debug(`connection.request_completed layer=frontend operation=disconnect instance_id=${instanceId} elapsed_ms=${Date.now() - startedAt} outcome=succeeded`);
       set({ loading: false });
     } catch (e) {
+      logError(`connection.request_failed layer=frontend operation=disconnect instance_id=${instanceId} elapsed_ms=${Date.now() - startedAt}`);
       set({ error: String(e), loading: false });
       throw e;
     }

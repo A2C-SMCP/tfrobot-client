@@ -1,94 +1,73 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Modal, Spin, Switch, Typography } from 'antd';
+import { Alert, Modal, Typography } from 'antd';
 import { useTranslation } from 'react-i18next';
-import { useInputStore, type InputDefinition } from '@/stores/inputStore';
-import type { MissingRuntimeInputError } from '@/utils/runtimeActionError';
-import { InputValueEditor } from './InputValueEditor';
+import { useInputStore } from '@/stores/inputStore';
+import { useRuntimeInputStore } from '@/stores/runtimeInputStore';
+import {
+  completeRuntimeInputRequest,
+  RuntimeInputCompletionError,
+} from '@/services/runtimeInputBridge';
+import { InputEntryEditor } from './InputEntryEditor';
 
-interface RuntimeInputPromptProps {
-  instanceId: string;
-  error: MissingRuntimeInputError;
-  allowPersistentDefinitionCreation?: boolean;
-  onCancel: () => void;
-  onSubmitted: () => Promise<void>;
-}
-
-export function RuntimeInputPrompt({
-  instanceId,
-  error,
-  allowPersistentDefinitionCreation = true,
-  onCancel,
-  onSubmitted,
-}: RuntimeInputPromptProps) {
+export function RuntimeInputPrompt() {
   const { t } = useTranslation();
-  const promptKey = `${instanceId}:${error.input_id}`;
-  const getInput = useInputStore((state) => state.getInput);
-  const addOrUpdateInput = useInputStore((state) => state.addOrUpdateInput);
-  const setValue = useInputStore((state) => state.setValue);
-  const setRuntimeValue = useInputStore((state) => state.setRuntimeValue);
-  const [loadedDefinition, setLoadedDefinition] = useState<{
-    key: string;
-    value: InputDefinition | null;
-  }>();
-  const [loadError, setLoadError] = useState(false);
-  const [submitError, setSubmitError] = useState(false);
-  const [createAsSecret, setCreateAsSecret] = useState(error.code === 'missing_secret');
+  const request = useRuntimeInputStore((state) => state.requests[0]);
+  const remove = useRuntimeInputStore((state) => state.remove);
+  const reportCompletionFailure = useRuntimeInputStore((state) => state.reportCompletionFailure);
+  const [cancelError, setCancelError] = useState(false);
   const submittingRef = useRef(false);
 
   useEffect(() => {
-    let active = true;
-    setLoadedDefinition(undefined);
-    setLoadError(false);
-    setSubmitError(false);
-    setCreateAsSecret(error.code === 'missing_secret');
-    getInput(instanceId, error.input_id)
-      .then((input) => {
-        if (active) setLoadedDefinition({ key: promptKey, value: input });
-      })
-      .catch(() => {
-        if (active) setLoadError(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [error.code, error.input_id, getInput, instanceId, promptKey]);
+    setCancelError(false);
+    submittingRef.current = false;
+  }, [request?.requestId]);
 
-  const definition = loadedDefinition?.key === promptKey
-    ? loadedDefinition.value
-    : undefined;
+  if (!request) return null;
+  const definition = request.definition;
+  const initialValue = definition.type === 'Command'
+    || (definition.type === 'PromptString' && definition.password === true)
+    ? undefined
+    : definition.default;
+  const requireValue = definition.type === 'PickString' && initialValue === undefined;
 
-  const handleSubmit = async (value: string) => {
+  const handleSubmit = async (_key: string, value: string | undefined) => {
+    if (submittingRef.current || value === undefined) return;
+    submittingRef.current = true;
+    try {
+      await completeRuntimeInputRequest(request.requestId, { status: 'confirmed', value });
+      remove(request.requestId);
+      const inputState = useInputStore.getState();
+      if (inputState.activeInstanceId === request.instanceId) {
+        await Promise.all([
+          inputState.fetchEntries(request.instanceId),
+          inputState.refreshValues(request.instanceId),
+        ]);
+      }
+    } catch (error) {
+      if (error instanceof RuntimeInputCompletionError && error.terminal) {
+        remove(request.requestId);
+        reportCompletionFailure();
+      }
+      throw error;
+    } finally {
+      submittingRef.current = false;
+    }
+  };
+
+  const handleCancel = async () => {
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setSubmitError(false);
+    setCancelError(false);
     try {
-      if (definition === null) {
-        const storedForRuntimeDefinition = await setRuntimeValue(
-          instanceId,
-          error.input_id,
-          value,
-        );
-        if (!storedForRuntimeDefinition) {
-          if (!allowPersistentDefinitionCreation) {
-            throw new Error(
-              `Runtime input definition '${error.input_id}' is no longer available`,
-            );
-          }
-          await addOrUpdateInput(instanceId, {
-            type: 'PromptString',
-            id: error.input_id,
-            label: error.input_id,
-            description: error.message,
-            password: createAsSecret,
-          });
-          await setValue(instanceId, error.input_id, value);
-        }
+      await completeRuntimeInputRequest(request.requestId, { status: 'cancelled' });
+      remove(request.requestId);
+    } catch (error) {
+      if (error instanceof RuntimeInputCompletionError && error.terminal) {
+        remove(request.requestId);
+        reportCompletionFailure();
       } else {
-        await setValue(instanceId, error.input_id, value);
+        setCancelError(true);
       }
-      await onSubmitted();
-    } catch {
-      setSubmitError(true);
     } finally {
       submittingRef.current = false;
     }
@@ -96,60 +75,31 @@ export function RuntimeInputPrompt({
 
   return (
     <Modal
-      title={t(error.code === 'missing_secret' ? 'inputs.runtime.missingSecret' : 'inputs.runtime.missingInput')}
+      title={request.reason === 'invalid_selection'
+        ? t(request.secret ? 'inputs.status.invalidSecretSelection' : 'inputs.runtime.invalidSelection')
+        : t(request.secret ? 'inputs.runtime.missingSecret' : 'inputs.runtime.missingInput')}
       open
-      onCancel={onCancel}
+      onCancel={() => { void handleCancel(); }}
       footer={null}
       destroyOnHidden
       width={440}
     >
-      <Typography.Paragraph>{error.message}</Typography.Paragraph>
       <Typography.Paragraph type="secondary">
-        {t('inputs.runtime.envHint', { env: error.env_hint })}
+        {t('inputs.runtime.description')}
       </Typography.Paragraph>
-      {loadError && (
-        <Alert type="error" showIcon message={t('inputs.runtime.loadFailed')} />
-      )}
-      {submitError && (
-        <Alert type="error" showIcon message={t('inputs.runtime.submitFailed')} />
-      )}
-      {definition === undefined && <Spin />}
-      {definition === null && (
-        <>
-          <Alert
-            type="info"
-            showIcon
-            message={t('inputs.runtime.definitionMissing', { id: error.input_id })}
-            style={{ marginBottom: 16 }}
-          />
-          {allowPersistentDefinitionCreation && (
-            <Typography.Paragraph>
-              <Switch
-                checked={createAsSecret}
-                onChange={setCreateAsSecret}
-                style={{ marginRight: 8 }}
-              />
-              {t('inputs.runtime.createAsSecret')}
-            </Typography.Paragraph>
-          )}
-        </>
-      )}
-      {definition !== undefined && (
-        <InputValueEditor
-          key={promptKey}
-          inputId={error.input_id}
-          inputs={[definition ?? {
-            type: 'PromptString',
-            id: error.input_id,
-            label: error.input_id,
-            description: error.message,
-            password: createAsSecret,
-          }]}
-          currentValue={undefined}
-          onSubmit={handleSubmit}
-          onCancel={onCancel}
-        />
-      )}
+      {cancelError && <Alert type="error" showIcon message={t('inputs.runtime.submitFailed')} />}
+      <InputEntryEditor
+        key={request.requestId}
+        fixedKey={definition.id}
+        definition={definition}
+        initialSecret={request.secret}
+        initialValue={initialValue}
+        lockSecret
+        showSecretControl={definition.type !== 'PickString'}
+        requireValue={requireValue}
+        onSubmit={handleSubmit}
+        onCancel={() => { void handleCancel(); }}
+      />
     </Modal>
   );
 }

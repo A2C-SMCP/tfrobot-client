@@ -25,6 +25,10 @@ use tfrobot_client_lib::services::manager_context::{
     ManagerContextLifecycleSink, ManagerContextSnapshot,
 };
 use tfrobot_client_lib::services::manager_environment::ManagerEnvironment;
+use tfrobot_client_lib::services::manager_token_bridge::{
+    ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
+    ManagerTokenProfile,
+};
 use tfrobot_client_lib::services::settings::SettingsService;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -65,6 +69,19 @@ struct RecordingContextEvents {
 #[derive(Default)]
 struct RecordingLifecycle {
     contexts: StdMutex<Vec<Option<ManagerContextKey>>>,
+}
+
+struct ChannelTokenBridge {
+    sender: tokio::sync::mpsc::UnboundedSender<ManagerTokenBridgeRequest>,
+}
+
+#[async_trait::async_trait]
+impl ManagerTokenBridgeSink for ChannelTokenBridge {
+    async fn emit_token_request(&self, request: &ManagerTokenBridgeRequest) -> Result<(), String> {
+        self.sender
+            .send(request.clone())
+            .map_err(|_| "token request receiver dropped".to_string())
+    }
 }
 
 #[async_trait::async_trait]
@@ -2312,183 +2329,217 @@ async fn network_error_when_server_unreachable() {
     }
 }
 
-// ───────────────────── token-exchange (TFRC-11 / C1) ─────────────────────
-
 #[tokio::test]
-async fn exchange_token_posts_form_and_parses_oauth_response() {
-    let script = vec![
+async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge() {
+    let (base, captured, _handle) = spawn_mock_manager(vec![
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            envelope(single_account_login_data("user-jwt-xyz")),
+            envelope(single_account_login_data("jwt-for-typescript")),
         ),
         json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+        raw_script(
             "/api/v1/oauth/token",
             "HTTP/1.1 200 OK",
-            serde_json::json!({
-                "access_token": "short-robot-jwt",
-                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                "token_type": "Bearer",
-                "expires_in": 300,
-                "scope": "smcp:connect"
-            }),
+            r#"{"access_token":"short-from-typescript","token_type":"Bearer","expires_in":300,"scope":"smcp:connect"}"#,
+            "application/json",
         ),
-    ];
-    let (base, captured, _h) = spawn_mock_manager(script).await;
-
-    let client = test_manager_client();
-    client
-        .login(Some(base), "13800138008", "Test@123456")
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base.clone(),
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    coordinator
+        .set_token_bridge_sink(Arc::new(ChannelTokenBridge { sender }))
+        .await;
+    coordinator
+        .set_token_bridge_ready("integration-test", true)
+        .await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "client@example.com", "secret")
+        .await
+        .unwrap();
+    let generation = coordinator
+        .capture_authenticated_generation()
         .await
         .unwrap();
 
-    let tok = client.exchange_token("robot-acct-1", None).await.unwrap();
-    assert_eq!(tok.access_token, "short-robot-jwt");
-    assert_eq!(tok.token_type, "Bearer");
-    assert_eq!(tok.expires_in, 300);
-    assert_eq!(tok.scope.as_deref(), Some("smcp:connect"));
+    let exchange_coordinator = coordinator.clone();
+    let exchange = tokio::spawn(async move {
+        exchange_coordinator
+            .exchange_token_for_generation(
+                generation,
+                "robot-account-1",
+                Some("smcp:connect".to_string()),
+            )
+            .await
+    });
+    let request = receiver.recv().await.expect("TypeScript bridge request");
+    assert_eq!(request.generation, generation);
+    assert_eq!(request.token_url, format!("{base}/api/v1/oauth/token"));
+    assert_eq!(request.user_jwt, "jwt-for-typescript");
+    assert_eq!(request.audience, "robot:robot-account-1");
+    assert_eq!(request.scope.as_deref(), Some("smcp:connect"));
+    assert_eq!(request.token_profile, ManagerTokenProfile::Session);
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("subject_token", "jwt-for-typescript"),
+            ("subject_token_type", "urn:ietf:params:oauth:token-type:jwt"),
+            ("audience", "robot:robot-account-1"),
+            ("scope", "smcp:connect"),
+            ("token_profile", "session"),
+        ])
+        .finish();
+    let (status, response_body, content_type) = coordinator
+        .token_bridge_http_request(&request.request_id, generation, form)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    assert!(response_body.contains("short-from-typescript"));
+    coordinator
+        .complete_token_bridge_request(
+            &request.request_id,
+            generation,
+            ManagerTokenBridgeCompletion::Success {
+                access_token: "short-from-typescript".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 300,
+                scope: Some("smcp:connect".to_string()),
+            },
+        )
+        .await
+        .unwrap();
 
-    // 校验 wire 请求：POST /api/v1/oauth/token + form-urlencoded 字段（RFC 8693）。
-    let reqs = captured.lock().await.clone();
-    let xchg = reqs
+    let token = exchange.await.unwrap().unwrap();
+    assert_eq!(token.access_token, "short-from-typescript");
+    assert_eq!(token.expires_in, 300);
+    let requests = captured.lock().await;
+    let token_request = requests
         .iter()
-        .find(|r| r.request_line.contains("/api/v1/oauth/token"))
-        .expect("token-exchange request should be captured");
-    assert!(
-        xchg.request_line.starts_with("POST "),
-        "should be POST: {}",
-        xchg.request_line
-    );
+        .find(|captured| captured.request_line.contains("/api/v1/oauth/token"))
+        .expect("native transport must call the Manager token endpoint");
     assert_eq!(
-        xchg.headers.get("content-type").map(String::as_str),
+        token_request
+            .headers
+            .get("content-type")
+            .map(String::as_str),
         Some("application/x-www-form-urlencoded")
     );
-    assert!(
-        xchg.body
-            .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"),
-        "body: {}",
-        xchg.body
-    );
-    assert!(
-        xchg.body.contains("subject_token=user-jwt-xyz"),
-        "subject_token must be the session User JWT. body: {}",
-        xchg.body
-    );
-    assert!(
-        xchg.body
-            .contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt"),
-        "body: {}",
-        xchg.body
-    );
-    assert!(
-        xchg.body.contains("audience=robot%3Arobot-acct-1"),
-        "audience must be robot:<id>. body: {}",
-        xchg.body
-    );
-    assert!(
-        !xchg.body.contains("scope="),
-        "scope must be omitted when None. body: {}",
-        xchg.body
-    );
+    assert!(token_request
+        .body
+        .contains("subject_token=jwt-for-typescript"));
+    assert!(token_request.body.contains("token_profile=session"));
 }
 
 #[tokio::test]
-async fn exchange_token_sends_scope_when_present() {
-    let script = vec![
+async fn old_bridge_unauthorized_completion_cannot_clear_new_session() {
+    let (base, _captured, _handle) = spawn_mock_manager(vec![
         json_script(
             "/auth/login-by-password",
             "HTTP/1.1 200 OK",
-            envelope(single_account_login_data("user-jwt")),
+            envelope(single_account_login_data("jwt-old")),
         ),
         json_script(
-            "/api/v1/oauth/token",
+            "/api/v1/auth/me",
             "HTTP/1.1 200 OK",
-            serde_json::json!({"access_token": "t", "token_type": "Bearer", "expires_in": 300}),
+            envelope(current_user_data()),
         ),
-    ];
-    let (base, captured, _h) = spawn_mock_manager(script).await;
+        json_script(
+            "/auth/login-by-password",
+            "HTTP/1.1 200 OK",
+            envelope(single_account_login_data("jwt-new")),
+        ),
+        json_script(
+            "/api/v1/auth/me",
+            "HTTP/1.1 200 OK",
+            envelope(current_user_data()),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let coordinator = Arc::new(test_context_coordinator(
+        base,
+        settings,
+        InMemorySecretStore::shared(),
+    ));
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    coordinator
+        .set_token_bridge_sink(Arc::new(ChannelTokenBridge { sender }))
+        .await;
+    coordinator
+        .set_token_bridge_ready("integration-test", true)
+        .await;
+    coordinator
+        .login(ManagerEnvironment::Staging, "old@example.com", "secret")
+        .await
+        .unwrap();
+    let old_generation = coordinator
+        .capture_authenticated_generation()
+        .await
+        .unwrap();
+    let exchange_coordinator = coordinator.clone();
+    let old_exchange = tokio::spawn(async move {
+        exchange_coordinator
+            .exchange_token_for_generation(old_generation, "robot-old", None)
+            .await
+    });
+    let old_request = receiver.recv().await.expect("old bridge request");
 
-    let client = test_manager_client();
-    client.login(Some(base), "p", "w").await.unwrap();
-    let _ = client
-        .exchange_token("r1", Some("smcp:connect tools:call".to_string()))
+    coordinator
+        .login(ManagerEnvironment::Staging, "new@example.com", "secret")
+        .await
+        .unwrap();
+    let new_generation = coordinator
+        .capture_authenticated_generation()
+        .await
+        .unwrap();
+    assert_ne!(new_generation, old_generation);
+    coordinator
+        .complete_token_bridge_request(
+            &old_request.request_id,
+            old_generation,
+            ManagerTokenBridgeCompletion::Error {
+                error:
+                    tfrobot_client_lib::services::manager_token_bridge::ManagerTokenBridgeFailure {
+                        kind: "unauthorized".to_string(),
+                        code: None,
+                        description: None,
+                        http_status: Some(401),
+                        redirect_url: None,
+                    },
+            },
+        )
         .await
         .unwrap();
 
-    let reqs = captured.lock().await.clone();
-    let xchg = reqs
-        .iter()
-        .find(|r| r.request_line.contains("/api/v1/oauth/token"))
-        .unwrap();
-    // 空格分隔的 scope 在 form-urlencoded 里编码为 `+`。
-    assert!(
-        xchg.body.contains("scope=smcp%3Aconnect+tools%3Acall"),
-        "body: {}",
-        xchg.body
+    assert!(matches!(
+        old_exchange.await.unwrap(),
+        Err(ManagerError::ContextChanged)
+    ));
+    assert_eq!(
+        coordinator
+            .capture_authenticated_generation()
+            .await
+            .unwrap(),
+        new_generation
     );
-}
-
-#[tokio::test]
-async fn exchange_token_maps_400_to_token_exchange_error() {
-    let script = vec![
-        json_script(
-            "/auth/login-by-password",
-            "HTTP/1.1 200 OK",
-            envelope(single_account_login_data("user-jwt")),
-        ),
-        json_script(
-            "/api/v1/oauth/token",
-            "HTTP/1.1 400 Bad Request",
-            serde_json::json!({"error": "invalid_grant", "error_description": "subject token revoked"}),
-        ),
-    ];
-    let (base, _cap, _h) = spawn_mock_manager(script).await;
-
-    let client = test_manager_client();
-    client.login(Some(base), "p", "w").await.unwrap();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
-    match err {
-        ManagerError::TokenExchange { error, description } => {
-            assert_eq!(error, "invalid_grant");
-            assert_eq!(description.as_deref(), Some("subject token revoked"));
-        }
-        other => panic!("expected TokenExchange, got {other:?}"),
-    }
-    // token-exchange 的 400 不是 session 鉴权失败 — session 应保留。
-    assert!(client.has_session().await);
-}
-
-#[tokio::test]
-async fn exchange_token_maps_503_to_signing_unavailable() {
-    let script = vec![
-        json_script(
-            "/auth/login-by-password",
-            "HTTP/1.1 200 OK",
-            envelope(single_account_login_data("user-jwt")),
-        ),
-        json_script(
-            "/api/v1/oauth/token",
-            "HTTP/1.1 503 Service Unavailable",
-            serde_json::json!({"error": "temporarily_unavailable", "error_description": "signing keys not provisioned"}),
-        ),
-    ];
-    let (base, _cap, _h) = spawn_mock_manager(script).await;
-
-    let client = test_manager_client();
-    client.login(Some(base), "p", "w").await.unwrap();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
-    match err {
-        ManagerError::SigningUnavailable { message } => {
-            assert_eq!(message.as_deref(), Some("signing keys not provisioned"));
-        }
-        other => panic!("expected SigningUnavailable, got {other:?}"),
-    }
-    assert!(client.has_session().await);
-}
-
-#[tokio::test]
-async fn exchange_token_without_login_errors_no_session() {
-    let client = test_manager_client();
-    let err = client.exchange_token("r1", None).await.unwrap_err();
-    assert!(matches!(err, ManagerError::NoSession));
+    assert_eq!(
+        coordinator.snapshot().await.auth_state,
+        ManagerAuthState::Authenticated
+    );
 }

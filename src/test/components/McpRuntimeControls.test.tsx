@@ -6,6 +6,8 @@ import type { McpServerStatus } from '@/stores/mcpStore';
 const userServer: McpServerStatus = {
   bundleId: 'runtime-server-id',
   name: 'runtime-server',
+  activation_state: 'stopped',
+  connection_state: 'disconnected',
   running: false,
   status_message: 'Stopped',
   disabled: false,
@@ -86,6 +88,32 @@ describe('McpRuntimeControls', () => {
     expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
   });
 
+  it('retries a failed connection by stopping before starting it again', async () => {
+    const operations: string[] = [];
+    mockStore.servers = [{
+      ...userServer,
+      activation_state: 'started',
+      connection_state: 'error',
+      running: true,
+      status_message: 'error',
+    }];
+    mockStore.stopServer.mockImplementationOnce(async () => {
+      operations.push('stop');
+    });
+    mockStore.startServer.mockImplementationOnce(async () => {
+      operations.push('start');
+    });
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    fireEvent.click(screen.getByTitle('Retry connection'));
+
+    expect(await screen.findByText('Server runtime-server reconnected')).toBeInTheDocument();
+    expect(operations).toEqual(['stop', 'start']);
+    expect(mockStore.stopServer).toHaveBeenCalledWith('computer-a', 'runtime-server-id');
+    expect(mockStore.startServer).toHaveBeenCalledWith('computer-a', 'runtime-server-id');
+    expect(screen.queryByText('Server runtime-server started')).not.toBeInTheDocument();
+  });
+
   it('keeps a single-server technical failure out of the ordinary UI', async () => {
     mockStore.startServer.mockRejectedValueOnce({
       code: 'runtime_error',
@@ -101,6 +129,24 @@ describe('McpRuntimeControls', () => {
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   });
 
+  it('keeps one MCP start pending while the global runtime input bridge owns prompting', async () => {
+    const startup = deferred<void>();
+    mockStore.startServer.mockReturnValueOnce(startup.promise);
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+    fireEvent.click(screen.getByTitle('Start'));
+
+    await waitFor(() => expect(mockStore.startServer).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('textbox', { name: 'Key' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      startup.resolve();
+      await startup.promise;
+    });
+    expect(await screen.findByText('Server runtime-server started')).toBeInTheDocument();
+    expect(mockStore.startServer).toHaveBeenCalledTimes(1);
+  });
+
   it('shows Plugin-owned diagnostics without lifecycle buttons and opens the matching Plugin', () => {
     const owner = {
       type: 'plugin' as const,
@@ -111,6 +157,8 @@ describe('McpRuntimeControls', () => {
     mockStore.servers = [{
       bundleId: 'plugin-server-id',
       name: 'plugin-server',
+      activation_state: 'started',
+      connection_state: 'connected',
       running: true,
       status_message: 'Connected with 3 tools',
       disabled: false,
@@ -128,12 +176,62 @@ describe('McpRuntimeControls', () => {
 
     expect(screen.getByText('Plugin: desktop-tools')).toBeInTheDocument();
     expect(screen.getByText('Marketplace: tf-market')).toBeInTheDocument();
-    expect(screen.getAllByText('Running').length).toBeGreaterThan(0);
+    expect(screen.getByText('Available')).toBeInTheDocument();
     expect(screen.queryByText('Connected with 3 tools')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Start')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Stop')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Manage desktop-tools$/ }));
     expect(onOpenPlugin).toHaveBeenCalledWith(owner);
+  });
+
+  it('shows the built-in Robot control provider without MCP lifecycle actions', () => {
+    mockStore.servers = [{
+      bundleId: 'client_control',
+      name: 'Client Control',
+      activation_state: 'started',
+      connection_state: 'connected',
+      running: true,
+      status_message: 'connected',
+      disabled: false,
+      managedBy: { type: 'built_in', provider: 'robot_control' },
+    }];
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    expect(screen.getByText('Built-in')).toBeInTheDocument();
+    expect(screen.getByText('Robot control')).toBeInTheDocument();
+    expect(screen.getByText('Managed by the Robot control setting.')).toBeInTheDocument();
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.queryByTitle('Start')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Retry connection')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Stop')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Manage/ })).not.toBeInTheDocument();
+  });
+
+  it('shows an unauthorized started Plugin server as waiting for authorization', () => {
+    mockStore.servers = [{
+      bundleId: 'plugin-oauth-server-id',
+      name: 'plugin-oauth-server',
+      activation_state: 'started',
+      connection_state: 'authorization_required',
+      running: true,
+      status_message: 'authorization_required',
+      disabled: false,
+      managedBy: {
+        type: 'plugin',
+        marketplace: 'tf-market',
+        plugin: 'desktop-tools',
+        pluginId: 'desktop-tools@tf-market',
+      },
+      oauth_status: { state: 'unauthorized' },
+      oauth_interaction: 'interactive',
+    }];
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    expect(screen.getByText('Waiting for authorization')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Authorize' })).toBeInTheDocument();
+    expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
   });
 
   it('reports mixed batch results with changed, unchanged, excluded, and failed counts', async () => {

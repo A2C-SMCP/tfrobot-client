@@ -3,7 +3,7 @@ use crate::services::computer::{
     ClientConnectionOperation, ClientConnectionOperationTarget, ClientConnectionOperationToken,
     ClientConnectionStateSnapshot, ClientConnectionStatus, ComputerConnectionPolicy,
     ComputerConnectionTarget, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeAction,
-    ComputerRuntimeState, ManagerRobotBindingState, RobotBindingMetadata, SmcpReconnectOutcome,
+    ComputerRuntimeState, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use crate::services::config::normalize_manual_smcp_target;
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
@@ -11,35 +11,54 @@ use crate::services::manager_client::{
     ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
 };
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
+use crate::services::observability::{
+    classify_connection_error, redact_text, sanitize_connection_endpoint, ActivityEventDraft,
+    ActivityLevel, ActivityOutcome, CONNECTION_LOG_TARGET,
+};
 use crate::AppState;
+use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tauri::State;
 use tokio::time::{timeout, Duration};
 
 const SMCP_CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MANAGER_AUTH_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const MANAGER_AUTH_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 
-/// 短 JWT 过期前多少秒触发预刷新重连（TFRC-11：`expires_at - 60s`）。
-const TOKEN_PREREFRESH_LEAD_SECS: i64 = 60;
-/// 预刷新失败（503 签名未就位 / 网络抖动）时的重试间隔；小于 lead，保证过期前多次重试。
-const TOKEN_REFRESH_RETRY_SECS: u64 = 10;
-/// A reconnect that has torn down the old socket must not leave the UI in an unbounded
-/// transitional state. Three retries give transient outages 10s/20s/40s windows to recover.
-const TOKEN_REFRESH_MAX_RETRIES: u32 = 3;
-const TOKEN_REFRESH_MAX_RETRY_SECS: u64 = 40;
+type ManagerTokenExchange = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<ExchangedToken, ManagerError>> + Send + 'static>>
+        + Send
+        + Sync,
+>;
 
-/// 单调代际号：后台预刷新任务在原地替换连接前，确认「这仍是我建立的那条连接」，
-/// 避免与「用户期间手动断开 / 改连别的机器人」竞态时误覆盖新连接。
+#[derive(Clone)]
+struct ManagerAuthDiagnostics {
+    instance_id: String,
+    origin_operation_id: uuid::Uuid,
+    origin_operation_epoch: u64,
+    runtime_generation: u64,
+    manager_generation: u64,
+    connection_generation: u64,
+}
+
+/// 单调代际号：连接快照与 Manager generation 共同隔离手动断开、改连及身份切换。
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn next_generation() -> u64 {
     CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Manager 驱动连接重建所需的参数（首连 + 预刷新重连共用）。`pub` 供集成测试构造，传给
-/// [`reconnect_with_token`] 验证成功、失败和 stale generation 路径。
+fn should_warn_manager_auth_retry(attempt: u64) -> bool {
+    attempt.is_power_of_two()
+}
+
+/// Manager 驱动连接所需的解析结果。
 #[derive(Clone)]
 pub struct ManagerConnectionParams {
     /// Socket.IO 服务端 URL（connection-info.socketBaseURL）。
@@ -61,16 +80,6 @@ pub struct ManagerConnectionParams {
 struct ManagerConnectionAuthority {
     manager_generation: u64,
     params: ManagerConnectionParams,
-}
-
-/// 预刷新换连接的结果：要么当前 business snapshot 仍属本代并已刷新时间戳，
-/// 要么连接已被用户断开 / 改连，刷新任务应退出。
-/// `pub` 供集成测试验证 generation 守卫。
-pub enum SwapResult {
-    /// 成功刷新当前连接快照。
-    Replaced,
-    /// 连接已不属于本代（用户断开 / 改连别的机器人）。
-    Stale,
 }
 
 #[derive(Debug)]
@@ -147,6 +156,10 @@ pub struct ConnectionStatusInfo {
 pub async fn list_manual_smcp_targets(
     state: State<'_, AppState>,
 ) -> Result<Vec<ManualSmcpTarget>, String> {
+    list_manual_smcp_targets_core(&state)
+}
+
+pub fn list_manual_smcp_targets_core(state: &AppState) -> Result<Vec<ManualSmcpTarget>, String> {
     state
         .config
         .list_manual_smcp_targets()
@@ -156,6 +169,14 @@ pub async fn list_manual_smcp_targets(
 #[tauri::command]
 pub async fn save_manual_smcp_target(
     state: State<'_, AppState>,
+    target: ManualSmcpTarget,
+    api_key_action: Option<ManualSmcpApiKeyAction>,
+) -> Result<ManualSmcpTarget, String> {
+    save_manual_smcp_target_core(&state, target, api_key_action).await
+}
+
+pub async fn save_manual_smcp_target_core(
+    state: &AppState,
     target: ManualSmcpTarget,
     api_key_action: Option<ManualSmcpApiKeyAction>,
 ) -> Result<ManualSmcpTarget, String> {
@@ -249,6 +270,14 @@ pub async fn connect_connection_target_for_policy_core(
     instance_id: &str,
     target: &ComputerConnectionTarget,
 ) -> Result<(), String> {
+    connect_connection_target_for_policy_inner(state, instance_id, target).await
+}
+
+pub(crate) async fn connect_connection_target_for_policy_inner(
+    state: &AppState,
+    instance_id: &str,
+    target: &ComputerConnectionTarget,
+) -> Result<(), String> {
     let ComputerConnectionTarget::ManualSmcp { id } = target else {
         return Err("Expected a Manual SMCP connection target".to_string());
     };
@@ -261,12 +290,75 @@ async fn connect_connection_target_with_policy(
     target_id: &str,
     required_policy_target: Option<&ComputerConnectionTarget>,
 ) -> Result<(), String> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANUAL_SMCP,
+        target_id = %target_id,
+        policy_driven = required_policy_target.is_some(),
+        "manual SMCP connection requested"
+    );
+    let result = connect_connection_target_with_policy_inner_impl(
+        state,
+        instance_id,
+        target_id,
+        required_policy_target,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANUAL_SMCP,
+            target_id = %target_id,
+            policy_driven = required_policy_target.is_some(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "manual SMCP connection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANUAL_SMCP,
+            target_id = %target_id,
+            policy_driven = required_policy_target.is_some(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(error),
+            error = %redact_text(error),
+            "manual SMCP connection request failed"
+        ),
+    }
+    result
+}
+
+async fn connect_connection_target_with_policy_inner_impl(
+    state: &AppState,
+    instance_id: &str,
+    target_id: &str,
+    required_policy_target: Option<&ComputerConnectionTarget>,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), String> {
     // The connection mutation is a two-phase transaction. Validate its authoritative inputs and
     // publish the operation token under the Computer lifecycle lock, then release the lock before
     // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
     // runtimes, or operation tokens.
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?.to_string();
+    let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&instance_id)
@@ -303,7 +395,25 @@ async fn connect_connection_target_with_policy(
         },
     )
     .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANUAL_SMCP,
+        target_id = %target.id,
+        endpoint = %sanitize_connection_endpoint(&target.url),
+        office_id = %target.office_id,
+        auth_present = api_key.as_deref().is_some_and(|value| !value.is_empty()),
+        header_count = target.headers.len(),
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "manual SMCP connection preflight completed"
+    );
     drop(lifecycle_guard);
+    drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token).await?;
 
     let connect_result = async {
@@ -329,6 +439,7 @@ async fn connect_connection_target_with_policy(
                 .connect_and_install_smcp_socketio(
                     operation_token,
                     &target.url,
+                    None,
                     auth_payload,
                     target.headers.clone(),
                     Some(target.namespace.clone()),
@@ -348,7 +459,17 @@ async fn connect_connection_target_with_policy(
                     },
                 )
                 .await?;
-            commit_manual_connection_target(
+            let commit_started = Instant::now();
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.commit_started",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                "committing manual SMCP connection target"
+            );
+            let commit_result = commit_manual_connection_target(
                 state,
                 &runtime,
                 operation_token,
@@ -357,7 +478,23 @@ async fn connect_connection_target_with_policy(
                 api_key.as_deref(),
                 &profile_snapshot,
             )
-            .await
+            .await;
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.commit_completed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                elapsed_ms = commit_started.elapsed().as_millis() as u64,
+                outcome = if commit_result.is_ok() { "succeeded" } else { "failed" },
+                error_kind = commit_result
+                    .as_ref()
+                    .err()
+                    .map(|error| classify_connection_error(error)),
+                "manual SMCP connection commit completed"
+            );
+            commit_result
         }
         .await;
         if result.is_err() {
@@ -382,13 +519,21 @@ async fn connect_connection_target_with_policy(
             "Connection operation was superseded by a runtime lifecycle change".to_string(),
         );
     }
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        &format!("Connected to manual SMCP target {}", target.name),
-        None,
-        Some(&instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            &instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "connect_manual",
+            ActivityOutcome::Succeeded,
+            format!("Connected to manual SMCP target {}", target.name),
+        ))
+        .await
+    {
+        log::error!("failed to persist connection activity: {error}");
+    }
     Ok(())
 }
 
@@ -401,6 +546,7 @@ async fn commit_manual_connection_target(
     expected_api_key: Option<&str>,
     expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime.ensure_connection_operation(operation_token).await?;
     state
@@ -584,10 +730,54 @@ pub async fn disconnect_smcp(
 }
 
 pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "disconnect",
+        "SMCP disconnection requested"
+    );
+    let result = disconnect_smcp_inner(state, instance_id, request_id, requested_at).await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "SMCP disconnection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(error),
+            error = %redact_text(error),
+            "SMCP disconnection request failed"
+        ),
+    }
+    result
+}
+
+async fn disconnect_smcp_inner(
+    state: &AppState,
+    instance_id: &str,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), String> {
     // Publish the operation while the authoritative runtime is protected, release the global
     // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance_id(instance_id)?.to_string();
+    let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
+    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
         .computer_registry
@@ -601,10 +791,23 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
 
     let current = runtime.connection_snapshot().await;
     if !current.actions.disconnect.enabled {
-        return Err(format!(
+        let error = format!(
             "Connection disconnect action is unavailable: {:?}",
             current.actions.disconnect.disabled_reason
-        ));
+        );
+        tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.operation_rejected",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "disconnect",
+            connection_revision = current.revision,
+            status = ?current.status,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error),
+            "SMCP disconnection action was unavailable"
+        );
+        return Err(error);
     }
     let operation_token = runtime
         .begin_connection_operation(
@@ -619,20 +822,67 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
                 }),
         )
         .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.disconnect_started",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        connection_revision = current.revision,
+        source_type = current
+            .context
+            .as_ref()
+            .map(|context| context.source_type.as_str())
+            .unwrap_or("unknown"),
+        target_id = current
+            .context
+            .as_ref()
+            .and_then(|context| context.target_id.as_deref())
+            .unwrap_or("none"),
+        "SMCP transport teardown started"
+    );
     if let Err(error) = runtime
         .ensure_runtime_action(ComputerRuntimeAction::Disconnect)
         .await
     {
         let message = error.to_string();
+        tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.disconnect_failed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&message),
+            error = %redact_text(&message),
+            "runtime rejected SMCP disconnection"
+        );
         runtime
             .reconcile_disconnect_failure_for_token(operation_token, message.clone())
             .await;
         return Err(message);
     }
     drop(lifecycle_guard);
+    drop(operation_guard);
 
     if runtime.has_smcp_transport().await {
         if let Err(error) = close_smcp_transport(&runtime).await {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.disconnect_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                elapsed_ms = requested_at.elapsed().as_millis() as u64,
+                error_kind = classify_connection_error(&error),
+                error = %redact_text(&error),
+                "SMCP transport teardown failed"
+            );
+            let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
             let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
             if state
                 .computer_registry
@@ -651,6 +901,7 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
             return Err(error);
         }
     }
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     state
         .computer_registry
@@ -666,13 +917,34 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
         );
     }
 
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        "Disconnected from SMCP server",
-        None,
-        Some(&instance_id),
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.disconnect_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        outcome = "succeeded",
+        "SMCP disconnection completed"
     );
+
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            &instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "disconnect",
+            ActivityOutcome::Succeeded,
+            "Disconnected from SMCP server",
+        ))
+        .await
+    {
+        log::error!("failed to persist disconnection activity: {error}");
+    }
     Ok(())
 }
 
@@ -712,7 +984,15 @@ pub async fn get_connection_status(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<ConnectionStatusInfo, String> {
-    let instance_id = require_instance_id(&instance_id)?;
+    get_connection_status_core(&state, &instance_id).await
+}
+
+pub async fn get_connection_status_core(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<ConnectionStatusInfo, String> {
+    let instance_id = require_instance_id(instance_id)?;
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -739,9 +1019,9 @@ pub async fn get_connection_status(
 
 /// 建立一条 Manager 驱动的 SMCP 连接（token-exchange 全路径）。
 ///
-/// 全路径：`connection-info → exchange_token(robotAccountId) → 短 JWT 注入 Socket.IO auth dict
-/// → 连接`。连接面鉴权**唯一**走 auth dict（字段名 `token`，smcp-computer #86）；`routingHeaders`
-/// 仅作 HTTP 路由（X-TF-*，非鉴权）。成功后后台起预刷新任务（`expires_in - 60s` teardown+重连）。
+/// 全路径：`connection-info → exchange_token(robotAccountId, token_profile=session) → 动态
+/// Socket.IO auth provider → 连接`。连接面鉴权**唯一**走 auth dict（字段名 `token`）；
+/// `routingHeaders` 仅作 HTTP 路由。SDK 每次真实重连前重新调用 provider，不主动拆健康连接。
 ///
 /// 前端只提交 employee 主键。robotAccountId、路由和连接地址必须在捕获的 Manager Context
 /// generation 下重新解析，前端缓存与 profile 中的最近快照都不具备授权语义。
@@ -752,11 +1032,92 @@ pub async fn manager_connect_smcp(
     employee_id: u64,
     scope: Option<String>,
 ) -> Result<(), ManagerError> {
-    let instance_id = require_instance_id(&instance_id)
+    manager_connect_smcp_core(&state, &instance_id, employee_id, scope).await
+}
+
+pub async fn manager_connect_smcp_core(
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+    scope: Option<String>,
+) -> Result<(), ManagerError> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        "Manager Robot SMCP connection requested"
+    );
+    let result = manager_connect_smcp_inner(
+        state,
+        instance_id,
+        employee_id,
+        scope,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot SMCP connection request completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error.to_string()),
+            error = %redact_text(&error.to_string()),
+            "Manager Robot SMCP connection request failed"
+        ),
+    }
+    result
+}
+
+async fn manager_connect_smcp_inner(
+    state: &AppState,
+    instance_id: &str,
+    employee_id: u64,
+    scope: Option<String>,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), ManagerError> {
+    let instance_id = require_instance_id(instance_id)
         .map_err(ManagerError::InvalidResponse)?
         .to_string();
     let (runtime, operation_token, profile_snapshot) =
-        begin_manager_connect(state.inner(), &instance_id, employee_id, None).await?;
+        begin_manager_connect(state, &instance_id, employee_id, None).await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "Manager Robot connection preflight completed"
+    );
     let result = async {
         let manager_generation = state
             .manager_context
@@ -774,9 +1135,24 @@ pub async fn manager_connect_smcp(
             scope,
         )
         .await?;
-        log::info!(
-            "manager_connect_smcp: employee_id={employee_id} resolved_robot_account_id={}",
-            params.robot_account_id
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.manager_target_resolved",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            employee_id,
+            endpoint = %sanitize_connection_endpoint(&params.url),
+            office_id = %params.office_id,
+            header_count = params.routing_headers.len(),
+            namespace_present = params
+                .robot_binding
+                .namespace
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            "Manager connection-info resolved"
         );
         runtime
             .ensure_connection_operation(operation_token)
@@ -784,14 +1160,57 @@ pub async fn manager_connect_smcp(
             .map_err(ManagerError::InvalidResponse)?;
 
         // 换短 JWT时只使用同一 generation 下刚解析出的 robotAccountId。
-        let token = state
+        let token_exchange_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_started",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial",
+            "Manager Robot token exchange started"
+        );
+        let token_result = state
             .manager_context
             .exchange_token_for_generation(
                 manager_generation,
                 &params.robot_account_id,
                 params.scope.clone(),
             )
-            .await?;
+            .await;
+        if let Err(error) = &token_result {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_exchange_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                manager_generation,
+                auth_phase = "initial",
+                elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+                retryable = false,
+                error_kind = classify_connection_error(&error.to_string()),
+                error = %redact_text(&error.to_string()),
+                "Manager Robot token exchange failed"
+            );
+        }
+        let token = token_result?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_completed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial",
+            elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot token exchange completed"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -801,9 +1220,9 @@ pub async fn manager_connect_smcp(
             .ensure_authenticated_generation(manager_generation)
             .await?;
 
-        // 连接 + 入库 + 起预刷新任务均位于 generation commit boundary 内。
+        // 连接与入库均位于 generation commit boundary 内。
         establish_manager_connection(
-            state.inner(),
+            state,
             &runtime,
             operation_token,
             ManagerConnectionAuthority {
@@ -826,6 +1245,70 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
     employee_id: u64,
     required_policy_target: &ComputerConnectionTarget,
 ) -> Result<(), ManagerError> {
+    let request_id = uuid::Uuid::new_v4();
+    let requested_at = Instant::now();
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.requested",
+        request_id = %request_id,
+        instance_id = %instance_id,
+        operation = "connect",
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        policy_driven = true,
+        "Manager Robot policy connection requested"
+    );
+    let result = connect_manager_robot_target_for_policy_inner(
+        state,
+        instance_id,
+        expected_context_key,
+        employee_id,
+        required_policy_target,
+        request_id,
+        requested_at,
+    )
+    .await;
+    match &result {
+        Ok(()) => tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_completed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            policy_driven = true,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot policy connection completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.request_failed",
+            request_id = %request_id,
+            instance_id = %instance_id,
+            operation = "connect",
+            source_type = SOURCE_MANAGER_ROBOT,
+            employee_id,
+            policy_driven = true,
+            elapsed_ms = requested_at.elapsed().as_millis() as u64,
+            error_kind = classify_connection_error(&error.to_string()),
+            error = %redact_text(&error.to_string()),
+            "Manager Robot policy connection failed"
+        ),
+    }
+    result
+}
+
+async fn connect_manager_robot_target_for_policy_inner(
+    state: &AppState,
+    instance_id: &str,
+    expected_context_key: &ManagerContextKey,
+    employee_id: u64,
+    required_policy_target: &ComputerConnectionTarget,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+) -> Result<(), ManagerError> {
     let (runtime, operation_token, profile_snapshot) = begin_manager_connect(
         state,
         instance_id,
@@ -833,6 +1316,20 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
         Some(required_policy_target),
     )
     .await?;
+    tracing::debug!(
+        target: CONNECTION_LOG_TARGET,
+        event = "connection.preflight_completed",
+        request_id = %request_id,
+        operation_id = %operation_token.diagnostic_id(),
+        instance_id = %instance_id,
+        operation_epoch = operation_token.epoch(),
+        runtime_generation = runtime.runtime_generation(),
+        source_type = SOURCE_MANAGER_ROBOT,
+        employee_id,
+        policy_driven = true,
+        elapsed_ms = requested_at.elapsed().as_millis() as u64,
+        "Manager Robot policy connection preflight completed"
+    );
     let result = async {
         let manager_generation = match state
             .manager_context
@@ -880,18 +1377,80 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             None,
         )
         .await?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.manager_target_resolved",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            employee_id,
+            endpoint = %sanitize_connection_endpoint(&params.url),
+            office_id = %params.office_id,
+            header_count = params.routing_headers.len(),
+            namespace_present = params
+                .robot_binding
+                .namespace
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            "Manager connection-info resolved for policy connection"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
             .map_err(ManagerError::InvalidResponse)?;
-        let token = state
+        let token_exchange_started = Instant::now();
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_started",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial_policy",
+            "Manager Robot policy token exchange started"
+        );
+        let token_result = state
             .manager_context
             .exchange_token_for_generation(
                 manager_generation,
                 &params.robot_account_id,
                 params.scope.clone(),
             )
-            .await?;
+            .await;
+        if let Err(error) = &token_result {
+            tracing::warn!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_exchange_failed",
+                request_id = %request_id,
+                operation_id = %operation_token.diagnostic_id(),
+                instance_id = %instance_id,
+                operation_epoch = operation_token.epoch(),
+                manager_generation,
+                auth_phase = "initial_policy",
+                elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+                retryable = false,
+                error_kind = classify_connection_error(&error.to_string()),
+                error = %redact_text(&error.to_string()),
+                "Manager Robot policy token exchange failed"
+            );
+        }
+        let token = token_result?;
+        tracing::debug!(
+            target: CONNECTION_LOG_TARGET,
+            event = "connection.auth_exchange_completed",
+            request_id = %request_id,
+            operation_id = %operation_token.diagnostic_id(),
+            instance_id = %instance_id,
+            operation_epoch = operation_token.epoch(),
+            manager_generation,
+            auth_phase = "initial_policy",
+            elapsed_ms = token_exchange_started.elapsed().as_millis() as u64,
+            outcome = "succeeded",
+            "Manager Robot policy token exchange completed"
+        );
         runtime
             .ensure_connection_operation(operation_token)
             .await
@@ -931,6 +1490,7 @@ async fn begin_manager_connect(
     ),
     ManagerError,
 > {
+    let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
@@ -962,6 +1522,7 @@ async fn begin_manager_connect(
     .await
     .map_err(ManagerError::InvalidResponse)?;
     drop(lifecycle_guard);
+    drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token)
         .await
         .map_err(ManagerError::InvalidResponse)?;
@@ -1012,6 +1573,7 @@ async fn mark_manager_binding_dormant(
     expected_context_key: &ManagerContextKey,
     employee_id: u64,
 ) -> Result<(), ManagerError> {
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
@@ -1178,21 +1740,276 @@ fn manager_connection_params_from_resolved(
     })
 }
 
-/// 用给定参数 + 短 JWT 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
+fn manager_socketio_auth_provider(
+    manager_context: Arc<ManagerContextCoordinator>,
+    manager_generation: u64,
+    robot_account_id: String,
+    scope: Option<String>,
+    initial_access_token: String,
+    diagnostics: ManagerAuthDiagnostics,
+) -> SocketIoAuthProvider {
+    let exchange: ManagerTokenExchange = Arc::new(move || {
+        let manager_context = manager_context.clone();
+        let robot_account_id = robot_account_id.clone();
+        let scope = scope.clone();
+        Box::pin(async move {
+            manager_context
+                .exchange_token_for_generation(manager_generation, &robot_account_id, scope)
+                .await
+        })
+    });
+    let refresh_provider = retrying_manager_socketio_auth_provider(
+        exchange,
+        MANAGER_AUTH_RETRY_INITIAL_DELAY,
+        MANAGER_AUTH_RETRY_MAX_DELAY,
+        Some(diagnostics.clone()),
+    );
+    seeded_socketio_auth_provider(initial_access_token, refresh_provider, Some(diagnostics))
+}
+
+fn retrying_manager_socketio_auth_provider(
+    exchange: ManagerTokenExchange,
+    initial_delay: Duration,
+    max_delay: Duration,
+    diagnostics: Option<ManagerAuthDiagnostics>,
+) -> SocketIoAuthProvider {
+    Arc::new(move || {
+        let exchange = exchange.clone();
+        let diagnostics = diagnostics.clone();
+        Box::pin(async move {
+            let reconnect_attempt_id = uuid::Uuid::new_v4();
+            let reconnect_started = Instant::now();
+            let mut retry_delay = initial_delay;
+            let mut attempt = 0_u64;
+            loop {
+                attempt += 1;
+                let exchange_started = Instant::now();
+                tracing::debug!(
+                    target: CONNECTION_LOG_TARGET,
+                    event = "connection.auth_exchange_started",
+                    instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                    origin_operation_id = diagnostics
+                        .as_ref()
+                        .map(|value| value.origin_operation_id.to_string()),
+                    origin_operation_epoch = diagnostics
+                        .as_ref()
+                        .map(|value| value.origin_operation_epoch),
+                    reconnect_attempt_id = %reconnect_attempt_id,
+                    runtime_generation = diagnostics.as_ref().map(|value| value.runtime_generation),
+                    manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                    connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                    auth_phase = "refresh",
+                    attempt,
+                    "Manager Socket.IO reconnect auth exchange started"
+                );
+                match exchange().await {
+                    Ok(token) => {
+                        tracing::debug!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_completed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            origin_operation_epoch = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_epoch),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            runtime_generation = diagnostics.as_ref().map(|value| value.runtime_generation),
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            exchange_elapsed_ms = exchange_started.elapsed().as_millis() as u64,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            outcome = "succeeded",
+                            "Manager Socket.IO reconnect auth exchange completed"
+                        );
+                        return serde_json::json!({ "token": token.access_token });
+                    }
+                    Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
+                        // Manager Context owns auth-expired publication and credential cleanup. Its
+                        // registered consumer disconnects Manager-owned runtimes; returning an empty
+                        // auth dict ensures no stale credential is replayed meanwhile.
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "session_unavailable",
+                            "Manager Socket.IO auth stopped because the session is unavailable"
+                        );
+                        return serde_json::json!({});
+                    }
+                    Err(ManagerError::ContextChanged) => {
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "context_changed",
+                            "Manager Socket.IO auth ignored a stale generation"
+                        );
+                        return serde_json::json!({});
+                    }
+                    Err(
+                        ManagerError::SigningUnavailable { .. } | ManagerError::NetworkError(_),
+                    ) => {
+                        if should_warn_manager_auth_retry(attempt) {
+                            tracing::warn!(
+                                target: CONNECTION_LOG_TARGET,
+                                event = "connection.auth_exchange_retry",
+                                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                                origin_operation_id = diagnostics
+                                    .as_ref()
+                                    .map(|value| value.origin_operation_id.to_string()),
+                                reconnect_attempt_id = %reconnect_attempt_id,
+                                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                                auth_phase = "refresh",
+                                attempt,
+                                retryable = true,
+                                retry_delay_ms = retry_delay.as_millis() as u64,
+                                error_kind = "transient_manager_error",
+                                sampling = "power_of_two",
+                                "Manager Socket.IO auth exchange is still retrying"
+                            );
+                        } else {
+                            tracing::debug!(
+                                target: CONNECTION_LOG_TARGET,
+                                event = "connection.auth_exchange_retry",
+                                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                                origin_operation_id = diagnostics
+                                    .as_ref()
+                                    .map(|value| value.origin_operation_id.to_string()),
+                                reconnect_attempt_id = %reconnect_attempt_id,
+                                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                                auth_phase = "refresh",
+                                attempt,
+                                retryable = true,
+                                retry_delay_ms = retry_delay.as_millis() as u64,
+                                error_kind = "transient_manager_error",
+                                sampling = "debug_detail",
+                                "Manager Socket.IO auth exchange failed transiently"
+                            );
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay.saturating_mul(2).min(max_delay);
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.auth_exchange_failed",
+                            instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                            origin_operation_id = diagnostics
+                                .as_ref()
+                                .map(|value| value.origin_operation_id.to_string()),
+                            reconnect_attempt_id = %reconnect_attempt_id,
+                            manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                            connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                            auth_phase = "refresh",
+                            attempt,
+                            attempt_elapsed_ms = reconnect_started.elapsed().as_millis() as u64,
+                            retryable = false,
+                            error_kind = "terminal_manager_error",
+                            "Manager Socket.IO auth exchange failed permanently"
+                        );
+                        return serde_json::json!({});
+                    }
+                }
+            }
+        })
+    })
+}
+
+fn seeded_socketio_auth_provider(
+    initial_access_token: String,
+    refresh_provider: SocketIoAuthProvider,
+    diagnostics: Option<ManagerAuthDiagnostics>,
+) -> SocketIoAuthProvider {
+    // The seed is consumed by the SDK's initial CONNECT while the Manager generation commit lock
+    // is held. Later invocations happen only for SDK-driven network reconnects and perform a fresh
+    // generation-bound lookup through foundation-ts' cache/retry policy.
+    let initial_access_token = Arc::new(StdMutex::new(Some(initial_access_token)));
+    Arc::new(move || {
+        let seeded = match initial_access_token.lock() {
+            Ok(mut token) => token.take(),
+            Err(_) => {
+                log::error!("Manager Socket.IO auth seed lock is unavailable");
+                None
+            }
+        };
+        if let Some(access_token) = seeded {
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_provider_invoked",
+                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                operation_id = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_id.to_string()),
+                operation_epoch = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_epoch),
+                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                auth_phase = "initial",
+                "Manager Socket.IO auth provider supplied the initial credential"
+            );
+            Box::pin(async move { serde_json::json!({ "token": access_token }) })
+        } else {
+            tracing::debug!(
+                target: CONNECTION_LOG_TARGET,
+                event = "connection.auth_provider_invoked",
+                instance_id = diagnostics.as_ref().map(|value| value.instance_id.as_str()),
+                origin_operation_id = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_id.to_string()),
+                origin_operation_epoch = diagnostics
+                    .as_ref()
+                    .map(|value| value.origin_operation_epoch),
+                manager_generation = diagnostics.as_ref().map(|value| value.manager_generation),
+                connection_generation = diagnostics.as_ref().map(|value| value.connection_generation),
+                auth_phase = "refresh",
+                "Manager Socket.IO auth provider requested a refreshed credential"
+            );
+            refresh_provider()
+        }
+    })
+}
+
+/// 用动态 auth provider 通过 SDK Computer 建立 Socket.IO 连接并 join_office。
 async fn build_and_join(
     runtime: &ComputerInstanceRuntime,
     operation_token: ClientConnectionOperationToken,
     params: &ManagerConnectionParams,
-    jwt: &str,
+    auth_provider: SocketIoAuthProvider,
     generation: u64,
 ) -> Result<(), String> {
-    // 连接面鉴权唯一走 Socket.IO auth dict（字段名 `token`，smcp-computer #86）。
-    let auth_payload = serde_json::json!({ "token": jwt });
     runtime
         .connect_and_install_smcp_socketio(
             operation_token,
             &params.url,
-            Some(auth_payload),
+            Some(auth_provider),
+            None,
             params.routing_headers.clone(),
             None,
             &params.office_id,
@@ -1213,7 +2030,7 @@ async fn build_and_join(
         .await
 }
 
-/// 首连：构建连接、替换 AppState、起预刷新任务、emit 状态变更事件。
+/// 首连：构建连接、替换 AppState、emit 状态变更事件。
 async fn establish_manager_connection(
     state: &AppState,
     runtime: &ComputerInstanceRuntime,
@@ -1265,19 +2082,28 @@ async fn establish_manager_connection(
                     return Ok(());
                 }
 
-                // The SDK currently combines Socket.IO construction and runtime installation.
-                // Keep that indivisible operation, the durable binding, and refresh-task install
-                // behind the Manager generation commit boundary so account switch/logout cannot
-                // interleave after validation.
-                build_and_join(
-                    runtime,
-                    operation_token,
-                    &params,
-                    &token.access_token,
-                    generation,
-                )
-                .await
-                .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
+                // The first provider result is the token exchanged immediately before this
+                // transaction. Seeding it avoids re-entering the Manager transaction lock from
+                // the SDK callback. Every later reconnect exchanges through the generation-bound
+                // Manager Context.
+                let auth_provider = manager_socketio_auth_provider(
+                    state.manager_context.clone(),
+                    manager_generation,
+                    params.robot_account_id.clone(),
+                    params.scope.clone(),
+                    token.access_token.clone(),
+                    ManagerAuthDiagnostics {
+                        instance_id: instance_id.to_string(),
+                        origin_operation_id: operation_token.diagnostic_id(),
+                        origin_operation_epoch: operation_token.epoch(),
+                        runtime_generation: runtime.runtime_generation(),
+                        manager_generation,
+                        connection_generation: generation,
+                    },
+                );
+                build_and_join(runtime, operation_token, &params, auth_provider, generation)
+                    .await
+                    .map_err(|e| ManagerError::NetworkError(format!("SMCP connect failed: {e}")))?;
                 commit_robot_binding(
                     state,
                     runtime,
@@ -1289,18 +2115,6 @@ async fn establish_manager_connection(
                 .await?;
                 runtime
                     .ensure_connection_operation(operation_token)
-                    .await
-                    .map_err(ManagerError::InvalidResponse)?;
-                let refresh_task = spawn_refresh_task(
-                    state,
-                    runtime.clone(),
-                    params.clone(),
-                    instance_id.to_string(),
-                    generation,
-                    token.expires_in,
-                );
-                runtime
-                    .set_refresh_task_for_generation(generation, refresh_task)
                     .await
                     .map_err(ManagerError::InvalidResponse)
             })
@@ -1318,16 +2132,24 @@ async fn establish_manager_connection(
         .await
         .map_err(ManagerError::InvalidResponse)?;
 
-    let _ = state.log_service.write_for_instance(
-        "info",
-        "connection",
-        &format!(
-            "Connected to {} (robot {})",
-            params.url, params.robot_account_id
-        ),
-        None,
-        Some(instance_id),
-    );
+    if let Err(error) = state
+        .observability
+        .record_activity_async(ActivityEventDraft::computer(
+            instance_id,
+            ActivityLevel::Info,
+            "connection",
+            "smcp_connection",
+            "connect_manager",
+            ActivityOutcome::Succeeded,
+            format!(
+                "Connected to {} (robot {})",
+                params.url, params.robot_account_id
+            ),
+        ))
+        .await
+    {
+        log::error!("failed to persist manager connection activity: {error}");
+    }
     Ok(())
 }
 
@@ -1349,6 +2171,7 @@ async fn commit_robot_binding(
             "only an active Manager Robot binding can be committed".to_string(),
         ));
     }
+    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
@@ -1374,65 +2197,6 @@ async fn commit_robot_binding(
                 context_key,
                 robot_binding.employee_id,
                 robot_binding.last_resolved_robot_account_id.clone(),
-            ));
-        })
-        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
-    apply_updated_computer_instance(state, previous, updated)
-        .await
-        .map_err(ManagerError::InvalidResponse)?;
-    Ok(())
-}
-
-async fn commit_refreshed_robot_binding(
-    state: &AppState,
-    runtime: &ComputerInstanceRuntime,
-    connection_generation: u64,
-    params: &ManagerConnectionParams,
-) -> Result<(), ManagerError> {
-    let context_key = params.robot_binding.context_key.clone().ok_or_else(|| {
-        ManagerError::InvalidResponse(
-            "refreshed Manager Robot binding is missing its Context key".to_string(),
-        )
-    })?;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    state
-        .computer_registry
-        .ensure_current_runtime(runtime)
-        .await
-        .map_err(ManagerError::InvalidResponse)?;
-    let connection = runtime
-        .connection_state_snapshot()
-        .await
-        .ok_or(ManagerError::ContextChanged)?;
-    if connection.generation != connection_generation
-        || connection.source_type != SOURCE_MANAGER_ROBOT
-        || connection.employee_id != Some(params.employee_id)
-    {
-        return Err(ManagerError::ContextChanged);
-    }
-    let instance_id = runtime.instance.id.as_str();
-    let previous = state
-        .config
-        .get_computer_instance(instance_id)
-        .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
-    match previous.connection_policy.target.as_ref() {
-        Some(ComputerConnectionTarget::ManagerRobot {
-            context_key: target_context_key,
-            employee_id,
-            ..
-        }) if target_context_key == &context_key && *employee_id == params.employee_id => {}
-        _ => return Err(ManagerError::ContextChanged),
-    }
-    let refreshed_binding = params.robot_binding.clone();
-    let refreshed_account_id = refreshed_binding.last_resolved_robot_account_id.clone();
-    let updated = state
-        .config
-        .update_computer_instance(instance_id, |instance| {
-            instance.robot_binding = Some(refreshed_binding.clone());
-            instance.connection_policy.target = Some(ComputerConnectionTarget::manager_robot(
-                context_key.clone(),
-                params.employee_id,
-                refreshed_account_id.clone(),
             ));
         })
         .map_err(|error| ManagerError::InvalidResponse(error.to_string()))?;
@@ -1536,345 +2300,6 @@ fn reserve_connection_target_in(
     })
 }
 
-/// 后台预刷新重连任务：`expires_in - 60s` 重新 exchange → SDK 重连 → 刷新业务快照。
-///
-/// SMCP 长连接 token 不能热刷新（握手时绑定一次），只能 teardown+reconnect。任务整段生命周期由
-/// [`ComputerInstanceRuntime`] 持有，连接被关闭/替换时 abort。换连接前用 `generation` 确认「仍是我
-/// 这条连接」，避免与用户期间手动断开/改连竞态时误覆盖。
-fn spawn_refresh_task(
-    state: &AppState,
-    runtime: ComputerInstanceRuntime,
-    params: ManagerConnectionParams,
-    instance_id: String,
-    generation: u64,
-    initial_expires_in: i64,
-) -> tokio::task::JoinHandle<()> {
-    let task_state = state.clone();
-    let log_service = state.log_service.clone();
-
-    tokio::spawn(async move {
-        let mut params = params;
-        let mut expires_in = initial_expires_in;
-        let mut next_wait = refresh_wait_secs(expires_in);
-        let mut retry_attempt = 0;
-        loop {
-            // #1: 把过短/退化 TTL（含 server 漏发=0）夹到安全下限，避免 wait≈1s 的重连风暴。
-            if expires_in <= TOKEN_PREREFRESH_LEAD_SECS {
-                log::warn!(
-                    "Token expires_in={expires_in}s <= lead={TOKEN_PREREFRESH_LEAD_SECS}s; \
-                     clamping refresh cadence to avoid a reconnect storm"
-                );
-            }
-            tokio::time::sleep(Duration::from_secs(next_wait)).await;
-            if !runtime.begin_reconnect_for_generation(generation).await {
-                return;
-            }
-
-            let (outcome, refreshed_params) =
-                refresh_cycle(&task_state, &runtime, &params, generation).await;
-            match outcome {
-                // 成功：emit/log 副作用在此（refresh_cycle 不做副作用，便于测试），按新 TTL 排下次。
-                RefreshOutcome::Renewed(new_ttl) => {
-                    if !runtime.complete_reconnect_for_generation(generation).await {
-                        return;
-                    }
-                    if let Some(refreshed_params) = refreshed_params {
-                        params = refreshed_params;
-                    }
-                    let _ = log_service.write_for_instance(
-                        "info",
-                        "connection",
-                        "Pre-refreshed SMCP token and reconnected",
-                        None,
-                        Some(&instance_id),
-                    );
-                    expires_in = new_ttl;
-                    next_wait = refresh_wait_secs(expires_in);
-                    retry_attempt = 0;
-                }
-                // session 失效：通知前端重新登录，停止刷新。
-                RefreshOutcome::Unauthorized => {
-                    log::warn!("Token pre-refresh: session unauthorized; stopping refresh");
-                    settle_refresh_terminal(
-                        &runtime,
-                        generation,
-                        RefreshTerminalOutcome::Unauthorized,
-                    )
-                    .await;
-                    return;
-                }
-                // 连接已被替换/断开，或永久错误 → 本任务退场。
-                RefreshOutcome::Gone => {
-                    settle_refresh_terminal(&runtime, generation, RefreshTerminalOutcome::Gone)
-                        .await;
-                    return;
-                }
-                RefreshOutcome::Stop => {
-                    settle_refresh_terminal(&runtime, generation, RefreshTerminalOutcome::Stop)
-                        .await;
-                    return;
-                }
-                // 暂时性失败（503 / 网络 / build 失败）→ 约 RETRY_SECS 后再试，
-                // 不再重睡整个 lead 窗口（修复僵尸窗口 + 错误的重睡间隔）。
-                RefreshOutcome::Retry => {
-                    if retry_attempt >= TOKEN_REFRESH_MAX_RETRIES {
-                        settle_refresh_terminal(
-                            &runtime,
-                            generation,
-                            RefreshTerminalOutcome::Exhausted,
-                        )
-                        .await;
-                        return;
-                    }
-                    retry_attempt += 1;
-                    runtime
-                        .record_reconnect_retry(
-                            generation,
-                            format!(
-                                "SMCP reconnect failed; retry {retry_attempt}/{TOKEN_REFRESH_MAX_RETRIES}"
-                            ),
-                        )
-                        .await;
-                    next_wait = refresh_retry_delay_secs(retry_attempt, generation);
-                    expires_in = TOKEN_PREREFRESH_LEAD_SECS + next_wait as i64;
-                }
-            }
-        }
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefreshTerminalOutcome {
-    Unauthorized,
-    Gone,
-    Stop,
-    Exhausted,
-}
-
-/// One terminal settlement table shared by orchestration and tests. Every exit either clears the
-/// reconnect operation for its generation or clears the failed connection authority with an
-/// actionable terminal error.
-pub(crate) async fn settle_refresh_terminal(
-    runtime: &ComputerInstanceRuntime,
-    generation: u64,
-    outcome: RefreshTerminalOutcome,
-) -> bool {
-    match outcome {
-        RefreshTerminalOutcome::Gone => runtime.abort_reconnect_for_generation(generation).await,
-        RefreshTerminalOutcome::Unauthorized => {
-            runtime
-                .terminate_reconnect_for_generation(
-                    generation,
-                    "Manager session expired during SMCP token refresh".to_string(),
-                    false,
-                )
-                .await
-        }
-        RefreshTerminalOutcome::Stop => {
-            runtime
-                .terminate_reconnect_for_generation(
-                    generation,
-                    "SMCP token refresh failed permanently".to_string(),
-                    false,
-                )
-                .await
-        }
-        RefreshTerminalOutcome::Exhausted => {
-            runtime
-                .terminate_reconnect_for_generation(
-                    generation,
-                    "SMCP reconnect retry limit exhausted".to_string(),
-                    true,
-                )
-                .await
-        }
-    }
-}
-
-/// #1: 距下次预刷新的等待秒数。把过短/退化 TTL 夹到安全下限 `lead+retry`——degenerate（含 0）→ 约
-/// `retry` 秒一次，杜绝 `wait≈1s` 的 teardown/reconnect 风暴。
-fn refresh_wait_secs(expires_in: i64) -> u64 {
-    let floor = TOKEN_PREREFRESH_LEAD_SECS + TOKEN_REFRESH_RETRY_SECS as i64;
-    (expires_in.max(floor) - TOKEN_PREREFRESH_LEAD_SECS).max(1) as u64
-}
-
-fn refresh_retry_delay_secs(attempt: u32, generation: u64) -> u64 {
-    let exponential = TOKEN_REFRESH_RETRY_SECS
-        .saturating_mul(1_u64 << attempt.saturating_sub(1))
-        .min(TOKEN_REFRESH_MAX_RETRY_SECS);
-    // Stable ±20% jitter prevents clients with identical token TTLs from retrying in lockstep
-    // without adding a runtime RNG dependency.
-    let jitter_bucket = (generation.wrapping_add(attempt as u64 * 17) % 41) as i64 - 20;
-    ((exponential as i64 * (100 + jitter_bucket)) / 100).max(1) as u64
-}
-
-/// 一次预刷新的结果。`pub` 供集成测试匹配 [`reconnect_with_token`] 的返回。
-pub enum RefreshOutcome {
-    /// 换上新连接，内含新 token 的 `expires_in`（秒）。
-    Renewed(i64),
-    /// 暂时性失败，短退避后重试；runtime 可能已进入 Error，等待后续重连恢复。
-    Retry,
-    /// 连接已被换/断，任务退场。
-    Gone,
-    /// 不可恢复（永久错误），停止刷新。
-    Stop,
-    /// session 失效——Manager Context 已统一发布 `manager:auth-expired`，刷新任务停止。
-    Unauthorized,
-}
-
-/// 执行一次预刷新：exchange → [`reconnect_with_token`]。
-/// 只做决策、不做 emit/log 副作用（交调用方按 [`RefreshOutcome`] 处理），便于无 AppHandle 环境测试。
-async fn refresh_cycle(
-    state: &AppState,
-    runtime: &ComputerInstanceRuntime,
-    params: &ManagerConnectionParams,
-    generation: u64,
-) -> (RefreshOutcome, Option<ManagerConnectionParams>) {
-    let manager_context = &state.manager_context;
-    let manager_generation = match manager_context.capture_authenticated_generation().await {
-        Ok(generation) => generation,
-        Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
-            return (RefreshOutcome::Unauthorized, None);
-        }
-        Err(error) => {
-            log::error!("Token pre-refresh could not capture Manager context: {error}");
-            return (RefreshOutcome::Stop, None);
-        }
-    };
-    let Some(expected_context_key) = params.robot_binding.context_key.as_ref() else {
-        log::error!("Token pre-refresh stopped: Manager binding has no Context key");
-        return (RefreshOutcome::Stop, None);
-    };
-    let refreshed_params = match resolve_manager_connection_params(
-        manager_context,
-        manager_generation,
-        expected_context_key,
-        params.employee_id,
-        params.scope.clone(),
-    )
-    .await
-    {
-        Ok(params) => params,
-        Err(ManagerError::Unauthorized | ManagerError::NoSession) => {
-            return (RefreshOutcome::Unauthorized, None);
-        }
-        Err(ManagerError::NetworkError(error)) => {
-            log::warn!("Token pre-refresh discovery retryable error: {error}");
-            return (RefreshOutcome::Retry, None);
-        }
-        Err(error) => {
-            log::warn!("Token pre-refresh discovery stopped: {error}");
-            return (RefreshOutcome::Stop, None);
-        }
-    };
-    let token = match manager_context
-        .exchange_token_for_generation(
-            manager_generation,
-            &refreshed_params.robot_account_id,
-            refreshed_params.scope.clone(),
-        )
-        .await
-    {
-        Ok(t) => t,
-        Err(ManagerError::Unauthorized) => return (RefreshOutcome::Unauthorized, None),
-        Err(e @ ManagerError::SigningUnavailable { .. })
-        | Err(e @ ManagerError::NetworkError(_)) => {
-            log::warn!("Token pre-refresh retryable error: {e}");
-            return (RefreshOutcome::Retry, None);
-        }
-        Err(e) => {
-            log::error!("Token pre-refresh failed permanently: {e}; stopping refresh");
-            return (RefreshOutcome::Stop, None);
-        }
-    };
-    let outcome = match manager_context
-        .commit_for_authenticated_generation(manager_generation, || async {
-            let outcome =
-                reconnect_with_token(runtime, &refreshed_params, generation, &token).await;
-            if matches!(outcome, RefreshOutcome::Renewed(_)) {
-                commit_refreshed_robot_binding(state, runtime, generation, &refreshed_params)
-                    .await?;
-            }
-            Ok(outcome)
-        })
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            log::warn!("Token pre-refresh context changed before reconnect commit: {error}");
-            RefreshOutcome::Stop
-        }
-    };
-    if matches!(outcome, RefreshOutcome::Renewed(_)) {
-        (outcome, Some(refreshed_params))
-    } else {
-        (outcome, None)
-    }
-}
-
-/// 用已拿到的短 JWT 重建连接：runtime lifecycle lock 内断开旧 SDK Socket.IO → 重连 → 成功刷新快照。
-///
-/// **不依赖 AppHandle / Manager Context**（emit/log 留给调用方），便于集成测试 build 失败路径。
-/// 顺序 **disconnect-first**：同机器人重连必须先释放 room，否则 server 拒绝重复实例
-/// （同 `(office_id, connection.computer_name)`）。build 失败返回 Retry；SDK lifecycle 回到 Started，
-/// client runtime diagnostic 则保留失败原因，避免业务层把已断开的 socket 误判为健康连接。
-/// `generation` 守卫防与用户手动断开/改连竞态。
-/// `pub` 供集成测试。
-pub async fn reconnect_with_token(
-    runtime: &ComputerInstanceRuntime,
-    params: &ManagerConnectionParams,
-    generation: u64,
-    token: &ExchangedToken,
-) -> RefreshOutcome {
-    let auth_payload = serde_json::json!({ "token": token.access_token });
-    let computer_name = {
-        let connection = runtime.connection_state_snapshot().await;
-        match connection.as_ref() {
-            Some(connection) if connection.generation == generation => {
-                connection.computer_name.clone()
-            }
-            _ => return RefreshOutcome::Gone,
-        }
-    };
-    match runtime
-        .reconnect_smcp_socketio_for_generation(
-            generation,
-            &params.url,
-            Some(auth_payload),
-            params.routing_headers.clone(),
-            None,
-            &params.office_id,
-            &computer_name,
-            token.expires_in,
-        )
-        .await
-    {
-        Ok(SmcpReconnectOutcome::Reconnected { expires_in }) => RefreshOutcome::Renewed(expires_in),
-        Ok(SmcpReconnectOutcome::Stale) => RefreshOutcome::Gone,
-        Err(e) => {
-            log::warn!("Pre-refresh reconnect failed: {e}");
-            RefreshOutcome::Retry
-        }
-    }
-}
-
-/// 仅当代际匹配（仍是同一条逻辑连接）时刷新当前 connection snapshot。
-/// 返回 [`SwapResult::Replaced`] 或 [`SwapResult::Stale`]（连接已被换/断）。
-/// `pub` 供集成测试验证 generation 守卫。
-pub async fn try_install_refreshed_client(
-    runtime: &ComputerInstanceRuntime,
-    generation: u64,
-) -> SwapResult {
-    if runtime
-        .refresh_connection_timestamp_for_generation(generation)
-        .await
-    {
-        SwapResult::Replaced
-    } else {
-        SwapResult::Stale
-    }
-}
-
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {
     let instance_id = instance_id.trim();
     if instance_id.is_empty() {
@@ -1899,7 +2324,8 @@ pub struct ConnectionState {
     pub target_id: Option<String>,
     pub target_name: Option<String>,
     pub employee_id: Option<u64>,
-    /// 代际号；Manager 驱动连接由预刷新任务用它确认连接归属。手动 profile 连接也分配（不复用）。
+    /// Logical connection generation used by lifecycle and ownership guards. Values are never
+    /// reused for either Manager-driven or manual profile connections.
     pub generation: u64,
 }
 
@@ -1971,24 +2397,6 @@ mod tests {
         drop(first);
         reserve_connection_target_in(&reservations, "computer-c", "target-a", "office-c").unwrap();
         drop(second);
-    }
-
-    #[test]
-    fn reconnect_retry_backoff_is_bounded_with_deterministic_jitter() {
-        let generation = 42;
-        let delays = (1..=TOKEN_REFRESH_MAX_RETRIES)
-            .map(|attempt| refresh_retry_delay_secs(attempt, generation))
-            .collect::<Vec<_>>();
-
-        assert!((8..=12).contains(&delays[0]));
-        assert!((16..=24).contains(&delays[1]));
-        assert!((32..=48).contains(&delays[2]));
-        assert_eq!(
-            delays,
-            (1..=TOKEN_REFRESH_MAX_RETRIES)
-                .map(|attempt| refresh_retry_delay_secs(attempt, generation))
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]
@@ -2223,7 +2631,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_refresh_reserves_target_for_other_instances_but_allows_owner_recovery() {
+    fn failed_connection_authority_reserves_target_for_others_but_allows_owner_recovery() {
         assert!(connection_snapshot_blocks_target(
             ComputerRuntimeState::Started,
             false
@@ -2232,5 +2640,71 @@ mod tests {
             ComputerRuntimeState::Started,
             true
         ));
+    }
+
+    #[tokio::test]
+    async fn manager_auth_provider_consumes_seed_once_then_refreshes_each_connect() {
+        let refresh_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refresh_provider: SocketIoAuthProvider = {
+            let refresh_count = refresh_count.clone();
+            Arc::new(move || {
+                let sequence = refresh_count.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move { serde_json::json!({ "token": format!("fresh-{sequence}") }) })
+            })
+        };
+        let provider = seeded_socketio_auth_provider("initial".to_string(), refresh_provider, None);
+
+        assert_eq!(provider().await, serde_json::json!({ "token": "initial" }));
+        assert_eq!(provider().await, serde_json::json!({ "token": "fresh-1" }));
+        assert_eq!(provider().await, serde_json::json!({ "token": "fresh-2" }));
+        assert_eq!(refresh_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn manager_auth_retry_warns_only_at_power_of_two_attempts() {
+        let warned = (1_u64..=10)
+            .filter(|attempt| should_warn_manager_auth_retry(*attempt))
+            .collect::<Vec<_>>();
+
+        assert_eq!(warned, vec![1, 2, 4, 8]);
+    }
+
+    #[tokio::test]
+    async fn manager_auth_provider_retries_transient_exchange_without_emitting_empty_auth() {
+        let exchange_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let exchange: ManagerTokenExchange = {
+            let exchange_count = exchange_count.clone();
+            Arc::new(move || {
+                let attempt = exchange_count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(ManagerError::NetworkError(
+                            "temporary bridge outage".to_string(),
+                        ))
+                    } else {
+                        Ok(ExchangedToken {
+                            access_token: "fresh-after-retry".to_string(),
+                            token_type: "Bearer".to_string(),
+                            expires_in: 300,
+                            scope: None,
+                        })
+                    }
+                })
+            })
+        };
+        let provider = retrying_manager_socketio_auth_provider(
+            exchange,
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+            None,
+        );
+
+        let auth = timeout(Duration::from_secs(1), provider())
+            .await
+            .expect("transient exchange should recover");
+
+        assert_eq!(auth, serde_json::json!({ "token": "fresh-after-retry" }));
+        assert_eq!(exchange_count.load(Ordering::SeqCst), 2);
+        assert_ne!(auth, serde_json::json!({}));
     }
 }

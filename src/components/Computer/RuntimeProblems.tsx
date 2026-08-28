@@ -102,6 +102,9 @@ export function RuntimeProblems({
       {currentProblems.map((problem) => {
         const resolvedActions = problem.recommended_actions.map(resolveAction);
         const disabledActions = resolvedActions.filter((action) => !action.enabled);
+        const presentationDetail = problem.message === 'mcp_start_failed'
+          ? problem.presentation_detail
+          : undefined;
         return (
           <Alert
             key={problem.id}
@@ -128,6 +131,16 @@ export function RuntimeProblems({
                     time: dayjs(problem.occurred_at).format('YYYY-MM-DD HH:mm:ss'),
                   })}
                 </Typography.Text>
+                {presentationDetail && (
+                  <Typography.Paragraph
+                    type="secondary"
+                    style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+                  >
+                    {t('computer.runtime.problems.technicalDetail', {
+                      detail: presentationDetail,
+                    })}
+                  </Typography.Paragraph>
+                )}
                 <Space wrap>
                   {resolvedActions.map((action) => (
                     <Button

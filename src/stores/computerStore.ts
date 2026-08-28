@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import { formatRuntimeActionError } from '@/utils/runtimeActionError';
+import { formatRuntimeActionError, isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import {
   getClientConnectionAuthority,
   legacyClientConnectionState,
@@ -59,6 +59,26 @@ export interface ComputerConnectionPolicy {
   auto_connect: boolean;
 }
 
+export type ClientControlToolScope =
+  | { mode: 'all' }
+  | { mode: 'custom'; tools: string[] };
+
+export type ClientControlTargetScope =
+  | { mode: 'self_only' }
+  | { mode: 'all' }
+  | { mode: 'custom'; targets: string[] };
+
+export interface RemoteControlPolicy {
+  enabled: boolean;
+  tool_scope: ClientControlToolScope;
+  target_scope: ClientControlTargetScope;
+}
+
+export interface CommandLineToolPolicy {
+  enabled: boolean;
+  workspace_root?: string;
+}
+
 export interface ComputerInstanceStatus {
   id: string;
   name: string;
@@ -77,6 +97,8 @@ export interface ComputerInstanceStatus {
   mcp_server_count: number;
   robot_binding?: RobotBindingMetadata | null;
   connection_policy?: ComputerConnectionPolicy;
+  remote_control?: RemoteControlPolicy;
+  command_line?: CommandLineToolPolicy;
   connection?: ConnectionStateSummary | null;
 }
 
@@ -100,6 +122,8 @@ export interface ComputerInstance {
   configuredSkillHome?: string;
   effectiveSkillHome?: string;
   connectionPolicy: ComputerConnectionPolicy;
+  remoteControl?: RemoteControlPolicy;
+  commandLine?: CommandLineToolPolicy;
   mcpServerCount: number;
   runtime: ComputerRuntimeSnapshot;
 }
@@ -188,6 +212,8 @@ function mergeConnectionMetadata(
     robotBinding,
     robotName: robotBinding?.robot_name,
     connectionPolicy: status.connection_policy ?? instance.connectionPolicy,
+    remoteControl: status.remote_control ?? instance.remoteControl,
+    commandLine: status.command_line ?? instance.commandLine,
   };
 }
 
@@ -216,6 +242,8 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     configuredSkillHome: status.configured_skill_home,
     effectiveSkillHome: status.effective_skill_home,
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
+    remoteControl: status.remote_control,
+    commandLine: status.command_line,
     mcpServerCount: projection.mcpServerCount,
     runtime,
   };
@@ -653,7 +681,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       }));
       return requireInstance(get().instances, started.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
+      set({ error: isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e) });
       throw e;
     } finally {
       set((state) => {
@@ -709,7 +737,7 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
       }));
       return requireInstance(get().instances, restarted.id);
     } catch (e) {
-      set({ error: formatRuntimeActionError(e) });
+      set({ error: isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e) });
       throw e;
     } finally {
       set((state) => {

@@ -2,23 +2,23 @@ import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
   FileTextOutlined,
-  DashboardOutlined,
   DesktopOutlined,
   SunOutlined,
   MoonOutlined,
   ApiOutlined,
+  MessageOutlined,
 } from '@ant-design/icons';
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
-import { Dashboard } from './components/Dashboard';
-import { LogViewer } from './components/LogViewer';
+import { ActivityViewer } from './components/ActivityViewer';
 import { Settings } from './components/Settings';
 import { RobotConnections } from './components/RobotConnections';
 import { Computer } from './components/Computer';
 import { ComputerSettings } from './components/ComputerSettings';
 import { GlobalManagerAccount } from './components/ManagerAccount/GlobalManagerAccount';
+import { Chat } from './components/Chat';
 import {
   legacyComputerSettingsSection,
   parsePluginSettingsTarget,
@@ -28,6 +28,10 @@ import {
 import { useThemeStore } from './stores/themeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
+import { initializeManagerTokenBridge } from './services/managerTokenBridge';
+import { initializeRuntimeInputBridge } from './services/runtimeInputBridge';
+import { RuntimeInputPrompt } from './components/InputVariables/RuntimeInputPrompt';
+import { useRuntimeInputStore } from './stores/runtimeInputStore';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -36,7 +40,7 @@ const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 
 function App() {
   const { t, i18n } = useTranslation();
-  const [selectedKey, setSelectedKey] = useState('dashboard');
+  const [selectedKey, setSelectedKey] = useState('chat');
   const menuSelectedKey = selectedKey.startsWith('computer-detail')
     || selectedKey.startsWith('computer-settings')
     ? 'computer'
@@ -52,6 +56,33 @@ function App() {
   const disposeRuntimeEvents = useRuntimeStore((state) => state.dispose);
   const recoverRuntimeEvents = useRuntimeStore((state) => state.recover);
   const runtimeEventsError = useRuntimeStore((state) => state.error);
+  const runtimeInputCompletionFailed = useRuntimeInputStore((state) => state.completionFailed);
+  const clearRuntimeInputCompletionFailure = useRuntimeInputStore(
+    (state) => state.clearCompletionFailure,
+  );
+  const [runtimeInputBridgeError, setRuntimeInputBridgeError] = useState<string | null>(null);
+  const runtimeInputBridgeDisposeRef = useRef<(() => Promise<void>) | null>(null);
+  const runtimeInputBridgeEpochRef = useRef(0);
+
+  const startRuntimeInputBridge = useCallback(async () => {
+    const epoch = ++runtimeInputBridgeEpochRef.current;
+    setRuntimeInputBridgeError(null);
+    try {
+      const dispose = await initializeRuntimeInputBridge();
+      if (epoch !== runtimeInputBridgeEpochRef.current) {
+        await dispose();
+        return;
+      }
+      const previous = runtimeInputBridgeDisposeRef.current;
+      runtimeInputBridgeDisposeRef.current = dispose;
+      if (previous) await previous();
+    } catch (error) {
+      if (epoch === runtimeInputBridgeEpochRef.current) {
+        setRuntimeInputBridgeError(String(error));
+      }
+      throw error;
+    }
+  }, []);
 
   // Initialize theme from persisted settings
   useEffect(() => {
@@ -59,13 +90,31 @@ function App() {
   }, [initFromSettings]);
 
   useEffect(() => {
-    initializeRuntimeEvents().catch(() => {
-      /* initialization errors are stored in runtime store */
+    let disposed = false;
+    let disposeTokenBridge: (() => Promise<void>) | null = null;
+    void initializeManagerTokenBridge().then(async (disposeBridge) => {
+      if (disposed) {
+        await disposeBridge();
+      } else {
+        disposeTokenBridge = disposeBridge;
+      }
+    }).catch(() => {
+      /* token actions fail closed until the bridge is ready */
     });
+    // These event channels recover independently: a failed Runtime Input listener must never
+    // prevent ordinary runtime snapshots from initializing.
+    void startRuntimeInputBridge().catch(() => undefined);
+    void initializeRuntimeEvents().catch(() => undefined);
     return () => {
+      disposed = true;
+      runtimeInputBridgeEpochRef.current += 1;
       void disposeRuntimeEvents();
+      const disposeRuntimeInputBridge = runtimeInputBridgeDisposeRef.current;
+      runtimeInputBridgeDisposeRef.current = null;
+      if (disposeRuntimeInputBridge) void disposeRuntimeInputBridge();
+      if (disposeTokenBridge) void disposeTokenBridge();
     };
-  }, [disposeRuntimeEvents, initializeRuntimeEvents]);
+  }, [disposeRuntimeEvents, initializeRuntimeEvents, startRuntimeInputBridge]);
 
   // Manager authentication is app-wide state: restore it before any page-level
   // connection action can need the Manager JWT.
@@ -125,14 +174,14 @@ function App() {
       type: 'group' as const,
       children: [
         {
-          key: 'dashboard',
-          icon: <DashboardOutlined />,
-          label: t('nav.dashboard'),
+          key: 'chat',
+          icon: <MessageOutlined />,
+          label: t('chat.title'),
         },
         {
           key: 'computer',
           icon: <DesktopOutlined />,
-          label: t('computer.title'),
+          label: t('nav.computer'),
         },
       ],
     },
@@ -195,8 +244,6 @@ function App() {
       : null;
 
     switch (pageKey) {
-      case 'dashboard':
-        return <Dashboard onNavigate={setSelectedKey} />;
       case 'computer':
         return <Computer key="computer-list" onNavigate={setSelectedKey} />;
       case 'computer-detail':
@@ -216,10 +263,12 @@ function App() {
             onNavigate={setSelectedKey}
           />
         );
+      case 'chat':
+        return <Chat />;
       case 'robot-connections':
         return <RobotConnections />;
       case 'logs':
-        return <LogViewer />;
+        return <ActivityViewer />;
       case 'settings':
         return <Settings />;
       default:
@@ -280,10 +329,39 @@ function App() {
                 style={{ marginBottom: 16 }}
               />
             )}
+            {runtimeInputBridgeError && (
+              <Alert
+                type="error"
+                showIcon
+                message={t('app.runtimeInputUnavailable')}
+                description={runtimeInputBridgeError}
+                action={(
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => { void startRuntimeInputBridge().catch(() => undefined); }}
+                  >
+                    {t('app.retryRuntimeInput')}
+                  </Button>
+                )}
+                style={{ marginBottom: 16 }}
+              />
+            )}
+            {runtimeInputCompletionFailed && (
+              <Alert
+                type="error"
+                showIcon
+                closable
+                message={t('inputs.runtime.completionFailed')}
+                onClose={clearRuntimeInputCompletionFailure}
+                style={{ marginBottom: 16 }}
+              />
+            )}
             {renderContent()}
           </div>
         </Content>
       </Layout>
+      <RuntimeInputPrompt />
     </Layout>
   );
 }

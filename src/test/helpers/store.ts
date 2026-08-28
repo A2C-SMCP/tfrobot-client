@@ -3,7 +3,7 @@ import { useConnectionStore } from '@/stores/connectionStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
 import { useInputStore } from '@/stores/inputStore';
-import { useLogStore } from '@/stores/logStore';
+import { useActivityStore } from '@/stores/activityStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useDesktopStore } from '@/stores/desktopStore';
@@ -56,8 +56,9 @@ function runtimeActionsForTest(
           : 'connection_unavailable',
     ),
     manage_mcp: capability(
-      ['started', 'connected', 'joined_office'].includes(lifecycle),
-      lifecycle === 'degraded' ? 'degraded' : inactiveOrTransitionReason,
+      ['started', 'connecting', 'connected', 'joined_office', 'degraded', 'disconnecting']
+        .includes(lifecycle),
+      inactiveOrTransitionReason,
     ),
   };
 }
@@ -88,6 +89,7 @@ export function runtimeSnapshot(
     actions: overrides.actions ?? runtimeActionsForTest(lifecycle),
     config_revision: 0,
     capability_revision: 0,
+    diagnostics_revision: 0,
     mcp_servers: 0,
     active_mcp_servers: 0,
     tools: 0,
@@ -110,7 +112,7 @@ export function resetAllStores() {
     useDashboardStore,
     useDebugStore,
     useInputStore,
-    useLogStore,
+    useActivityStore,
     useSettingsStore,
     useThemeStore,
     useDesktopStore,

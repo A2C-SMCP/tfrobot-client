@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tfrobot_client_lib::services::config::ConfigService;
 use tfrobot_client_lib::services::keychain::InMemorySecretStore;
-use tfrobot_client_lib::services::logger::LogService;
+use tfrobot_client_lib::services::observability::ObservabilityService;
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
 
@@ -10,7 +10,8 @@ use tfrobot_client_lib::AppState;
 pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
     let config =
         ConfigService::new(tmp_path.to_path_buf()).expect("Failed to create ConfigService");
-    let log_service = LogService::new(tmp_path).expect("Failed to create LogService");
+    let log_service =
+        ObservabilityService::new(tmp_path).expect("Failed to create observability service");
     let settings_service = SettingsService::new(tmp_path.to_path_buf());
 
     AppState::new_with_secret_store(
@@ -25,6 +26,12 @@ pub fn create_test_app_state(tmp_path: &std::path::Path) -> AppState {
 #[allow(dead_code)]
 pub fn echo_server_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index.js")
+}
+
+/// Path to the environment-reading MCP fixture used to verify process materialization.
+#[allow(dead_code)]
+pub fn env_server_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/echo-mcp-server/index-env.js")
 }
 
 /// Build an MCPServerConfig for the echo server
@@ -143,8 +150,7 @@ pub mod mcp {
             .map_err(|error| error.to_string())?;
         state
             .sdk_config
-            .sanitize_snapshot_for_view(state.sdk_config.load(instance_id))
-            .map_err(|error| error.to_string())?
+            .load(instance_id)
             .mcp
             .servers
             .into_iter()
@@ -153,6 +159,7 @@ pub mod mcp {
             .ok_or_else(|| format!("Server not found: {name}"))
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn add_mcp_server_core(
         state: &AppState,
         instance_id: &str,
@@ -161,6 +168,7 @@ pub mod mcp {
         update_runtime_server_for_test(state, instance_id, config).await
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn update_mcp_server_core(
         state: &AppState,
         instance_id: &str,
@@ -169,6 +177,7 @@ pub mod mcp {
         update_runtime_server_for_test(state, instance_id, config).await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn update_runtime_server_for_test(
         state: &AppState,
         instance_id: &str,

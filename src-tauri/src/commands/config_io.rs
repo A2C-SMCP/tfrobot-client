@@ -1,6 +1,9 @@
 use crate::services::sdk_config::SdkConfigService;
 use crate::services::storage::write_json_atomically;
 use crate::AppState;
+use a2c_smcp::smcp_computer::mcp_clients::model::{
+    HttpServerConfig, HttpServerParameters, StdioServerConfig, StdioServerParameters,
+};
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::ValidationReport;
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,9 @@ struct ConfigImportTransaction {
     inputs: Vec<super::inputs::InputDefinition>,
 }
 
+#[derive(Debug, Default)]
+struct RecoveredConfigImport;
+
 /// Detected config format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,11 +62,22 @@ struct ClaudeDesktopConfig {
 
 #[derive(Debug, Deserialize)]
 struct ClaudeDesktopServer {
-    command: String,
+    #[serde(default)]
+    command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default, alias = "serverUrl")]
+    url: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    oauth: Option<bool>,
+    #[serde(rename = "type", default)]
+    transport_type: Option<String>,
 }
 
 /// CLI native config format
@@ -104,6 +121,7 @@ pub async fn import_config_core(
     instance_id: String,
     format: Option<ConfigFormat>,
 ) -> Result<ImportResult, String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?.to_string();
@@ -151,8 +169,8 @@ async fn import_claude_desktop(
     let servers = config
         .mcp_servers
         .into_iter()
-        .map(|(name, server)| build_stdio_config(&name, &server))
-        .collect();
+        .map(|(name, server)| build_external_mcp_config(&name, server))
+        .collect::<Result<Vec<_>, _>>()?;
     import_servers_and_inputs(state, instance_id, servers, Vec::new()).await
 }
 
@@ -165,14 +183,13 @@ async fn import_servers_and_inputs(
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
     let servers = state
         .sdk_config
-        .prepare_portable_mcp_configs(&servers)
+        .prepare_literal_preserving_mcp_configs(&servers)
         .map_err(|error| error.to_string())?;
     let transaction_inputs = inputs.clone();
 
     recover_pending_config_import_for_instance(
         state.config.as_ref(),
         state.sdk_config.as_ref(),
-        state.secret_store.as_ref(),
         instance_id,
     )?;
     let inputs_imported = inputs.len();
@@ -182,9 +199,9 @@ async fn import_servers_and_inputs(
         None
     } else {
         let mut existing = state
-            .config
-            .load_inputs_for_instance(instance_id)
-            .map_err(|e| e.to_string())?;
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
         for input in inputs {
             let id = input.id().to_string();
             existing.retain(|item| item.id() != id);
@@ -218,12 +235,12 @@ async fn import_servers_and_inputs(
     };
     persist_config_import_transaction(state.config.as_ref(), &transaction)?;
 
-    // The durable, secret-free transaction makes a crash between the two stores recoverable.
+    // The durable transaction makes a crash between the two stores recoverable. It shares the
+    // Computer's trusted local storage boundary because user-authored constants may be plaintext.
     let mut transaction = transaction;
     let input_snapshot = if let Some(merged_inputs) = &merged_inputs {
         match crate::commands::inputs::replace_input_definitions_config_only_locked(
-            state.config.as_ref(),
-            state.secret_store.as_ref(),
+            state.sdk_config.as_ref(),
             instance_id,
             merged_inputs,
         ) {
@@ -253,8 +270,7 @@ async fn import_servers_and_inputs(
     {
         let rollback_error = input_snapshot.as_ref().and_then(|snapshot| {
             crate::commands::inputs::restore_input_definitions_config_only_locked(
-                state.config.as_ref(),
-                state.secret_store.as_ref(),
+                state.sdk_config.as_ref(),
                 instance_id,
                 snapshot,
             )
@@ -279,22 +295,6 @@ async fn import_servers_and_inputs(
     }
 
     finish_config_import_transaction(state.config.as_ref(), &mut transaction);
-
-    if merged_inputs.is_some() {
-        let instance = state
-            .config
-            .get_computer_instance(instance_id)
-            .map_err(|error| error.to_string())?;
-        state
-            .computer_registry
-            .update_runtime_instance(instance)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Configuration was imported, but the target Computer runtime could not synchronize its Inputs: {error}"
-                )
-            })?;
-    }
 
     Ok(ImportResult {
         servers_imported,
@@ -436,11 +436,10 @@ fn load_config_import_transaction(
 fn recover_pending_config_import_for_instance(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_id: &str,
-) -> Result<(), String> {
+) -> Result<RecoveredConfigImport, String> {
     let Some(mut transaction) = load_config_import_transaction(config, instance_id)? else {
-        return Ok(());
+        return Ok(RecoveredConfigImport);
     };
 
     if matches!(
@@ -448,20 +447,21 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Aborted | ConfigImportTransactionPhase::Committed
     ) {
         clear_terminal_config_import_transaction(config, instance_id);
-        return Ok(());
+        return Ok(RecoveredConfigImport);
     }
 
     transaction.inputs = super::inputs::prepare_portable_input_definitions(&transaction.inputs)?;
     transaction.servers = sdk_config
-        .prepare_portable_mcp_configs(&transaction.servers)
+        .prepare_literal_preserving_mcp_configs(&transaction.servers)
         .map_err(|error| error.to_string())?;
     sdk_config
         .preflight_import_mcp_configs(instance_id, &transaction.servers)
         .map_err(|error| error.to_string())?;
 
-    if !transaction.inputs.is_empty() {
-        let mut merged_inputs = config
-            .load_inputs_for_instance(instance_id)
+    let inputs_changed = !transaction.inputs.is_empty();
+    if inputs_changed {
+        let mut merged_inputs = sdk_config
+            .load_project_input_definitions(instance_id)
             .map_err(|error| error.to_string())?;
         for input in &transaction.inputs {
             let id = input.id().to_string();
@@ -469,8 +469,7 @@ fn recover_pending_config_import_for_instance(
             merged_inputs.push(input.clone());
         }
         crate::commands::inputs::replace_input_definitions_config_only_locked(
-            config,
-            secret_store,
+            sdk_config,
             instance_id,
             &merged_inputs,
         )
@@ -485,20 +484,21 @@ fn recover_pending_config_import_for_instance(
         ConfigImportTransactionPhase::Committed,
     )?;
     clear_terminal_config_import_transaction(config, instance_id);
-    Ok(())
+    Ok(RecoveredConfigImport)
 }
 
 pub(crate) fn recover_pending_config_imports(
     config: &crate::services::config::ConfigService,
     sdk_config: &SdkConfigService,
-    secret_store: &dyn crate::services::keychain::SecretStore,
     instance_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
     for instance_id in instance_ids {
-        recover_pending_config_import_for_instance(config, sdk_config, secret_store, &instance_id)
-            .map_err(|error| {
-                format!("Failed to recover config import for Computer '{instance_id}': {error}")
-            })?;
+        let _recovered =
+            recover_pending_config_import_for_instance(config, sdk_config, &instance_id).map_err(
+                |error| {
+                    format!("Failed to recover config import for Computer '{instance_id}': {error}")
+                },
+            )?;
     }
     Ok(())
 }
@@ -519,18 +519,110 @@ fn format_validation_errors(validation: &ValidationReport) -> String {
         .join("; ")
 }
 
-fn build_stdio_config(name: &str, server: &ClaudeDesktopServer) -> MCPServerConfig {
-    use a2c_smcp::smcp_computer::mcp_clients::model::{StdioServerConfig, StdioServerParameters};
+fn build_external_mcp_config(
+    name: &str,
+    server: ClaudeDesktopServer,
+) -> Result<MCPServerConfig, String> {
+    let command = normalize_optional_non_empty(name, "command", server.command)?;
+    let url = normalize_optional_non_empty(name, "url", server.url)?;
 
-    MCPServerConfig::Stdio(StdioServerConfig::new(
-        name,
-        StdioServerParameters {
-            command: server.command.clone(),
-            args: server.args.clone(),
-            env: server.env.clone(),
-            cwd: None,
-        },
-    ))
+    match (command, url) {
+        (Some(command), None) => {
+            validate_transport_type(name, server.transport_type.as_deref(), &["stdio"])?;
+            if !server.headers.is_empty() || server.oauth.is_some() {
+                return Err(format!(
+                    "MCP server '{name}' mixes stdio 'command' with HTTP-only headers or OAuth settings"
+                ));
+            }
+            Ok(MCPServerConfig::Stdio(StdioServerConfig::new(
+                name,
+                StdioServerParameters {
+                    command,
+                    args: server.args,
+                    env: server.env,
+                    cwd: server.cwd,
+                },
+            )))
+        }
+        (None, Some(url)) => {
+            validate_transport_type(
+                name,
+                server.transport_type.as_deref(),
+                &["http", "streamable", "streamable-http", "streamable_http"],
+            )?;
+            if !server.args.is_empty() || !server.env.is_empty() || server.cwd.is_some() {
+                return Err(format!(
+                    "MCP server '{name}' mixes HTTP URL with stdio-only args, env, or cwd settings"
+                ));
+            }
+            let has_authorization = server
+                .headers
+                .keys()
+                .any(|header| header.eq_ignore_ascii_case("authorization"));
+            if server.oauth == Some(true) && has_authorization {
+                return Err(format!(
+                    "MCP server '{name}' cannot enable OAuth while providing an Authorization header"
+                ));
+            }
+            if server.oauth == Some(false) && !has_authorization {
+                return Err(format!(
+                    "MCP server '{name}' requests oauth=false, but the rust-sdk now uses automatic-only OAuth negotiation and cannot preserve that opt-out"
+                ));
+            }
+
+            let config = HttpServerConfig::new(
+                name,
+                HttpServerParameters {
+                    url,
+                    headers: server.headers,
+                },
+            );
+            Ok(MCPServerConfig::Http(config))
+        }
+        (Some(_), Some(_)) => Err(format!(
+            "MCP server '{name}' must configure exactly one transport: command or URL, not both"
+        )),
+        (None, None) => Err(format!(
+            "MCP server '{name}' must configure either a stdio command or an HTTP URL"
+        )),
+    }
+}
+
+fn normalize_optional_non_empty(
+    server_name: &str,
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<String>, String> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                Err(format!(
+                    "MCP server '{server_name}' has an empty '{field}' field"
+                ))
+            } else {
+                Ok(value.to_string())
+            }
+        })
+        .transpose()
+}
+
+fn validate_transport_type(
+    server_name: &str,
+    transport_type: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), String> {
+    let Some(transport_type) = transport_type else {
+        return Ok(());
+    };
+    let normalized = transport_type.trim().to_ascii_lowercase();
+    if allowed.contains(&normalized.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "MCP server '{server_name}' has transport type '{transport_type}' that conflicts with its configured transport"
+        ))
+    }
 }
 
 /// Export configuration to file
@@ -550,6 +642,7 @@ pub async fn export_config_core(
     instance_id: String,
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let _mutation_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance_id(&instance_id)?;
@@ -568,12 +661,10 @@ pub async fn export_config_core(
             "Cannot export invalid portable SDK configuration: {details}"
         ));
     }
+    let inputs = SdkConfigService::input_definitions_from_portable_document(&portable)
+        .map_err(|error| error.to_string())?;
     let servers = SdkConfigService::mcp_configs_from_portable_document(portable)
         .map_err(|error| error.to_string())?;
-    let inputs = state
-        .config
-        .load_inputs_for_instance(instance_id)
-        .map_err(|e| e.to_string())?;
     let inputs = super::inputs::prepare_portable_input_definitions(&inputs)?;
 
     let filtered_servers = match server_names {
@@ -622,6 +713,139 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn parse_external_server(value: serde_json::Value) -> ClaudeDesktopServer {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn official_remote_url_maps_to_automatic_oauth_http_without_legacy_fields() {
+        let config = build_external_mcp_config(
+            "atlassian",
+            parse_external_server(serde_json::json!({
+                "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+            })),
+        )
+        .unwrap();
+
+        let MCPServerConfig::Http(http) = config else {
+            panic!("URL entry must import as Streamable HTTP");
+        };
+        assert_eq!(
+            http.server_parameters.url,
+            "https://mcp.atlassian.com/v1/mcp/authv2"
+        );
+        let encoded = serde_json::to_value(http).unwrap();
+        assert!(encoded.get("authPolicy").is_none());
+        assert!(encoded.get("oauth").is_none());
+    }
+
+    #[test]
+    fn server_url_alias_and_explicit_oauth_opt_out_is_rejected() {
+        let error = build_external_mcp_config(
+            "public",
+            parse_external_server(serde_json::json!({
+                "serverUrl": "https://public.example.com/mcp",
+                "oauth": false
+            })),
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot preserve that opt-out"));
+    }
+
+    #[test]
+    fn authorization_header_selects_static_http_auth_and_conflicts_with_explicit_oauth() {
+        let static_auth = build_external_mcp_config(
+            "static-auth",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "headers": {"authorization": "Bearer ${input:token}"}
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Http(static_auth) = static_auth else {
+            panic!("URL entry must import as Streamable HTTP");
+        };
+        assert!(static_auth
+            .server_parameters
+            .headers
+            .keys()
+            .any(|header| header.eq_ignore_ascii_case("authorization")));
+
+        let static_opt_out = build_external_mcp_config(
+            "static-opt-out",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "oauth": false,
+                "headers": {"Authorization": "Bearer ${input:token}"}
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Http(static_opt_out) = static_opt_out else {
+            panic!("static opt-out entry must import as Streamable HTTP");
+        };
+        assert!(static_opt_out
+            .server_parameters
+            .headers
+            .keys()
+            .any(|header| header.eq_ignore_ascii_case("authorization")));
+
+        let proactive = build_external_mcp_config(
+            "proactive",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "oauth": true
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Http(proactive) = proactive else {
+            panic!("URL entry must import as Streamable HTTP");
+        };
+        let proactive = serde_json::to_value(proactive).unwrap();
+        assert!(proactive.get("authPolicy").is_none());
+        assert!(proactive.get("oauth").is_none());
+
+        let conflict = build_external_mcp_config(
+            "conflict",
+            parse_external_server(serde_json::json!({
+                "url": "https://api.example.com/mcp",
+                "headers": {"Authorization": "Bearer ${input:token}"},
+                "oauth": true
+            })),
+        )
+        .unwrap_err();
+        assert!(conflict.contains("cannot enable OAuth"));
+    }
+
+    #[test]
+    fn stdio_import_is_preserved_and_mixed_transports_are_rejected() {
+        let stdio = build_external_mcp_config(
+            "stdio",
+            parse_external_server(serde_json::json!({
+                "command": "node",
+                "args": ["server.js"],
+                "env": {"MODE": "test"},
+                "cwd": "/tmp"
+            })),
+        )
+        .unwrap();
+        let MCPServerConfig::Stdio(stdio) = stdio else {
+            panic!("command entry must import as stdio");
+        };
+        assert_eq!(stdio.server_parameters.command, "node");
+        assert_eq!(stdio.server_parameters.args, ["server.js"]);
+        assert_eq!(stdio.server_parameters.cwd.as_deref(), Some("/tmp"));
+
+        let mixed = build_external_mcp_config(
+            "mixed",
+            parse_external_server(serde_json::json!({
+                "command": "node",
+                "url": "https://api.example.com/mcp"
+            })),
+        )
+        .unwrap_err();
+        assert!(mixed.contains("exactly one transport"));
+    }
 
     #[test]
     fn terminal_transaction_cleanup_failure_does_not_become_an_error() {

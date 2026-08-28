@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import type { LogEntry } from './logStore';
+import type { ActivityEvent } from './activityStore';
 import { useComputerStore, type ConnectionStateSummary } from './computerStore';
 import {
   getClientConnectionAuthority,
@@ -42,7 +42,7 @@ export interface DashboardData {
   computer_stopped: number;
   computer_connected: number;
   computers: DashboardComputerSummary[];
-  recent_logs: LogEntry[];
+  recent_activity: ActivityEvent[];
   runtimes: RuntimeInfo[];
 }
 

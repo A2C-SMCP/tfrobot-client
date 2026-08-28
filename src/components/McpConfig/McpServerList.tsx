@@ -3,6 +3,7 @@ import {
   AppstoreOutlined,
   PlayCircleOutlined,
   PauseCircleOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { ServerStatusBadge } from './ServerStatusBadge';
@@ -16,8 +17,12 @@ interface McpServerListProps {
   actionsDisabledReason?: string;
   loading?: boolean;
   onStart?: (bundleId: string) => Promise<void>;
+  onRetry?: (bundleId: string, name: string) => Promise<void>;
   onStop?: (bundleId: string, name: string) => Promise<void>;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  onAuthorize?: (bundleId: string) => Promise<void>;
+  onCancelAuthorization?: (bundleId: string) => Promise<void>;
+  onClearAuthorization?: (bundleId: string) => Promise<void>;
 }
 
 export function McpServerList({
@@ -26,16 +31,14 @@ export function McpServerList({
   actionsDisabledReason,
   loading,
   onStart,
+  onRetry,
   onStop,
   onOpenPlugin,
+  onAuthorize,
+  onCancelAuthorization,
+  onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
-  const safeStatusLabel = (record: McpServerStatus) => {
-    if (record.running) return t('mcp.status.running');
-    if (record.status_message === 'error') return t('mcp.status.error');
-    if (record.status_message === 'pending') return t('mcp.status.pending');
-    return t('mcp.status.stopped');
-  };
 
   const handleStart = async (bundleId: string) => {
     await onStart?.(bundleId);
@@ -51,11 +54,26 @@ export function McpServerList({
     });
   };
 
+  const builtInName = (record: McpServerStatus) => (
+    record.managedBy.type === 'built_in' && record.managedBy.provider === 'command_line'
+      ? t('mcp.builtIn.commandLineName')
+      : t('mcp.builtIn.robotControlName')
+  );
+
+  const builtInManagedHint = (record: McpServerStatus) => (
+    record.managedBy.type === 'built_in' && record.managedBy.provider === 'command_line'
+      ? t('mcp.builtIn.commandLineManagedHint')
+      : t('mcp.builtIn.robotControlManagedHint')
+  );
+
   const columns = [
     {
       title: t('mcp.table.source'),
       key: 'source',
       render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'built_in') {
+          return <Tag color="blue">{t('mcp.source.builtIn')}</Tag>;
+        }
         if (record.managedBy.type === 'plugin') {
           return (
             <Space direction="vertical" size={2}>
@@ -73,29 +91,135 @@ export function McpServerList({
     },
     {
       title: t('mcp.table.name'),
-      dataIndex: 'name',
       key: 'name',
+      render: (_: unknown, record: McpServerStatus) => (
+        record.managedBy.type === 'built_in'
+          ? builtInName(record)
+          : record.name
+      ),
     },
     {
       title: t('mcp.table.status'),
       key: 'status',
       render: (_: unknown, record: McpServerStatus) => (
-        <ServerStatusBadge
-          running={record.running}
-          statusMessage={record.status_message}
-        />
+        <ServerStatusBadge server={record} />
       ),
     },
     {
-      title: t('mcp.table.message'),
-      key: 'status_message',
-      ellipsis: true,
-      render: (_: unknown, record: McpServerStatus) => safeStatusLabel(record),
+      title: t('mcp.table.authorization'),
+      key: 'authorization',
+      render: (_: unknown, record: McpServerStatus) => {
+        // Older cached/test snapshots predate the authorization field; treat them as non-OAuth.
+        const oauthStatus = record.oauth_status ?? { state: 'not_applicable' as const };
+        const interaction = record.oauth_interaction
+          ?? (oauthStatus.state === 'not_applicable' ? 'none' : 'interactive');
+        if (interaction === 'machine') {
+          const label = (() => {
+            switch (oauthStatus.state) {
+              case 'authorized': return t('mcp.authorization.authorized');
+              case 'authorization_pending': return t('mcp.authorization.pending');
+              case 'reauthorization_required':
+                return t('mcp.authorization.requiredScope', { scope: oauthStatus.required_scope });
+              case 'error': return t('mcp.authorization.error');
+              default: return t('mcp.authorization.unauthorized');
+            }
+          })();
+          return <Tag color={oauthStatus.state === 'authorized' ? 'green' : undefined}>{label}</Tag>;
+        }
+        switch (oauthStatus.state) {
+          case 'not_applicable':
+            return <Typography.Text type="secondary">—</Typography.Text>;
+          case 'authorization_pending':
+            return (
+              <Button
+                size="small"
+                onClick={() => onCancelAuthorization?.(record.bundleId)}
+                disabled={actionsDisabled}
+              >
+                {t('mcp.authorization.cancel')}
+              </Button>
+            );
+          case 'authorized':
+            return (
+              <Space direction="vertical" size={2}>
+                <Tag color="green">{t('mcp.authorization.authorized')}</Tag>
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => onClearAuthorization?.(record.bundleId)}
+                  disabled={actionsDisabled}
+                >
+                  {t('mcp.authorization.clear')}
+                </Button>
+              </Space>
+            );
+          case 'reauthorization_required':
+            return (
+              <Space direction="vertical" size={2}>
+                <Typography.Text type="secondary">
+                  {t('mcp.authorization.requiredScope', { scope: oauthStatus.required_scope })}
+                </Typography.Text>
+                <Space size="small">
+                  <Button
+                    type="primary"
+                    size="small"
+                    onClick={() => onAuthorize?.(record.bundleId)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('mcp.authorization.reauthorize')}
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => onClearAuthorization?.(record.bundleId)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('mcp.authorization.clear')}
+                  </Button>
+                </Space>
+              </Space>
+            );
+          case 'error':
+            return (
+              <Space direction="vertical" size={2}>
+                <Typography.Text type="danger">
+                  {t('mcp.authorization.error')}
+                </Typography.Text>
+                <Button
+                  type="primary"
+                  size="small"
+                  onClick={() => onAuthorize?.(record.bundleId)}
+                  disabled={actionsDisabled}
+                >
+                  {t('mcp.authorization.authorize')}
+                </Button>
+              </Space>
+            );
+          default:
+            return (
+              <Button
+                type="primary"
+                size="small"
+                onClick={() => onAuthorize?.(record.bundleId)}
+                disabled={actionsDisabled}
+              >
+                {t('mcp.authorization.authorize')}
+              </Button>
+            );
+        }
+      },
     },
     {
       title: t('mcp.table.actions'),
       key: 'actions',
       render: (_: unknown, record: McpServerStatus) => {
+        if (record.managedBy.type === 'built_in') {
+          return (
+            <Typography.Text type="secondary">
+              {builtInManagedHint(record)}
+            </Typography.Text>
+          );
+        }
         if (record.managedBy.type === 'plugin') {
           return (
             <Space direction="vertical" size={2}>
@@ -113,9 +237,24 @@ export function McpServerList({
             </Space>
           );
         }
+        const retryable = record.activation_state === 'started'
+          && (record.connection_state === 'disconnected' || record.connection_state === 'error');
         return (
           <Space size="small">
-            {record.running ? (
+            {retryable && (
+              <Tooltip title={actionsDisabled ? actionsDisabledReason : t('mcp.actions.retry')}>
+                <span>
+                  <Button
+                    type="text"
+                    icon={<ReloadOutlined />}
+                    onClick={() => onRetry?.(record.bundleId, record.name)}
+                    title={t('mcp.actions.retry')}
+                    disabled={actionsDisabled}
+                  />
+                </span>
+              </Tooltip>
+            )}
+            {record.activation_state === 'started' ? (
               <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
                 <span>
                   <Button

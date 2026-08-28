@@ -36,8 +36,8 @@ vi.mock('@/components/DebugPanel', () => ({
     <div data-testid="debug-section">{instanceId}</div>
   ),
 }));
-vi.mock('@/components/LogViewer', () => ({
-  LogViewer: ({ instanceId }: { instanceId: string }) => (
+vi.mock('@/components/ActivityViewer', () => ({
+  ActivityViewer: ({ instanceId }: { instanceId: string }) => (
     <div data-testid="logs-section">{instanceId}</div>
   ),
 }));

@@ -91,7 +91,7 @@ describe('ComputerSettings', () => {
     });
   });
 
-  it('renders six persistent configuration sections in vertical navigation', async () => {
+  it('renders persistent configuration sections including Built-in Tools', async () => {
     render(<ComputerSettings />);
 
     expect(await screen.findByText('Computer A Settings')).toBeInTheDocument();
@@ -103,6 +103,7 @@ describe('ComputerSettings', () => {
     expect(within(navigation).getByText('MCP Servers')).toBeInTheDocument();
     expect(within(navigation).getByText('Inputs')).toBeInTheDocument();
     expect(within(navigation).getByText('Connection Policy')).toBeInTheDocument();
+    expect(within(navigation).getByText('Built-in Tools')).toBeInTheDocument();
 
     fireEvent.click(within(navigation).getByText('Skills'));
     expect(screen.getByTestId('skills-settings')).toHaveTextContent('computer-a');

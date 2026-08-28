@@ -1,8 +1,10 @@
-use crate::commands::inputs::InputDefinition;
+use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
+use crate::services::built_in_tools::CommandLineToolPolicy;
 use crate::services::client_computers::{
     ClientComputersPathError, ClientComputersPaths, GlobalConfigFile, COMPUTER_INPUTS_FILE_NAME,
     COMPUTER_PROFILE_FILE_NAME,
 };
+use crate::services::client_control::RemoteControlPolicy;
 use crate::services::computer::{
     ComputerConnectionTarget, ComputerConnectionTargetType, ComputerInputDefinition,
     ComputerInputsConfig, ComputerInstance, ComputerInstancesConfig, ComputerProfile,
@@ -68,6 +70,10 @@ struct ComputerDirectoryTransaction {
 
 const LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 1;
 const LEGACY_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v1.backup.json";
+const PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION: u32 = 2;
+const PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME: &str = "profile.v2.backup.json";
+const PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION: u32 = 3;
+const PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME: &str = "profile.v3.backup.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +87,36 @@ struct LegacyComputerProfileV1 {
     connection_policy: LegacyComputerConnectionPolicyV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     robot_binding: Option<LegacyRobotBindingV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PreviousComputerProfileV2 {
+    schema_version: u32,
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_binding: Option<RobotBindingMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PreviousComputerProfileV3 {
+    schema_version: u32,
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    connection_policy: ComputerProfileConnectionPolicy,
+    #[serde(default)]
+    remote_control: RemoteControlPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robot_binding: Option<RobotBindingMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -228,8 +264,16 @@ impl ConfigService {
                 profile_id: instance_directory_id.to_string(),
                 reason: "schema_version is required and must be a u32".to_string(),
             })?;
-        let profile = match schema_version {
+        let mut profile = match schema_version {
             COMPUTER_PROFILE_SCHEMA_VERSION => serde_json::from_value(value)?,
+            PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION => {
+                let previous: PreviousComputerProfileV3 = serde_json::from_value(value)?;
+                self.migrate_computer_profile_v3(&path, previous)?
+            }
+            PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION => {
+                let previous: PreviousComputerProfileV2 = serde_json::from_value(value)?;
+                self.migrate_computer_profile_v2(&path, previous)?
+            }
             LEGACY_COMPUTER_PROFILE_SCHEMA_VERSION => {
                 let legacy: LegacyComputerProfileV1 = serde_json::from_value(value)?;
                 self.migrate_computer_profile_v1(&path, legacy)?
@@ -242,6 +286,9 @@ impl ConfigService {
                 });
             }
         };
+        if profile.remote_control.sanitize_tools() {
+            write_json_atomically(&path, &profile)?;
+        }
         if profile.id != instance_directory_id {
             return Err(ConfigError::CorruptedComputerProfile {
                 directory_id: instance_directory_id.to_string(),
@@ -289,6 +336,93 @@ impl ConfigService {
         Ok(migrated)
     }
 
+    fn migrate_computer_profile_v2(
+        &self,
+        profile_path: &Path,
+        previous: PreviousComputerProfileV2,
+    ) -> Result<ComputerProfile, ConfigError> {
+        if previous.schema_version != PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                actual: previous.schema_version,
+            });
+        }
+        let migrated = ComputerProfile {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: previous.id.clone(),
+            name: previous.name.clone(),
+            description: previous.description.clone(),
+            connection_policy: previous.connection_policy.clone(),
+            remote_control: RemoteControlPolicy::default(),
+            command_line: CommandLineToolPolicy::default(),
+            robot_binding: previous.robot_binding.clone(),
+        };
+        validate_computer_profile(&migrated)?;
+
+        let backup_path = profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME);
+        if backup_path.exists() {
+            let existing: PreviousComputerProfileV2 = load_required_json_file(&backup_path)?;
+            if existing != previous {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id: previous.id,
+                    reason: format!(
+                        "profile v2 migration backup {} does not match the source profile",
+                        backup_path.display()
+                    ),
+                });
+            }
+        } else {
+            write_json_atomically(&backup_path, &previous)?;
+        }
+        write_json_atomically(profile_path, &migrated)?;
+        Ok(migrated)
+    }
+
+    fn migrate_computer_profile_v3(
+        &self,
+        profile_path: &Path,
+        previous: PreviousComputerProfileV3,
+    ) -> Result<ComputerProfile, ConfigError> {
+        if previous.schema_version != PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedSchemaVersion {
+                artifact: "computer profile",
+                expected: COMPUTER_PROFILE_SCHEMA_VERSION,
+                actual: previous.schema_version,
+            });
+        }
+        let migrated = ComputerProfile {
+            schema_version: COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: previous.id.clone(),
+            name: previous.name.clone(),
+            description: previous.description.clone(),
+            connection_policy: previous.connection_policy.clone(),
+            remote_control: previous.remote_control.clone(),
+            command_line: CommandLineToolPolicy::default(),
+            robot_binding: previous.robot_binding.clone(),
+        };
+        validate_computer_profile(&migrated)?;
+
+        let backup_path =
+            profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME);
+        if backup_path.exists() {
+            let existing: PreviousComputerProfileV3 = load_required_json_file(&backup_path)?;
+            if existing != previous {
+                return Err(ConfigError::InvalidComputerProfile {
+                    profile_id: previous.id,
+                    reason: format!(
+                        "profile v3 migration backup {} does not match the source profile",
+                        backup_path.display()
+                    ),
+                });
+            }
+        } else {
+            write_json_atomically(&backup_path, &previous)?;
+        }
+        write_json_atomically(profile_path, &migrated)?;
+        Ok(migrated)
+    }
+
     pub fn load_sdk_context(&self, instance_id: &str) -> Result<SdkContextConfig, ConfigError> {
         let path = self.sdk_context_path(instance_id)?;
         let config: SdkContextConfig = load_new_artifact_or_default(&path)?;
@@ -317,17 +451,18 @@ impl ConfigService {
         &self,
         profile: &ComputerProfile,
         context: &SdkContextConfig,
-        inputs: &[InputDefinition],
+        _legacy_inputs: &[InputDefinition],
     ) -> Result<(), ConfigError> {
         let _guard = self.lock_computer_directories()?;
         self.recover_computer_directory_transactions_unlocked()?;
-        self.save_computer_directory_transaction_unlocked(profile, context, inputs, false)
+        // Input definitions are SDK-owned. The legacy sidecar remains an empty transaction member
+        // only so existing Computer directory recovery stays compatible; normal persistence must
+        // never copy definitions into it.
+        let inputs = ComputerInputsConfig::default();
+        self.save_computer_directory_transaction_unlocked(profile, context, &inputs, false)
     }
 
-    pub fn load_computer_inputs(
-        &self,
-        instance_id: &str,
-    ) -> Result<ComputerInputsConfig, ConfigError> {
+    fn load_computer_inputs(&self, instance_id: &str) -> Result<ComputerInputsConfig, ConfigError> {
         let path = self.computer_inputs_path(instance_id)?;
         let mut config: ComputerInputsConfig = load_new_artifact_or_default(&path)?;
         sanitize_computer_inputs_config(&mut config);
@@ -335,7 +470,8 @@ impl ConfigService {
         Ok(config)
     }
 
-    pub fn save_computer_inputs(
+    #[cfg(test)]
+    fn save_computer_inputs(
         &self,
         instance_id: &str,
         config: &ComputerInputsConfig,
@@ -405,9 +541,9 @@ impl ConfigService {
             .ok_or_else(|| ConfigError::NotFound(instance_id.to_string()))
     }
 
-    // --- Input Definitions ---
-
-    pub fn load_inputs_for_instance(
+    /// Reads the obsolete client sidecar only for migration verification.
+    /// Runtime and CRUD code must use `SdkConfigService` instead.
+    pub(crate) fn load_legacy_input_definitions_for_migration_audit(
         &self,
         instance_id: &str,
     ) -> Result<Vec<InputDefinition>, ConfigError> {
@@ -418,22 +554,6 @@ impl ConfigService {
             .iter()
             .map(InputDefinition::from)
             .collect())
-    }
-
-    pub fn save_inputs_for_instance(
-        &self,
-        instance_id: &str,
-        inputs: &[InputDefinition],
-    ) -> Result<ComputerInstance, ConfigError> {
-        self.load_computer_profile(instance_id)?;
-        self.save_computer_inputs(
-            instance_id,
-            &ComputerInputsConfig {
-                schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
-                inputs: inputs.iter().map(ComputerInputDefinition::from).collect(),
-            },
-        )?;
-        self.get_computer_instance(instance_id)
     }
 
     // --- Computer Instances ---
@@ -489,19 +609,6 @@ impl ConfigService {
             match self.load_computer_profile(&directory_id) {
                 Ok(profile) => {
                     let mut instance = ComputerInstance::from(profile);
-                    match self.load_computer_inputs(&directory_id) {
-                        Ok(inputs) => {
-                            instance.inputs =
-                                inputs.inputs.iter().map(InputDefinition::from).collect()
-                        }
-                        Err(error) => {
-                            errors.push(ComputerProfileDiscoveryError {
-                                path: self.computer_inputs_path(&directory_id)?,
-                                error,
-                            });
-                            continue;
-                        }
-                    }
                     match self.load_sdk_context(&directory_id) {
                         Ok(context) => instance.local_skills_root = context.skill_home_override,
                         Err(error) => {
@@ -521,6 +628,15 @@ impl ConfigService {
             }
         }
         instances.sort_by(|left, right| left.id.cmp(&right.id));
+        let known_targets = instances
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect::<HashSet<_>>();
+        for instance in &mut instances {
+            if instance.remote_control.sanitize(&known_targets) {
+                self.save_computer_profile(&ComputerProfile::from(&*instance))?;
+            }
+        }
         Ok(ComputerProfileDiscovery {
             config: ComputerInstancesConfig {
                 schema_version: 1,
@@ -557,12 +673,6 @@ impl ConfigService {
 
     fn load_computer_instance_unlocked(&self, id: &str) -> Result<ComputerInstance, ConfigError> {
         let mut instance = ComputerInstance::from(self.load_computer_profile(id)?);
-        instance.inputs = self
-            .load_computer_inputs(id)?
-            .inputs
-            .iter()
-            .map(InputDefinition::from)
-            .collect();
         instance.local_skills_root = self.load_sdk_context(id)?.skill_home_override;
         Ok(instance)
     }
@@ -574,13 +684,14 @@ impl ConfigService {
         if path.exists() {
             return Err(ConfigError::AlreadyExists(instance.id));
         }
+        let inputs = ComputerInputsConfig::default();
         self.save_computer_directory_transaction_unlocked(
             &ComputerProfile::from(&instance),
             &SdkContextConfig {
                 schema_version: SDK_CONTEXT_SCHEMA_VERSION,
                 skill_home_override: instance.local_skills_root.clone(),
             },
-            &instance.inputs,
+            &inputs,
             true,
         )
     }
@@ -605,15 +716,23 @@ impl ConfigService {
     {
         let _guard = self.lock_computer_directories()?;
         self.recover_computer_directory_transactions_unlocked()?;
-        let mut instance = self.load_computer_instance_unlocked(id)?;
+        let inputs = ComputerInputsConfig::default();
+        let mut instance = ComputerInstance::from(self.load_computer_profile(id)?);
+        instance.local_skills_root = self.load_sdk_context(id)?.skill_home_override;
         update(&mut instance);
+        if !instance.inputs.is_empty() {
+            return Err(ConfigError::InvalidComputerProfile {
+                profile_id: id.to_string(),
+                reason: "update_computer_instance cannot mutate SDK-owned Inputs".to_string(),
+            });
+        }
         self.save_computer_directory_transaction_unlocked(
             &ComputerProfile::from(&instance),
             &SdkContextConfig {
                 schema_version: SDK_CONTEXT_SCHEMA_VERSION,
                 skill_home_override: instance.local_skills_root.clone(),
             },
-            &instance.inputs,
+            &inputs,
             false,
         )?;
         Ok(instance)
@@ -623,7 +742,7 @@ impl ConfigService {
         &self,
         profile: &ComputerProfile,
         context: &SdkContextConfig,
-        inputs: &[InputDefinition],
+        inputs_config: &ComputerInputsConfig,
         require_absent: bool,
     ) -> Result<(), ConfigError> {
         validate_schema_version(
@@ -636,10 +755,7 @@ impl ConfigService {
             context.schema_version,
             SDK_CONTEXT_SCHEMA_VERSION,
         )?;
-        let mut inputs_config = ComputerInputsConfig {
-            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
-            inputs: inputs.iter().map(ComputerInputDefinition::from).collect(),
-        };
+        let mut inputs_config = inputs_config.clone();
         sanitize_computer_inputs_config(&mut inputs_config);
         validate_computer_inputs_config(&inputs_config)?;
         let instance_root = self.computer_instance_root(&profile.id)?;
@@ -1149,6 +1265,8 @@ fn migrate_legacy_computer_profile(
             target,
             auto_connect,
         },
+        remote_control: RemoteControlPolicy::default(),
+        command_line: CommandLineToolPolicy::default(),
         robot_binding: binding,
     })
 }
@@ -1164,6 +1282,8 @@ fn validate_computer_profile(profile: &ComputerProfile) -> Result<(), ConfigErro
     if profile.name.trim().is_empty() {
         return Err(invalid("name must be non-empty".to_string()));
     }
+    profile.remote_control.validate().map_err(invalid)?;
+    profile.command_line.validate().map_err(invalid)?;
 
     if let Some(target) = profile.connection_policy.target.as_ref() {
         match target {
@@ -1265,36 +1385,83 @@ fn validate_computer_inputs_config(config: &ComputerInputsConfig) -> Result<(), 
         config.inputs.iter().map(|input| input.id()),
     )?;
 
-    for input in &config.inputs {
-        if let ComputerInputDefinition::PromptString {
-            id,
-            default: Some(default),
-            password: Some(true),
-            ..
-        } = input
+    let mut unresolved_pick_ids = HashSet::new();
+    for issue in &config.migration_issues {
+        let input_id = issue.input_id();
+        if input_id.trim().is_empty()
+            || input_id.trim() != input_id
+            || !unresolved_pick_ids.insert(input_id.to_string())
         {
-            if !default.is_empty() {
-                return Err(ConfigError::SecretPlaintextInComputerInput {
-                    input_id: id.clone(),
-                });
-            }
+            return Err(ConfigError::InvalidComputerInput {
+                input_id: input_id.to_string(),
+                reason: "invalid or duplicate migration issue".to_string(),
+            });
+        }
+        let is_matching_empty_pick = config.inputs.iter().any(|input| {
+            matches!(
+                input,
+                ComputerInputDefinition::PickString { id, options, .. }
+                    if id == input_id && options.is_empty()
+            )
+        });
+        if !is_matching_empty_pick {
+            return Err(ConfigError::InvalidComputerInput {
+                input_id: input_id.to_string(),
+                reason: "unresolved_pick_no_option must identify an empty legacy PickString"
+                    .to_string(),
+            });
+        }
+    }
+
+    for input in &config.inputs {
+        if matches!(input, ComputerInputDefinition::PickString { options, .. } if options.is_empty())
+            && unresolved_pick_ids.contains(input.id())
+        {
+            validate_unresolved_pick_metadata(input)?;
+            continue;
+        }
+        let definition = InputDefinition::from(input);
+        let prepared = prepare_portable_input_definitions(std::slice::from_ref(&definition))
+            .map_err(|reason| ConfigError::InvalidComputerInput {
+                input_id: input.id().to_string(),
+                reason,
+            })?;
+        if prepared.first() != Some(&definition) {
+            return Err(ConfigError::InvalidComputerInput {
+                input_id: input.id().to_string(),
+                reason: "definition text must already be normalized and trimmed".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_unresolved_pick_metadata(input: &ComputerInputDefinition) -> Result<(), ConfigError> {
+    let ComputerInputDefinition::PickString {
+        id,
+        label,
+        description,
+        ..
+    } = input
+    else {
+        unreachable!("only unresolved PickString metadata is validated here")
+    };
+    for (field_name, value) in [("label", label), ("description", description)] {
+        if value
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.trim() != value)
+        {
+            return Err(ConfigError::InvalidComputerInput {
+                input_id: id.clone(),
+                reason: format!("{field_name} must be non-empty and trimmed when present"),
+            });
         }
     }
     Ok(())
 }
 
-fn sanitize_computer_inputs_config(config: &mut ComputerInputsConfig) {
-    for input in &mut config.inputs {
-        if let ComputerInputDefinition::PromptString {
-            default, password, ..
-        } = input
-        {
-            if *password == Some(true) {
-                *default = None;
-            }
-        }
-    }
-}
+fn sanitize_computer_inputs_config(_config: &mut ComputerInputsConfig) {}
 
 fn validate_global_manual_targets_config(
     config: &GlobalManualTargetsConfig,
@@ -1481,6 +1648,9 @@ pub enum ConfigError {
     #[error("Computer input '{input_id}' contains a password default; store it in keychain")]
     SecretPlaintextInComputerInput { input_id: String },
 
+    #[error("invalid Computer input '{input_id}': {reason}")]
+    InvalidComputerInput { input_id: String, reason: String },
+
     #[error("{artifact} has invalid entity id '{id}'")]
     InvalidArtifactEntityId { artifact: &'static str, id: String },
 
@@ -1533,6 +1703,70 @@ mod tests {
             tmp.path()
                 .join("client_computers/instances/computer-a/profile.json")
         );
+    }
+
+    #[test]
+    fn profile_v2_migrates_to_disabled_remote_control_with_backup() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-v2").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let previous = PreviousComputerProfileV2 {
+            schema_version: PREVIOUS_COMPUTER_PROFILE_SCHEMA_VERSION,
+            id: "computer-v2".to_string(),
+            name: "Previous Computer".to_string(),
+            description: Some("preserved".to_string()),
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-v2").unwrap();
+
+        assert_eq!(migrated.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+        assert_eq!(migrated.description.as_deref(), Some("preserved"));
+        assert_eq!(migrated.remote_control, RemoteControlPolicy::default());
+        assert!(!migrated.remote_control.enabled);
+        assert_eq!(migrated.command_line, CommandLineToolPolicy::default());
+        let backup: PreviousComputerProfileV2 = serde_json::from_slice(
+            &std::fs::read(profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_BACKUP_FILE_NAME))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup, previous);
+    }
+
+    #[test]
+    fn profile_v3_preserves_robot_policy_and_adds_disabled_command_line_with_backup() {
+        let (svc, _tmp) = setup_empty();
+        let profile_path = svc.computer_profile_path("computer-v3").unwrap();
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let previous = PreviousComputerProfileV3 {
+            schema_version: PREVIOUS_COMPUTER_PROFILE_V3_SCHEMA_VERSION,
+            id: "computer-v3".to_string(),
+            name: "Robot Computer".to_string(),
+            description: None,
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            remote_control: RemoteControlPolicy {
+                enabled: true,
+                ..RemoteControlPolicy::default()
+            },
+            robot_binding: None,
+        };
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+
+        let migrated = svc.load_computer_profile("computer-v3").unwrap();
+
+        assert_eq!(migrated.schema_version, COMPUTER_PROFILE_SCHEMA_VERSION);
+        assert!(migrated.remote_control.enabled);
+        assert_eq!(migrated.command_line, CommandLineToolPolicy::default());
+        let backup: PreviousComputerProfileV3 = serde_json::from_slice(
+            &std::fs::read(
+                profile_path.with_file_name(PREVIOUS_COMPUTER_PROFILE_V3_BACKUP_FILE_NAME),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup, previous);
     }
 
     #[test]
@@ -1655,7 +1889,7 @@ mod tests {
         let mut instance = ComputerInstance::new("computer-a", "Computer A");
         instance.inputs.push(InputDefinition::PromptString {
             id: "api-key".to_string(),
-            label: "API key".to_string(),
+            label: Some("API key".to_string()),
             description: None,
             default: None,
             password: Some(true),
@@ -1672,10 +1906,17 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["connection_policy", "id", "name", "schema_version"]
-                .into_iter()
-                .map(str::to_string)
-                .collect()
+            [
+                "command_line",
+                "connection_policy",
+                "id",
+                "name",
+                "remote_control",
+                "schema_version",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
         );
         assert!(!serialized.to_string().contains("secret-value"));
         assert!(!object.contains_key("inputs"));
@@ -1724,6 +1965,7 @@ mod tests {
         let inputs = ComputerInputsConfig {
             schema_version: COMPUTER_INPUTS_SCHEMA_VERSION + 1,
             inputs: Vec::new(),
+            migration_issues: Vec::new(),
         };
 
         assert!(matches!(
@@ -1750,11 +1992,12 @@ mod tests {
             schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: vec![ComputerInputDefinition::PromptString {
                 id: "region".to_string(),
-                label: "Region".to_string(),
+                label: Some("Region".to_string()),
                 description: None,
-                default: Some("us-east".to_string()),
+                default: None,
                 password: None,
             }],
+            migration_issues: Vec::new(),
         };
         let targets = GlobalManualTargetsConfig {
             schema_version: MANUAL_TARGETS_SCHEMA_VERSION,
@@ -1792,39 +2035,127 @@ mod tests {
     }
 
     #[test]
-    fn computer_inputs_strip_password_default_plaintext() {
+    fn computer_inputs_v2_allow_missing_labels_and_omit_absent_defaults() {
         let (svc, _tmp) = setup_empty();
         let inputs = ComputerInputsConfig {
             schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: vec![ComputerInputDefinition::PromptString {
                 id: "api-key".to_string(),
-                label: "API key".to_string(),
+                label: None,
                 description: None,
-                default: Some("plaintext-secret".to_string()),
+                default: None,
                 password: Some(true),
             }],
+            migration_issues: Vec::new(),
         };
 
         svc.save_computer_inputs(TEST_INSTANCE_ID, &inputs).unwrap();
         let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
         let stored = std::fs::read_to_string(&inputs_path).unwrap();
-        assert!(!stored.contains("plaintext-secret"));
+        assert!(!stored.contains("default"));
+        assert!(!stored.contains("label"));
         assert!(matches!(
             svc.load_computer_inputs(TEST_INSTANCE_ID)
                 .unwrap()
                 .inputs
                 .as_slice(),
-            [ComputerInputDefinition::PromptString { default: None, .. }]
+            [ComputerInputDefinition::PromptString { label: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn computer_inputs_v2_reject_invalid_definitions_on_save_and_load() {
+        let (svc, _tmp) = setup_empty();
+        let invalid = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+            inputs: vec![ComputerInputDefinition::PickString {
+                id: "region".to_string(),
+                label: None,
+                description: None,
+                options: Vec::new(),
+                default: None,
+            }],
+            migration_issues: Vec::new(),
+        };
+        assert!(matches!(
+            svc.save_computer_inputs(TEST_INSTANCE_ID, &invalid)
+                .unwrap_err(),
+            ConfigError::InvalidComputerInput { .. }
         ));
 
-        std::fs::write(inputs_path, serde_json::to_vec_pretty(&inputs).unwrap()).unwrap();
+        let path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": COMPUTER_INPUTS_SCHEMA_VERSION,
+                "inputs": [{
+                    "type": "PickString",
+                    "id": "region",
+                    "options": [
+                        {"label": "US", "value": "same"},
+                        {"label": "EU", "value": "same"}
+                    ],
+                    "default": "missing"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
-            svc.load_computer_inputs(TEST_INSTANCE_ID)
-                .unwrap()
-                .inputs
-                .as_slice(),
-            [ComputerInputDefinition::PromptString { default: None, .. }]
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap_err(),
+            ConfigError::InvalidComputerInput { .. }
         ));
+    }
+
+    #[test]
+    fn computer_metadata_update_clears_obsolete_input_sidecar() {
+        let (svc, _tmp) = setup();
+        let unresolved = ComputerInputsConfig {
+            schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
+            inputs: vec![ComputerInputDefinition::PickString {
+                id: "legacy-pick".to_string(),
+                label: Some("Legacy Pick".to_string()),
+                description: None,
+                options: Vec::new(),
+                default: None,
+            }],
+            migration_issues: vec![
+                crate::services::computer::ComputerInputMigrationIssue::UnresolvedPickNoOption {
+                    input_id: "legacy-pick".to_string(),
+                },
+            ],
+        };
+        svc.save_computer_inputs(TEST_INSTANCE_ID, &unresolved)
+            .unwrap();
+
+        let updated = svc
+            .rename_computer_instance(TEST_INSTANCE_ID, "Renamed".to_string())
+            .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+        assert!(updated.inputs.is_empty());
+        assert_eq!(
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap(),
+            ComputerInputsConfig::default()
+        );
+
+        let error = svc
+            .update_computer_instance(TEST_INSTANCE_ID, |instance| {
+                instance.inputs.push(InputDefinition::PromptString {
+                    id: "unexpected".to_string(),
+                    label: None,
+                    description: None,
+                    default: None,
+                    password: None,
+                });
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("SDK-owned Inputs"));
+        assert_eq!(
+            svc.load_computer_inputs(TEST_INSTANCE_ID).unwrap(),
+            ComputerInputsConfig::default()
+        );
     }
 
     #[test]
@@ -1896,7 +2227,7 @@ mod tests {
         let (svc, _tmp) = setup_empty();
         let prompt = |id: &str| ComputerInputDefinition::PromptString {
             id: id.to_string(),
-            label: "Input".to_string(),
+            label: Some("Input".to_string()),
             description: None,
             default: None,
             password: None,
@@ -1913,6 +2244,7 @@ mod tests {
         let invalid_inputs = ComputerInputsConfig {
             schema_version: COMPUTER_INPUTS_SCHEMA_VERSION,
             inputs: vec![prompt(" ")],
+            migration_issues: Vec::new(),
         };
         assert!(matches!(
             svc.save_computer_inputs(TEST_INSTANCE_ID, &invalid_inputs)
@@ -1945,7 +2277,7 @@ mod tests {
         std::fs::write(
             inputs_path,
             r#"{
-              "schema_version": 1,
+              "schema_version": 2,
               "inputs": [
                 {"type": "Command", "id": "duplicate", "label": "One", "command": "one"},
                 {"type": "Command", "id": "duplicate", "label": "Two", "command": "two"}
@@ -2387,7 +2719,7 @@ mod tests {
         let (svc, _tmp) = setup_empty();
         let inputs_path = svc.computer_inputs_path(TEST_INSTANCE_ID).unwrap();
         std::fs::create_dir_all(inputs_path.parent().unwrap()).unwrap();
-        std::fs::write(inputs_path, r#"{"schema_version": 2, "inputs": []}"#).unwrap();
+        std::fs::write(inputs_path, r#"{"schema_version": 3, "inputs": []}"#).unwrap();
         let targets_path = svc.global_config_path(GlobalConfigFile::ManualTargets);
         std::fs::create_dir_all(targets_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -2668,32 +3000,6 @@ mod tests {
         std::fs::write(tmp.path().join("computer_instances.json"), "").unwrap();
         let instances = svc.load_computer_instances().unwrap();
         assert!(instances.instances.is_empty());
-    }
-
-    // --- Input Definitions ---
-
-    #[test]
-    fn test_load_empty_inputs() {
-        let (svc, _tmp) = setup();
-        let inputs = svc.load_inputs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert!(inputs.is_empty());
-    }
-
-    #[test]
-    fn test_save_and_load_inputs_roundtrip() {
-        let (svc, _tmp) = setup();
-        let input: InputDefinition = serde_json::from_value(serde_json::json!({
-            "type": "PromptString",
-            "id": "api-key",
-            "label": "API Key",
-            "password": true
-        }))
-        .unwrap();
-
-        svc.save_inputs_for_instance(TEST_INSTANCE_ID, &[input])
-            .unwrap();
-        let loaded = svc.load_inputs_for_instance(TEST_INSTANCE_ID).unwrap();
-        assert_eq!(loaded.len(), 1);
     }
 
     #[test]

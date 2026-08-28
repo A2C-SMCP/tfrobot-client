@@ -1,6 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 
+/**
+ * Default tool-call deadline (seconds) surfaced to the UI. The authoritative
+ * fallback lives in the backend (`execute_tool_core`); this mirrors it so the
+ * field placeholder shows the effective default when left empty.
+ */
+export const DEFAULT_TOOL_TIMEOUT_S = 120;
+
 export interface ToolInfo {
   name: string;
   displayName: string;

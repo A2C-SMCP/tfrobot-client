@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
-import { info, warn, error as logError } from '@/utils/logger';
+import { debug, info, warn, error as logError } from '@/utils/logger';
 import { useComputerStore } from './computerStore';
 
 /** Login command response. Identity authority always comes from ManagerContextSnapshot. */
@@ -553,6 +553,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   },
 
   selectEmployeeAndConnect: async (instanceId, employeeId) => {
+    const startedAt = Date.now();
     const context = get().context;
     const scope = managerContextScope(context);
     const resource = currentEmployeeResource(get());
@@ -578,12 +579,16 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
         connectingEmployeeId: employeeId,
       })),
     }));
+    let connectionSucceeded = false;
     try {
+      debug(`connection.requested layer=frontend operation=connect source_type=manager_robot instance_id=${instanceId} employee_id=${employeeId}`);
       await invoke('manager_connect_smcp', {
         instanceId,
         employeeId,
         scope: null,
       });
+      connectionSucceeded = true;
+      debug(`connection.request_completed layer=frontend operation=connect source_type=manager_robot instance_id=${instanceId} employee_id=${employeeId} elapsed_ms=${Date.now() - startedAt} outcome=succeeded`);
       if (!requestStillCurrent(get(), scope)) return null;
       await useComputerStore.getState().reconcileConnectionMetadata(instanceId);
       if (!requestStillCurrent(get(), scope)) return null;
@@ -598,6 +603,11 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     } catch (e) {
       const err = toManagerError(e);
       if (!requestStillCurrent(get(), scope)) return null;
+      if (connectionSucceeded) {
+        logError(`connection.metadata_reconciliation_failed layer=frontend source_type=manager_robot instance_id=${instanceId} employee_id=${employeeId} elapsed_ms=${Date.now() - startedAt} connection_outcome=succeeded error_kind=${err.kind}`);
+      } else {
+        logError(`connection.request_failed layer=frontend operation=connect source_type=manager_robot instance_id=${instanceId} employee_id=${employeeId} elapsed_ms=${Date.now() - startedAt} error_kind=${err.kind}`);
+      }
       logError(`manager: select_employee_and_connect failed, kind=${err.kind}`);
       set((state) => ({
         employeeResources: updateResource(state.employeeResources, scope, (current) => ({

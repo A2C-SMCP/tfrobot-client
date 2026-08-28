@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { debug } from '@tauri-apps/plugin-log';
 import { useComputerStore } from '@/stores/computerStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useDebugStore } from '@/stores/debugStore';
@@ -16,6 +17,7 @@ import { runtimeSnapshot } from '../helpers/store';
 
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
+const mockedDebug = vi.mocked(debug);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,6 +40,7 @@ describe('runtimeStore', () => {
     useSkillStore.getState().reset();
     mockedInvoke.mockReset();
     mockedListen.mockReset();
+    mockedDebug.mockReset();
     mockedListen.mockResolvedValue(() => {});
   });
 
@@ -68,7 +71,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 1,
           runtime: initialRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });
@@ -252,8 +255,25 @@ describe('runtimeStore', () => {
       }],
     });
 
-    useRuntimeStore.getState().receiveSnapshot('computer-a', current);
-    useRuntimeStore.getState().receiveSnapshot('computer-a', stale);
+    const connection = {
+      status: 'connected' as const,
+      present: true,
+      revision: 1,
+      context: null,
+      operation: null,
+      operation_target: null,
+      last_error: null,
+      actions: {
+        connect: { enabled: false, disabled_reason: 'already_connected' as const },
+        disconnect: { enabled: true, disabled_reason: null },
+      },
+    };
+    useRuntimeStore.getState().receiveSnapshot('computer-a', current, connection);
+    useRuntimeStore.getState().receiveSnapshot('computer-a', stale, connection);
+
+    expect(mockedDebug).toHaveBeenCalledWith(expect.stringContaining(
+      'connection.snapshot_received layer=frontend instance_id=computer-a accepted=false',
+    ));
 
     expect(useRuntimeStore.getState().snapshots['computer-a']).toEqual(current);
   });
@@ -356,7 +376,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 0,
           runtime: connectedRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });
@@ -592,7 +612,7 @@ describe('runtimeStore', () => {
           mcp_server_count: 0,
           runtime: retiredRuntime,
         }],
-        recent_logs: [],
+        recent_activity: [],
         runtimes: [],
       },
     });
@@ -660,6 +680,57 @@ describe('runtimeStore', () => {
 
     useRuntimeStore.getState().evictSnapshot('computer-a', 2);
     expect(useRuntimeStore.getState().eventsByInstance['computer-a']).toBeUndefined();
+  });
+
+  it('rehydrates a lagged OAuth row without overwriting a newer event', async () => {
+    const response = deferred<ReturnType<typeof useMcpStore.getState>['servers']>();
+    mockedInvoke.mockReturnValueOnce(response.promise);
+    useMcpStore.setState({
+      activeInstanceId: 'computer-a',
+      serversReady: true,
+      servers: [{
+        bundleId: 'protected',
+        name: 'protected',
+        activation_state: 'stopped',
+        connection_state: 'disconnected',
+        running: false,
+        status_message: 'stopped',
+        disabled: false,
+        managedBy: { type: 'user' },
+        oauth_status: { state: 'unauthorized' },
+        oauth_interaction: 'interactive',
+      }],
+    });
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: { kind: 'resync', skipped_events: 3 },
+      snapshot: runtimeSnapshot({ snapshot_revision: 2 }),
+      connection: { present: false, revision: 0, context: null },
+    });
+    expect(useMcpStore.getState().servers).toHaveLength(1);
+
+    useRuntimeStore.getState().receiveEvent({
+      instance_id: 'computer-a',
+      cause: {
+        kind: 'oauth_status_changed',
+        bundle_id: 'protected',
+        status: { state: 'authorized', scopes: ['tools.read'] },
+      },
+      snapshot: runtimeSnapshot({ snapshot_revision: 3 }),
+      connection: { present: false, revision: 0, context: null },
+    });
+    response.resolve([{
+      ...useMcpStore.getState().servers[0],
+      oauth_status: { state: 'unauthorized' },
+    }]);
+
+    await vi.waitFor(() => {
+      expect(useMcpStore.getState().servers[0].oauth_status).toEqual({
+        state: 'authorized',
+        scopes: ['tools.read'],
+      });
+    });
   });
 
   it('does not let reconciliation forget erase an explicit deletion tombstone', () => {

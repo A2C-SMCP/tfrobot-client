@@ -1,12 +1,69 @@
 use super::*;
+use crate::services::observability::CONNECTION_LOG_TARGET;
+#[cfg(test)]
+use a2c_smcp::smcp_computer::oauth::OAuthStatus;
+use a2c_smcp::smcp_computer::ComputerEvent;
+use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::timeout;
 
 const SDK_COMPUTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn coalesce_oauth_events(events: Vec<ComputerEvent>) -> Vec<ComputerEvent> {
+    let mut seen_oauth_bundles = HashSet::new();
+    let mut retained = Vec::with_capacity(events.len());
+    for event in events.into_iter().rev() {
+        if let ComputerEvent::OAuthStatusChanged { bundle_id, .. } = &event {
+            if !seen_oauth_bundles.insert(bundle_id.clone()) {
+                continue;
+            }
+        }
+        retained.push(event);
+    }
+    retained.reverse();
+    retained
+}
+
+struct PendingRuntimeCause {
+    cause: ComputerRuntimeEventCause,
+    terminal: bool,
+}
+
+async fn project_oauth_required_scope(
+    required_scopes: &RwLock<oauth::OAuthRequiredScopeCache>,
+    cause: &ComputerRuntimeEventCause,
+) {
+    let mut required_scopes = required_scopes.write().await;
+    match cause {
+        ComputerRuntimeEventCause::OAuthStatusChanged { bundle_id, status } => {
+            if let Ok(bundle_id) = BundleId::try_from(bundle_id.as_str()) {
+                required_scopes.apply_public_status(&bundle_id, status);
+            }
+        }
+        ComputerRuntimeEventCause::Resync { .. } => required_scopes.clear(),
+        _ => {}
+    }
+}
+
 impl ComputerInstanceRuntime {
     pub async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
+        self.lifecycle_lease()
+            .await
+            .start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn lifecycle_lease(&self) -> ComputerRuntimeLifecycleLease<'_> {
+        ComputerRuntimeLifecycleLease {
+            runtime: self,
+            _lifecycle: self.lifecycle_lock.lock().await,
+        }
+    }
+
+    async fn start_with_failure_policy_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
         let lifecycle = self.runtime_state().await;
@@ -17,17 +74,30 @@ impl ComputerInstanceRuntime {
                 | LifecycleState::Shutdown
                 | LifecycleState::Error
         ) {
-            self.replace_sdk_computer(false, "start_with_persisted_configuration")
-                .await?;
+            self.replace_sdk_computer(
+                false,
+                "start_with_persisted_configuration",
+                HandleReplacementConfig::ReloadPersisted,
+                failure_policy,
+            )
+            .await?;
         } else if matches!(
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
         ) {
-            self.reconcile_sdk_governance_inner()
-                .await
-                .map_err(ComputerRuntimeStartError::Sdk)?;
-            let failures = self.start_desired_mcp_servers_inner().await;
-            self.log_mcp_start_failures(&failures, "idempotent Computer startup");
+            self.reconcile_governance_for_computer_start(
+                "idempotent Computer startup",
+                failure_policy,
+            )
+            .await
+            .map_err(ComputerRuntimeStartError::from)?;
+            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            self.handle_desired_mcp_start_failures(
+                failures,
+                "idempotent Computer startup",
+                failure_policy,
+            )
+            .map_err(ComputerRuntimeStartError::from)?;
             return Ok(());
         } else if matches!(
             lifecycle,
@@ -44,14 +114,17 @@ impl ComputerInstanceRuntime {
         self.start_runtime_event_relay().await;
 
         if let Err(error) = self.computer.read().await.boot_up().await {
-            return Err(ComputerRuntimeStartError::Sdk(error));
+            return Err(ComputerRuntimeStartError::from(error));
         }
-        if let Err(error) = self.reconcile_sdk_governance_inner().await {
+        if let Err(error) = self
+            .reconcile_governance_for_computer_start("Computer startup", failure_policy)
+            .await
+        {
             // boot_up has already moved the SDK lifecycle to Started. A governance failure is
             // still a failed Computer start transaction, so roll the partially started handle
             // back to Shutdown; otherwise the public Start action becomes unavailable and the
             // user cannot save the missing runtime input and retry.
-            let mut start_error = ComputerRuntimeStartError::Sdk(error);
+            let mut start_error = ComputerRuntimeStartError::from(error);
             if let Err(cleanup_error) = self.try_shutdown_inner().await {
                 start_error = start_error.append_context(format!(
                     "failed to roll back the partially started Computer: {cleanup_error}"
@@ -59,9 +132,21 @@ impl ComputerInstanceRuntime {
             }
             return Err(start_error);
         }
-        let failures = self.start_desired_mcp_servers_inner().await;
-        self.log_mcp_start_failures(&failures, "Computer startup");
-
+        let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+        if let Err(error) =
+            self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
+        {
+            if Self::is_command_line_start_error(&error) {
+                return Err(ComputerRuntimeStartError::from(error));
+            }
+            let mut start_error = ComputerRuntimeStartError::from(error);
+            if let Err(cleanup_error) = self.try_shutdown_inner().await {
+                start_error = start_error.append_context(format!(
+                    "failed to roll back the partially started Computer: {cleanup_error}"
+                ));
+            }
+            return Err(start_error);
+        }
         Ok(())
     }
 
@@ -99,7 +184,7 @@ impl ComputerInstanceRuntime {
         loop {
             let _snapshot_guard = self.runtime_snapshot_lock.lock().await;
             let generation = self.runtime_generation();
-            let snapshot = self.computer.read().await.status().await;
+            let snapshot = user_visible_sdk_status_snapshot(&self.computer).await;
             if generation == self.runtime_generation() {
                 let snapshot_revision = self
                     .runtime_snapshot_revision
@@ -169,6 +254,7 @@ impl ComputerInstanceRuntime {
         let mcp_start_diagnostics = self.mcp_start_diagnostics.clone();
         let mcp_config_apply_diagnostics = self.mcp_config_apply_diagnostics.clone();
         let sdk_servers = self.sdk_servers.clone();
+        let oauth_required_scopes = self.oauth_required_scopes.clone();
         let connection = self.connection.clone();
         let connection_operation = self.connection_operation.clone();
         let connection_authority_revision = self.connection_authority_revision.clone();
@@ -191,32 +277,68 @@ impl ComputerInstanceRuntime {
             stale.task.abort();
         }
         let relay_task = tokio::spawn(async move {
+            let mut pending = VecDeque::<PendingRuntimeCause>::new();
             loop {
-                let (cause, terminal) = match receiver.recv().await {
-                    Ok(event) => {
-                        let terminal = matches!(
-                            event,
-                            a2c_smcp::smcp_computer::ComputerEvent::LifecycleChanged {
-                                state: LifecycleState::Shutdown
+                if pending.is_empty() {
+                    let first = match receiver.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped_events)) => {
+                            pending.push_back(PendingRuntimeCause {
+                                cause: ComputerRuntimeEventCause::Resync { skipped_events },
+                                terminal: false,
+                            });
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    let mut events = vec![first];
+                    let mut lagged = None;
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(event) => events.push(event),
+                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                                lagged = Some(skipped);
+                                break;
                             }
-                        );
-                        (ComputerRuntimeEventCause::from(event), terminal)
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped_events)) => {
-                        (ComputerRuntimeEventCause::Resync { skipped_events }, false)
+                    if let Some(skipped_events) = lagged {
+                        pending.push_back(PendingRuntimeCause {
+                            cause: ComputerRuntimeEventCause::Resync { skipped_events },
+                            terminal: false,
+                        });
+                    } else {
+                        pending.extend(coalesce_oauth_events(events).into_iter().map(|event| {
+                            let terminal = matches!(
+                                &event,
+                                ComputerEvent::LifecycleChanged {
+                                    state: LifecycleState::Shutdown
+                                }
+                            );
+                            PendingRuntimeCause {
+                                cause: ComputerRuntimeEventCause::from(event),
+                                terminal,
+                            }
+                        }));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
+                }
+
+                let PendingRuntimeCause { cause, terminal } = pending
+                    .pop_front()
+                    .expect("a relay batch always yields one pending cause");
 
                 if current_generation.load(Ordering::Acquire) != generation {
                     break;
                 }
+                project_oauth_required_scope(&oauth_required_scopes, &cause).await;
                 let runtime_snapshot = {
                     let _snapshot_guard = snapshot_lock.lock().await;
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
-                    let snapshot = computer.read().await.status().await;
+                    let snapshot = user_visible_sdk_status_snapshot(&computer).await;
                     if current_generation.load(Ordering::Acquire) != generation {
                         break;
                     }
@@ -241,20 +363,56 @@ impl ComputerInstanceRuntime {
                 let Some(sink) = sink.read().await.clone() else {
                     break;
                 };
-                let event = ComputerRuntimeStatusEvent::from_observation(
-                    instance_id.clone(),
-                    cause,
-                    runtime_snapshot.clone(),
-                    {
-                        let connection = connection.read().await;
-                        let operation = connection_operation.read().await;
+                let (connection_snapshot, connection_generation) = {
+                    let connection = connection.read().await;
+                    let operation = connection_operation.read().await;
+                    (
                         ClientConnectionStateSnapshot::from_parts(
                             connection_authority_revision.load(Ordering::Acquire),
                             connection.as_ref(),
                             &operation,
                             runtime_snapshot.lifecycle,
-                        )
-                    },
+                        ),
+                        connection.as_ref().map(|connection| connection.generation),
+                    )
+                };
+                match &cause {
+                    ComputerRuntimeEventCause::LifecycleChanged { state }
+                        if connection_snapshot.present =>
+                    {
+                        tracing::debug!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.sdk_lifecycle_changed",
+                            instance_id = %instance_id,
+                            runtime_incarnation = incarnation,
+                            runtime_generation = generation,
+                            snapshot_revision = runtime_snapshot.snapshot_revision,
+                            connection_generation,
+                            sdk_lifecycle = ?state,
+                            projected_status = ?connection_snapshot.status,
+                            connection_revision = connection_snapshot.revision,
+                            "observed SDK lifecycle change for an SMCP connection"
+                        );
+                    }
+                    ComputerRuntimeEventCause::Resync { skipped_events } => {
+                        tracing::warn!(
+                            target: CONNECTION_LOG_TARGET,
+                            event = "connection.runtime_event_resync",
+                            instance_id = %instance_id,
+                            runtime_incarnation = incarnation,
+                            runtime_generation = generation,
+                            skipped_events,
+                            connection_present = connection_snapshot.present,
+                            "runtime event relay lagged and rebuilt connection projection"
+                        );
+                    }
+                    _ => {}
+                }
+                let event = ComputerRuntimeStatusEvent::from_observation(
+                    instance_id.clone(),
+                    cause,
+                    runtime_snapshot.clone(),
+                    connection_snapshot,
                 );
                 if let Err(error) = sink.emit(&event) {
                     log::warn!(
@@ -283,10 +441,25 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
-        let _guard = self.lifecycle_lock.lock().await;
+        self.lifecycle_lease()
+            .await
+            .restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    async fn restart_with_failure_policy_inner(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(true, "restart").await
+        self.replace_sdk_computer(
+            true,
+            "restart",
+            HandleReplacementConfig::ReloadPersisted,
+            failure_policy,
+        )
+        .await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {
@@ -321,6 +494,10 @@ impl ComputerInstanceRuntime {
     /// Crosses the shutdown commit point. Callers must run the non-mutating preflight first.
     pub(super) async fn shutdown_after_preflight_inner(&self) -> Vec<String> {
         let mut cleanup_errors = Vec::new();
+        // Shutdown is a terminal OAuth admission boundary. Unlike handle replacement, it remains
+        // closed after cleanup; a later runtime start installs a fresh SDK handle first.
+        self.close_oauth_admission().await;
+        self.cancel_all_oauth_authorizations().await;
         if let Err(error) = self.prepare_sdk_shutdown_inner().await {
             cleanup_errors.push(error);
         }
@@ -334,8 +511,7 @@ impl ComputerInstanceRuntime {
             }
         }
         // Teardown is deliberately exhaustive after the commit point: no cleanup failure may
-        // leave refresh work or logical connection state alive for an instance being removed.
-        self.abort_refresh_task().await;
+        // leave logical connection state alive for an instance being removed.
         self.take_connection_state().await;
         self.complete_connection_operation().await;
         self.clear_client_runtime_diagnostic_silent().await;
@@ -491,6 +667,58 @@ impl ComputerInstanceRuntime {
     }
 }
 
+impl ComputerRuntimeLifecycleLease<'_> {
+    pub(crate) async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures)
+            .await
+    }
+
+    async fn start_with_failure_policy(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        self.runtime
+            .start_with_failure_policy_inner(failure_policy)
+            .await
+    }
+
+    pub(crate) async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
+            .await
+    }
+
+    pub(crate) async fn restart_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.restart_with_failure_policy(
+            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures,
+        )
+        .await
+    }
+
+    async fn restart_with_failure_policy(
+        &self,
+        failure_policy: RuntimeMcpStartFailurePolicy,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        self.runtime
+            .restart_with_failure_policy_inner(failure_policy)
+            .await
+    }
+}
+
+/// Projects the SDK's complete runtime inventory into the client-facing capability view.
+/// Built-in providers are part of the observable MCP runtime even though their lifecycle remains
+/// owned by the feature that mounted them.
+async fn user_visible_sdk_status_snapshot(
+    computer: &RwLock<Computer<InstanceSession>>,
+) -> ComputerStatusSnapshot {
+    let computer = computer.read().await;
+    computer.status().await
+}
+
 async fn collect_runtime_problems(
     snapshot: &ComputerRuntimeSnapshot,
     sdk_problem_observations: &Mutex<SdkProblemObservations>,
@@ -608,5 +836,87 @@ fn earliest_runtime_occurrence(left: &str, right: &str) -> String {
         (Ok(_), Ok(_)) => left.to_string(),
         _ if right < left => right.to_string(),
         _ => left.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sdk_event_projection_tracks_and_invalidates_required_scope() {
+        let scopes = RwLock::new(oauth::OAuthRequiredScopeCache::default());
+        let bundle_id = BundleId::try_from("protected").unwrap();
+
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::OAuthStatusChanged {
+                bundle_id: bundle_id.to_string(),
+                status: PublicOAuthStatus::ReauthorizationRequired {
+                    required_scope: "tools.write".to_string(),
+                },
+            },
+        )
+        .await;
+        assert_eq!(
+            scopes.read().await.required_scope(&bundle_id).as_deref(),
+            Some("tools.write")
+        );
+
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::OAuthStatusChanged {
+                bundle_id: bundle_id.to_string(),
+                status: PublicOAuthStatus::Authorized {
+                    scopes: vec!["tools.write".to_string()],
+                },
+            },
+        )
+        .await;
+        assert!(scopes.read().await.required_scope(&bundle_id).is_none());
+
+        scopes.write().await.apply_public_status(
+            &bundle_id,
+            &PublicOAuthStatus::ReauthorizationRequired {
+                required_scope: "tools.admin".to_string(),
+            },
+        );
+        project_oauth_required_scope(
+            &scopes,
+            &ComputerRuntimeEventCause::Resync { skipped_events: 1 },
+        )
+        .await;
+        assert!(scopes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_oauth_events_keep_latest_status_per_bundle_in_batch() {
+        let bundle_id = BundleId::try_from("protected").unwrap();
+        let events = coalesce_oauth_events(vec![
+            ComputerEvent::OAuthStatusChanged {
+                bundle_id: bundle_id.clone(),
+                status: OAuthStatus::Unauthorized,
+            },
+            ComputerEvent::CapabilityRevisionBumped { revision: 7 },
+            ComputerEvent::OAuthStatusChanged {
+                bundle_id: bundle_id.clone(),
+                status: OAuthStatus::ReauthorizationRequired {
+                    required_scope: "tools.write".to_string(),
+                },
+            },
+        ]);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ComputerEvent::CapabilityRevisionBumped { revision: 7 }
+        ));
+        assert!(matches!(
+            &events[1],
+            ComputerEvent::OAuthStatusChanged {
+                status: OAuthStatus::ReauthorizationRequired { required_scope },
+                ..
+            } if required_scope == "tools.write"
+        ));
     }
 }

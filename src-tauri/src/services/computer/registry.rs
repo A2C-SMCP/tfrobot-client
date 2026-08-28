@@ -2,10 +2,14 @@ use super::*;
 
 pub struct ComputerRegistry {
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
+    runtime_membership: Arc<Mutex<()>>,
     runtime_mutations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
+    runtime_operations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
     skill_home_base: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     runtime_event_sink: SharedRuntimeEventSink,
+    runtime_input_bridge: Arc<crate::services::runtime_input_bridge::RuntimeInputBridge>,
+    client_control_binding: ClientControlBinding,
 }
 
 /// A two-phase runtime removal. Creating the transaction closes activity admission, drains
@@ -86,6 +90,9 @@ impl ComputerRegistry {
         config.normalize();
         let mut runtimes = HashMap::new();
         let runtime_event_sink: SharedRuntimeEventSink = Arc::new(RwLock::new(None));
+        let runtime_input_bridge =
+            Arc::new(crate::services::runtime_input_bridge::RuntimeInputBridge::new());
+        let client_control_binding = ClientControlBinding::default();
 
         for instance in config.instances {
             let instance_id = instance.id.clone();
@@ -94,6 +101,8 @@ impl ComputerRegistry {
                 skill_home_base.clone(),
                 secret_store.clone(),
                 runtime_event_sink.clone(),
+                runtime_input_bridge.clone(),
+                client_control_binding.clone(),
             );
             runtimes.insert(instance_id, runtime);
         }
@@ -101,10 +110,14 @@ impl ComputerRegistry {
         let initial_runtime = runtimes.values().next().cloned();
         let registry = Self {
             runtimes: RwLock::new(runtimes),
+            runtime_membership: Arc::new(Mutex::new(())),
             runtime_mutations: std::sync::Mutex::new(HashMap::new()),
+            runtime_operations: std::sync::Mutex::new(HashMap::new()),
             skill_home_base,
             secret_store,
             runtime_event_sink,
+            runtime_input_bridge,
+            client_control_binding,
         };
 
         (registry, initial_runtime)
@@ -127,6 +140,19 @@ impl ComputerRegistry {
         for runtime in self.list_runtimes().await {
             runtime.start_runtime_event_relay().await;
         }
+    }
+
+    pub fn runtime_input_bridge(
+        &self,
+    ) -> Arc<crate::services::runtime_input_bridge::RuntimeInputBridge> {
+        self.runtime_input_bridge.clone()
+    }
+
+    pub fn bind_client_control(
+        &self,
+        plane: &Arc<crate::services::client_control::ClientControlPlane>,
+    ) {
+        self.client_control_binding.bind(plane);
     }
 
     pub async fn runtime_observations(
@@ -160,6 +186,36 @@ impl ComputerRegistry {
         let coordinator = Arc::new(Mutex::new(()));
         coordinators.insert(id.to_string(), Arc::downgrade(&coordinator));
         coordinator
+    }
+
+    /// Serializes command-level operations for one Computer before they enter the application-wide
+    /// configuration transaction. Runtime Input can hold the runtime lifecycle lock indefinitely;
+    /// acquiring this gate first prevents a same-Computer waiter from holding the global
+    /// transaction lock and blocking unrelated Computers.
+    pub async fn operation_lease(&self, id: &str) -> OwnedMutexGuard<()> {
+        let coordinator = {
+            let mut coordinators = self
+                .runtime_operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(coordinator) = coordinators.get(id).and_then(Weak::upgrade) {
+                coordinator
+            } else {
+                coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
+                let coordinator = Arc::new(Mutex::new(()));
+                coordinators.insert(id.to_string(), Arc::downgrade(&coordinator));
+                coordinator
+            }
+        };
+        coordinator.lock_owned().await
+    }
+
+    /// Linearizes runtime membership changes that can carry Manager authority with Context
+    /// cleanup. This lock is deliberately independent from the application-wide configuration
+    /// transaction so waiting for one Computer's operation gate cannot convoy unrelated
+    /// lifecycle commands.
+    pub(crate) async fn membership_lease(&self) -> OwnedMutexGuard<()> {
+        self.runtime_membership.clone().lock_owned().await
     }
 
     fn runtime_entry_matches(
@@ -210,6 +266,8 @@ impl ComputerRegistry {
             self.skill_home_base.clone(),
             self.secret_store.clone(),
             self.runtime_event_sink.clone(),
+            self.runtime_input_bridge.clone(),
+            self.client_control_binding.clone(),
         );
         {
             let mut runtimes = self.runtimes.write().await;
@@ -249,13 +307,36 @@ impl ComputerRegistry {
                 "Computer runtime does not exist for instance {instance_id}"
             ))
         })?;
+        let remote_control_policy_changed =
+            existing.instance.remote_control != instance.remote_control;
+        let command_line_policy_changed = existing.instance.command_line != instance.command_line;
+        let was_running = existing.is_running().await;
         let runtime = existing.with_instance(instance);
-        if let Err(error) = runtime.sync_runtime().await {
+        if let Err(error) = runtime
+            .sync_runtime_for_policy_change(
+                remote_control_policy_changed,
+                command_line_policy_changed,
+            )
+            .await
+        {
             let restore_runtime = existing.with_instance(existing.instance.clone());
-            if let Err(restore_error) = restore_runtime.sync_runtime().await {
+            if let Err(restore_error) = restore_runtime
+                .sync_runtime_for_policy_change(
+                    remote_control_policy_changed,
+                    command_line_policy_changed,
+                )
+                .await
+            {
                 return Err(error.append_context(format!(
                     "additionally failed to restore previous runtime: {restore_error}"
                 )));
+            }
+            if was_running && !restore_runtime.is_running().await {
+                if let Err(restore_error) = restore_runtime.start().await {
+                    return Err(error.append_context(format!(
+                        "previous Computer configuration was restored, but its running state could not be restored: {restore_error}"
+                    )));
+                }
             }
             return Err(error);
         }

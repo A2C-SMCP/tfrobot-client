@@ -17,11 +17,7 @@ import {
   type ComputerInstance,
 } from '@/stores/computerStore';
 import { useManagerStore } from '@/stores/managerStore';
-import {
-  isMissingRuntimeInputError,
-  type MissingRuntimeInputError,
-} from '@/utils/runtimeActionError';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
+import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import {
   computerSettingsNavigationKey,
   type ComputerWorkbenchSection,
@@ -218,11 +214,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
   const [view, setView] = useState<'list' | 'detail'>(initialView);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
-  const [runtimeInputPrompt, setRuntimeInputPrompt] = useState<{
-    instanceId: string;
-    error: MissingRuntimeInputError;
-    action: 'start' | 'restart';
-  } | null>(null);
   const [form] = Form.useForm<{
     name: string;
     description?: string;
@@ -314,13 +305,9 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     try {
       if (action === 'start') await startInstance(instance.id);
       if (action === 'restart') await restartInstance(instance.id);
-      setRuntimeInputPrompt(null);
       message.success(t(`computer.messages.${action === 'start' ? 'started' : 'restarted'}`));
     } catch (e) {
-      if (isMissingRuntimeInputError(e)) {
-        setRuntimeInputPrompt({ instanceId: instance.id, error: e, action });
-        return;
-      }
+      if (isRuntimeInputCancelledError(e)) return;
       message.error(t('computer.messages.runtimeOperationFailed'));
     }
   };
@@ -408,19 +395,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     </Modal>
   );
 
-  const renderRuntimeInputPrompt = () => runtimeInputPrompt && (
-    <RuntimeInputPrompt
-      key={`${runtimeInputPrompt.instanceId}:${runtimeInputPrompt.error.input_id}`}
-      instanceId={runtimeInputPrompt.instanceId}
-      error={runtimeInputPrompt.error}
-      onCancel={() => setRuntimeInputPrompt(null)}
-      onSubmitted={async () => {
-        const instance = instances.find((item) => item.id === runtimeInputPrompt.instanceId);
-        if (instance) await runRuntimeAction(instance, runtimeInputPrompt.action);
-      }}
-    />
-  );
-
   if (loading && instances.length === 0) {
     return <Skeleton active paragraph={{ rows: 4 }} />;
   }
@@ -443,7 +417,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
             onNavigate?.(computerSettingsNavigationKey('plugins', owner));
           }}
         />
-        {renderRuntimeInputPrompt()}
       </div>
     );
   }
@@ -483,7 +456,6 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
         </Row>
       )}
       {renderComputerModal()}
-      {renderRuntimeInputPrompt()}
     </div>
   );
 }

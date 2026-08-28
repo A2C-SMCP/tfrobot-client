@@ -36,6 +36,7 @@ describe('SkillsTab', () => {
     expect(screen.getByText('marketplace:tf-market')).toBeInTheDocument();
     expect(screen.getByText('desktop-tools:review')).toBeInTheDocument();
     expect(screen.getByText('mcp:browser')).toBeInTheDocument();
+    expect(screen.queryByText('Open MCP server browser')).not.toBeInTheDocument();
     expect(screen.queryByText('tf-market_desktop-tools')).not.toBeInTheDocument();
     expect(screen.queryByText('mcp_browser')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /enable/i })).not.toBeInTheDocument();
@@ -196,6 +197,7 @@ describe('SkillsTab', () => {
           loadingSkills: false,
           loadingSkill: false,
           loadingMarketplace: false,
+          marketplaceOperation: null,
           error: null,
           skillError: null,
           marketplaceError: null,

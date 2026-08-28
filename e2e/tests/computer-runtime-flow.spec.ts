@@ -95,8 +95,8 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.getByText('Debug Panel', { exact: true }).click();
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Search tools...')).toBeVisible();
-    await page.getByRole('button', { name: /Logs/ }).click();
-    await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: /Activity$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
   });
 
   test('projects runtime status events into the active Computer view and refreshes consumers', async ({ page }) => {
@@ -226,6 +226,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
               current: true,
               message: 'mcp_start_failed',
               recommended_actions: ['restart_runtime', 'view_logs'],
+              presentation_detail: 'process exited with code 1',
               technical_detail: 'process exited with code 1',
             }],
             last_error: null,
@@ -240,9 +241,9 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(runtimePanel.getByText('The Runtime is available, but an MCP server could not start.'))
       .toBeVisible();
     await expect(runtimePanel.getByText('Affected: MCP server Browser MCP')).toBeVisible();
-    await expect(runtimePanel.getByText('process exited with code 1')).not.toBeVisible();
+    await expect(runtimePanel.getByText('Technical details: process exited with code 1')).toBeVisible();
     await runtimePanel.getByRole('button', { name: 'View logs' }).click();
-    await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
   });
 
   test('keeps the workbench accessible and responsive in a narrow desktop window', async ({

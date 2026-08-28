@@ -28,6 +28,10 @@ export function RuntimeDiagnostics({ runtime, recentEvents }: RuntimeDiagnostics
         return t('computer.runtime.eventCauses.capabilityRevisionBumped', {
           revision: cause.revision,
         });
+      case 'diagnostics_changed':
+        return t('computer.runtime.eventCauses.diagnosticsChanged', {
+          revision: cause.revision,
+        });
       case 'client_connection_state_changed':
         return t('computer.runtime.eventCauses.clientConnectionStateChanged', {
           revision: cause.revision,
@@ -52,6 +56,11 @@ export function RuntimeDiagnostics({ runtime, recentEvents }: RuntimeDiagnostics
           status: cause.has_error
             ? t('computer.runtime.eventCauses.diagnosticFailed')
             : t('computer.runtime.eventCauses.diagnosticCleared'),
+        });
+      case 'oauth_status_changed':
+        return t('computer.runtime.eventCauses.oauthStatusChanged', {
+          bundleId: cause.bundle_id,
+          status: cause.status.state,
         });
       case 'handle_replaced':
         return t('computer.runtime.eventCauses.handleReplaced', { reason: cause.reason });

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Space, Typography } from 'antd';
 import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { RuntimeInputPrompt } from '@/components/InputVariables/RuntimeInputPrompt';
 import {
   useMcpStore,
   type McpBatchOperationResult,
@@ -27,6 +26,8 @@ function runtimeSuccessMessage(action: McpRuntimeAction) {
   switch (action.kind) {
     case 'start':
       return { key: 'mcp.messages.started' as const, options: { name: action.name } };
+    case 'retry':
+      return { key: 'mcp.messages.reconnected' as const, options: { name: action.name } };
     default:
       return null;
   }
@@ -56,6 +57,9 @@ export function McpRuntimeControls({
     stopServer,
     startAll,
     stopAll,
+    authorizeServer,
+    cancelAuthorization,
+    clearAuthorization,
   } = useMcpStore();
 
   useEffect(() => {
@@ -75,6 +79,7 @@ export function McpRuntimeControls({
   const runtimeActions = useMcpRuntimeActions({
     instanceId,
     startServer,
+    stopServer,
     startAll,
     onBatchResult: (result) => setBatchFeedback({ action: 'start', result }),
     onError: () => message.error(t('mcp.messages.operationFailed')),
@@ -105,6 +110,20 @@ export function McpRuntimeControls({
     } catch {
       if (activeInstanceRef.current !== actionInstanceId) return;
       message.error(t('mcp.messages.operationFailed'));
+    }
+  };
+
+  const runAuthorizationAction = async (
+    action: (instanceId: string, bundleId: string) => Promise<void>,
+    bundleId: string,
+  ) => {
+    const actionInstanceId = instanceId;
+    try {
+      await action(actionInstanceId, bundleId);
+    } catch {
+      if (activeInstanceRef.current === actionInstanceId) {
+        message.error(t('mcp.messages.operationFailed'));
+      }
     }
   };
 
@@ -227,22 +246,17 @@ export function McpRuntimeControls({
         actionsDisabledReason={disabledReason}
         loading={loading}
         onOpenPlugin={onOpenPlugin}
+        onAuthorize={(bundleId) => runAuthorizationAction(authorizeServer, bundleId)}
+        onCancelAuthorization={(bundleId) => runAuthorizationAction(cancelAuthorization, bundleId)}
+        onClearAuthorization={(bundleId) => runAuthorizationAction(clearAuthorization, bundleId)}
         onStop={(bundleId, name) => handleStopServer(bundleId, name)}
+        onRetry={(bundleId, name) => runtimeActions.run({ kind: 'retry', bundleId, name })}
         onStart={(bundleId) => {
           const server = servers.find((candidate) => candidate.bundleId === bundleId);
           return runtimeActions.run({ kind: 'start', bundleId, name: server?.name ?? bundleId });
         }}
       />
 
-      {runtimeActions.pending && (
-        <RuntimeInputPrompt
-          key={`${instanceId}:${runtimeActions.pending.error.input_id}`}
-          instanceId={instanceId}
-          error={runtimeActions.pending.error}
-          onCancel={runtimeActions.cancel}
-          onSubmitted={runtimeActions.retry}
-        />
-      )}
     </div>
   );
 }

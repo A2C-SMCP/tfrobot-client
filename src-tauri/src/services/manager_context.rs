@@ -1,9 +1,10 @@
 //! Backend-owned TFRSManager identity context.
 //!
 //! This coordinator is the only production entry point for Manager authentication and
-//! authenticated HTTP calls. It keeps credentials inside [`ManagerClient`], publishes only a
-//! redacted snapshot, and serializes identity-changing transactions so a late response cannot
-//! overwrite a newer account context.
+//! authenticated HTTP calls. [`ManagerClient`] remains the authoritative credential owner; only
+//! the dedicated TypeScript token bridge receives a transient copy. The coordinator publishes
+//! only a redacted snapshot and serializes identity-changing transactions so a late response
+//! cannot overwrite a newer account context.
 
 use std::{
     future::Future,
@@ -22,6 +23,9 @@ use crate::services::manager_client::{
     SwitchedManagerAccount, UserInfo,
 };
 use crate::services::manager_environment::ManagerEnvironment;
+use crate::services::manager_token_bridge::{
+    ManagerTokenBridge, ManagerTokenBridgeSink, ManagerTokenProfile,
+};
 use crate::services::settings::{
     ManagerSessionConfig, ManagerSessionConfigError, PersistedManagerSession, SettingsService,
     MANAGER_SESSION_SCHEMA_VERSION,
@@ -39,7 +43,7 @@ pub enum ManagerAuthState {
     Authenticated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerContextKey {
     pub environment: ManagerEnvironment,
@@ -138,6 +142,7 @@ impl Drop for ManagerContextTransitionGuard<'_> {
 
 pub struct ManagerContextCoordinator {
     client: Arc<ManagerClient>,
+    token_bridge: Arc<ManagerTokenBridge>,
     settings: Arc<SettingsService>,
     snapshot: RwLock<ManagerContextSnapshot>,
     transaction_lock: Mutex<()>,
@@ -149,8 +154,17 @@ pub struct ManagerContextCoordinator {
 
 impl ManagerContextCoordinator {
     pub fn new(client: Arc<ManagerClient>, settings: Arc<SettingsService>) -> Self {
+        Self::new_with_token_bridge(client, settings, Arc::new(ManagerTokenBridge::new()))
+    }
+
+    fn new_with_token_bridge(
+        client: Arc<ManagerClient>,
+        settings: Arc<SettingsService>,
+        token_bridge: Arc<ManagerTokenBridge>,
+    ) -> Self {
         Self {
             client,
+            token_bridge,
             settings,
             snapshot: RwLock::new(ManagerContextSnapshot::default()),
             transaction_lock: Mutex::new(()),
@@ -171,6 +185,7 @@ impl ManagerContextCoordinator {
     ) -> Self {
         Self {
             client,
+            token_bridge: Arc::new(ManagerTokenBridge::new()),
             settings,
             snapshot: RwLock::new(ManagerContextSnapshot::default()),
             transaction_lock: Mutex::new(()),
@@ -187,6 +202,18 @@ impl ManagerContextCoordinator {
 
     pub async fn set_lifecycle_sink(&self, sink: Arc<dyn ManagerContextLifecycleSink>) {
         *self.lifecycle_sink.write().await = Some(sink);
+    }
+
+    pub async fn set_token_bridge_sink(&self, sink: Arc<dyn ManagerTokenBridgeSink>) {
+        self.token_bridge.set_sink(sink).await;
+    }
+
+    pub async fn set_token_bridge_ready(&self, lease_id: &str, ready: bool) {
+        self.token_bridge.set_ready(lease_id, ready).await;
+    }
+
+    pub async fn force_token_bridge_not_ready(&self) {
+        self.token_bridge.force_not_ready().await;
     }
 
     pub async fn snapshot(&self) -> ManagerContextSnapshot {
@@ -560,11 +587,7 @@ impl ManagerContextCoordinator {
         scope: Option<String>,
     ) -> Result<ExchangedToken, ManagerError> {
         let generation = self.capture_authenticated_generation().await?;
-        let outcome = self
-            .client
-            .exchange_token_outcome(robot_account_id, scope)
-            .await?;
-        self.handle_authenticated_outcome_for_generation(outcome, Some(generation))
+        self.exchange_token_for_generation(generation, robot_account_id, scope)
             .await
     }
 
@@ -576,11 +599,57 @@ impl ManagerContextCoordinator {
     ) -> Result<ExchangedToken, ManagerError> {
         self.ensure_authenticated_generation(expected_generation)
             .await?;
-        let outcome = self
+        let material = self
             .client
-            .exchange_token_outcome(robot_account_id, scope)
+            .token_material_for_generation(expected_generation)
             .await?;
+        let generation = material.generation;
+        let result = self
+            .token_bridge
+            .exchange(
+                generation,
+                material.token_url,
+                material.user_jwt,
+                format!("robot:{robot_account_id}"),
+                scope,
+                ManagerTokenProfile::Session,
+            )
+            .await;
+        let outcome = ManagerRequestOutcome { generation, result };
         self.handle_authenticated_outcome_for_generation(outcome, Some(expected_generation))
+            .await
+    }
+
+    pub async fn token_bridge_http_request(
+        &self,
+        request_id: &str,
+        expected_generation: u64,
+        body: String,
+    ) -> Result<(u16, String, Option<String>), ManagerError> {
+        self.ensure_authenticated_generation(expected_generation)
+            .await?;
+        let attempt_id = self
+            .token_bridge
+            .begin_transport(request_id, expected_generation, &body)
+            .await?;
+        let result = self
+            .client
+            .token_bridge_http_for_generation(expected_generation, body)
+            .await;
+        self.token_bridge
+            .finish_transport(request_id, expected_generation, &attempt_id)
+            .await?;
+        result
+    }
+
+    pub async fn complete_token_bridge_request(
+        &self,
+        request_id: &str,
+        generation: u64,
+        completion: crate::services::manager_token_bridge::ManagerTokenBridgeCompletion,
+    ) -> Result<(), ManagerError> {
+        self.token_bridge
+            .complete(request_id, generation, completion)
             .await
     }
 

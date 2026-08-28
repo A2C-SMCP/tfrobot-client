@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { create } from 'zustand';
+import { debug } from '@/utils/logger';
 import { useComputerStore } from './computerStore';
 import { useDashboardStore } from './dashboardStore';
 import { useDebugStore } from './debugStore';
@@ -30,6 +31,7 @@ export type ComputerRuntimeEventCause =
   | { kind: 'lifecycle_changed'; state: ComputerRuntimeSnapshot['lifecycle'] }
   | { kind: 'config_revision_bumped'; revision: number }
   | { kind: 'capability_revision_bumped'; revision: number }
+  | { kind: 'diagnostics_changed'; revision: number }
   | {
       kind: 'client_connection_state_changed';
       revision: number;
@@ -43,6 +45,11 @@ export type ComputerRuntimeEventCause =
       bundle_id: string;
       operation: string;
       has_error: boolean;
+    }
+  | {
+      kind: 'oauth_status_changed';
+      bundle_id: string;
+      status: import('./mcpStore').SdkOAuthStatus;
     }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
@@ -148,6 +155,17 @@ const initialState = {
   error: null as string | null,
 };
 
+function connectionDiagnosticSummary(connection: ClientConnectionAuthorityInput) {
+  return {
+    present: connection.present,
+    status: 'status' in connection
+      ? connection.status
+      : connection.present ? 'connected' : 'disconnected',
+    revision: connection.revision,
+    operation: 'operation' in connection ? connection.operation : null,
+  };
+}
+
 export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   ...initialState,
 
@@ -166,6 +184,14 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // Admission runs first so a trusted post-delete status can explicitly reopen the event fence
     // before its independently versioned connection authority is projected.
     if (connection) applyConnectionAuthority(instanceId, snapshot, connection);
+    if (connection) {
+      const diagnostic = connectionDiagnosticSummary(connection);
+      if (diagnostic.present || diagnostic.operation !== null || !accepted) {
+        debug(
+          `connection.snapshot_received layer=frontend instance_id=${instanceId} accepted=${accepted} status=${diagnostic.status} operation=${diagnostic.operation ?? 'none'} connection_revision=${diagnostic.revision} runtime_incarnation=${snapshot.incarnation} runtime_generation=${snapshot.generation} snapshot_revision=${snapshot.snapshot_revision}`,
+        );
+      }
+    }
     if (!accepted) {
       // A status response may carry a newer independent connection authority together with an
       // older SDK snapshot. Re-project the current SDK authority so that connection-only changes
@@ -198,6 +224,18 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // its own revision plus the paired runtime generation/revision to reject equal-revision
     // observations that arrive out of order.
     applyConnectionAuthority(event.instance_id, event.snapshot, event.connection);
+    const connectionDiagnostic = connectionDiagnosticSummary(event.connection);
+    if (
+      event.cause.kind === 'client_connection_state_changed'
+      || event.cause.kind === 'client_connection_authority_changed'
+      || event.cause.kind === 'handle_replaced'
+      || event.cause.kind === 'resync'
+      || (event.cause.kind === 'lifecycle_changed' && connectionDiagnostic.present)
+    ) {
+      debug(
+        `connection.runtime_event_received layer=frontend instance_id=${event.instance_id} cause=${event.cause.kind} accepted=${accepted} status=${connectionDiagnostic.status} operation=${connectionDiagnostic.operation ?? 'none'} connection_revision=${connectionDiagnostic.revision} runtime_incarnation=${event.snapshot.incarnation} runtime_generation=${event.snapshot.generation} snapshot_revision=${event.snapshot.snapshot_revision}`,
+      );
+    }
     if (!accepted) {
       // Connection authority is versioned independently and has already been projected above.
       // Event history deliberately remains a history of accepted runtime observations so a
@@ -222,6 +260,20 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       };
     });
     applySnapshotToConsumers(event.instance_id, event.snapshot);
+    if (event.cause.kind === 'oauth_status_changed') {
+      useMcpStore.getState().applyOAuthStatusEvent(
+        event.instance_id,
+        event.cause.bundle_id,
+        event.cause.status,
+      );
+    } else if (
+      event.cause.kind === 'resync'
+      && useMcpStore.getState().activeInstanceId === event.instance_id
+    ) {
+      // OAuth state is intentionally absent from the compact runtime snapshot. A lag marker is
+      // therefore the event-driven signal to rehydrate MCP rows after one or more dropped events.
+      void useMcpStore.getState().rehydrateServers(event.instance_id);
+    }
     refreshRevisionConsumers(event.instance_id, previous, event.snapshot);
   },
 
