@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Alert, Button, Space, Spin, Switch, Tag, Typography, message } from 'antd';
+import { Alert, Button, Input, Space, Spin, Switch, Tag, Typography, message } from 'antd';
 import { FolderOpenOutlined, UndoOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useComputerStore, type CommandLineToolPolicy } from '@/stores/computerStore';
@@ -21,6 +21,10 @@ interface CommandLineToolState {
 interface CommandLineToolSettingsProps {
   computerId: string;
 }
+
+const isWorkspaceLocked = (runtimeState: RuntimeState) => (
+  runtimeState === 'starting' || runtimeState === 'running'
+);
 
 export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsProps) {
   const { t } = useTranslation();
@@ -69,7 +73,11 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
   };
 
   const chooseWorkspace = async () => {
-    if (!state) return;
+    if (
+      !state
+      || saving
+      || isWorkspaceLocked(state.runtimeState)
+    ) return;
     const selected = await open({
       directory: true,
       multiple: false,
@@ -77,7 +85,13 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
       defaultPath: state.effectiveWorkspace,
     });
     if (typeof selected === 'string') {
-      await update({ ...state.policy, workspace_root: selected });
+      const latest = await invoke<CommandLineToolState>('get_command_line_tool_state', {
+        computerId,
+      });
+      setState(latest);
+      if (!isWorkspaceLocked(latest.runtimeState)) {
+        await update({ ...latest.policy, workspace_root: selected });
+      }
     }
   };
 
@@ -91,6 +105,7 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
     running: 'success',
     error: 'error',
   };
+  const workspaceLocked = isWorkspaceLocked(state.runtimeState);
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -136,25 +151,35 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
 
       <Space direction="vertical" size={4} style={{ width: '100%' }}>
         <Text strong>{t('computer.builtInTools.commandLine.workspace')}</Text>
-        <Text code copyable>{state.effectiveWorkspace}</Text>
+        <Input
+          value={state.effectiveWorkspace}
+          readOnly
+          disabled={workspaceLocked}
+          title={state.effectiveWorkspace}
+          aria-label={t('computer.builtInTools.commandLine.workspace')}
+        />
         <Text type="secondary">
-          {state.policy.workspace_root
-            ? t('computer.builtInTools.commandLine.customWorkspace')
-            : t('computer.builtInTools.commandLine.defaultWorkspace')}
+          {workspaceLocked
+            ? t('computer.builtInTools.commandLine.workspaceLocked')
+            : state.policy.workspace_root
+              ? t('computer.builtInTools.commandLine.customWorkspace')
+              : t('computer.builtInTools.commandLine.defaultWorkspace')}
         </Text>
         <Space>
           <Button
             icon={<FolderOpenOutlined />}
-            disabled={saving}
+            disabled={saving || workspaceLocked}
             onClick={() => void chooseWorkspace()}
+            aria-label={t('computer.builtInTools.commandLine.chooseWorkspace')}
           >
             {t('computer.builtInTools.commandLine.chooseWorkspace')}
           </Button>
           {state.policy.workspace_root && (
             <Button
               icon={<UndoOutlined />}
-              disabled={saving}
+              disabled={saving || workspaceLocked}
               onClick={() => void update({ ...state.policy, workspace_root: undefined })}
+              aria-label={t('computer.builtInTools.commandLine.useDefaultWorkspace')}
             >
               {t('computer.builtInTools.commandLine.useDefaultWorkspace')}
             </Button>

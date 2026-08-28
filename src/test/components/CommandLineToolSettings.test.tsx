@@ -44,6 +44,7 @@ describe('CommandLineToolSettings', () => {
       { request: { computerId: 'computer-a', policy: { enabled: true } } },
     ));
     expect(await screen.findByText('Pending start')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Workspace' })).toBeEnabled();
   });
 
   it('persists a selected custom workspace without adding another switch', async () => {
@@ -62,5 +63,61 @@ describe('CommandLineToolSettings', () => {
       },
     ));
     expect(screen.getAllByRole('switch')).toHaveLength(1);
+  });
+
+  it.each(['starting', 'running'] as const)(
+    'locks workspace changes while the command line tool is %s',
+    async (runtimeState) => {
+      vi.mocked(invoke).mockImplementation(async (command) => {
+        if (command === 'get_command_line_tool_state') {
+          return {
+            ...disabledState,
+            policy: { enabled: true, workspace_root: '/work/project' },
+            effectiveWorkspace: '/work/project',
+            runtimeState,
+          };
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+
+      render(<CommandLineToolSettings computerId="computer-a" />);
+
+      expect(await screen.findByRole('textbox', { name: 'Workspace' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Choose workspace' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Use default' })).toBeDisabled();
+      expect(screen.getByText(
+        'The workspace cannot be changed while the command line tool is running. '
+        + 'Turn it off to make changes.',
+      )).toBeInTheDocument();
+      expect(open).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rechecks runtime state before applying a workspace selected from an open dialog', async () => {
+    let resolveSelection: ((path: string) => void) | undefined;
+    vi.mocked(open).mockReturnValue(new Promise((resolve) => {
+      resolveSelection = resolve;
+    }));
+    let stateRequestCount = 0;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_command_line_tool_state') {
+        stateRequestCount += 1;
+        return stateRequestCount === 1
+          ? disabledState
+          : { ...disabledState, policy: { enabled: true }, runtimeState: 'running' };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<CommandLineToolSettings computerId="computer-a" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Choose workspace' }));
+    resolveSelection?.('/work/project');
+
+    await waitFor(() => expect(stateRequestCount).toBe(2));
+    expect(screen.getByRole('textbox', { name: 'Workspace' })).toBeDisabled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      'update_command_line_tool_policy',
+      expect.anything(),
+    );
   });
 });

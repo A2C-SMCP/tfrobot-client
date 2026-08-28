@@ -139,7 +139,6 @@ pub async fn update_command_line_tool_policy_core(
     state: &AppState,
     request: UpdateCommandLineToolPolicyRequest,
 ) -> Result<CommandLineToolState, String> {
-    request.policy.validate_existing_workspace()?;
     let _operation_guard = state
         .computer_registry
         .operation_lease(&request.computer_id)
@@ -150,6 +149,13 @@ pub async fn update_command_line_tool_policy_core(
         .get_computer_instance(&request.computer_id)
         .map_err(|error| error.to_string())?;
     let previous_policy = previous.command_line.clone();
+    let current_state = get_command_line_tool_state_core(state, &request.computer_id).await?;
+    validate_workspace_update(
+        &previous_policy,
+        &request.policy,
+        current_state.runtime_state,
+    )?;
+    request.policy.validate_existing_workspace()?;
     if request.policy.enabled {
         command_line_server_config(
             &request.policy,
@@ -190,4 +196,83 @@ pub async fn update_command_line_tool_policy_core(
         return Err(error);
     }
     get_command_line_tool_state_core(state, &request.computer_id).await
+}
+
+fn validate_workspace_update(
+    previous: &CommandLineToolPolicy,
+    requested: &CommandLineToolPolicy,
+    runtime_state: CommandLineToolRuntimeState,
+) -> Result<(), String> {
+    let workspace_changed = previous.workspace_root != requested.workspace_root;
+    if workspace_changed
+        && matches!(
+            runtime_state,
+            CommandLineToolRuntimeState::Starting | CommandLineToolRuntimeState::Running
+        )
+    {
+        return Err(
+            "command line workspace cannot be changed while the tool is starting or running"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_change_is_rejected_while_runtime_is_active() {
+        let previous = CommandLineToolPolicy {
+            enabled: true,
+            workspace_root: Some(PathBuf::from("/old/workspace")),
+        };
+        let requested = CommandLineToolPolicy {
+            workspace_root: Some(PathBuf::from("/new/workspace")),
+            ..previous.clone()
+        };
+
+        for runtime_state in [
+            CommandLineToolRuntimeState::Starting,
+            CommandLineToolRuntimeState::Running,
+        ] {
+            let error = validate_workspace_update(&previous, &requested, runtime_state)
+                .expect_err("active runtime must reject workspace changes");
+            assert!(error.contains("cannot be changed"));
+        }
+    }
+
+    #[test]
+    fn workspace_change_is_allowed_while_runtime_is_inactive() {
+        let previous = CommandLineToolPolicy::default();
+        let requested = CommandLineToolPolicy {
+            enabled: false,
+            workspace_root: Some(PathBuf::from("/new/workspace")),
+        };
+
+        for runtime_state in [
+            CommandLineToolRuntimeState::Disabled,
+            CommandLineToolRuntimeState::Pending,
+            CommandLineToolRuntimeState::Error,
+        ] {
+            validate_workspace_update(&previous, &requested, runtime_state)
+                .expect("inactive runtime must allow workspace changes");
+        }
+    }
+
+    #[test]
+    fn unchanged_workspace_is_allowed_while_runtime_is_active() {
+        let previous = CommandLineToolPolicy {
+            enabled: true,
+            workspace_root: Some(PathBuf::from("/workspace")),
+        };
+        let requested = CommandLineToolPolicy {
+            enabled: false,
+            ..previous.clone()
+        };
+
+        validate_workspace_update(&previous, &requested, CommandLineToolRuntimeState::Running)
+            .expect("turning the tool off must remain allowed");
+    }
 }
