@@ -59,7 +59,7 @@ test.describe('Computer settings navigation and runtime boundary', () => {
 
     await navigation.getByText('Inputs', { exact: true }).click();
     await expectNoRuntimeActions();
-    await expect(page.getByRole('button', { name: 'Add Variable' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add Input' })).toBeVisible();
 
     await navigation.getByText('Connection Policy', { exact: true }).click();
     await expectNoRuntimeActions();
@@ -119,7 +119,7 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     await expect(
       page.getByRole('heading', { name: 'Inputs', exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Add Variable' })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'Add Input' })).toBeInViewport();
 
     await navigation.getByText('MCP Servers', { exact: true }).click();
     await expect(page.getByRole('button', { name: 'Import Config' })).toBeInViewport();
