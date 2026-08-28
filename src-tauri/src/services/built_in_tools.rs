@@ -6,6 +6,13 @@ pub const COMMAND_LINE_BUNDLE_ID: &str = "tfrobot_tfbash_mcp";
 pub const COMMAND_LINE_PROVIDER: &str = "command_line";
 pub const BUILT_IN_RESOURCE_ROOT_ENV: &str = "TFROBOT_BUILT_IN_RESOURCE_ROOT";
 
+pub(crate) fn configure_resource_root(resource_root: Option<&Path>) {
+    match resource_root {
+        Some(path) => std::env::set_var(BUILT_IN_RESOURCE_ROOT_ENV, path),
+        None => std::env::remove_var(BUILT_IN_RESOURCE_ROOT_ENV),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CommandLineToolPolicy {
@@ -185,7 +192,37 @@ compile_error!("TFRC-125 does not define a bundled tfbash runtime for this targe
 mod tests {
     use super::*;
     use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static RESOURCE_ROOT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn restore_resource_root(previous: Option<OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(BUILT_IN_RESOURCE_ROOT_ENV, value),
+            None => std::env::remove_var(BUILT_IN_RESOURCE_ROOT_ENV),
+        }
+    }
+
+    #[test]
+    fn resource_root_configuration_replaces_and_clears_stale_process_state() {
+        let _guard = RESOURCE_ROOT_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(BUILT_IN_RESOURCE_ROOT_ENV);
+        std::env::set_var(BUILT_IN_RESOURCE_ROOT_ENV, "/stale/resources");
+
+        configure_resource_root(None);
+        let cleared = std::env::var_os(BUILT_IN_RESOURCE_ROOT_ENV);
+
+        let resolved = Path::new("/resolved/resources");
+        configure_resource_root(Some(resolved));
+        let configured = std::env::var_os(BUILT_IN_RESOURCE_ROOT_ENV);
+
+        restore_resource_root(previous);
+
+        assert!(cleared.is_none());
+        assert_eq!(configured, Some(resolved.as_os_str().to_os_string()));
+    }
 
     #[test]
     fn custom_workspace_must_be_absolute() {

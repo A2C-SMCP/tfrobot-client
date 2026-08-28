@@ -327,14 +327,17 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("Failed to get app data directory");
-            let resource_dir = app
-                .path()
-                .resource_dir()
-                .expect("Failed to get app resource directory");
-            std::env::set_var(
-                services::built_in_tools::BUILT_IN_RESOURCE_ROOT_ENV,
-                resource_dir.join("resources"),
-            );
+            match services::runtime::resource_root_from_app(app.handle()) {
+                Ok(resource_root) => services::built_in_tools::configure_resource_root(Some(
+                    resource_root.as_path(),
+                )),
+                Err(error) => {
+                    services::built_in_tools::configure_resource_root(None);
+                    log::error!(
+                        "built-in command line tool is unavailable because its resource root could not be resolved: {error}"
+                    );
+                }
+            }
 
             let client_computers_paths = ClientComputersPaths::from_app_data_dir(&app_data_dir);
             let config_service = ConfigService::new_with_client_computers_paths(
