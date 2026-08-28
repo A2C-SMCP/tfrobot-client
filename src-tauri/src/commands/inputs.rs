@@ -177,7 +177,7 @@ pub(crate) fn input_definition_from_sdk(input: &MCPServerInput) -> InputDefiniti
         MCPServerInput::Command(input) => {
             let args = input.args.as_ref().map(|args| {
                 let mut args = args.iter().collect::<Vec<_>>();
-                args.sort_by(|(left, _), (right, _)| left.cmp(right));
+                args.sort_by_key(|(key, _)| *key);
                 args.into_iter().map(|(_, value)| value.clone()).collect()
             });
             InputDefinition::Command {
