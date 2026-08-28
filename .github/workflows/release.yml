@@ -18,12 +18,16 @@ jobs:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
+            bundles: app,dmg
           - platform: macos-latest
             target: x86_64-apple-darwin
+            bundles: app,dmg
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
 
     runs-on: ${{ matrix.platform }}
 
@@ -60,6 +64,41 @@ jobs:
       - name: Prepare and verify offline tfbash runtime
         run: pnpm runtime:prepare:tfbash -- ${{ matrix.target }}
 
+      # The bundled Python runtime contains native Mach-O executables, extension
+      # modules and dylibs. Tauri signs the outer app bundle, but Apple notarization
+      # also requires every nested native binary to carry its own Developer ID
+      # signature and secure timestamp.
+      - name: Import Apple code-signing certificate (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Sign bundled tfbash native binaries (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          RUNTIME_ROOT="src-tauri/resources/tfbash/${{ matrix.target }}"
+          SIGNED_COUNT=0
+          while IFS= read -r -d '' CANDIDATE; do
+            if file -b "$CANDIDATE" | grep -q '^Mach-O'; then
+              codesign --force --timestamp --options runtime \
+                --sign "$APPLE_SIGNING_IDENTITY" "$CANDIDATE"
+              codesign --verify --strict --verbose=2 "$CANDIDATE"
+              SIGNED_COUNT=$((SIGNED_COUNT + 1))
+            fi
+          done < <(find "$RUNTIME_ROOT" -type f -print0)
+          if [ "$SIGNED_COUNT" -eq 0 ]; then
+            echo "::error::No Mach-O files found under $RUNTIME_ROOT"
+            exit 1
+          fi
+          echo "Signed and verified $SIGNED_COUNT bundled Mach-O files."
+          pnpm runtime:prepare:tfbash -- "${{ matrix.target }}" --refresh-manifest
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -67,14 +106,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
           # Apple code-signing + notarization (macOS only; ignored on other platforms).
-          # tauri-action 自动检测这组变量，创建临时 keychain → 签名 → 公证 → staple。
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # 证书由上面的 Apple Action 导入；Tauri 使用 identity 签名并自动公证应用。
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: 'TFRobot Client v__VERSION__'
@@ -85,10 +121,10 @@ jobs:
 
             - **macOS**：下载 `.dmg`，双击挂载后将应用拖入 Applications 即可。已通过 Apple 公证，无需任何额外命令。
             - **Windows**：下载 `.msi` 或 `.exe` 安装包并运行。
-            - **Linux**：下载 `.AppImage` 或 `.deb`。
+            - **Linux**：下载 `.deb` 或 `.rpm` 安装包。
           releaseDraft: false
           prerelease: false
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # tauri-action 只把 .app 提交给 notarytool 公证，.dmg 容器从未公证 → stapler
       # 拿 .dmg 的 hash 在 Apple CloudKit 上查不到 ticket。这里单独把 .dmg 公证 + staple。

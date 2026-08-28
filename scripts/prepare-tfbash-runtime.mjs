@@ -33,6 +33,7 @@ const targets = {
 
 const args = process.argv.slice(2);
 const verifyOnly = args.includes('--verify');
+const refreshManifestOnly = args.includes('--refresh-manifest');
 const requestedTarget = args.find((value) => !value.startsWith('--'))
   ?? process.env.TAURI_ENV_TARGET_TRIPLE
   ?? process.env.TARGET;
@@ -98,6 +99,22 @@ const expectedManifestBase = {
     powershell: { version: POWERSHELL_VERSION, sha256: target.powershellSha256 },
   } : {}),
 };
+
+if (refreshManifestOnly) {
+  if (!existsSync(pythonPath) || !existsSync(packagePath)) {
+    throw new Error(`tfbash runtime is missing for ${requestedTarget}`);
+  }
+  if (target.powershellSha256 && !existsSync(powershellPath)) {
+    throw new Error(`tfbash PowerShell runtime is missing for ${requestedTarget}`);
+  }
+  const payloadSha256 = await hashPayloadTree(outputRoot);
+  await writeFile(manifestPath, `${JSON.stringify({
+    ...expectedManifestBase,
+    payloadSha256,
+  }, null, 2)}\n`);
+  console.log(`tfbash runtime manifest refreshed: ${requestedTarget}`);
+  process.exit(0);
+}
 
 async function isPrepared() {
   if (!existsSync(manifestPath) || !existsSync(pythonPath) || !existsSync(packagePath)) return false;
