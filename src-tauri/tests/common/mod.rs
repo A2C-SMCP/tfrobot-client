@@ -159,6 +159,7 @@ pub mod mcp {
             .ok_or_else(|| format!("Server not found: {name}"))
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn add_mcp_server_core(
         state: &AppState,
         instance_id: &str,
@@ -167,6 +168,7 @@ pub mod mcp {
         update_runtime_server_for_test(state, instance_id, config).await
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn update_mcp_server_core(
         state: &AppState,
         instance_id: &str,
@@ -175,6 +177,7 @@ pub mod mcp {
         update_runtime_server_for_test(state, instance_id, config).await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn update_runtime_server_for_test(
         state: &AppState,
         instance_id: &str,
