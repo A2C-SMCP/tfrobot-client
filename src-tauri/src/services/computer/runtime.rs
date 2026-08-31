@@ -74,13 +74,8 @@ impl ComputerInstanceRuntime {
                 | LifecycleState::Shutdown
                 | LifecycleState::Error
         ) {
-            self.replace_sdk_computer(
-                false,
-                "start_with_persisted_configuration",
-                HandleReplacementConfig::ReloadPersisted,
-                failure_policy,
-            )
-            .await?;
+            self.replace_sdk_computer(false, "start_with_persisted_configuration", failure_policy)
+                .await?;
         } else if matches!(
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
@@ -453,13 +448,8 @@ impl ComputerInstanceRuntime {
     ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(
-            true,
-            "restart",
-            HandleReplacementConfig::ReloadPersisted,
-            failure_policy,
-        )
-        .await
+        self.replace_sdk_computer(true, "restart", failure_policy)
+            .await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {

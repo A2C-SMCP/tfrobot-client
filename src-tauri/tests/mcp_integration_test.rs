@@ -2518,6 +2518,119 @@ async fn test_config_runtime_tool_and_robot_capability_sync_full_chain() {
 }
 
 #[tokio::test]
+async fn disabling_robot_control_preserves_smcp_and_unrelated_mcp_runtime() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+
+    mcp::add_mcp_server_core(
+        &state,
+        TEST_INSTANCE_ID,
+        echo_server_config_with_bundle_id("unrelated-echo", "unrelated-echo"),
+    )
+    .await
+    .unwrap();
+    client_control::update_remote_control_policy_core(
+        &state,
+        UpdateRemoteControlPolicyRequest {
+            computer_id: TEST_INSTANCE_ID.to_string(),
+            policy: RemoteControlPolicy {
+                enabled: true,
+                ..RemoteControlPolicy::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    let before = runtime.runtime_snapshot().await;
+    assert!(runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .iter()
+        .any(|status| {
+            status.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID && status.is_connected()
+        }));
+    assert!(runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .iter()
+        .any(|status| status.bundle_id.as_str() == "unrelated-echo" && status.is_connected()));
+
+    let (server_url, stats) = start_sync_capture_smcp_server().await;
+    connect_runtime_to_mock_robot(&state, &server_url).await;
+    wait_for_sync_event("mock robot never observed the SMCP join event", || {
+        stats.join_events() == 1
+    })
+    .await;
+    let tool_events_before_disable = stats.update_tool_list_events();
+
+    client_control::update_remote_control_policy_core(
+        &state,
+        UpdateRemoteControlPolicyRequest {
+            computer_id: TEST_INSTANCE_ID.to_string(),
+            policy: RemoteControlPolicy::default(),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_sync_event(
+        "Robot control removal was not synchronized to the connected robot",
+        || stats.update_tool_list_events() > tool_events_before_disable,
+    )
+    .await;
+
+    let after = runtime.runtime_snapshot().await;
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(
+        stats.join_events(),
+        1,
+        "policy save must not reconnect SMCP"
+    );
+    assert!(runtime
+        .connection_handle_for_test()
+        .read_owned()
+        .await
+        .is_some());
+    assert!(runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .iter()
+        .all(|status| status.bundle_id.as_str() != CLIENT_CONTROL_BUNDLE_ID));
+    assert!(runtime
+        .mcp_server_runtime_statuses()
+        .await
+        .iter()
+        .any(|status| status.bundle_id.as_str() == "unrelated-echo" && status.is_connected()));
+    assert!(
+        stats.update_tool_list_computers()[tool_events_before_disable..]
+            .iter()
+            .all(|computer| computer == TEST_COMPUTER_NAME)
+    );
+
+    let call = debug::execute_tool_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "unrelated-echo__echo",
+        serde_json::json!({ "message": "still running" }),
+        Some(5.0),
+    )
+    .await
+    .unwrap();
+    assert!(call.success);
+
+    runtime.disconnect_smcp_socketio().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_start_all_servers_uses_sdk_computer_runtime() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
