@@ -743,12 +743,6 @@ impl From<ComputerError> for ComputerRuntimeStartError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandleReplacementConfig {
-    ReloadPersisted,
-    RetainCurrentGeneration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuntimeMcpStartFailurePolicy {
     BestEffort,
     PropagateRuntimeInputFailures,
@@ -1199,7 +1193,7 @@ impl ComputerInstanceRuntime {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
 
-        let provider_is_mounted = self
+        let client_control_is_mounted = self
             .computer
             .read()
             .await
@@ -1215,18 +1209,11 @@ impl ComputerInstanceRuntime {
             .await
             .iter()
             .any(|server| resolve_bundle_id(server).as_str() == COMMAND_LINE_BUNDLE_ID);
-        if provider_is_mounted != self.instance.remote_control.enabled
-            || (provider_is_mounted && remote_control_policy_changed)
+        if client_control_is_mounted != self.instance.remote_control.enabled
+            || (client_control_is_mounted && remote_control_policy_changed)
         {
-            let was_running = self.is_running().await;
-            self.replace_sdk_computer(
-                was_running,
-                "built-in tool policy changed",
-                HandleReplacementConfig::RetainCurrentGeneration,
-                RuntimeMcpStartFailurePolicy::BestEffort,
-            )
-            .await?;
-            return Ok(());
+            self.sync_client_control_provider_inner(client_control_is_mounted)
+                .await?;
         }
         if command_line_is_mounted != self.instance.command_line.enabled
             || (command_line_is_mounted && command_line_policy_changed)
@@ -1254,21 +1241,75 @@ impl ComputerInstanceRuntime {
         Ok(())
     }
 
+    /// Applies the Robot control provider without replacing the SDK Computer handle. Re-mounting
+    /// an enabled provider also refreshes the tool catalog after a scope change while preserving
+    /// the SMCP transport and every unrelated MCP process.
+    async fn sync_client_control_provider_inner(
+        &self,
+        client_control_is_mounted: bool,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        let desired_server = self
+            .instance
+            .remote_control
+            .enabled
+            .then(client_control_server_config);
+        self.sync_built_in_provider_inner(
+            CLIENT_CONTROL_BUNDLE_ID,
+            client_control_is_mounted,
+            desired_server,
+        )
+        .await
+    }
+
     /// Applies the client-owned command-line provider without replacing the SDK Computer handle.
-    /// Keeping this server-local preserves the Computer lifecycle, SMCP transport, and unrelated
-    /// MCP processes while a setting is enabled, disabled, or rolled back.
     async fn sync_command_line_tool_inner(
         &self,
         command_line_is_mounted: bool,
     ) -> Result<(), ComputerRuntimeStartError> {
-        let bundle_id = BundleId::try_from(COMMAND_LINE_BUNDLE_ID).map_err(|error| {
+        let desired_server = if self.instance.command_line.enabled {
+            let instance_storage_root = self
+                .skill_home_base
+                .join(instance_storage_dir_name(&self.instance.id));
+            Some(
+                command_line_server_config(&self.instance.command_line, &instance_storage_root)
+                    .map_err(ComputerRuntimeStartError::Client)?,
+            )
+        } else {
+            None
+        };
+        self.sync_built_in_provider_inner(
+            COMMAND_LINE_BUNDLE_ID,
+            command_line_is_mounted,
+            desired_server,
+        )
+        .await
+    }
+
+    /// Hot-swaps one client-owned built-in provider while leaving the Computer handle intact.
+    /// The desired config is materialized before the current provider is disturbed so validation
+    /// failures cannot unnecessarily stop a healthy provider.
+    async fn sync_built_in_provider_inner(
+        &self,
+        bundle_id: &str,
+        provider_is_mounted: bool,
+        desired_server: Option<MCPServerConfig>,
+    ) -> Result<(), ComputerRuntimeStartError> {
+        let bundle_id = BundleId::try_from(bundle_id).map_err(|error| {
             ComputerRuntimeStartError::Client(format!(
-                "invalid built-in command line bundleId: {error}"
+                "invalid built-in provider bundleId: {error}"
             ))
         })?;
+        if let Some(server) = desired_server.as_ref() {
+            let configured_bundle_id = resolve_bundle_id(server);
+            if configured_bundle_id != bundle_id {
+                return Err(ComputerRuntimeStartError::Client(format!(
+                    "built-in provider config resolved to '{configured_bundle_id}', expected '{bundle_id}'"
+                )));
+            }
+        }
         let computer_running = self.is_running().await;
 
-        if command_line_is_mounted {
+        if provider_is_mounted {
             let server_started = self
                 .computer
                 .read()
@@ -1296,16 +1337,9 @@ impl ComputerInstanceRuntime {
             self.clear_mcp_config_apply_diagnostic(&bundle_id).await;
         }
 
-        if !self.instance.command_line.enabled {
+        let Some(server) = desired_server else {
             return Ok(());
-        }
-
-        let instance_storage_root = self
-            .skill_home_base
-            .join(instance_storage_dir_name(&self.instance.id));
-        let server =
-            command_line_server_config(&self.instance.command_line, &instance_storage_root)
-                .map_err(ComputerRuntimeStartError::Client)?;
+        };
         let server_name = server.name().to_string();
         self.computer
             .read()
@@ -2640,29 +2674,15 @@ impl ComputerInstanceRuntime {
         &self,
         was_running: bool,
         reason: &str,
-        config_mode: HandleReplacementConfig,
         failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> Result<(), ComputerRuntimeStartError> {
         let injected_inputs = self.plugin_runtime_inputs.read().await.clone();
-        let (retained_inputs, retained_mcp_servers) = match config_mode {
-            HandleReplacementConfig::ReloadPersisted => (None, None),
-            HandleReplacementConfig::RetainCurrentGeneration => {
-                let inputs = self.inputs.read().await.clone();
-                let servers = self
-                    .sdk_user_mcp_server_config_map()
-                    .await
-                    .into_values()
-                    .map(|config| (config.name().to_string(), config))
-                    .collect();
-                (Some(inputs), Some(servers))
-            }
-        };
         let (new_computer, sdk_servers, inputs) = build_sdk_computer(
             &self.instance,
             HandleDeclarations {
                 injected_inputs: &injected_inputs,
-                retained_inputs: retained_inputs.as_ref(),
-                retained_mcp_servers: retained_mcp_servers.as_ref(),
+                retained_inputs: None,
+                retained_mcp_servers: None,
             },
             self.session.clone(),
             self.input_resolver.clone(),
