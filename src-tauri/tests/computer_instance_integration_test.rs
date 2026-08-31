@@ -137,6 +137,7 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     assert_eq!(created.name, "Second Computer");
     assert_eq!(created.description.as_deref(), Some("Test description"));
     assert!(!created.running);
+    assert_eq!(created.mcp_start_concurrency, 5);
 
     let renamed = rename_computer_instance_core(
         &state,
@@ -144,12 +145,38 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
             id: created.id.clone(),
             name: "Renamed Computer".to_string(),
             description: Some("Renamed description".to_string()),
+            mcp_start_concurrency: Some(7),
         },
     )
     .await
     .unwrap();
     assert_eq!(renamed.name, "Renamed Computer");
     assert_eq!(renamed.description.as_deref(), Some("Renamed description"));
+    assert_eq!(renamed.mcp_start_concurrency, 7);
+    assert_eq!(
+        state
+            .config
+            .get_computer_instance(&created.id)
+            .unwrap()
+            .mcp_start_concurrency,
+        7
+    );
+
+    let invalid_concurrency = rename_computer_instance_core(
+        &state,
+        RenameComputerInstanceRequest {
+            id: created.id.clone(),
+            name: "Must Not Be Applied".to_string(),
+            description: None,
+            mcp_start_concurrency: Some(0),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid_concurrency.contains("between 1 and 64"));
+    let unchanged = state.config.get_computer_instance(&created.id).unwrap();
+    assert_eq!(unchanged.name, "Renamed Computer");
+    assert_eq!(unchanged.mcp_start_concurrency, 7);
 
     let list = list_computer_instances_core(&state).await.unwrap();
     assert_eq!(list.len(), 1);
@@ -309,6 +336,7 @@ async fn rename_does_not_require_keychain_reads() {
             id: id.clone(),
             name: "Renamed Without Keychain Reads".to_string(),
             description: None,
+            mcp_start_concurrency: None,
         },
     )
     .await

@@ -4,10 +4,6 @@ use crate::services::observability::CONNECTION_LOG_TARGET;
 use a2c_smcp::smcp_computer::oauth::OAuthStatus;
 use a2c_smcp::smcp_computer::ComputerEvent;
 use std::collections::VecDeque;
-use std::time::Duration;
-use tokio::time::timeout;
-
-const SDK_COMPUTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn coalesce_oauth_events(events: Vec<ComputerEvent>) -> Vec<ComputerEvent> {
     let mut seen_oauth_bundles = HashSet::new();
@@ -74,13 +70,8 @@ impl ComputerInstanceRuntime {
                 | LifecycleState::Shutdown
                 | LifecycleState::Error
         ) {
-            self.replace_sdk_computer(
-                false,
-                "start_with_persisted_configuration",
-                HandleReplacementConfig::ReloadPersisted,
-                failure_policy,
-            )
-            .await?;
+            self.replace_sdk_computer(false, "start_with_persisted_configuration", failure_policy)
+                .await?;
         } else if matches!(
             lifecycle,
             LifecycleState::Started | LifecycleState::Degraded
@@ -453,13 +444,8 @@ impl ComputerInstanceRuntime {
     ) -> Result<(), ComputerRuntimeStartError> {
         self.ensure_active()
             .map_err(ComputerRuntimeStartError::Client)?;
-        self.replace_sdk_computer(
-            true,
-            "restart",
-            HandleReplacementConfig::ReloadPersisted,
-            failure_policy,
-        )
-        .await
+        self.replace_sdk_computer(true, "restart", failure_policy)
+            .await
     }
 
     pub async fn try_shutdown(&self) -> Result<(), String> {
@@ -501,6 +487,12 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.prepare_sdk_shutdown_inner().await {
             cleanup_errors.push(error);
         }
+        // SDK shutdown closes the shared startup gate before waiting for in-flight starts. It is
+        // the first SDK teardown operation so queued starts fail instead of being drained one by
+        // one by a client-side stop-all loop.
+        if let Err(error) = self.shutdown_sdk_computer_inner().await {
+            cleanup_errors.push(error);
+        }
 
         if self.has_smcp_transport().await {
             if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
@@ -515,9 +507,6 @@ impl ComputerInstanceRuntime {
         self.take_connection_state().await;
         self.complete_connection_operation().await;
         self.clear_client_runtime_diagnostic_silent().await;
-        if let Err(error) = self.shutdown_sdk_computer_inner().await {
-            cleanup_errors.push(error);
-        }
         cleanup_errors
     }
 
@@ -531,7 +520,9 @@ impl ComputerInstanceRuntime {
         }
     }
 
-    /// Stops SDK MCP clients after shutdown has crossed its explicit commit point.
+    /// Runs fallible client-owned shutdown preparation without touching SDK MCP clients. SDK 0.4.1
+    /// shutdown owns startup-gate closure, in-flight draining, queued-start rejection, and client
+    /// teardown; calling stop-all here would consume the queue before the gate can close.
     pub(super) async fn prepare_sdk_shutdown_inner(&self) -> Result<(), String> {
         if self.shutdown_completed.load(Ordering::Acquire) {
             return Ok(());
@@ -546,23 +537,14 @@ impl ComputerInstanceRuntime {
                 self.instance.id
             ));
         }
-        let computer = self.computer.read().await;
-        if computer.is_mcp_manager_initialized().await {
-            computer.stop_all_mcp_clients().await.map_err(|error| {
-                format!(
-                    "Failed to stop SDK MCP clients before shutdown for instance {}: {}",
-                    self.instance.id, error
-                )
-            })?;
-        }
         Ok(())
     }
 
     /// Tears down the authoritative SDK handle exactly once.
     ///
     /// The pinned SDK enters `Shutdown` before all fallible cleanup completes, so that lifecycle
-    /// value cannot prove teardown success. Stopping MCP clients first keeps failures retryable;
-    /// only a successful SDK shutdown records completion for this handle generation.
+    /// value cannot prove teardown success. Only a successful SDK shutdown records completion for
+    /// this handle generation.
     pub(super) async fn shutdown_sdk_computer_inner(&self) -> Result<(), String> {
         if self.shutdown_completed.load(Ordering::Acquire) {
             return Ok(());
@@ -575,19 +557,7 @@ impl ComputerInstanceRuntime {
             ));
         }
 
-        let shutdown_result = timeout(SDK_COMPUTER_SHUTDOWN_TIMEOUT, async {
-            self.computer.read().await.shutdown().await
-        })
-        .await;
-        let shutdown_result = match shutdown_result {
-            Ok(result) => result,
-            Err(_) => {
-                return Err(format!(
-                    "Timed out shutting down SDK Computer for instance {} after {:?}",
-                    self.instance.id, SDK_COMPUTER_SHUTDOWN_TIMEOUT
-                ))
-            }
-        };
+        let shutdown_result = self.computer.read().await.shutdown().await;
         if let Err(error) = shutdown_result {
             let computer = self.computer.read().await;
             if computer.lifecycle_state() != LifecycleState::Shutdown {

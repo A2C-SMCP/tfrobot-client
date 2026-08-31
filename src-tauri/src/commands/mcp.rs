@@ -313,7 +313,7 @@ async fn start_mcp_server_core_with_mode(
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+    let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Starting MCP server for instance {}: {}",
         instance_id,
@@ -339,8 +339,16 @@ async fn start_mcp_server_core_with_mode(
                     McpServerStartOperation::Start(bundle_id.clone()),
                     &latest_inputs,
                 )?;
+                let operation = runtime
+                    .prepare_user_mcp_server_with_latest_config(request)
+                    .await
+                    .map_err(|error| {
+                        RuntimeActionError::from(error)
+                            .with_requesting_mcp(bundle_id.to_string(), server_name.to_string())
+                    })?;
+                drop(operation_guard);
                 runtime
-                    .start_user_mcp_server_with_latest_config(request)
+                    .execute_prepared_user_mcp_server_start(operation)
                     .await
                     .map_err(|error| {
                         RuntimeActionError::from(error)
@@ -535,7 +543,7 @@ async fn start_all_servers_core_with_mode(
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+    let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
     let result = async {
@@ -584,8 +592,16 @@ async fn start_all_servers_core_with_mode(
                     user_mcp_start_request(latest, operation, &latest_inputs)
                 })
                 .collect::<Result<Vec<_>, RuntimeActionError>>()?;
+            let prepared = runtime
+                .prepare_user_mcp_servers_with_latest_configs_best_effort(requests)
+                .await;
+            // Preparation is the last client-owned critical section: after the exact durable
+            // snapshot is mounted, release the command gate so Computer shutdown can close the
+            // SDK startup gate while this batch is still running. The SDK then drains in-flight
+            // starts and rejects queued starts according to its own lifecycle contract.
+            drop(operation_guard);
             let failures = runtime
-                .start_user_mcp_servers_with_latest_configs_best_effort(requests)
+                .execute_user_mcp_start_batch_best_effort(prepared)
                 .await
                 .into_iter()
                 .map(|(bundle_id, error)| {

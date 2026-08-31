@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_toggle_rebuilds_running_provider_without_persisting_an_mcp_server() {
+    async fn policy_toggle_hot_swaps_only_the_provider_without_persisting_an_mcp_server() {
         let temp = TempDir::new().unwrap();
         let config = Arc::new(ConfigService::new(temp.path().to_path_buf()).unwrap());
         config
@@ -919,13 +919,9 @@ mod tests {
             Arc::new(NoopControlAuditSink),
         ));
         registry.bind_client_control(&plane);
-        registry
-            .runtime("source")
-            .await
-            .unwrap()
-            .start()
-            .await
-            .unwrap();
+        let runtime = registry.runtime("source").await.unwrap();
+        runtime.start().await.unwrap();
+        let generation = runtime.runtime_snapshot().await.generation;
 
         plane
             .update_policy_local(
@@ -938,6 +934,7 @@ mod tests {
             .await
             .unwrap();
         let enabled = registry.runtime("source").await.unwrap();
+        assert_eq!(enabled.runtime_snapshot().await.generation, generation);
         assert!(enabled
             .mcp_server_runtime_statuses()
             .await
@@ -962,6 +959,7 @@ mod tests {
             .await
             .unwrap();
         let narrowed = registry.runtime("source").await.unwrap();
+        assert_eq!(narrowed.runtime_snapshot().await.generation, generation);
         let narrowed_tools = narrowed
             .available_tools()
             .await
@@ -986,6 +984,7 @@ mod tests {
             .await
             .unwrap();
         let expanded = registry.runtime("source").await.unwrap();
+        assert_eq!(expanded.runtime_snapshot().await.generation, generation);
         assert_eq!(
             expanded
                 .available_tools()
@@ -1001,6 +1000,7 @@ mod tests {
             .await
             .unwrap();
         let disabled = registry.runtime("source").await.unwrap();
+        assert_eq!(disabled.runtime_snapshot().await.generation, generation);
         assert!(disabled
             .mcp_server_runtime_statuses()
             .await

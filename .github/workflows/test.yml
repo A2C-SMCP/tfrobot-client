@@ -135,6 +135,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
+      - name: Verify Rust SDK registry source
+        run: pnpm verify:a2c-smcp-source
+
       - name: Run tests
         if: runner.os != 'Windows'
         working-directory: src-tauri

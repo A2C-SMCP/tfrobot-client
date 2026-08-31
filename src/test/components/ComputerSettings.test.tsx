@@ -78,6 +78,7 @@ const computerResponse = {
   mcp_server_count: 1,
   robot_binding: null,
   connection_policy: { target: null, auto_connect: false },
+  mcp_start_concurrency: 7,
   connection: null,
 };
 
@@ -89,6 +90,36 @@ describe('ComputerSettings', () => {
       if (command === 'list_computer_instances') return [computerResponse];
       return null;
     });
+  });
+
+  it('saves MCP startup concurrency with the other general settings', async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'list_computer_instances') return [computerResponse];
+      if (command === 'rename_computer_instance') {
+        return { ...computerResponse, mcp_start_concurrency: 9 };
+      }
+      return null;
+    });
+    render(<ComputerSettings />);
+
+    const concurrency = await screen.findByRole('spinbutton', {
+      name: 'MCP startup concurrency',
+    });
+    expect(concurrency).toHaveValue('7');
+    fireEvent.change(concurrency, { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('rename_computer_instance', {
+        request: {
+          id: 'computer-a',
+          name: 'Computer A',
+          description: 'Primary Computer',
+          mcpStartConcurrency: 9,
+        },
+      });
+    });
+    expect(screen.getByText('Applies the next time this Computer starts.')).toBeInTheDocument();
   });
 
   it('renders persistent configuration sections including Built-in Tools', async () => {
