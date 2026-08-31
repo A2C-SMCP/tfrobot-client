@@ -476,6 +476,7 @@ pub(super) async fn dispatch(
                     id: args.computer_id,
                     name: args.name,
                     description: args.description,
+                    mcp_start_concurrency: None,
                 },
             )
             .await

@@ -108,6 +108,23 @@ fn unavailable_server_config(name: &str) -> MCPServerConfig {
     serde_json::from_value(value).unwrap()
 }
 
+fn delayed_start_server_config(name: &str, marker_file: &Path, delay_ms: u64) -> MCPServerConfig {
+    serde_json::from_value(serde_json::json!({
+        "type": "stdio",
+        "name": name,
+        "bundle_id": name,
+        "server_parameters": {
+            "command": "node",
+            "args": [common::slow_echo_server_path().to_str().unwrap()],
+            "env": {
+                "START_DELAY_MS": delay_ms.to_string(),
+                "START_MARKER_FILE": marker_file.to_str().unwrap()
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn oauth_http_server_config(name: &str, endpoint: Option<&str>) -> MCPServerConfig {
     serde_json::from_value(serde_json::json!({
         "type": "streamable",
@@ -1963,6 +1980,82 @@ async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
         .await
         .unwrap();
     assert!(servers.iter().all(|server| server.running));
+}
+
+#[tokio::test]
+async fn computer_shutdown_drains_one_in_flight_start_and_rejects_queued_batch_starts() {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+    computer::rename_computer_instance_core(
+        &state,
+        computer::RenameComputerInstanceRequest {
+            id: TEST_INSTANCE_ID.to_string(),
+            name: TEST_COMPUTER_NAME.to_string(),
+            description: None,
+            mcp_start_concurrency: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+
+    let marker_dir = tmp.path().join("start-markers");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    for index in 0..3 {
+        let name = format!("shutdown-gate-{index}");
+        sdk_config::upsert_computer_mcp_config_core(
+            &state,
+            TEST_INSTANCE_ID,
+            delayed_start_server_config(&name, &marker_dir.join(format!("{name}.marker")), 6_000),
+        )
+        .await
+        .unwrap();
+    }
+
+    let start_state = Arc::clone(&state);
+    let start_task =
+        tokio::spawn(
+            async move { mcp::start_all_servers_core(&start_state, TEST_INSTANCE_ID).await },
+        );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_dir(&marker_dir).unwrap().count() == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the first MCP start never entered initialization");
+
+    let stopped = timeout(
+        Duration::from_secs(12),
+        computer::stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string()),
+    )
+    .await
+    .expect("Computer Stop waited for the entire queued start batch")
+    .unwrap();
+    assert!(!stopped.running);
+
+    let batch = timeout(Duration::from_secs(5), start_task)
+        .await
+        .expect("start-all did not settle after SDK shutdown")
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read_dir(&marker_dir).unwrap().count(), 1);
+    assert_eq!(batch.actual_operation_count, 1);
+    assert_eq!(batch.failures.len(), 2);
+    assert_eq!(
+        batch
+            .failures
+            .iter()
+            .map(|failure| failure.bundle_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shutdown-gate-1", "shutdown-gate-2"]
+    );
 }
 
 #[tokio::test]

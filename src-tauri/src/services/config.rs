@@ -356,6 +356,7 @@ impl ConfigService {
             connection_policy: previous.connection_policy.clone(),
             remote_control: RemoteControlPolicy::default(),
             command_line: CommandLineToolPolicy::default(),
+            mcp_start_concurrency: crate::services::computer::DEFAULT_MCP_START_CONCURRENCY,
             robot_binding: previous.robot_binding.clone(),
         };
         validate_computer_profile(&migrated)?;
@@ -399,6 +400,7 @@ impl ConfigService {
             connection_policy: previous.connection_policy.clone(),
             remote_control: previous.remote_control.clone(),
             command_line: CommandLineToolPolicy::default(),
+            mcp_start_concurrency: crate::services::computer::DEFAULT_MCP_START_CONCURRENCY,
             robot_binding: previous.robot_binding.clone(),
         };
         validate_computer_profile(&migrated)?;
@@ -1267,6 +1269,7 @@ fn migrate_legacy_computer_profile(
         },
         remote_control: RemoteControlPolicy::default(),
         command_line: CommandLineToolPolicy::default(),
+        mcp_start_concurrency: crate::services::computer::DEFAULT_MCP_START_CONCURRENCY,
         robot_binding: binding,
     })
 }
@@ -1284,6 +1287,14 @@ fn validate_computer_profile(profile: &ComputerProfile) -> Result<(), ConfigErro
     }
     profile.remote_control.validate().map_err(invalid)?;
     profile.command_line.validate().map_err(invalid)?;
+    if profile.mcp_start_concurrency == 0
+        || profile.mcp_start_concurrency > crate::services::computer::MAX_MCP_START_CONCURRENCY
+    {
+        return Err(invalid(format!(
+            "MCP start concurrency must be between 1 and {}",
+            crate::services::computer::MAX_MCP_START_CONCURRENCY
+        )));
+    }
 
     if let Some(target) = profile.connection_policy.target.as_ref() {
         match target {
@@ -1910,6 +1921,7 @@ mod tests {
                 "command_line",
                 "connection_policy",
                 "id",
+                "mcp_start_concurrency",
                 "name",
                 "remote_control",
                 "schema_version",
@@ -1918,6 +1930,7 @@ mod tests {
             .map(str::to_string)
             .collect()
         );
+        assert_eq!(serialized["mcp_start_concurrency"], 5);
         assert!(!serialized.to_string().contains("secret-value"));
         assert!(!object.contains_key("inputs"));
         assert!(!object.contains_key("mcp_servers"));

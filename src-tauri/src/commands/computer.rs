@@ -55,6 +55,7 @@ pub struct ComputerInstanceStatus {
     pub connection_policy: ComputerConnectionPolicy,
     pub remote_control: RemoteControlPolicy,
     pub command_line: CommandLineToolPolicy,
+    pub mcp_start_concurrency: usize,
     pub connection: Option<ConnectionStateSummary>,
 }
 
@@ -71,6 +72,8 @@ pub struct RenameComputerInstanceRequest {
     pub id: ComputerInstanceId,
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub mcp_start_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +239,7 @@ pub async fn create_computer_instance_core(
         connection_policy: ComputerConnectionPolicy::default(),
         remote_control: RemoteControlPolicy::default(),
         command_line: CommandLineToolPolicy::default(),
+        mcp_start_concurrency: crate::services::computer::DEFAULT_MCP_START_CONCURRENCY,
         robot_binding: None,
     };
 
@@ -277,6 +281,14 @@ pub async fn rename_computer_instance_core(
     state: &AppState,
     request: RenameComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    use crate::services::computer::MAX_MCP_START_CONCURRENCY;
+    if let Some(concurrency) = request.mcp_start_concurrency {
+        if concurrency == 0 || concurrency > MAX_MCP_START_CONCURRENCY {
+            return Err(format!(
+                "MCP start concurrency must be between 1 and {MAX_MCP_START_CONCURRENCY}"
+            ));
+        }
+    }
     let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
     let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
@@ -289,6 +301,9 @@ pub async fn rename_computer_instance_core(
         .update_computer_instance(&request.id, |instance| {
             instance.name = name;
             instance.description = normalize_optional_text(request.description);
+            if let Some(concurrency) = request.mcp_start_concurrency {
+                instance.mcp_start_concurrency = concurrency;
+            }
         })
         .map_err(|error| error.to_string())?;
     let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
@@ -1235,6 +1250,7 @@ async fn status_from_instance(
         connection_policy: instance.connection_policy.clone(),
         remote_control: instance.remote_control.clone(),
         command_line: instance.command_line.clone(),
+        mcp_start_concurrency: instance.mcp_start_concurrency,
         connection: connected.then_some(connection_context).flatten(),
     }
 }

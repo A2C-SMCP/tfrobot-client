@@ -1314,6 +1314,7 @@ async fn runtime_metadata_update_preserves_smcp_connection_snapshot() {
             id: TEST_INSTANCE_ID.to_string(),
             name: "Renamed Test Computer".to_string(),
             description: None,
+            mcp_start_concurrency: None,
         },
     )
     .await
@@ -1864,6 +1865,7 @@ async fn rename_during_connect_supersedes_stale_connection_commit() {
                 id: TEST_INSTANCE_ID.to_string(),
                 name: "Renamed During Connect".to_string(),
                 description: None,
+                mcp_start_concurrency: None,
             },
         )
         .await

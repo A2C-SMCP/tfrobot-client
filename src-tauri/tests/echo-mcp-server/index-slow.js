@@ -1,6 +1,7 @@
 // Slow MCP JSON-RPC over stdio server for timeout-path integration tests.
 
 const readline = require('readline');
+const fs = require('fs');
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
@@ -25,6 +26,10 @@ async function handleRequest(req) {
 
   switch (method) {
     case 'initialize':
+      if (process.env.START_MARKER_FILE) {
+        fs.writeFileSync(process.env.START_MARKER_FILE, 'initializing');
+      }
+      await sleep(Number(process.env.START_DELAY_MS || 0));
       sendResponse(id, {
         protocolVersion: '2025-03-26',
         serverInfo: { name: 'slow-mcp-server', version: '0.1.0' },
