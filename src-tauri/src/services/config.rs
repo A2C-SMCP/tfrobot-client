@@ -1095,7 +1095,7 @@ pub fn normalize_manual_smcp_target(mut target: ManualSmcpTarget) -> ManualSmcpT
     target
 }
 
-fn stable_or_existing_manual_target_id(id: &str, target: &ManualSmcpTarget) -> String {
+pub(crate) fn stable_or_existing_manual_target_id(id: &str, target: &ManualSmcpTarget) -> String {
     let id = id.trim();
     if id.is_empty() {
         stable_manual_target_id_from_parts(

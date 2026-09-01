@@ -49,6 +49,10 @@ impl ComputerInstanceRuntime {
             .await
     }
 
+    pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.lifecycle_lease().await.start_interactive().await
+    }
+
     pub(crate) async fn lifecycle_lease(&self) -> ComputerRuntimeLifecycleLease<'_> {
         ComputerRuntimeLifecycleLease {
             runtime: self,
@@ -438,6 +442,10 @@ impl ComputerInstanceRuntime {
             .await
     }
 
+    pub(crate) async fn restart_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.lifecycle_lease().await.restart_interactive().await
+    }
+
     async fn restart_with_failure_policy_inner(
         &self,
         failure_policy: RuntimeMcpStartFailurePolicy,
@@ -487,13 +495,9 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.prepare_sdk_shutdown_inner().await {
             cleanup_errors.push(error);
         }
-        // SDK shutdown closes the shared startup gate before waiting for in-flight starts. It is
-        // the first SDK teardown operation so queued starts fail instead of being drained one by
-        // one by a client-side stop-all loop.
-        if let Err(error) = self.shutdown_sdk_computer_inner().await {
-            cleanup_errors.push(error);
-        }
-
+        // Leave the office while the SDK connection is still addressable. SDK shutdown may clear
+        // its Socket.IO handle even when another reference keeps the transport alive, which would
+        // otherwise skip the protocol-level leave and leak remote membership.
         if self.has_smcp_transport().await {
             if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
                 cleanup_errors.push(format!(
@@ -501,6 +505,12 @@ impl ComputerInstanceRuntime {
                     self.instance.id, error
                 ));
             }
+        }
+        // SDK shutdown closes the shared startup gate before waiting for in-flight starts. It is
+        // the first MCP teardown operation so queued starts fail instead of being drained one by
+        // one by a client-side stop-all loop.
+        if let Err(error) = self.shutdown_sdk_computer_inner().await {
+            cleanup_errors.push(error);
         }
         // Teardown is deliberately exhaustive after the commit point: no cleanup failure may
         // leave logical connection state alive for an instance being removed.
@@ -638,11 +648,6 @@ impl ComputerInstanceRuntime {
 }
 
 impl ComputerRuntimeLifecycleLease<'_> {
-    pub(crate) async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
-        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
-            .await
-    }
-
     pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
         self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures)
             .await
@@ -654,11 +659,6 @@ impl ComputerRuntimeLifecycleLease<'_> {
     ) -> Result<(), ComputerRuntimeStartError> {
         self.runtime
             .start_with_failure_policy_inner(failure_policy)
-            .await
-    }
-
-    pub(crate) async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
-        self.restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
             .await
     }
 

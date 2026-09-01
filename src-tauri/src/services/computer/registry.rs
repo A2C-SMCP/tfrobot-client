@@ -3,8 +3,9 @@ use super::*;
 pub struct ComputerRegistry {
     runtimes: RwLock<HashMap<ComputerInstanceId, ComputerInstanceRuntime>>,
     runtime_membership: Arc<Mutex<()>>,
+    departing_manager_contexts: std::sync::Mutex<HashSet<ManagerContextKey>>,
     runtime_mutations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
-    runtime_operations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<Mutex<()>>>>,
+    runtime_operations: std::sync::Mutex<HashMap<ComputerInstanceId, Weak<RwLock<()>>>>,
     skill_home_base: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     runtime_event_sink: SharedRuntimeEventSink,
@@ -18,7 +19,7 @@ pub struct ComputerRegistry {
 pub(crate) struct PreparedRuntimeRemoval {
     runtime: ComputerInstanceRuntime,
     _mutation_guard: OwnedMutexGuard<()>,
-    _lifecycle_guard: OwnedMutexGuard<()>,
+    _lifecycle_guard: Option<OwnedMutexGuard<()>>,
     committed: bool,
 }
 
@@ -111,6 +112,7 @@ impl ComputerRegistry {
         let registry = Self {
             runtimes: RwLock::new(runtimes),
             runtime_membership: Arc::new(Mutex::new(())),
+            departing_manager_contexts: std::sync::Mutex::new(HashSet::new()),
             runtime_mutations: std::sync::Mutex::new(HashMap::new()),
             runtime_operations: std::sync::Mutex::new(HashMap::new()),
             skill_home_base,
@@ -188,11 +190,7 @@ impl ComputerRegistry {
         coordinator
     }
 
-    /// Serializes command-level operations for one Computer before they enter the application-wide
-    /// configuration transaction. Runtime Input can hold the runtime lifecycle lock indefinitely;
-    /// acquiring this gate first prevents a same-Computer waiter from holding the global
-    /// transaction lock and blocking unrelated Computers.
-    pub async fn operation_lease(&self, id: &str) -> OwnedMutexGuard<()> {
+    fn operation_coordinator(&self, id: &str) -> Arc<RwLock<()>> {
         let coordinator = {
             let mut coordinators = self
                 .runtime_operations
@@ -202,20 +200,55 @@ impl ComputerRegistry {
                 coordinator
             } else {
                 coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
-                let coordinator = Arc::new(Mutex::new(()));
+                let coordinator = Arc::new(RwLock::new(()));
                 coordinators.insert(id.to_string(), Arc::downgrade(&coordinator));
                 coordinator
             }
         };
-        coordinator.lock_owned().await
+        coordinator
+    }
+
+    /// Exclusively serializes one Computer's configuration and lifecycle transactions. The gate
+    /// is per Computer; unrelated Computers never wait behind it.
+    pub async fn operation_lease(&self, id: &str) -> OwnedRwLockWriteGuard<()> {
+        self.operation_coordinator(id).write_owned().await
+    }
+
+    /// Admits a runtime operation that may run alongside other non-mutating work for the same
+    /// Computer while excluding configuration replacement, deletion, and governance mutations.
+    pub async fn shared_operation_lease(&self, id: &str) -> OwnedRwLockReadGuard<()> {
+        self.operation_coordinator(id).read_owned().await
     }
 
     /// Linearizes runtime membership changes that can carry Manager authority with Context
-    /// cleanup. This lock is deliberately independent from the application-wide configuration
-    /// transaction so waiting for one Computer's operation gate cannot convoy unrelated
-    /// lifecycle commands.
+    /// cleanup. The guard covers only short publication phases; waiting for one Computer's
+    /// operation gate cannot convoy unrelated lifecycle commands.
     pub(crate) async fn membership_lease(&self) -> OwnedMutexGuard<()> {
         self.runtime_membership.clone().lock_owned().await
+    }
+
+    /// Marks a Manager Context transition while holding [`Self::membership_lease`]. Duplicate
+    /// publication consults this tombstone so the long per-Computer cleanup can run after the
+    /// membership guard is released without allowing inherited authority to escape its snapshot.
+    pub(crate) fn mark_manager_context_departing(&self, context: ManagerContextKey) {
+        self.departing_manager_contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(context);
+    }
+
+    pub(crate) fn clear_departing_manager_context(&self, context: &ManagerContextKey) {
+        self.departing_manager_contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(context);
+    }
+
+    pub(crate) fn is_manager_context_departing(&self, context: &ManagerContextKey) -> bool {
+        self.departing_manager_contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(context)
     }
 
     fn runtime_entry_matches(
@@ -377,20 +410,21 @@ impl ComputerRegistry {
             return Ok(None);
         };
         runtime.retired.store(true, Ordering::SeqCst);
-        while runtime.active_operations.load(Ordering::SeqCst) != 0 {
-            runtime.activity_changed.notified().await;
-        }
-        let lifecycle_guard = runtime.lifecycle_lock.clone().lock_owned().await;
-        if let Err(error) = runtime.preflight_sdk_shutdown_inner().await {
-            runtime.retired.store(false, Ordering::SeqCst);
-            return Err(error);
-        }
-        Ok(Some(PreparedRuntimeRemoval {
+        // Construct the rollback owner before the first await after closing admission. Dropping
+        // this future at any later suspension point therefore reopens the authoritative runtime.
+        let mut prepared = PreparedRuntimeRemoval {
             runtime,
             _mutation_guard: mutation_guard,
-            _lifecycle_guard: lifecycle_guard,
+            _lifecycle_guard: None,
             committed: false,
-        }))
+        };
+        while prepared.runtime.active_operations.load(Ordering::SeqCst) != 0 {
+            prepared.runtime.activity_changed.notified().await;
+        }
+        prepared._lifecycle_guard =
+            Some(prepared.runtime.lifecycle_lock.clone().lock_owned().await);
+        prepared.runtime.preflight_sdk_shutdown_inner().await?;
+        Ok(Some(prepared))
     }
 
     pub(crate) async fn commit_runtime_removal(

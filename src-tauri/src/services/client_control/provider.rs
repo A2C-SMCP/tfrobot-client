@@ -60,6 +60,9 @@ pub fn client_control_server_config() -> MCPServerConfig {
 pub struct ClientControlMcpClient {
     source_computer_id: String,
     binding: ClientControlBinding,
+    /// Immutable policy captured when this provider incarnation is mounted. Call-time
+    /// authorization still consults the registry-published runtime through the control plane.
+    tool_policy: super::RemoteControlPolicy,
     state: RwLock<ClientState>,
 }
 
@@ -68,11 +71,13 @@ impl ClientControlMcpClient {
     pub fn new(
         source_computer_id: impl Into<String>,
         binding: ClientControlBinding,
+        tool_policy: super::RemoteControlPolicy,
         _notify: Option<ClientNotifyCtx>,
     ) -> Self {
         Self {
             source_computer_id: source_computer_id.into(),
             binding,
+            tool_policy,
             state: RwLock::new(ClientState::Initialized),
         }
     }
@@ -128,13 +133,10 @@ impl MCPClientProtocol for ClientControlMcpClient {
 
     async fn list_tools(&self) -> Result<Vec<Tool>, MCPClientError> {
         let plane = self.binding.plane()?;
-        let policy = plane
-            .policy(&self.source_computer_id)
-            .map_err(|error| MCPClientError::ProtocolError(error.to_string()))?;
         Ok(plane
             .catalog()
             .into_iter()
-            .filter(|definition| policy.allows_tool(definition.id))
+            .filter(|definition| self.tool_policy.allows_tool(definition.id))
             .map(Self::mcp_tool)
             .collect())
     }

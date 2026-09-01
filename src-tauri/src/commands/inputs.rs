@@ -351,8 +351,6 @@ pub async fn upsert_input_entry_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     migrated_input_entry_store(state, instance_id)?.upsert(
         key,
@@ -377,8 +375,6 @@ pub async fn delete_input_entry_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     migrated_input_entry_store(state, instance_id)?.delete(key)
 }
@@ -530,8 +526,6 @@ pub async fn add_or_update_input_core(
         .expect("one input definition was prepared");
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     let id = input.id().to_string();
     log::info!("Adding/updating input for instance {}: {}", instance_id, id);
     require_existing_instance(state, instance_id)?;
@@ -597,8 +591,6 @@ pub async fn remove_input_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Removing input for instance {}: {}", instance_id, id);
     require_existing_instance(state, instance_id)?;
 
@@ -740,8 +732,6 @@ pub async fn set_input_value_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     log::info!("Setting input value: {}", id);
     require_existing_instance(state, instance_id)?;
     let inputs = state.sdk_config.load_input_definitions(instance_id);
@@ -794,8 +784,6 @@ pub async fn set_runtime_input_value_core(
 ) -> Result<bool, String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     let Some(runtime) = state.computer_registry.runtime(instance_id).await else {
         return Ok(false);
@@ -839,8 +827,6 @@ pub async fn remove_input_value_core(
 ) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     migrated_input_entry_store(state, instance_id)?.delete(id)
 }
@@ -857,8 +843,6 @@ pub async fn clear_input_values(
 pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Result<(), String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     let store = migrated_input_entry_store(state, instance_id)?;
     for entry in store.list()? {
@@ -927,8 +911,6 @@ pub async fn import_inputs_core(
 ) -> Result<usize, String> {
     let instance_id = require_instance_id(instance_id)?;
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _mutation_guard = state.input_mutation_lock.lock().await;
     require_existing_instance(state, instance_id)?;
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let imported: Vec<InputDefinition> =

@@ -27,7 +27,7 @@ use crate::services::observability::{
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
@@ -121,61 +121,13 @@ pub async fn list_computer_instances(
 pub async fn list_computer_instances_core(
     state: &AppState,
 ) -> Result<Vec<ComputerInstanceStatus>, RuntimeActionError> {
-    // Listing may reconcile persisted profiles into runtime membership. Serialize that write with
-    // create/duplicate publication and Manager Context cleanup so an uncommitted profile can
-    // never escape a failed creation transaction as an orphan runtime.
-    let _membership_guard = state.computer_registry.membership_lease().await;
-    let config = state
-        .load_hydrated_computer_instances()
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let discovered_ids = config
-        .instances
-        .iter()
-        .map(|instance| instance.id.clone())
-        .collect::<HashSet<_>>();
-    for runtime in state.computer_registry.list_runtimes().await {
-        if !discovered_ids.contains(&runtime.instance.id) {
-            let _operation_guard = state
-                .computer_registry
-                .operation_lease(&runtime.instance.id)
-                .await;
-            if state
-                .config
-                .get_computer_instance(&runtime.instance.id)
-                .is_err()
-            {
-                state
-                    .computer_registry
-                    .remove_runtime(&runtime.instance.id)
-                    .await
-                    .map_err(RuntimeActionError::runtime)?;
-            }
-        }
-    }
-    let mut statuses = Vec::with_capacity(config.instances.len());
-
-    for discovered in config.instances {
-        let _operation_guard = state
-            .computer_registry
-            .operation_lease(&discovered.id)
-            .await;
-        let Ok(instance) = state.config.get_computer_instance(&discovered.id) else {
-            continue;
-        };
-        let instance = state
-            .hydrate_computer_instance(instance)
-            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-        // Listing is observational and must not trigger SDK governance reconciliation. A
-        // lifecycle command or the instance-scoped status command performs typed synchronization,
-        // where a missing input can be associated with the exact Computer and retried safely.
-        let runtime = match state.computer_registry.runtime(&instance.id).await {
-            Some(runtime) => runtime,
-            None => state
-                .computer_registry
-                .upsert_runtime(instance.clone())
-                .await
-                .map_err(RuntimeActionError::runtime)?,
-        };
+    // Runtime membership is the publication boundary. Reads never repair persisted state or wait
+    // for a Computer mutation: create/update/delete publish one authoritative runtime only after
+    // their durable work is ready, and startup recovery constructs the initial registry.
+    let runtimes = state.computer_registry.list_runtimes().await;
+    let mut statuses = Vec::with_capacity(runtimes.len());
+    for runtime in runtimes {
+        let instance = runtime.instance.clone();
         statuses.push(status_from_instance(&instance, &runtime).await);
     }
 
@@ -194,21 +146,11 @@ pub async fn get_computer_instance_status_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(&id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let config = state
-        .load_hydrated_computer_instances()
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    let instance = config
-        .instances
-        .into_iter()
-        .find(|instance| instance.id == id)
-        .ok_or_else(|| RuntimeActionError::runtime(format!("Computer instance not found: {id}")))?;
-    let runtime = state
-        .computer_registry
-        .update_runtime_instance_typed(instance.clone())
-        .await
-        .map_err(RuntimeActionError::from)?;
+    let runtime =
+        state.computer_registry.runtime(&id).await.ok_or_else(|| {
+            RuntimeActionError::runtime(format!("Computer instance not found: {id}"))
+        })?;
+    let instance = runtime.instance.clone();
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -225,8 +167,6 @@ pub async fn create_computer_instance_core(
     state: &AppState,
     request: CreateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
-    let _membership_guard = state.computer_registry.membership_lease().await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let instance = ComputerInstance {
         id: generate_instance_id(),
@@ -256,15 +196,28 @@ pub async fn create_computer_instance_core(
                 &instance.id,
                 &instance_storage_root,
                 "create",
+                error.to_string(),
+            )
+            .await)
+        }
+    };
+    let runtime = match state
+        .computer_registry
+        .upsert_runtime(instance.clone())
+        .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Err(rollback_failed_computer_creation(
+                state,
+                &instance.id,
+                &instance_storage_root,
+                "create",
                 error,
             )
             .await)
         }
     };
-    let runtime = state
-        .computer_registry
-        .upsert_runtime(instance.clone())
-        .await?;
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -290,7 +243,6 @@ pub async fn rename_computer_instance_core(
         }
     }
     let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let name = normalize_name(&request.name)?;
     let previous = state
         .config
@@ -323,25 +275,45 @@ pub async fn duplicate_computer_instance_core(
     state: &AppState,
     request: DuplicateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
-    // A duplicate can inherit an active Manager binding. Publish it in the same membership
-    // transaction used by Manager Context cleanup so a departing Context cannot miss a runtime
-    // created after its snapshot. Membership must precede the per-Computer operation gate.
-    let _membership_guard = state.computer_registry.membership_lease().await;
-    let _operation_guard = state
+    let transaction_state = state.clone();
+    tokio::spawn(async move {
+        duplicate_computer_instance_transaction(&transaction_state, request).await
+    })
+    .await
+    .map_err(|error| format!("Duplicate Computer transaction task failed: {error}"))?
+}
+
+async fn duplicate_computer_instance_transaction(
+    state: &AppState,
+    request: DuplicateComputerInstanceRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    let name = normalize_name(&request.name)?;
+    let target_override = normalize_optional_text(request.connection_target_id);
+    if let Some(target_id) = target_override.as_ref() {
+        state
+            .config
+            .get_manual_smcp_target(target_id)
+            .map_err(|error| error.to_string())?;
+    }
+    // Snapshot the source under its own transaction gate, then release it before copying files.
+    // The source authority fields are refreshed again at publication, so Manager Context cleanup
+    // can proceed while the potentially slow copy is running.
+    let source_guard = state
         .computer_registry
         .operation_lease(&request.source_id)
         .await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let name = normalize_name(&request.name)?;
     let mut instance = state
         .config
         .get_computer_instance(&request.source_id)
         .map_err(|error| error.to_string())?;
     let source_id = instance.id.clone();
-    let source_skill_root = instance
-        .local_skills_root
-        .clone()
-        .unwrap_or_else(|| state.config.default_local_skills_root(&source_id));
+    let source_runtime = state
+        .computer_registry
+        .runtime(&source_id)
+        .await
+        .ok_or_else(|| format!("Computer instance not found: {source_id}"))?;
+    let skill_snapshot = source_runtime.acquire_skill_snapshot_lease().await?;
+    let source_skill_root = skill_snapshot.configured_skill_home();
     instance.id = generate_instance_id();
     instance.name = name;
     instance.description = normalize_optional_text(request.description);
@@ -353,18 +325,16 @@ pub async fn duplicate_computer_instance_core(
     if !request.copy_robot_binding {
         instance.robot_binding = None;
     }
-    if let Some(target_id) = normalize_optional_text(request.connection_target_id) {
-        state
-            .config
-            .get_manual_smcp_target(&target_id)
-            .map_err(|error| error.to_string())?;
+    if let Some(target_id) = target_override.as_ref() {
         instance.connection_policy.target = Some(ComputerConnectionTarget::manual_smcp(target_id));
     }
+    drop(source_guard);
     state
         .config
         .add_computer_instance(instance.clone())
         .map_err(|error| error.to_string())?;
     if let Err(error) = state.sdk_config.duplicate(&source_id, &instance.id) {
+        drop(skill_snapshot);
         return Err(rollback_failed_computer_creation(
             state,
             &instance.id,
@@ -381,6 +351,7 @@ pub async fn duplicate_computer_instance_core(
     )
     .await
     {
+        drop(skill_snapshot);
         return Err(rollback_failed_computer_creation(
             state,
             &instance.id,
@@ -390,23 +361,147 @@ pub async fn duplicate_computer_instance_core(
         )
         .await);
     }
-    let instance = match load_hydrated_computer_instance(state, &instance.id) {
-        Ok(instance) => instance,
-        Err(error) => {
+    drop(skill_snapshot);
+    // Only runtime publication participates in the cross-Computer membership transaction. Re-read
+    // the source after taking membership in the canonical order and refresh authority-bearing
+    // fields so a departing Manager Context cannot be copied after its cleanup snapshot.
+    let membership_guard = state.computer_registry.membership_lease().await;
+    let source_guard = state
+        .computer_registry
+        .operation_lease(&request.source_id)
+        .await;
+    let target_guard = state.connection_target_lock.lock().await;
+    if let Some(target_id) = target_override.as_ref() {
+        if let Err(error) = state.config.get_manual_smcp_target(target_id) {
+            drop(target_guard);
+            drop(source_guard);
+            drop(membership_guard);
             return Err(rollback_failed_computer_creation(
                 state,
                 &instance.id,
                 &destination_storage_root,
                 "duplicate",
-                error,
+                format!("connection target changed before publication: {error}"),
             )
-            .await)
+            .await);
+        }
+    }
+    let latest_source = match state.config.get_computer_instance(&request.source_id) {
+        Ok(source) => source,
+        Err(error) => {
+            drop(target_guard);
+            drop(source_guard);
+            drop(membership_guard);
+            return Err(rollback_failed_computer_creation(
+                state,
+                &instance.id,
+                &destination_storage_root,
+                "duplicate",
+                format!("source Computer changed before publication: {error}"),
+            )
+            .await);
         }
     };
-    let runtime = state
+    let mut inherited_manager_contexts = Vec::new();
+    if let Some(ComputerConnectionTarget::ManagerRobot { context_key, .. }) =
+        latest_source.connection_policy.target.as_ref()
+    {
+        inherited_manager_contexts.push(context_key.clone());
+    }
+    if let Some(context_key) = latest_source
+        .robot_binding
+        .as_ref()
+        .and_then(|binding| binding.context_key.clone())
+    {
+        if !inherited_manager_contexts.contains(&context_key) {
+            inherited_manager_contexts.push(context_key);
+        }
+    }
+    let departing_inherited_contexts = inherited_manager_contexts
+        .into_iter()
+        .filter(|context| {
+            state
+                .computer_registry
+                .is_manager_context_departing(context)
+        })
+        .collect::<Vec<_>>();
+    let latest_policy = if target_override.is_none() {
+        Some(latest_source.connection_policy)
+    } else {
+        None
+    };
+    let latest_binding = request
+        .copy_robot_binding
+        .then_some(latest_source.robot_binding)
+        .flatten();
+    instance = match state
+        .config
+        .update_computer_instance(&instance.id, |candidate| {
+            if let Some(policy) = latest_policy.clone() {
+                candidate.connection_policy = policy;
+            }
+            candidate.robot_binding = latest_binding.clone();
+            for context in &departing_inherited_contexts {
+                crate::commands::manager::make_departing_manager_binding_dormant(
+                    candidate, context,
+                );
+            }
+        }) {
+        Ok(instance) => instance,
+        Err(error) => {
+            drop(target_guard);
+            drop(source_guard);
+            drop(membership_guard);
+            return Err(rollback_failed_computer_creation(
+                state,
+                &instance.id,
+                &destination_storage_root,
+                "duplicate",
+                error.to_string(),
+            )
+            .await);
+        }
+    };
+    let duplicate_id = instance.id.clone();
+    let instance = match state.hydrate_computer_instance(instance) {
+        Ok(instance) => instance,
+        Err(error) => {
+            drop(target_guard);
+            drop(source_guard);
+            drop(membership_guard);
+            return Err(rollback_failed_computer_creation(
+                state,
+                &duplicate_id,
+                &destination_storage_root,
+                "duplicate",
+                error.to_string(),
+            )
+            .await);
+        }
+    };
+    let runtime = match state
         .computer_registry
         .upsert_runtime(instance.clone())
-        .await?;
+        .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            drop(target_guard);
+            drop(source_guard);
+            drop(membership_guard);
+            return Err(rollback_failed_computer_creation(
+                state,
+                &duplicate_id,
+                &destination_storage_root,
+                "duplicate",
+                error,
+            )
+            .await);
+        }
+    };
+    drop(target_guard);
+    drop(source_guard);
+    drop(membership_guard);
 
     Ok(status_from_instance(&instance, &runtime).await)
 }
@@ -424,7 +519,6 @@ pub async fn delete_computer_instance_core(
     id: ComputerInstanceId,
 ) -> Result<(), String> {
     let _operation_guard = state.computer_registry.operation_lease(&id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_storage_root = state.config.computer_instance_storage_root(&id);
     let persisted_instance = state
         .config
@@ -672,7 +766,7 @@ async fn start_computer_instance_core_with_mode(
     id: ComputerInstanceId,
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(&id).await;
+    let operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -694,29 +788,32 @@ async fn start_computer_instance_core_with_mode(
         .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
-    let runtime_lifecycle = runtime.lifecycle_lease().await;
-    // The operation lease serializes this Computer without occupying the cross-Computer
-    // coordinator while Runtime Input may wait on the user indefinitely.
+    // Atomically downgrade after snapshot construction: replacement remains excluded while
+    // independent shared operations on this Computer can progress during Runtime Input.
+    let shared_operation_guard = operation_guard.downgrade();
     let start_result = match interaction_mode {
         RuntimeInputInteractionMode::Interactive => {
             runtime
-                .with_runtime_input_interaction(
-                    interaction_mode,
-                    runtime_lifecycle.start_interactive(),
-                )
+                .with_runtime_input_interaction(interaction_mode, runtime.start_interactive())
                 .await
         }
         RuntimeInputInteractionMode::NonInteractive => {
             runtime
-                .with_runtime_input_interaction(interaction_mode, runtime_lifecycle.start())
+                .with_runtime_input_interaction(interaction_mode, runtime.start())
                 .await
         }
     };
-    drop(runtime_lifecycle);
+    drop(shared_operation_guard);
     if let Err(error) = start_result {
         let command_line_failed = error.is_command_line_start_failure();
         let error = RuntimeActionError::from(error);
         if instance.command_line.enabled && command_line_failed {
+            let _rollback_guard = state.computer_registry.operation_lease(&id).await;
+            state
+                .computer_registry
+                .ensure_current_runtime(&runtime)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
             instance = disable_command_line_after_failure(state, &id, &error.to_string())
                 .await
                 .map_err(|restore_error| {
@@ -729,7 +826,6 @@ async fn start_computer_instance_core_with_mode(
         }
     }
     record_mcp_start_failure_activities(state, &id, &runtime).await;
-    drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             if let Err(error) =
@@ -833,7 +929,7 @@ async fn restart_computer_instance_core_with_mode(
     id: ComputerInstanceId,
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(&id).await;
+    let operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
         .get_computer_instance(&id)
@@ -855,29 +951,30 @@ async fn restart_computer_instance_core_with_mode(
         .update_runtime_instance_typed(instance.clone())
         .await
         .map_err(RuntimeActionError::from)?;
-    let runtime_lifecycle = runtime.lifecycle_lease().await;
-    // See the start path above: foreground confirmation holds only this Computer's operation and
-    // runtime lifecycle leases.
+    let shared_operation_guard = operation_guard.downgrade();
     let restart_result = match interaction_mode {
         RuntimeInputInteractionMode::Interactive => {
             runtime
-                .with_runtime_input_interaction(
-                    interaction_mode,
-                    runtime_lifecycle.restart_interactive(),
-                )
+                .with_runtime_input_interaction(interaction_mode, runtime.restart_interactive())
                 .await
         }
         RuntimeInputInteractionMode::NonInteractive => {
             runtime
-                .with_runtime_input_interaction(interaction_mode, runtime_lifecycle.restart())
+                .with_runtime_input_interaction(interaction_mode, runtime.restart())
                 .await
         }
     };
-    drop(runtime_lifecycle);
+    drop(shared_operation_guard);
     if let Err(error) = restart_result {
         let command_line_failed = error.is_command_line_start_failure();
         let error = RuntimeActionError::from(error);
         if instance.command_line.enabled && command_line_failed {
+            let _rollback_guard = state.computer_registry.operation_lease(&id).await;
+            state
+                .computer_registry
+                .ensure_current_runtime(&runtime)
+                .await
+                .map_err(RuntimeActionError::runtime)?;
             instance = disable_command_line_after_failure(state, &id, &error.to_string())
                 .await
                 .map_err(|restore_error| {
@@ -890,7 +987,6 @@ async fn restart_computer_instance_core_with_mode(
         }
     }
     record_mcp_start_failure_activities(state, &id, &runtime).await;
-    drop(_operation_guard);
     if instance.connection_policy.auto_connect {
         if let Some(target) = instance.connection_policy.target.as_ref() {
             connect_computer_connection_target_by_policy(app, state, &id, target)
@@ -1062,7 +1158,7 @@ async fn persist_computer_connection_policy(
     request: UpdateComputerConnectionPolicyRequest,
 ) -> Result<ComputerInstanceStatus, String> {
     let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _target_guard = state.connection_target_lock.lock().await;
     validate_connection_target_reference(state, request.target.as_ref())?;
     let previous = state
         .config
@@ -1131,7 +1227,6 @@ pub async fn update_computer_skill_home_core(
     request: UpdateComputerSkillHomeRequest,
 ) -> Result<ComputerInstanceStatus, String> {
     let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let previous = state
         .config
         .get_computer_instance(&request.id)
@@ -1551,6 +1646,9 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::client_control::{
+        update_remote_control_policy_core, UpdateRemoteControlPolicyRequest,
+    };
     use crate::services::computer::ComputerRuntimeState;
     use crate::services::config::ConfigService;
     use crate::services::input_entry_store::InputEntryStorageKind;
@@ -1631,7 +1729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_cannot_publish_an_uncommitted_creation_profile() {
+    async fn list_is_observational_while_an_uncommitted_profile_exists() {
         let (state, _dir) = test_state();
         let state = Arc::new(state);
         let creation_membership = state.computer_registry.membership_lease().await;
@@ -1644,12 +1742,13 @@ mod tests {
             .unwrap();
 
         let list_state = state.clone();
-        let list = tokio::spawn(async move { list_computer_instances_core(&list_state).await });
-        tokio::task::yield_now().await;
-        assert!(
-            !list.is_finished(),
-            "list must not observe a profile before its membership transaction commits"
-        );
+        let list = tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            list_computer_instances_core(&list_state).await
+        })
+        .await
+        .expect("list must not wait for a membership transaction")
+        .unwrap();
+        assert!(list.iter().all(|status| status.id != "computer-pending"));
 
         // Model create/duplicate rollback after its profile write but before runtime publication.
         state
@@ -1658,10 +1757,6 @@ mod tests {
             .unwrap();
         drop(creation_membership);
 
-        let statuses = list.await.unwrap().unwrap();
-        assert!(statuses
-            .iter()
-            .all(|status| status.id != "computer-pending"));
         assert!(state
             .computer_registry
             .runtime("computer-pending")
@@ -1956,12 +2051,18 @@ mod tests {
     #[tokio::test]
     async fn computer_status_includes_internal_client_control_in_mcp_counts() {
         let (state, _dir) = test_state();
-        state
-            .config
-            .update_computer_instance("computer-a", |instance| {
-                instance.remote_control.enabled = true;
-            })
-            .unwrap();
+        update_remote_control_policy_core(
+            &state,
+            UpdateRemoteControlPolicyRequest {
+                computer_id: "computer-a".to_string(),
+                policy: RemoteControlPolicy {
+                    enabled: true,
+                    ..RemoteControlPolicy::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
 
         let stopped = get_computer_instance_status_core(&state, "computer-a".to_string())
             .await
