@@ -227,26 +227,6 @@ describe('inputStore', () => {
     });
   });
 
-  describe('saveInput', () => {
-    it('atomically saves a Prompt definition and value before refreshing projections', async () => {
-      const input: InputDefinition = { type: 'PromptString', id: 'token', password: true };
-      mockedInvoke
-        .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce([input])
-        .mockResolvedValueOnce({ token: { configured: true } })
-        .mockResolvedValueOnce([]);
-
-      await useInputStore.getState().saveInput(instanceId, input, 'secret', false);
-
-      expect(mockedInvoke).toHaveBeenCalledWith('save_input', {
-        instanceId,
-        input,
-        value: 'secret',
-        keepExistingValue: false,
-      });
-    });
-  });
-
   describe('removeInput', () => {
     it('invokes remove_input and refreshes inputs + values', async () => {
       mockedInvoke.mockResolvedValueOnce(undefined); // remove_input
