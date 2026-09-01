@@ -210,10 +210,12 @@ pub struct ManagerCurrentUser {
     pub phone: String,
     #[serde(default)]
     pub account_avatar: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub account_id: String,
     pub account_name: String,
     #[serde(default)]
     pub employee_no: String,
+    #[serde(deserialize_with = "super::serde_compat::deserialize_opaque_id")]
     pub organization_id: String,
     pub organization_name: String,
     pub organization_type: String,
@@ -1633,27 +1635,6 @@ mod tests {
             serialized["robotAccountId"],
             serde_json::json!("turingfocus:000042")
         );
-    }
-
-    #[test]
-    fn current_user_rejects_numeric_account_and_organization_ids() {
-        let base = serde_json::json!({
-            "id": 7,
-            "nickname": "Client UAT",
-            "accountId": "turingfocus:000007",
-            "accountName": "client_uat",
-            "organizationId": "turingfocus",
-            "organizationName": "TuringFocus",
-            "organizationType": "enterprise"
-        });
-
-        let mut numeric_account = base.clone();
-        numeric_account["accountId"] = serde_json::json!(7);
-        assert!(serde_json::from_value::<ManagerCurrentUser>(numeric_account).is_err());
-
-        let mut numeric_organization = base;
-        numeric_organization["organizationId"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<ManagerCurrentUser>(numeric_organization).is_err());
     }
 
     #[test]
