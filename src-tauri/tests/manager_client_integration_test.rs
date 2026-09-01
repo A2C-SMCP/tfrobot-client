@@ -2378,7 +2378,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
         exchange_coordinator
             .exchange_token_for_generation(
                 generation,
-                "robot-account-1",
+                "turingfocus:robot-account-1",
                 Some("smcp:connect".to_string()),
             )
             .await
@@ -2387,7 +2387,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
     assert_eq!(request.generation, generation);
     assert_eq!(request.token_url, format!("{base}/api/v1/oauth/token"));
     assert_eq!(request.user_jwt, "jwt-for-typescript");
-    assert_eq!(request.audience, "robot:robot-account-1");
+    assert_eq!(request.audience, "robot:turingfocus:robot-account-1");
     assert_eq!(request.scope.as_deref(), Some("smcp:connect"));
     assert_eq!(request.token_profile, ManagerTokenProfile::Session);
     let form = url::form_urlencoded::Serializer::new(String::new())
@@ -2398,7 +2398,7 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
             ),
             ("subject_token", "jwt-for-typescript"),
             ("subject_token_type", "urn:ietf:params:oauth:token-type:jwt"),
-            ("audience", "robot:robot-account-1"),
+            ("audience", "robot:turingfocus:robot-account-1"),
             ("scope", "smcp:connect"),
             ("token_profile", "session"),
         ])
@@ -2495,7 +2495,7 @@ async fn old_bridge_unauthorized_completion_cannot_clear_new_session() {
     let exchange_coordinator = coordinator.clone();
     let old_exchange = tokio::spawn(async move {
         exchange_coordinator
-            .exchange_token_for_generation(old_generation, "robot-old", None)
+            .exchange_token_for_generation(old_generation, "turingfocus:robot-old", None)
             .await
     });
     let old_request = receiver.recv().await.expect("old bridge request");
