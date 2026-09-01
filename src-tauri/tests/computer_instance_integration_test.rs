@@ -679,7 +679,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
                 state: ManagerRobotBindingState::NeedsRebind,
                 employee_id: 42,
                 robot_id: Some("robot-42".to_string()),
-                last_resolved_robot_account_id: Some("4200".to_string()),
+                last_resolved_robot_account_id: Some("turingfocus:004200".to_string()),
                 namespace: Some("test".to_string()),
                 robot_name: Some("Robot 42".to_string()),
             });

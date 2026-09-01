@@ -406,7 +406,7 @@ describe('ManagerAccount', () => {
       id: 11,
       name: 'bot-one',
       robotId: 'robot-a',
-      robotAccountId: '4242',
+      robotAccountId: 'turingfocus:004242',
       templateType: 'tfrserver',
       templateDisplayName: '智能客服',
       status: 'running',
@@ -544,7 +544,7 @@ describe('ManagerAccount', () => {
         id: 12,
         name: 'bot-two',
         robotId: 'robot-b',
-        robotAccountId: '4343',
+        robotAccountId: 'turingfocus:004343',
       };
       applyMock({
         session: user,
