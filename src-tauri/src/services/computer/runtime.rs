@@ -495,13 +495,9 @@ impl ComputerInstanceRuntime {
         if let Err(error) = self.prepare_sdk_shutdown_inner().await {
             cleanup_errors.push(error);
         }
-        // SDK shutdown closes the shared startup gate before waiting for in-flight starts. It is
-        // the first SDK teardown operation so queued starts fail instead of being drained one by
-        // one by a client-side stop-all loop.
-        if let Err(error) = self.shutdown_sdk_computer_inner().await {
-            cleanup_errors.push(error);
-        }
-
+        // Leave the office while the SDK connection is still addressable. SDK shutdown may clear
+        // its Socket.IO handle even when another reference keeps the transport alive, which would
+        // otherwise skip the protocol-level leave and leak remote membership.
         if self.has_smcp_transport().await {
             if let Err(error) = self.disconnect_smcp_socketio_bounded_inner().await {
                 cleanup_errors.push(format!(
@@ -509,6 +505,12 @@ impl ComputerInstanceRuntime {
                     self.instance.id, error
                 ));
             }
+        }
+        // SDK shutdown closes the shared startup gate before waiting for in-flight starts. It is
+        // the first MCP teardown operation so queued starts fail instead of being drained one by
+        // one by a client-side stop-all loop.
+        if let Err(error) = self.shutdown_sdk_computer_inner().await {
+            cleanup_errors.push(error);
         }
         // Teardown is deliberately exhaustive after the commit point: no cleanup failure may
         // leave logical connection state alive for an instance being removed.
