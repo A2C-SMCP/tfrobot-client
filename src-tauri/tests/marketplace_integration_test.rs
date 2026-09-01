@@ -52,6 +52,16 @@ use tokio::time::{timeout, Duration};
 const TEST_INSTANCE_ID: &str = "computer-a";
 const TEST_SECOND_INSTANCE_ID: &str = "computer-b";
 
+fn presented_local_path(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap();
+    url::Url::from_file_path(&canonical)
+        .expect("canonical local path must convert to a file URL")
+        .to_file_path()
+        .expect("file URL must convert back to a native path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 struct RecordingRuntimeInputSink {
     sender: tokio::sync::mpsc::UnboundedSender<RuntimeInputRequest>,
 }
@@ -368,7 +378,7 @@ async fn local_marketplace_path_is_canonicalized_and_presented_as_a_native_path(
     assert_eq!(
         governance.marketplaces[0].source,
         MarketplaceSourceSummary::LocalGit {
-            path: repo.canonicalize().unwrap().display().to_string(),
+            path: presented_local_path(&repo),
         }
     );
 }
@@ -2396,7 +2406,7 @@ async fn marketplace_update_is_rejected_without_losing_the_existing_marketplace(
     assert_eq!(
         governance.marketplaces[0].source,
         MarketplaceSourceSummary::LocalGit {
-            path: first_repo.canonicalize().unwrap().display().to_string(),
+            path: presented_local_path(&first_repo),
         }
     );
     assert_eq!(governance.plugins.len(), 1);
