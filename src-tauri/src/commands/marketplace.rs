@@ -18,15 +18,15 @@ use a2c_smcp::smcp_computer::{GovernanceDiagnostic, MarketplaceStatus, PluginSta
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
+use url::Url;
 
 const SUPPORTED_OPERATIONS: &[&str] = &[
     "add_marketplace",
     "refresh_marketplace",
     "remove_marketplace",
-    "update_marketplace",
     "install_plugin",
     "enable_plugin",
     "disable_plugin",
@@ -60,13 +60,24 @@ pub struct MarketplaceCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceSummary {
     pub name: String,
+    pub source: MarketplaceSourceSummary,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum MarketplaceSourceSummary {
     /// Sanitized URL returned by the SDK for presentation only.
     ///
     /// Credentials, query, and fragment may be absent. Callers must never submit this value as
     /// the source for an update.
-    pub display_git_url: Option<String>,
-    pub status: String,
-    pub message: Option<String>,
+    RemoteGit {
+        display_git_url: Option<String>,
+    },
+    LocalGit {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,14 +119,21 @@ pub struct MarketplaceGovernance {
 #[serde(rename_all = "camelCase")]
 pub struct AddMarketplaceRequest {
     pub name: String,
-    pub git_url: String,
+    pub source: MarketplaceSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMarketplaceRequest {
     pub name: String,
-    pub git_url: String,
+    pub source: MarketplaceSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum MarketplaceSource {
+    RemoteGit { git_url: String },
+    LocalGit { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,10 +198,10 @@ pub async fn add_marketplace_core(
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     let name = require_non_empty("marketplace name", &request.name)?;
-    let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
+    let git_url = resolve_marketplace_source(request.source)?;
     runtime
         .sdk_add_marketplace(
-            git_url,
+            &git_url,
             AddMarketplaceParams {
                 name: Some(name),
                 auto_update: false,
@@ -192,6 +210,23 @@ pub async fn add_marketplace_core(
         )
         .await
         .map_err(|error| error.to_string())?;
+    if let Err(error) = ensure_marketplace_healthy(&runtime, name, "add").await {
+        let cleanup_result = runtime
+            .sdk_remove_marketplace(
+                name,
+                RemoveMarketplaceParams {
+                    keep_plugins: true,
+                    hooks: None,
+                },
+            )
+            .await;
+        return match cleanup_result {
+            Ok(_) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; failed to clean up the rejected Marketplace: {cleanup_error}"
+            )),
+        };
+    }
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
 }
@@ -217,7 +252,7 @@ pub async fn refresh_marketplace_core(
     if let Some(missing) = rows.iter().find(|row| row.status.as_str() == "missing") {
         return Err(format!("unknown marketplace: {:?}", missing.name));
     }
-    Ok(())
+    ensure_marketplace_healthy(&runtime, marketplace, "refresh").await
 }
 
 #[tauri::command]
@@ -272,38 +307,13 @@ pub async fn update_marketplace_core(
     request: UpdateMarketplaceRequest,
 ) -> Result<(), String> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    let name = require_non_empty("marketplace name", &request.name)?;
-    let git_url = require_non_empty("marketplace git_url", &request.git_url)?;
-    let snapshot = marketplace_governance_snapshot(&runtime).await?;
-    if snapshot.has_installed_plugins_for_marketplace(name) {
-        return Err(format!(
-            "marketplace '{name}' has installed plugins; uninstall plugins before updating the marketplace URL"
-        ));
-    }
-    runtime
-        .sdk_remove_marketplace(
-            name,
-            RemoveMarketplaceParams {
-                keep_plugins: true,
-                hooks: None,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    runtime
-        .sdk_add_marketplace(
-            git_url,
-            AddMarketplaceParams {
-                name: Some(name),
-                auto_update: false,
-                no_clone: false,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    ensure_runtime(state, instance_id).await?;
+    require_non_empty("marketplace name", &request.name)?;
+    resolve_marketplace_source(request.source)?;
+    Err(
+        "Marketplace source updates are unavailable until smcp-computer provides an atomic update API; the existing Marketplace was left unchanged"
+            .to_string(),
+    )
 }
 
 #[tauri::command]
@@ -643,6 +653,69 @@ fn require_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, String>
     Ok(value)
 }
 
+fn resolve_marketplace_source(source: MarketplaceSource) -> Result<String, String> {
+    match source {
+        MarketplaceSource::RemoteGit { git_url } => {
+            let git_url = require_non_empty("marketplace git_url", &git_url)?;
+            if Url::parse(git_url)
+                .ok()
+                .is_some_and(|url| url.scheme().eq_ignore_ascii_case("file"))
+            {
+                return Err(
+                    "remote Marketplace Git URL must not use file://; choose Local repository"
+                        .to_string(),
+                );
+            }
+            Ok(git_url.to_string())
+        }
+        MarketplaceSource::LocalGit { path } => {
+            let path = require_non_empty("marketplace local path", &path)?;
+            let canonical = std::fs::canonicalize(path).map_err(|error| {
+                format!("failed to resolve Marketplace local repository path '{path}': {error}")
+            })?;
+            if !canonical.is_dir() {
+                return Err(format!(
+                    "Marketplace local repository path is not a directory: {}",
+                    canonical.display()
+                ));
+            }
+            Url::from_file_path(&canonical)
+                .map(String::from)
+                .map_err(|()| {
+                    format!(
+                        "failed to convert Marketplace local repository path to a file URL: {}",
+                        canonical.display()
+                    )
+                })
+        }
+    }
+}
+
+fn summarize_marketplace_source(source_url: Option<String>) -> MarketplaceSourceSummary {
+    let Some(source_url) = source_url else {
+        return MarketplaceSourceSummary::RemoteGit {
+            display_git_url: None,
+        };
+    };
+    let Ok(url) = Url::parse(&source_url) else {
+        return MarketplaceSourceSummary::RemoteGit {
+            display_git_url: Some(source_url),
+        };
+    };
+    if !url.scheme().eq_ignore_ascii_case("file") {
+        return MarketplaceSourceSummary::RemoteGit {
+            display_git_url: Some(source_url),
+        };
+    }
+
+    let path = url
+        .to_file_path()
+        .unwrap_or_else(|()| PathBuf::from(url.path()));
+    MarketplaceSourceSummary::LocalGit {
+        path: path.to_string_lossy().into_owned(),
+    }
+}
+
 fn supported_capabilities() -> MarketplaceCapabilities {
     MarketplaceCapabilities {
         computer_lifecycle_api_available: true,
@@ -686,7 +759,7 @@ async fn marketplace_governance_snapshot(
         .into_iter()
         .map(|marketplace| MarketplaceSummary {
             name: marketplace.name,
-            display_git_url: marketplace.source_url,
+            source: summarize_marketplace_source(marketplace.source_url),
             status: marketplace_status(marketplace.status).to_string(),
             message: diagnostic_message(
                 &marketplace.diagnostics,
@@ -784,6 +857,34 @@ fn diagnostic_message(
                 .join("; "),
         )
     }
+}
+
+async fn ensure_marketplace_healthy(
+    runtime: &crate::services::computer::ComputerInstanceRuntime,
+    marketplace: &str,
+    operation: &str,
+) -> Result<(), String> {
+    let snapshot = runtime.sdk_governance_snapshot().await.map_err(|error| {
+        format!("Marketplace '{marketplace}' {operation} could not be verified: {error}")
+    })?;
+    let marketplace_snapshot = snapshot
+        .marketplaces
+        .iter()
+        .find(|candidate| candidate.name == marketplace)
+        .ok_or_else(|| {
+            format!(
+                "Marketplace '{marketplace}' {operation} could not be verified: SDK governance snapshot did not contain the Marketplace"
+            )
+        })?;
+    if marketplace_snapshot.status != MarketplaceStatus::Degraded {
+        return Ok(());
+    }
+
+    let details = diagnostic_message(&marketplace_snapshot.diagnostics, None)
+        .unwrap_or_else(|| "SDK reported a degraded Marketplace state".to_string());
+    Err(format!(
+        "Marketplace '{marketplace}' {operation} failed: {details}"
+    ))
 }
 
 fn sdk_settings_env(state: &AppState, instance_id: &str) -> EnvMap {

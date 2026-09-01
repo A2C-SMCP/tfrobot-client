@@ -15,7 +15,7 @@ use tfrobot_client_lib::commands::{
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
         get_marketplace_governance_core, install_plugin_core, refresh_marketplace_core,
-        remove_marketplace_core, uninstall_plugin_core, AddMarketplaceRequest,
+        remove_marketplace_core, uninstall_plugin_core, AddMarketplaceRequest, MarketplaceSource,
         PluginLifecycleRequest,
     },
     skills,
@@ -60,7 +60,9 @@ async fn real_cnb_marketplace_plugin_skills_and_mcp_lifecycle_work() {
         INSTANCE_ID,
         AddMarketplaceRequest {
             name: MARKETPLACE_NAME.to_string(),
-            git_url: MARKETPLACE_URL.to_string(),
+            source: MarketplaceSource::RemoteGit {
+                git_url: MARKETPLACE_URL.to_string(),
+            },
         },
     )
     .await

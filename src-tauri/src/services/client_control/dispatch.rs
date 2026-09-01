@@ -741,7 +741,9 @@ pub(super) async fn dispatch(
                 &args.computer_id,
                 marketplace::AddMarketplaceRequest {
                     name: args.name,
-                    git_url: args.git_url,
+                    source: marketplace::MarketplaceSource::RemoteGit {
+                        git_url: args.git_url,
+                    },
                 },
             )
             .await
@@ -754,7 +756,9 @@ pub(super) async fn dispatch(
                 &args.computer_id,
                 marketplace::UpdateMarketplaceRequest {
                     name: args.name,
-                    git_url: args.git_url,
+                    source: marketplace::MarketplaceSource::RemoteGit {
+                        git_url: args.git_url,
+                    },
                 },
             )
             .await

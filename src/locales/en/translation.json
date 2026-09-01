@@ -496,6 +496,10 @@
     "sdkOwnedState": "State is owned by SDK governance APIs.",
     "bundledSkills": "Bundled skills: {{skills}}",
     "bundledMcpServers": "Bundled MCP servers: {{servers}}",
+    "source": {
+      "remoteGit": "Remote repository",
+      "localGit": "Local repository"
+    },
     "details": {
       "title": "Plugin Contents",
       "emptyPlugin": "Select a plugin to inspect its contents",
@@ -514,9 +518,14 @@
     "form": {
       "name": "Name",
       "nameRequired": "Marketplace name is required",
+      "sourceType": "Source type",
       "gitUrl": "Git URL",
       "gitUrlRequired": "Git URL is required",
+      "remoteFileUrlForbidden": "file:// URLs must be added as a local repository",
       "gitUrlEditHelp": "For security, enter the complete Git URL again. The displayed source omits credentials, query, and fragment.",
+      "localPath": "Local repository path",
+      "localPathRequired": "Select a local Git repository",
+      "sourceLocked": "This Marketplace has installed Plugins. Uninstall them before changing its source.",
       "marketplace": "Marketplace",
       "marketplaceRequired": "Marketplace is required",
       "plugin": "Plugin",
@@ -524,6 +533,7 @@
     },
     "actions": {
       "addMarketplace": "Add Marketplace",
+      "chooseFolder": "Choose folder",
       "selectMarketplace": "Select marketplace {{marketplace}}",
       "selectPlugin": "Select plugin {{plugin}} ({{pluginId}})",
       "refreshMarketplace": "Refresh Marketplace",

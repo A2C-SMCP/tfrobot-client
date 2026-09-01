@@ -34,10 +34,14 @@ export interface MarketplaceCapabilities {
 
 export interface MarketplaceSummary {
   name: string;
-  displayGitUrl?: string | null;
+  source: MarketplaceSourceSummary;
   status: string;
   message?: string | null;
 }
+
+export type MarketplaceSourceSummary =
+  | { type: 'remoteGit'; displayGitUrl?: string | null }
+  | { type: 'localGit'; path: string };
 
 export interface PluginSummary {
   marketplace: string;
@@ -68,8 +72,12 @@ export interface MarketplaceGovernance {
 
 export interface AddMarketplaceRequest {
   name: string;
-  gitUrl: string;
+  source: MarketplaceSource;
 }
+
+export type MarketplaceSource =
+  | { type: 'remoteGit'; gitUrl: string }
+  | { type: 'localGit'; path: string };
 
 export interface PluginLifecycleRequest {
   marketplace: string;

@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { StrictMode, useCallback, useState } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
 import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
+const mockedOpen = vi.mocked(open);
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -38,6 +40,7 @@ describe('MarketplaceTab', () => {
   beforeEach(() => {
     useSkillStore.getState().reset();
     mockedInvoke.mockReset();
+    mockedOpen.mockReset();
   });
 
   it('does not render persistent SDK capability metadata and disables lifecycle actions when unsupported', async () => {
@@ -66,8 +69,8 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: 'lastUpdated=2026-07-03T06:08:14Z' },
-        { name: 'acme', displayGitUrl: 'https://example.com/acme.git', status: 'known', message: null },
+        { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: 'lastUpdated=2026-07-03T06:08:14Z' },
+        { name: 'acme', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/acme.git' }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -133,8 +136,8 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'tf-market', displayGitUrl: null, status: 'known', message: null },
-        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+        { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: null }, status: 'known', message: null },
+        { name: 'acme', source: { type: 'remoteGit', displayGitUrl: null }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -228,7 +231,7 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'acme', displayGitUrl: null, status: 'known', message: null },
+        { name: 'acme', source: { type: 'remoteGit', displayGitUrl: null }, status: 'known', message: null },
       ],
       plugins: [{
         marketplace: 'acme',
@@ -266,7 +269,7 @@ describe('MarketplaceTab', () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -327,7 +330,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-mkt', displayGitUrl: 'https://example.com/private.git', status: 'known', message: null },
+          { name: 'tf-mkt', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/private.git' }, status: 'known', message: null },
         ],
         plugins: [],
       })
@@ -357,7 +360,169 @@ describe('MarketplaceTab', () => {
         instanceId: 'computer-a',
         request: {
           name: 'tf-mkt',
-          gitUrl: 'https://oauth2:test-token@example.com/private.git?ref=release#v1',
+          source: {
+            type: 'remoteGit',
+            gitUrl: 'https://oauth2:test-token@example.com/private.git?ref=release#v1',
+          },
+        },
+      });
+    });
+  });
+
+  it('rejects file URLs in remote repository mode before invoking Tauri', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add').closest('button')!);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'local-market' } });
+    fireEvent.change(screen.getByLabelText('Git URL'), {
+      target: { value: 'file:///tmp/local-market' },
+    });
+    const addButtons = screen.getAllByText('Add');
+    fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
+
+    expect(await screen.findByText(/must be added as a local repository/i)).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalledWith(
+      'add_marketplace',
+      expect.anything(),
+    );
+  });
+
+  it('selects one local directory, preserves it when selection is cancelled, and submits a structured source', async () => {
+    mockedOpen
+      .mockResolvedValueOnce('/tmp/Marketplace 空格')
+      .mockResolvedValueOnce(null);
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add').closest('button')!);
+    fireEvent.click(screen.getByLabelText('Local repository'));
+    expect(screen.getByLabelText('Local repository')).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose folder' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/Marketplace 空格');
+    });
+    expect(mockedOpen).toHaveBeenCalledWith({ directory: true, multiple: false });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose folder' }));
+    await waitFor(() => expect(mockedOpen).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/Marketplace 空格');
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'local-market' } });
+    const addButtons = screen.getAllByText('Add');
+    fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
+        instanceId: 'computer-a',
+        request: {
+          name: 'local-market',
+          source: { type: 'localGit', path: '/tmp/Marketplace 空格' },
+        },
+      });
+    });
+  });
+
+  it('recognizes a saved local source and blocks source changes while Plugins are installed', async () => {
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [{
+          name: 'local-market',
+          source: { type: 'localGit', path: '/tmp/local-market' },
+          status: 'known',
+          message: null,
+        }],
+        plugins: [{
+          marketplace: 'local-market',
+          plugin: 'tools',
+          pluginId: 'tools@local-market',
+          version: null,
+          installed: true,
+          enabled: false,
+          status: 'disabled',
+          bundledMcpServers: [],
+          bundledSkills: [],
+          declared: null,
+          message: null,
+        }],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('/tmp/local-market')).toBeInTheDocument();
+    expect(screen.getByText('Local repository')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Edit'));
+
+    expect(screen.getByLabelText('Local repository')).toBeChecked();
+    expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/local-market');
+    expect(screen.getByText(/uninstall them before changing its source/i)).toBeInTheDocument();
+    expect(screen.getByText('Update').closest('button')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Choose folder' })).toBeDisabled();
+  });
+
+  it('updates an existing local Marketplace from a newly selected directory', async () => {
+    mockedOpen.mockResolvedValueOnce('/tmp/local-market-next');
+    mockedInvoke
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [{
+          name: 'local-market',
+          source: { type: 'localGit', path: '/tmp/local-market' },
+          status: 'known',
+          message: null,
+        }],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        capabilities: supportedCapabilities,
+        marketplaces: [],
+        plugins: [],
+      })
+      .mockResolvedValueOnce([]);
+
+    render(<MarketplaceTab instanceId="computer-a" />);
+
+    expect(await screen.findByText('/tmp/local-market')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Edit'));
+    fireEvent.click(screen.getByRole('button', { name: 'Choose folder' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/local-market-next');
+    });
+    fireEvent.click(screen.getByText('Update').closest('button')!);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('update_marketplace', {
+        instanceId: 'computer-a',
+        request: {
+          name: 'local-market',
+          source: { type: 'localGit', path: '/tmp/local-market-next' },
         },
       });
     });
@@ -369,7 +534,7 @@ describe('MarketplaceTab', () => {
       marketplaces: [
         {
           name: 'tf-market',
-          displayGitUrl: 'https://example.com/tf.git',
+          source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' },
           status: 'known',
           message: null,
         },
@@ -404,7 +569,7 @@ describe('MarketplaceTab', () => {
         marketplaces: [
           {
             name: 'tf-market',
-            displayGitUrl: 'https://example.com/tf.git',
+            source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' },
             status: 'known',
             message: null,
           },
@@ -451,7 +616,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null },
         ],
         plugins: [],
       })
@@ -476,7 +641,7 @@ describe('MarketplaceTab', () => {
         instanceId: 'computer-a',
         request: {
           name: 'tf-market',
-          gitUrl: 'https://example.com/tf.git',
+          source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
         },
       });
     });
@@ -555,7 +720,7 @@ describe('MarketplaceTab', () => {
         reason: 'partial support',
       },
       marketplaces: [
-        { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+        { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -587,7 +752,7 @@ describe('MarketplaceTab', () => {
     const governance = {
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'acme', displayGitUrl: 'https://example.com/acme.git', status: 'known', message: null },
+        { name: 'acme', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/acme.git' }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -648,7 +813,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null },
         ],
         plugins: [
           {
@@ -705,7 +870,7 @@ describe('MarketplaceTab', () => {
       .mockResolvedValueOnce({
         capabilities: supportedCapabilities,
         marketplaces: [
-          { name: 'tf-market', displayGitUrl: 'https://example.com/tf.git', status: 'known', message: null },
+          { name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null },
         ],
         plugins: [
           {
@@ -743,7 +908,7 @@ describe('MarketplaceTab', () => {
       activeInstanceId: 'computer-a',
       capabilities: supportedCapabilities,
       marketplaces: [
-        { name: 'stale-market', displayGitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+        { name: 'stale-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/stale.git' }, status: 'known', message: null },
       ],
       plugins: [
         {
@@ -768,7 +933,7 @@ describe('MarketplaceTab', () => {
           governance: {
             capabilities: supportedCapabilities,
             marketplaces: [
-              { name: 'stale-market', displayGitUrl: 'https://example.com/stale.git', status: 'known', message: null },
+              { name: 'stale-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/stale.git' }, status: 'known', message: null },
             ],
             plugins: [
               {
