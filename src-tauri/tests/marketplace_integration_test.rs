@@ -31,7 +31,8 @@ use tfrobot_client_lib::commands::{
         enable_plugin_interactive_core, get_marketplace_capabilities_core,
         get_marketplace_governance_core, install_plugin_core, refresh_marketplace_core,
         remove_marketplace_core, uninstall_plugin_core, update_marketplace_core,
-        AddMarketplaceRequest, PluginLifecycleRequest, UpdateMarketplaceRequest,
+        AddMarketplaceRequest, MarketplaceSource, MarketplaceSourceSummary, PluginLifecycleRequest,
+        UpdateMarketplaceRequest,
     },
     runtime_error::RuntimeActionError,
     sdk_config, skills,
@@ -61,12 +62,6 @@ impl RuntimeInputRequestSink for RecordingRuntimeInputSink {
             .send(request.clone())
             .map_err(|error| error.to_string())
     }
-}
-
-fn file_url(path: &Path) -> String {
-    url::Url::from_file_path(path)
-        .expect("test repository path should convert to a file URL")
-        .to_string()
 }
 
 fn write_mcp_server_config(path: &Path, name: &str) {
@@ -187,7 +182,9 @@ async fn disabled_legacy_auto_plugin_oauth_credentials_are_retained_until_uninst
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -304,6 +301,79 @@ async fn governance_report_has_stable_empty_sdk_owned_ledger_shape() {
 }
 
 #[tokio::test]
+async fn marketplace_source_adapter_rejects_remote_file_urls_and_missing_local_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("local marketplace 空格");
+    build_marketplace_repo(&repo);
+
+    let error = add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "remote-file".to_string(),
+            source: MarketplaceSource::RemoteGit {
+                git_url: url::Url::from_file_path(&repo).unwrap().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("must not use file://"));
+
+    let missing = tmp.path().join("missing marketplace");
+    let error = add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "missing-local".to_string(),
+            source: MarketplaceSource::LocalGit {
+                path: missing.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("failed to resolve Marketplace local repository path"));
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance.marketplaces.is_empty());
+}
+
+#[tokio::test]
+async fn local_marketplace_path_is_canonicalized_and_presented_as_a_native_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("local marketplace 空格");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "local-market".to_string(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.join(".").display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        governance.marketplaces[0].source,
+        MarketplaceSourceSummary::LocalGit {
+            path: repo.canonicalize().unwrap().display().to_string(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn marketplace_lifecycle_commands_use_sdk_errors_without_client_ledgers() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
@@ -313,7 +383,9 @@ async fn marketplace_lifecycle_commands_use_sdk_errors_without_client_ledgers() 
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "tf-market".to_string(),
-            git_url: "not a git url".to_string(),
+            source: MarketplaceSource::RemoteGit {
+                git_url: "not a git url".to_string(),
+            },
         },
     )
     .await
@@ -374,7 +446,9 @@ async fn marketplace_install_and_uninstall_use_sdk_lifecycle_and_mcp_hooks() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -509,7 +583,9 @@ async fn plugin_missing_input_does_not_block_computer_across_retry_and_cold_star
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -680,7 +756,9 @@ async fn running_plugin_with_multiple_mcps_fails_closed_without_requester_contex
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -724,7 +802,9 @@ async fn foreground_plugin_enable_confirms_runtime_secret_and_continues_in_place
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -784,7 +864,9 @@ async fn foreground_plugin_enable_stops_after_first_input_failure() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -847,7 +929,9 @@ async fn foreground_computer_start_and_restart_fail_fast_for_enabled_plugin_inpu
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -957,7 +1041,9 @@ async fn plugin_runtime_definition_stays_out_of_sdk_export_while_its_entry_is_ma
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: format!("file://{}", repo.display()),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1064,7 +1150,9 @@ async fn duplicate_copies_only_user_skills_and_keeps_plugin_governance_isolated(
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1152,7 +1240,9 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1446,7 +1536,9 @@ async fn plugin_disable_removes_skills_from_active_skill_registry() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1521,7 +1613,9 @@ async fn shared_plugin_dependency_hands_off_and_is_reclaimed_after_the_last_disa
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1649,7 +1743,9 @@ async fn enabling_plugin_starts_a_stopped_independent_bundle_dependency() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1699,7 +1795,9 @@ async fn plugin_enable_claims_an_existing_user_bundle_dependency_until_disabled(
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1766,7 +1864,9 @@ async fn enabled_plugin_overrides_disabled_user_fallback_until_plugin_is_disable
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1857,7 +1957,9 @@ async fn direct_plugin_uninstall_restores_a_disabled_user_fallback() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -1913,7 +2015,9 @@ async fn config_import_is_independent_from_dynamic_plugin_runtime_ownership() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2015,7 +2119,9 @@ async fn computer_bootup_starts_enabled_plugin_mcp_servers() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2081,7 +2187,9 @@ async fn plugin_install_and_enable_start_mcp_when_computer_is_running() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2136,7 +2244,9 @@ async fn enabled_plugin_mcp_remounts_from_ledger_after_app_restart() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2211,7 +2321,9 @@ async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2240,7 +2352,7 @@ async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
 }
 
 #[tokio::test]
-async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
+async fn marketplace_update_is_rejected_without_losing_the_existing_marketplace() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
     let first_repo = tmp.path().join("first-marketplace-repo");
@@ -2253,34 +2365,187 @@ async fn marketplace_update_replaces_url_when_no_plugins_are_installed() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&first_repo),
+            source: MarketplaceSource::LocalGit {
+                path: first_repo.display().to_string(),
+            },
         },
     )
     .await
     .unwrap();
 
-    update_marketplace_core(
+    let error = update_marketplace_core(
         &state,
         TEST_INSTANCE_ID,
         UpdateMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&second_repo),
+            source: MarketplaceSource::LocalGit {
+                path: second_repo.display().to_string(),
+            },
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
+
+    assert!(error.contains("atomic update API"));
+    assert!(error.contains("left unchanged"));
 
     let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
         .await
         .unwrap();
     assert_eq!(governance.marketplaces.len(), 1);
     assert_eq!(
-        governance.marketplaces[0].display_git_url.as_deref(),
-        Some(file_url(&second_repo).as_str())
+        governance.marketplaces[0].source,
+        MarketplaceSourceSummary::LocalGit {
+            path: first_repo.canonicalize().unwrap().display().to_string(),
+        }
     );
     assert_eq!(governance.plugins.len(), 1);
-    assert_eq!(governance.plugins[0].plugin, "tf45-audit");
+    assert_eq!(governance.plugins[0].plugin, "audit");
     assert_eq!(governance.plugins[0].status, "available");
+}
+
+#[tokio::test]
+async fn local_marketplace_refresh_only_loads_committed_git_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("refresh-marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    fs::write(
+        repo.join(".tfrobot-plugin/marketplace.json"),
+        r#"{"plugins":[{"name":"audit","source":"./plugins/audit"},{"name":"notes","source":"./plugins/notes"}]}"#,
+    )
+    .unwrap();
+    let notes_skill = repo.join("plugins/notes/skills/notes");
+    fs::create_dir_all(&notes_skill).unwrap();
+    fs::write(
+        notes_skill.join("SKILL.md"),
+        "---\nname: notes\ndescription: notes\n---\nbody",
+    )
+    .unwrap();
+
+    refresh_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance
+        .plugins
+        .iter()
+        .all(|plugin| plugin.plugin != "notes"));
+
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "add notes plugin",
+        ],
+    );
+    refresh_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance
+        .plugins
+        .iter()
+        .any(|plugin| plugin.plugin == "notes"));
+}
+
+#[tokio::test]
+async fn invalid_local_marketplace_is_rejected_without_governance_residue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("invalid-marketplace-repo");
+    build_invalid_marketplace_repo(&repo);
+
+    let error = add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "invalid".to_string(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("add failed"));
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance.marketplaces.is_empty());
+    assert!(governance.plugins.is_empty());
+}
+
+#[tokio::test]
+async fn refresh_reports_a_committed_invalid_manifest_as_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("refresh-invalid-marketplace-repo");
+    build_marketplace_repo(&repo);
+
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".to_string(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    fs::write(repo.join(".tfrobot-plugin/marketplace.json"), "not-json").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "break manifest",
+        ],
+    );
+
+    let error = refresh_marketplace_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap_err();
+    assert!(error.contains("refresh failed"));
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces[0].status, "degraded");
+    assert!(governance.marketplaces[0].message.is_some());
 }
 
 #[tokio::test]
@@ -2297,7 +2562,9 @@ async fn marketplace_update_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&first_repo),
+            source: MarketplaceSource::LocalGit {
+                path: first_repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2318,13 +2585,21 @@ async fn marketplace_update_requires_plugins_to_be_uninstalled_first() {
         TEST_INSTANCE_ID,
         UpdateMarketplaceRequest {
             name: "acme".to_string(),
-            git_url: file_url(&second_repo),
+            source: MarketplaceSource::LocalGit {
+                path: second_repo.display().to_string(),
+            },
         },
     )
     .await
     .unwrap_err();
 
-    assert!(error.contains("uninstall plugins before updating"));
+    assert!(error.contains("atomic update API"));
+
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert!(governance.plugins[0].installed);
 }
 
 #[tokio::test]
@@ -2347,15 +2622,15 @@ async fn plugin_enable_state_is_isolated_per_computer_instance() {
         .unwrap();
     let repo = tmp.path().join("marketplace-repo");
     build_marketplace_repo(&repo);
-    let git_url = file_url(&repo);
-
     for instance_id in [TEST_INSTANCE_ID, TEST_SECOND_INSTANCE_ID] {
         add_marketplace_core(
             &state,
             instance_id,
             AddMarketplaceRequest {
                 name: "acme".to_string(),
-                git_url: git_url.clone(),
+                source: MarketplaceSource::LocalGit {
+                    path: repo.display().to_string(),
+                },
             },
         )
         .await
@@ -2453,7 +2728,9 @@ async fn plugin_install_materializes_mcp_and_skills_only_for_current_instance() 
         FIRST_INSTANCE_ID,
         AddMarketplaceRequest {
             name: MARKETPLACE.to_string(),
-            git_url: file_url(&repo),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
         },
     )
     .await
@@ -2564,6 +2841,25 @@ fn build_marketplace_repo(repo: &Path) {
             "commit",
             "-qm",
             "init",
+        ],
+    );
+}
+
+fn build_invalid_marketplace_repo(repo: &Path) {
+    fs::create_dir_all(repo.join(".tfrobot-plugin")).unwrap();
+    fs::write(repo.join(".tfrobot-plugin/marketplace.json"), "not-json").unwrap();
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "invalid manifest",
         ],
     );
 }

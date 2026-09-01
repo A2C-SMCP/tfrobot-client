@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { App, Alert, Button, Card, Empty, Form, Input, List, Modal, Skeleton, Space, Tag, Typography } from 'antd';
+import { App, Alert, Button, Card, Empty, Form, Input, List, Modal, Radio, Skeleton, Space, Tag, Typography } from 'antd';
 import {
   CloudDownloadOutlined,
   DeleteOutlined,
   EditOutlined,
+  FolderOpenOutlined,
   LoadingOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -16,6 +17,7 @@ import {
   formatInvokeError,
   useSkillStore,
   type MarketplaceSummary,
+  type MarketplaceSource,
   type PluginSummary,
   type SkillRef,
   type SkillResource,
@@ -36,7 +38,7 @@ interface MarketplaceTabProps {
 
 interface MarketplaceFormValues {
   name: string;
-  gitUrl: string;
+  source: MarketplaceSource;
 }
 
 function pluginKey(plugin: Pick<PluginSummary, 'marketplace' | 'plugin' | 'pluginId'>) {
@@ -120,6 +122,11 @@ export function MarketplaceTab({
   const marketplaceOperation = recordsByInstanceId[instanceId]?.marketplaceOperation ?? null;
   const marketplaceBusy = loadingMarketplace || marketplaceOperation !== null;
   const marketplaceError = recordsByInstanceId[instanceId]?.marketplaceError ?? null;
+  const marketplaceSourceType = Form.useWatch(['source', 'type'], marketplaceForm) ?? 'remoteGit';
+  const editingMarketplaceLocked = editingMarketplace !== null
+    && plugins.some((plugin) => (
+      plugin.marketplace === editingMarketplace && plugin.installed
+    ));
 
   useLayoutEffect(() => {
     currentInstanceIdRef.current = instanceId;
@@ -226,11 +233,26 @@ export function MarketplaceTab({
   const handleOpenAddMarketplace = () => {
     setEditingMarketplace(null);
     marketplaceForm.resetFields();
+    marketplaceForm.setFieldsValue({
+      name: '',
+      source: { type: 'remoteGit', gitUrl: '' },
+    });
     setMarketplaceModalOpen(true);
   };
 
   const handleSubmitMarketplace = async () => {
-    const values = await marketplaceForm.validateFields();
+    let values: MarketplaceFormValues;
+    try {
+      values = await marketplaceForm.validateFields();
+    } catch {
+      return;
+    }
+    const request = {
+      name: values.name,
+      source: values.source.type === 'localGit'
+        ? { type: 'localGit' as const, path: values.source.path }
+        : { type: 'remoteGit' as const, gitUrl: values.source.gitUrl },
+    };
     const marketplaceName = editingMarketplace ?? values.name;
     const successMessage = editingMarketplace
       ? 'marketplace.messages.updated'
@@ -240,9 +262,9 @@ export function MarketplaceTab({
     setMarketplaceModalOpen(false);
     try {
       if (editingMarketplace) {
-        await updateMarketplace(instanceId, { ...values, name: editingMarketplace });
+        await updateMarketplace(instanceId, { ...request, name: editingMarketplace });
       } else {
-        await addMarketplace(instanceId, values);
+        await addMarketplace(instanceId, request);
       }
       if (currentInstanceIdRef.current !== instanceId) return;
       setSelectedMarketplaceName(marketplaceName);
@@ -253,11 +275,28 @@ export function MarketplaceTab({
     }
   };
 
-  const handleEditMarketplace = (marketplaceName: string) => {
-    setEditingMarketplace(marketplaceName);
-    setSelectedMarketplaceName(marketplaceName);
-    marketplaceForm.setFieldsValue({ name: marketplaceName, gitUrl: '' });
+  const handleEditMarketplace = (marketplace: MarketplaceSummary) => {
+    setEditingMarketplace(marketplace.name);
+    setSelectedMarketplaceName(marketplace.name);
+    marketplaceForm.setFieldsValue({
+      name: marketplace.name,
+      source: marketplace.source.type === 'localGit'
+        ? { type: 'localGit', path: marketplace.source.path }
+        : { type: 'remoteGit', gitUrl: '' },
+    });
     setMarketplaceModalOpen(true);
+  };
+
+  const handleChooseMarketplaceDirectory = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const path = await open({ directory: true, multiple: false });
+      if (path) {
+        marketplaceForm.setFieldValue('source', { type: 'localGit', path });
+      }
+    } catch (error) {
+      message.error(formatInvokeError(error));
+    }
   };
 
   const handleCancelEditMarketplace = () => {
@@ -513,8 +552,13 @@ export function MarketplaceTab({
                             <Tag>{marketplace.status}</Tag>
                           </Space>
                           <Text type="secondary" ellipsis className={styles.marketplaceUrl}>
-                            {marketplace.displayGitUrl ?? t('marketplace.sdkOwnedState')}
+                            {marketplace.source.type === 'localGit'
+                              ? marketplace.source.path
+                              : marketplace.source.displayGitUrl ?? t('marketplace.sdkOwnedState')}
                           </Text>
+                          {marketplace.source.type === 'localGit' && (
+                            <Tag>{t('marketplace.source.localGit')}</Tag>
+                          )}
                         </button>
                         <Space size={4} className={styles.marketplaceActions}>
                           {canRunOperation('refresh_marketplace') && (
@@ -542,7 +586,7 @@ export function MarketplaceTab({
                             loading={loadingMarketplace}
                             onClick={(event) => {
                               event.stopPropagation();
-                              handleEditMarketplace(marketplace.name);
+                              handleEditMarketplace(marketplace);
                             }}
                           />
                           <Button
@@ -682,6 +726,7 @@ export function MarketplaceTab({
         confirmLoading={loadingMarketplace}
         okButtonProps={{
           disabled: marketplaceBusy
+            || editingMarketplaceLocked
             || !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace')),
         }}
         onOk={handleSubmitMarketplace}
@@ -689,6 +734,14 @@ export function MarketplaceTab({
         destroyOnHidden
       >
         <Form form={marketplaceForm} layout="vertical">
+          {editingMarketplaceLocked && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t('marketplace.form.sourceLocked')}
+              className={styles.formAlert}
+            />
+          )}
           <Form.Item
             name="name"
             label={t('marketplace.form.name')}
@@ -697,13 +750,61 @@ export function MarketplaceTab({
             <Input disabled={marketplaceBusy || !!editingMarketplace || !canRunOperation('add_marketplace')} />
           </Form.Item>
           <Form.Item
-            name="gitUrl"
-            label={t('marketplace.form.gitUrl')}
-            rules={[{ required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') }]}
-            extra={editingMarketplace ? t('marketplace.form.gitUrlEditHelp') : undefined}
+            name={['source', 'type']}
+            label={t('marketplace.form.sourceType')}
           >
-            <Input disabled={marketplaceBusy || !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
+            <Radio.Group
+              aria-label={t('marketplace.form.sourceType')}
+              disabled={marketplaceBusy || editingMarketplaceLocked}
+              options={[
+                { value: 'remoteGit', label: t('marketplace.source.remoteGit') },
+                { value: 'localGit', label: t('marketplace.source.localGit') },
+              ]}
+            />
           </Form.Item>
+          {marketplaceSourceType === 'remoteGit' ? (
+            <Form.Item
+              name={['source', 'gitUrl']}
+              label={t('marketplace.form.gitUrl')}
+              rules={[
+                { required: true, whitespace: true, message: t('marketplace.form.gitUrlRequired') },
+                {
+                  validator: async (_, value?: string) => {
+                    if (value?.trim().toLowerCase().startsWith('file:')) {
+                      throw new Error(t('marketplace.form.remoteFileUrlForbidden'));
+                    }
+                  },
+                },
+              ]}
+              extra={editingMarketplace ? t('marketplace.form.gitUrlEditHelp') : undefined}
+            >
+              <Input disabled={marketplaceBusy || editingMarketplaceLocked || !(editingMarketplace ? canRunOperation('update_marketplace') : canRunOperation('add_marketplace'))} />
+            </Form.Item>
+          ) : (
+            <Form.Item label={t('marketplace.form.localPath')} required>
+              <Space.Compact style={{ width: '100%' }}>
+                <Form.Item
+                  name={['source', 'path']}
+                  noStyle
+                  rules={[{ required: true, whitespace: true, message: t('marketplace.form.localPathRequired') }]}
+                >
+                  <Input
+                    aria-label={t('marketplace.form.localPath')}
+                    readOnly
+                    disabled={marketplaceBusy || editingMarketplaceLocked}
+                  />
+                </Form.Item>
+                <Button
+                  aria-label={t('marketplace.actions.chooseFolder')}
+                  icon={<FolderOpenOutlined />}
+                  disabled={marketplaceBusy || editingMarketplaceLocked}
+                  onClick={() => void handleChooseMarketplaceDirectory()}
+                >
+                  {t('marketplace.actions.chooseFolder')}
+                </Button>
+              </Space.Compact>
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </Space>
