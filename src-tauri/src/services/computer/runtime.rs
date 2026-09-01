@@ -49,6 +49,10 @@ impl ComputerInstanceRuntime {
             .await
     }
 
+    pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.lifecycle_lease().await.start_interactive().await
+    }
+
     pub(crate) async fn lifecycle_lease(&self) -> ComputerRuntimeLifecycleLease<'_> {
         ComputerRuntimeLifecycleLease {
             runtime: self,
@@ -438,6 +442,10 @@ impl ComputerInstanceRuntime {
             .await
     }
 
+    pub(crate) async fn restart_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
+        self.lifecycle_lease().await.restart_interactive().await
+    }
+
     async fn restart_with_failure_policy_inner(
         &self,
         failure_policy: RuntimeMcpStartFailurePolicy,
@@ -638,11 +646,6 @@ impl ComputerInstanceRuntime {
 }
 
 impl ComputerRuntimeLifecycleLease<'_> {
-    pub(crate) async fn start(&self) -> Result<(), ComputerRuntimeStartError> {
-        self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
-            .await
-    }
-
     pub(crate) async fn start_interactive(&self) -> Result<(), ComputerRuntimeStartError> {
         self.start_with_failure_policy(RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures)
             .await
@@ -654,11 +657,6 @@ impl ComputerRuntimeLifecycleLease<'_> {
     ) -> Result<(), ComputerRuntimeStartError> {
         self.runtime
             .start_with_failure_policy_inner(failure_policy)
-            .await
-    }
-
-    pub(crate) async fn restart(&self) -> Result<(), ComputerRuntimeStartError> {
-        self.restart_with_failure_policy(RuntimeMcpStartFailurePolicy::BestEffort)
             .await
     }
 

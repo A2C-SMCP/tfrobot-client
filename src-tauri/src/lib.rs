@@ -44,11 +44,9 @@ pub struct AppState {
     /// work runs under each Computer's own lifecycle coordinator, never under this map lock.
     pub connection_target_reservations:
         Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
-    /// Serializes Computer lifecycle transactions across profile, SDK storage, and runtime state.
-    /// These operations are infrequent and must not observe one another half-committed.
-    pub computer_lifecycle_lock: Arc<Mutex<()>>,
-    /// Serializes per-Computer input definition/value mutations through runtime compensation.
-    pub input_mutation_lock: Arc<Mutex<()>>,
+    /// Serializes short catalog/profile phases that validate or mutate Manual SMCP targets.
+    /// Network connection work never runs while this lock is held.
+    pub connection_target_lock: Arc<Mutex<()>>,
     /// User-visible activity journal and durable tool-call audit history.
     pub observability: Arc<ObservabilityService>,
     /// Runtime diagnostic verbosity controller. Diagnostics never enter the activity database.
@@ -194,8 +192,7 @@ impl AppState {
         let observability = Arc::new(observability);
         let connection_target_reservations =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let computer_lifecycle_lock = Arc::new(Mutex::new(()));
-        let input_mutation_lock = Arc::new(Mutex::new(()));
+        let connection_target_lock = Arc::new(Mutex::new(()));
         let client_control = Arc::new(ClientControlPlane::new_with_host(
             config.clone(),
             computer_registry.clone(),
@@ -204,8 +201,7 @@ impl AppState {
                 sdk_config: sdk_config.clone(),
                 secret_store: secret_store.clone(),
                 connection_target_reservations: connection_target_reservations.clone(),
-                computer_lifecycle_lock: computer_lifecycle_lock.clone(),
-                input_mutation_lock: input_mutation_lock.clone(),
+                connection_target_lock: connection_target_lock.clone(),
                 observability: observability.clone(),
                 diagnostics: diagnostics.clone(),
                 settings_service: settings_service.clone(),
@@ -222,8 +218,7 @@ impl AppState {
             client_control,
             secret_store: secret_store.clone(),
             connection_target_reservations,
-            computer_lifecycle_lock,
-            input_mutation_lock,
+            connection_target_lock,
             observability,
             diagnostics,
             settings_service,
@@ -379,7 +374,6 @@ pub fn run() {
                 commands::manager::TauriManagerContextLifecycleSink::new(
                     state.config.clone(),
                     state.computer_registry.clone(),
-                    state.computer_lifecycle_lock.clone(),
                     state.chat_sessions.clone(),
                 ),
             )));
