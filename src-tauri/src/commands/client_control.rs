@@ -54,7 +54,7 @@ pub fn get_remote_control_policy_core(
     state: &AppState,
     computer_id: &str,
 ) -> Result<RemoteControlPolicy, ClientControlError> {
-    state.client_control.policy(computer_id)
+    state.client_control.persisted_policy(computer_id)
 }
 
 #[tauri::command]
@@ -69,11 +69,6 @@ pub async fn update_remote_control_policy_core(
     state: &AppState,
     request: UpdateRemoteControlPolicyRequest,
 ) -> Result<RemoteControlPolicy, ClientControlError> {
-    let _operation_guard = state
-        .computer_registry
-        .operation_lease(&request.computer_id)
-        .await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     state
         .client_control
         .update_policy_local(&request.computer_id, request.policy)

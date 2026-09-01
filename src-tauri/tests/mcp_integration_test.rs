@@ -6686,7 +6686,6 @@ async fn test_pending_foreground_prompt_does_not_block_another_computer_backgrou
     sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, waiting_server)
         .await
         .unwrap();
-
     const SECOND_INSTANCE_ID: &str = "computer-b";
     state
         .config
@@ -6703,6 +6702,22 @@ async fn test_pending_foreground_prompt_does_not_block_another_computer_backgrou
     start_computer_instance_core(None, state.as_ref(), TEST_INSTANCE_ID.to_string())
         .await
         .unwrap();
+    let same_computer_independent =
+        echo_server_config_with_bundle_id("same-computer-independent", "same-computer-independent");
+    sdk_config::upsert_computer_mcp_config_core(
+        state.as_ref(),
+        TEST_INSTANCE_ID,
+        same_computer_independent,
+    )
+    .await
+    .unwrap();
+    mcp::start_mcp_server_core(
+        state.as_ref(),
+        TEST_INSTANCE_ID,
+        &bundle_id("same-computer-independent"),
+    )
+    .await
+    .unwrap();
     let bridge = state.computer_registry.runtime_input_bridge();
     let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
     bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
@@ -6721,6 +6736,18 @@ async fn test_pending_foreground_prompt_does_not_block_another_computer_backgrou
         .await
         .expect("Computer A must reach its foreground prompt")
         .expect("prompt bridge must remain available");
+
+    timeout(
+        Duration::from_secs(5),
+        mcp::stop_mcp_server_core(
+            state.as_ref(),
+            TEST_INSTANCE_ID,
+            &bundle_id("same-computer-independent"),
+        ),
+    )
+    .await
+    .expect("an unrelated MCP stop on Computer A must not wait behind Runtime Input")
+    .unwrap();
 
     let stop_state = state.clone();
     let same_computer_stop = tokio::spawn(async move {

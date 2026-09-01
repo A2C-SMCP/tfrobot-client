@@ -61,7 +61,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use tokio::sync::{Mutex, Notify, OwnedMutexGuard, RwLock};
+use tokio::sync::{
+    Mutex, Notify, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
+};
 use tokio::task::JoinHandle;
 
 mod connection;
@@ -804,6 +806,11 @@ struct HandleDeclarations<'a> {
     retained_mcp_servers: Option<&'a HashMap<String, MCPServerConfig>>,
 }
 
+struct ClientControlFactoryContext {
+    binding: ClientControlBinding,
+    policy: Arc<std::sync::RwLock<RemoteControlPolicy>>,
+}
+
 impl ComputerRuntimeStartError {
     pub(crate) fn is_command_line_start_failure(&self) -> bool {
         let source = match self {
@@ -872,9 +879,17 @@ pub(crate) struct SdkSkillMutationLease {
     _lifecycle: tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Keeps one Computer generation lifecycle-locked while an application-wide transaction guard is
-/// released. Foreground commands use this hand-off before entering Runtime Input so another
-/// Computer remains independent without allowing same-Computer replacement to slip into the gap.
+/// Holds the source Skill Home stable while a duplicate copies its multi-file contents. It uses
+/// the same lifecycle domain as Skill mutations, preventing a copied Skill from mixing revisions.
+pub(crate) struct SdkSkillSnapshotLease {
+    runtime: ComputerInstanceRuntime,
+    _activity: RuntimeActivityGuard,
+    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Keeps one Computer generation lifecycle-locked while its command-level write lease is
+/// downgraded for Runtime Input. Independent shared operations may continue, while replacement
+/// and other conflicting lifecycle mutations cannot slip into the interaction.
 pub(crate) struct ComputerRuntimeLifecycleLease<'a> {
     runtime: &'a ComputerInstanceRuntime,
     _lifecycle: tokio::sync::MutexGuard<'a, ()>,
@@ -891,6 +906,12 @@ impl SdkSkillMutationLease {
 
     pub async fn mark_skills_dirty(&self) {
         self.runtime.computer.read().await.mark_skills_dirty();
+    }
+}
+
+impl SdkSkillSnapshotLease {
+    pub fn configured_skill_home(&self) -> PathBuf {
+        self.runtime.configured_skill_home()
     }
 }
 
@@ -960,6 +981,7 @@ pub struct ComputerInstanceRuntime {
     runtime_snapshot_lock: Arc<Mutex<()>>,
     runtime_event_sink: SharedRuntimeEventSink,
     client_control_binding: ClientControlBinding,
+    client_control_factory_policy: Arc<std::sync::RwLock<RemoteControlPolicy>>,
     runtime_event_task: Arc<Mutex<Option<RuntimeEventRelay>>>,
     shutdown_completed: Arc<AtomicBool>,
     sdk_problem_observations: Arc<Mutex<SdkProblemObservations>>,
@@ -1043,6 +1065,8 @@ impl ComputerInstanceRuntime {
             secret_store,
             runtime_input_bridge,
         ));
+        let client_control_factory_policy =
+            Arc::new(std::sync::RwLock::new(instance.remote_control.clone()));
         let (computer, sdk_servers, inputs) = build_sdk_computer(
             &instance,
             HandleDeclarations {
@@ -1054,7 +1078,10 @@ impl ComputerInstanceRuntime {
             input_resolver.clone(),
             oauth_credential_store.clone(),
             &skill_home_base,
-            client_control_binding.clone(),
+            ClientControlFactoryContext {
+                binding: client_control_binding.clone(),
+                policy: client_control_factory_policy.clone(),
+            },
         );
         Self {
             instance,
@@ -1085,6 +1112,7 @@ impl ComputerInstanceRuntime {
             runtime_snapshot_lock: Arc::new(Mutex::new(())),
             runtime_event_sink,
             client_control_binding,
+            client_control_factory_policy,
             runtime_event_task: Arc::new(Mutex::new(None)),
             shutdown_completed: Arc::new(AtomicBool::new(false)),
             sdk_problem_observations: Arc::new(Mutex::new(SdkProblemObservations::default())),
@@ -1132,6 +1160,7 @@ impl ComputerInstanceRuntime {
             runtime_snapshot_lock: self.runtime_snapshot_lock.clone(),
             runtime_event_sink: self.runtime_event_sink.clone(),
             client_control_binding: self.client_control_binding.clone(),
+            client_control_factory_policy: self.client_control_factory_policy.clone(),
             runtime_event_task: self.runtime_event_task.clone(),
             shutdown_completed: self.shutdown_completed.clone(),
             sdk_problem_observations: self.sdk_problem_observations.clone(),
@@ -1235,6 +1264,10 @@ impl ComputerInstanceRuntime {
         if client_control_is_mounted != self.instance.remote_control.enabled
             || (client_control_is_mounted && remote_control_policy_changed)
         {
+            *self
+                .client_control_factory_policy
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = self.instance.remote_control.clone();
             self.sync_client_control_provider_inner(client_control_is_mounted)
                 .await?;
         }
@@ -1913,6 +1946,14 @@ impl ComputerInstanceRuntime {
         requests: Vec<UserMcpServerStartRequest>,
     ) -> PreparedUserMcpStartBatch {
         let _guard = self.lifecycle_lock.lock().await;
+        self.prepare_user_mcp_servers_with_latest_configs_best_effort_inner(requests)
+            .await
+    }
+
+    async fn prepare_user_mcp_servers_with_latest_configs_best_effort_inner(
+        &self,
+        requests: Vec<UserMcpServerStartRequest>,
+    ) -> PreparedUserMcpStartBatch {
         let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         let mut ordered_bundle_ids = Vec::with_capacity(requests.len());
         let mut preflight_failures = HashMap::new();
@@ -2118,7 +2159,10 @@ impl ComputerInstanceRuntime {
         if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
             return Err("reserved built-in providers are not user-manageable".to_string());
         }
-        let _guard = self.lifecycle_lock.lock().await;
+        // Runtime replacement/removal drains admitted work. The SDK owns the actual MCP lock
+        // hierarchy: a global shutdown gate plus one lifecycle lock per bundle, so unrelated
+        // servers do not need the client-wide runtime lifecycle mutex.
+        let _activity = self.begin_activity()?;
         self.stop_mcp_server_inner(bundle_id).await
     }
 
@@ -2141,20 +2185,24 @@ impl ComputerInstanceRuntime {
         &self,
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, Result<bool, String>)> {
-        let _guard = self.lifecycle_lock.lock().await;
-        let mut results = Vec::with_capacity(bundle_ids.len());
-        for bundle_id in bundle_ids {
-            if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
-                results.push((
-                    bundle_id,
-                    Err("reserved built-in providers are not user-manageable".to_string()),
-                ));
-                continue;
+        let _activity = match self.begin_activity() {
+            Ok(activity) => activity,
+            Err(error) => {
+                return bundle_ids
+                    .into_iter()
+                    .map(|bundle_id| (bundle_id, Err(error.clone())))
+                    .collect();
             }
-            let result = self.stop_mcp_server_inner(&bundle_id).await;
-            results.push((bundle_id, result));
-        }
-        results
+        };
+        join_all(bundle_ids.into_iter().map(|bundle_id| async move {
+            let result = if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+                Err("reserved built-in providers are not user-manageable".to_string())
+            } else {
+                self.stop_mcp_server_inner(&bundle_id).await
+            };
+            (bundle_id, result)
+        }))
+        .await
     }
 
     pub async fn start_mcp_servers_best_effort(
@@ -2570,6 +2618,19 @@ impl ComputerInstanceRuntime {
         })
     }
 
+    pub(crate) async fn acquire_skill_snapshot_lease(
+        &self,
+    ) -> Result<SdkSkillSnapshotLease, String> {
+        let activity = self.begin_activity()?;
+        let lifecycle = self.lifecycle_lock.clone().lock_owned().await;
+        self.ensure_active()?;
+        Ok(SdkSkillSnapshotLease {
+            runtime: self.clone(),
+            _activity: activity,
+            _lifecycle: lifecycle,
+        })
+    }
+
     pub async fn mark_sdk_skills_dirty(&self) {
         let Ok(_activity) = self.begin_activity() else {
             return;
@@ -2848,6 +2909,10 @@ impl ComputerInstanceRuntime {
         failure_policy: RuntimeMcpStartFailurePolicy,
     ) -> Result<(), ComputerRuntimeStartError> {
         let injected_inputs = self.plugin_runtime_inputs.read().await.clone();
+        *self
+            .client_control_factory_policy
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = self.instance.remote_control.clone();
         let (new_computer, sdk_servers, inputs) = build_sdk_computer(
             &self.instance,
             HandleDeclarations {
@@ -2859,7 +2924,10 @@ impl ComputerInstanceRuntime {
             self.input_resolver.clone(),
             self.oauth_credential_store.clone(),
             &self.skill_home_base,
-            self.client_control_binding.clone(),
+            ClientControlFactoryContext {
+                binding: self.client_control_binding.clone(),
+                policy: self.client_control_factory_policy.clone(),
+            },
         );
 
         let oauth_admission = self.oauth_admission_open.clone();
@@ -2981,7 +3049,7 @@ fn build_sdk_computer(
     input_resolver: Arc<RuntimeInputResolver>,
     oauth_credential_store: Arc<KeychainOAuthCredentialStore>,
     skill_home_base: &Path,
-    client_control_binding: ClientControlBinding,
+    client_control: ClientControlFactoryContext,
 ) -> (
     Computer<InstanceSession>,
     HashMap<BundleId, ServerName>,
@@ -3059,11 +3127,20 @@ fn build_sdk_computer(
         .map(|config| (resolve_bundle_id(config), config.name().to_string()))
         .collect();
     let source_id = instance.id.clone();
+    let ClientControlFactoryContext {
+        binding: client_control_binding,
+        policy: client_control_factory_policy,
+    } = client_control;
     let factory: ClientFactory = Arc::new(move |config, notify| {
         if config.bundle_id().map(BundleId::as_str) == Some(CLIENT_CONTROL_BUNDLE_ID) {
+            let tool_policy = client_control_factory_policy
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
             Arc::new(ClientControlMcpClient::new(
                 source_id.clone(),
                 client_control_binding.clone(),
+                tool_policy,
                 notify,
             ))
         } else {
@@ -5536,6 +5613,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_removal_preparation_reopens_runtime_activity_admission() {
+        let registry = Arc::new(ComputerRegistry::from_config(ComputerInstancesConfig {
+            schema_version: 1,
+            instances: vec![instance("one", "Retained")],
+        }));
+        let runtime = registry.runtime("one").await.unwrap();
+        let activity = runtime.begin_activity().unwrap();
+        let removal_registry = registry.clone();
+        let removal_task =
+            tokio::spawn(async move { removal_registry.prepare_runtime_removal("one").await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !runtime.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removal did not close activity admission");
+        removal_task.abort();
+        assert!(matches!(
+            removal_task.await,
+            Err(error) if error.is_cancelled()
+        ));
+
+        assert!(!runtime.is_retired());
+        assert!(runtime.begin_activity().is_ok());
+        assert!(registry.runtime("one").await.is_some());
+        drop(activity);
+    }
+
+    #[tokio::test]
     async fn removal_drains_sdk_skill_read_sessions_before_shutdown() {
         let registry = Arc::new(ComputerRegistry::from_config(ComputerInstancesConfig {
             schema_version: 1,
@@ -5561,6 +5669,32 @@ mod tests {
 
         drop(reader);
         assert!(removal_task.await.unwrap().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn skill_snapshot_excludes_multi_file_skill_mutations() {
+        let runtime = ComputerInstanceRuntime::new(
+            instance("one", "Snapshot"),
+            std::env::temp_dir().join("tfrobot-client-skill-snapshot-test"),
+        );
+        let snapshot = runtime.acquire_skill_snapshot_lease().await.unwrap();
+        let mutation_runtime = runtime.clone();
+        let mut mutation =
+            tokio::spawn(async move { mutation_runtime.acquire_skill_mutation_lease().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut mutation)
+                .await
+                .is_err(),
+            "Skill mutation must wait until the duplicate snapshot copy releases its lease"
+        );
+
+        drop(snapshot);
+        let mutation = tokio::time::timeout(std::time::Duration::from_secs(2), mutation)
+            .await
+            .expect("Skill mutation did not resume after snapshot release")
+            .unwrap()
+            .unwrap();
+        drop(mutation);
     }
 
     #[tokio::test]

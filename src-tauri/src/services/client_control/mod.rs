@@ -43,8 +43,7 @@ pub struct ClientControlHost {
     pub secret_store: Arc<dyn SecretStore>,
     pub connection_target_reservations:
         Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
-    pub computer_lifecycle_lock: Arc<Mutex<()>>,
-    pub input_mutation_lock: Arc<Mutex<()>>,
+    pub connection_target_lock: Arc<Mutex<()>>,
     pub observability: Arc<ObservabilityService>,
     pub diagnostics: Arc<Diagnostics>,
     pub settings_service: Arc<SettingsService>,
@@ -117,8 +116,7 @@ impl ClientControlPlane {
             client_control: self.clone(),
             secret_store: host.secret_store.clone(),
             connection_target_reservations: host.connection_target_reservations.clone(),
-            computer_lifecycle_lock: host.computer_lifecycle_lock.clone(),
-            input_mutation_lock: host.input_mutation_lock.clone(),
+            connection_target_lock: host.connection_target_lock.clone(),
             observability: host.observability.clone(),
             diagnostics: host.diagnostics.clone(),
             settings_service: host.settings_service.clone(),
@@ -132,11 +130,32 @@ impl ClientControlPlane {
         self.catalog.all()
     }
 
-    pub fn policy(&self, source_id: &str) -> Result<RemoteControlPolicy, ClientControlError> {
+    /// Returns the durable UI/editor value. Runtime authorization must use
+    /// [`Self::published_policy`] so a partially committed update cannot leak into tool exposure.
+    pub fn persisted_policy(
+        &self,
+        source_id: &str,
+    ) -> Result<RemoteControlPolicy, ClientControlError> {
         self.config
             .get_computer_instance(source_id)
             .map(|instance| instance.remote_control)
             .map_err(|_| {
+                ClientControlError::new(
+                    ClientControlErrorCode::SourceNotFound,
+                    format!("source Computer does not exist: {source_id}"),
+                )
+            })
+    }
+
+    pub async fn published_policy(
+        &self,
+        source_id: &str,
+    ) -> Result<RemoteControlPolicy, ClientControlError> {
+        self.computer_registry
+            .runtime(source_id)
+            .await
+            .map(|runtime| runtime.instance.remote_control)
+            .ok_or_else(|| {
                 ClientControlError::new(
                     ClientControlErrorCode::SourceNotFound,
                     format!("source Computer does not exist: {source_id}"),
@@ -151,16 +170,20 @@ impl ClientControlPlane {
         target_id: Option<&str>,
     ) -> Result<AuthorizedInvocation, ClientControlError> {
         let source_id = context.source_computer_id.as_str();
-        let source = self.config.get_computer_instance(source_id).map_err(|_| {
-            ClientControlError::invocation(
-                ClientControlErrorCode::SourceNotFound,
-                "source Computer does not exist",
-                source_id,
-                tool,
-                target_id,
-            )
-        })?;
-        let policy = source.remote_control;
+        let source = self
+            .computer_registry
+            .runtime(source_id)
+            .await
+            .ok_or_else(|| {
+                ClientControlError::invocation(
+                    ClientControlErrorCode::SourceNotFound,
+                    "source Computer does not exist",
+                    source_id,
+                    tool,
+                    target_id,
+                )
+            })?;
+        let policy = source.instance.remote_control;
         if !policy.enabled {
             return Err(ClientControlError::invocation(
                 ClientControlErrorCode::RemoteControlDisabled,
@@ -199,15 +222,21 @@ impl ClientControlPlane {
                         Some(target_id),
                     ));
                 }
-                Some(self.config.get_computer_instance(target_id).map_err(|_| {
-                    ClientControlError::invocation(
-                        ClientControlErrorCode::TargetNotFound,
-                        "target Computer does not exist",
-                        source_id,
-                        tool,
-                        Some(target_id),
-                    )
-                })?)
+                Some(
+                    self.computer_registry
+                        .runtime(target_id)
+                        .await
+                        .ok_or_else(|| {
+                            ClientControlError::invocation(
+                                ClientControlErrorCode::TargetNotFound,
+                                "target Computer does not exist",
+                                source_id,
+                                tool,
+                                Some(target_id),
+                            )
+                        })?
+                        .instance,
+                )
             }
             None => None,
         };
@@ -223,17 +252,20 @@ impl ClientControlPlane {
         source_id: &str,
         tool: ToolId,
     ) -> Result<Vec<ComputerInstance>, ClientControlError> {
-        let policy = self.policy(source_id)?;
+        let policy = self.published_policy(source_id).await?;
         if !policy.allows_tool(tool) {
             return Ok(Vec::new());
         }
+        // Runtime membership is the Computer publication boundary. A duplicate profile can exist
+        // transiently while its SDK storage is prepared, but it must not become a remote-control
+        // target before the runtime transaction commits.
         let mut instances = self
-            .config
-            .load_computer_instances()
-            .map_err(|error| {
-                ClientControlError::new(ClientControlErrorCode::OperationFailed, error.to_string())
-            })?
-            .instances;
+            .computer_registry
+            .list_runtimes()
+            .await
+            .into_iter()
+            .map(|runtime| runtime.instance)
+            .collect::<Vec<_>>();
         instances.retain(|target| {
             policy.allows_target(source_id, &target.id)
                 && !(source_id == target.id && is_source_destructive(tool))
@@ -246,18 +278,36 @@ impl ClientControlPlane {
         source_id: &str,
         policy: RemoteControlPolicy,
     ) -> Result<RemoteControlPolicy, ClientControlError> {
+        let config = self.config.clone();
+        let computer_registry = self.computer_registry.clone();
+        let source_id = source_id.to_string();
+        tokio::spawn(async move {
+            Self::update_policy_transaction(config, computer_registry, source_id, policy).await
+        })
+        .await
+        .map_err(|error| {
+            ClientControlError::new(
+                ClientControlErrorCode::OperationFailed,
+                format!("policy transaction task failed: {error}"),
+            )
+        })?
+    }
+
+    async fn update_policy_transaction(
+        config: Arc<ConfigService>,
+        computer_registry: Arc<ComputerRegistry>,
+        source_id: String,
+        policy: RemoteControlPolicy,
+    ) -> Result<RemoteControlPolicy, ClientControlError> {
         policy.validate().map_err(|message| {
             ClientControlError::new(ClientControlErrorCode::InvalidArguments, message)
         })?;
-        let known_targets = self
-            .config
-            .load_computer_instances()
-            .map_err(|error| {
-                ClientControlError::new(ClientControlErrorCode::OperationFailed, error.to_string())
-            })?
-            .instances
+        let _operation_guard = computer_registry.operation_lease(&source_id).await;
+        let known_targets = computer_registry
+            .list_runtimes()
+            .await
             .into_iter()
-            .map(|instance| instance.id)
+            .map(|runtime| runtime.instance.id)
             .collect::<HashSet<_>>();
         if let TargetScope::Custom { targets } = &policy.target_scope {
             if let Some(target) = targets
@@ -270,28 +320,22 @@ impl ClientControlPlane {
                 ));
             }
         }
-        let previous = self
-            .config
-            .get_computer_instance(source_id)
-            .map_err(|error| {
-                ClientControlError::new(ClientControlErrorCode::OperationFailed, error.to_string())
-            })?;
-        let updated = self
-            .config
-            .update_computer_instance(source_id, |instance| {
+        let previous = config.get_computer_instance(&source_id).map_err(|error| {
+            ClientControlError::new(ClientControlErrorCode::OperationFailed, error.to_string())
+        })?;
+        let updated = config
+            .update_computer_instance(&source_id, |instance| {
                 instance.remote_control = policy.clone();
             })
             .map_err(|error| {
                 ClientControlError::new(ClientControlErrorCode::OperationFailed, error.to_string())
             })?;
-        if let Err(error) = self
-            .computer_registry
+        if let Err(error) = computer_registry
             .update_runtime_instance(updated.clone())
             .await
         {
-            let restored = self
-                .config
-                .update_computer_instance(source_id, |instance| {
+            let restored = config
+                .update_computer_instance(&source_id, |instance| {
                     instance.remote_control = previous.remote_control.clone();
                 })
                 .map_err(|restore_error| {
@@ -302,7 +346,7 @@ impl ClientControlPlane {
                         ),
                     )
                 })?;
-            self.computer_registry
+            computer_registry
                 .update_runtime_instance(restored)
                 .await
                 .map_err(|restore_error| {
@@ -743,10 +787,11 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_and_call_time_authorization_enforce_tool_target_and_self_protection() {
-        let (plane, config, _temp) = test_plane();
-        config
-            .update_computer_instance("source", |source| {
-                source.remote_control = RemoteControlPolicy {
+        let (plane, _config, _temp) = test_plane();
+        plane
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
                     enabled: true,
                     tool_scope: ToolScope::Custom {
                         tools: BTreeSet::from([
@@ -757,8 +802,9 @@ mod tests {
                     target_scope: TargetScope::Custom {
                         targets: BTreeSet::from(["source".to_string(), "target-b".to_string()]),
                     },
-                };
-            })
+                },
+            )
+            .await
             .unwrap();
 
         let discovered = plane
@@ -807,11 +853,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_plane_skill_create_uses_target_home_and_notifies_sdk_refresh() {
+    async fn unpublished_profiles_are_not_remote_control_targets() {
+        let (plane, config, _temp) = test_plane();
+        plane
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::All,
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Model duplicate_computer_instance_core after its durable profile write but before
+        // runtime publication.
+        config
+            .add_computer_instance(ComputerInstance::new("pending", "Pending"))
+            .unwrap();
+
+        let discovered = plane
+            .discover_targets("source", ToolId::ComputerGetStatus)
+            .await
+            .unwrap();
+        assert!(discovered.iter().all(|instance| instance.id != "pending"));
+        let authorization_error = plane
+            .authorize(
+                context("pending-target"),
+                ToolId::ComputerGetStatus,
+                Some("pending"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            authorization_error.code,
+            ClientControlErrorCode::TargetNotFound
+        );
+
+        let error = plane
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::Custom {
+                        targets: BTreeSet::from(["pending".to_string()]),
+                    },
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ClientControlErrorCode::InvalidArguments);
+    }
+
+    #[tokio::test]
+    async fn unpublished_source_policy_is_not_exposed_to_runtime_callers() {
         let (plane, config, _temp) = test_plane();
         config
-            .update_computer_instance("source", |source| {
-                source.remote_control = RemoteControlPolicy {
+            .update_computer_instance("source", |instance| {
+                instance.remote_control = RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::All,
+                    ..RemoteControlPolicy::default()
+                };
+            })
+            .unwrap();
+
+        assert!(plane.persisted_policy("source").unwrap().enabled);
+        assert!(!plane.published_policy("source").await.unwrap().enabled);
+        assert!(plane
+            .discover_targets("source", ToolId::ComputerGetStatus)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            plane
+                .authorize(
+                    context("unpublished-source-policy"),
+                    ToolId::ComputerGetStatus,
+                    Some("target-b"),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ClientControlErrorCode::RemoteControlDisabled
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_policy_request_still_finishes_runtime_publication() {
+        let (plane, config, _temp) = test_plane();
+        let runtime = plane.computer_registry.runtime("source").await.unwrap();
+        let lifecycle_lease = runtime.acquire_skill_mutation_lease().await.unwrap();
+        let update_plane = plane.clone();
+        let update = tokio::spawn(async move {
+            update_plane
+                .update_policy_local(
+                    "source",
+                    RemoteControlPolicy {
+                        enabled: true,
+                        target_scope: TargetScope::All,
+                        ..RemoteControlPolicy::default()
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !config
+                .get_computer_instance("source")
+                .unwrap()
+                .remote_control
+                .enabled
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("policy transaction did not persist its candidate");
+        update.abort();
+        assert!(update.await.unwrap_err().is_cancelled());
+        drop(lifecycle_lease);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !plane.published_policy("source").await.unwrap().enabled {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached policy transaction did not publish after caller cancellation");
+        assert!(plane.persisted_policy("source").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn control_plane_skill_create_uses_target_home_and_notifies_sdk_refresh() {
+        let (plane, config, _temp) = test_plane();
+        plane
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
                     enabled: true,
                     tool_scope: ToolScope::Custom {
                         tools: BTreeSet::from(["skill_create".to_string()]),
@@ -819,8 +999,9 @@ mod tests {
                     target_scope: TargetScope::Custom {
                         targets: BTreeSet::from(["target-b".to_string()]),
                     },
-                };
-            })
+                },
+            )
+            .await
             .unwrap();
 
         let result = plane
@@ -1068,8 +1249,15 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(disabled.code, ClientControlErrorCode::RemoteControlDisabled);
-        config
-            .update_computer_instance("source", |source| source.remote_control.enabled = true)
+        plane
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
             .unwrap();
         let invalid = plane
             .dispatch(

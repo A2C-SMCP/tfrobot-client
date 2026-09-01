@@ -324,7 +324,7 @@ async fn start_mcp_server_core_with_mode(
         let runtime = require_runtime(state, instance_id)
             .await
             .map_err(RuntimeActionError::runtime)?;
-        runtime
+        let server_name = runtime
             .with_runtime_input_interaction(interaction_mode, async {
                 ensure_computer_started(&runtime)
                     .await
@@ -339,6 +339,9 @@ async fn start_mcp_server_core_with_mode(
                     McpServerStartOperation::Start(bundle_id.clone()),
                     &latest_inputs,
                 )?;
+                // The Computer write lease protects the durable snapshot and runtime handoff.
+                // Runtime Input may then wait while shared operations on unrelated MCP bundles
+                // keep progressing.
                 let operation = runtime
                     .prepare_user_mcp_server_with_latest_config(request)
                     .await
@@ -356,7 +359,8 @@ async fn start_mcp_server_core_with_mode(
                     })?;
                 Ok::<_, RuntimeActionError>(server_name)
             })
-            .await
+            .await?;
+        Ok::<_, RuntimeActionError>(server_name)
     }
     .await;
 
@@ -440,7 +444,10 @@ pub async fn stop_mcp_server_core(
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+    let _operation_guard = state
+        .computer_registry
+        .shared_operation_lease(instance_id)
+        .await;
     log::info!(
         "Stopping MCP server for instance {}: {}",
         instance_id,
@@ -550,93 +557,94 @@ async fn start_all_servers_core_with_mode(
         let runtime = require_runtime(state, instance_id)
             .await
             .map_err(RuntimeActionError::runtime)?;
-        runtime
-            .with_runtime_input_interaction(interaction_mode, async {
-            ensure_computer_started(&runtime)
-                .await
-                .map_err(RuntimeActionError::from)?;
-            // One durable snapshot defines the complete batch. Servers added after this point are
-            // picked up by the next explicit start, while removed/disabled declarations in this
-            // snapshot can never fall back to a stale runtime entry.
-            let (latest_servers, latest_inputs) =
-                latest_user_mcp_start_snapshot(state, instance_id);
-            let inventory = mcp_start_batch_inventory(&runtime, &latest_servers).await;
-            let candidate_count = inventory.candidates.len();
-            let unchanged_count = inventory
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.start_operation().is_none())
-                .count();
-            let operation_candidates: Vec<_> = inventory
-                .candidates
-                .into_iter()
-                .filter_map(|candidate| {
-                    let operation = candidate.start_operation()?;
-                    Some((candidate, operation))
-                })
-                .collect();
-            let operation_count = operation_candidates.len();
-            let names: std::collections::HashMap<_, _> = operation_candidates
-                .iter()
-                .map(|(candidate, _)| (candidate.bundle_id.clone(), candidate.name.clone()))
-                .collect();
-            let requests = operation_candidates
-                .into_iter()
-                .map(|(candidate, operation)| {
-                    let latest = latest_servers.get(&candidate.bundle_id).cloned().ok_or_else(|| {
+        ensure_computer_started(&runtime)
+            .await
+            .map_err(RuntimeActionError::from)?;
+        // One durable snapshot defines the complete batch. Servers added after this point are
+        // picked up by the next explicit start, while removed/disabled declarations in this
+        // snapshot can never fall back to a stale runtime entry.
+        let (latest_servers, latest_inputs) = latest_user_mcp_start_snapshot(state, instance_id);
+        let inventory = mcp_start_batch_inventory(&runtime, &latest_servers).await;
+        let candidate_count = inventory.candidates.len();
+        let unchanged_count = inventory
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.start_operation().is_none())
+            .count();
+        let operation_candidates: Vec<_> = inventory
+            .candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                let operation = candidate.start_operation()?;
+                Some((candidate, operation))
+            })
+            .collect();
+        let operation_count = operation_candidates.len();
+        let names: std::collections::HashMap<_, _> = operation_candidates
+            .iter()
+            .map(|(candidate, _)| (candidate.bundle_id.clone(), candidate.name.clone()))
+            .collect();
+        let requests = operation_candidates
+            .into_iter()
+            .map(|(candidate, operation)| {
+                let latest = latest_servers
+                    .get(&candidate.bundle_id)
+                    .cloned()
+                    .ok_or_else(|| {
                         RuntimeActionError::runtime(format!(
                             "Latest MCP configuration not found: {}",
                             candidate.bundle_id
                         ))
                     })?;
-                    user_mcp_start_request(latest, operation, &latest_inputs)
-                })
-                .collect::<Result<Vec<_>, RuntimeActionError>>()?;
-            let prepared = runtime
-                .prepare_user_mcp_servers_with_latest_configs_best_effort(requests)
-                .await;
-            // Preparation is the last client-owned critical section: after the exact durable
-            // snapshot is mounted, release the command gate so Computer shutdown can close the
-            // SDK startup gate while this batch is still running. The SDK then drains in-flight
-            // starts and rejects queued starts according to its own lifecycle contract.
-            drop(operation_guard);
-            let failures = runtime
-                .execute_user_mcp_start_batch_best_effort(prepared)
-                .await
-                .into_iter()
-                .map(|(bundle_id, error)| {
-                    let name = names
-                        .get(&bundle_id)
-                        .cloned()
-                        .unwrap_or_else(|| bundle_id.to_string());
-                    McpBatchFailure {
-                        error: RuntimeActionError::from(error)
-                            .with_requesting_mcp(bundle_id.to_string(), name.clone()),
-                        name,
-                        bundle_id,
-                    }
-                })
-                .collect::<Vec<_>>();
-            let result = McpBatchOperationResult {
-                candidate_count,
-                actual_operation_count: operation_count.saturating_sub(failures.len()),
-                unchanged_count,
-                excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
-                failures,
-            };
+                user_mcp_start_request(latest, operation, &latest_inputs)
+            })
+            .collect::<Result<Vec<_>, RuntimeActionError>>()?;
+        let failures = runtime
+            .with_runtime_input_interaction(interaction_mode, async {
+                let prepared = runtime
+                    .prepare_user_mcp_servers_with_latest_configs_best_effort(requests)
+                    .await;
+                // Preparation fixes the exact durable snapshot. The SDK owns startup/shutdown
+                // exclusion from here, while Runtime Input remains in this interaction scope.
+                drop(operation_guard);
+                let failures = runtime
+                    .execute_user_mcp_start_batch_best_effort(prepared)
+                    .await
+                    .into_iter()
+                    .map(|(bundle_id, error)| {
+                        let name = names
+                            .get(&bundle_id)
+                            .cloned()
+                            .unwrap_or_else(|| bundle_id.to_string());
+                        McpBatchFailure {
+                            error: RuntimeActionError::from(error)
+                                .with_requesting_mcp(bundle_id.to_string(), name.clone()),
+                            name,
+                            bundle_id,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                failures
+            })
+            .await;
+        let result = McpBatchOperationResult {
+            candidate_count,
+            actual_operation_count: operation_count.saturating_sub(failures.len()),
+            unchanged_count,
+            excluded_plugin_owned_count: inventory.excluded_plugin_owned_count,
+            failures,
+        };
 
-            log::info!(
-                "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
-                instance_id,
-                result.candidate_count,
-                result.actual_operation_count,
-                result.unchanged_count,
-                result.excluded_plugin_owned_count,
-                result.failures.len()
-            );
-            Ok(result)
-        })
-            .await
+        log::info!(
+            "MCP start-all completed for instance {}: candidates={}, changed={}, unchanged={}, excluded_plugin_owned={}, failures={}",
+            instance_id,
+            result.candidate_count,
+            result.actual_operation_count,
+            result.unchanged_count,
+            result.excluded_plugin_owned_count,
+            result.failures.len()
+        );
+        Ok(result)
     }
     .await;
     record_mcp_batch_activity(state, instance_id, "start_all", "Start all", &result).await;
@@ -656,7 +664,10 @@ pub async fn stop_all_servers_core(
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+    let _operation_guard = state
+        .computer_registry
+        .shared_operation_lease(instance_id)
+        .await;
     log::info!("Stopping all MCP servers for instance {}", instance_id);
 
     let result = async {
