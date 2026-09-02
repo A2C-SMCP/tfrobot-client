@@ -150,12 +150,15 @@ describe('skillStore', () => {
     mockedInvoke.mockResolvedValueOnce([]);
     await useSkillStore.getState().addMarketplace('computer-a', {
       name: 'tf',
-      gitUrl: 'https://example.com/tf.git',
+      source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
     });
 
     expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
       instanceId: 'computer-a',
-      request: { name: 'tf', gitUrl: 'https://example.com/tf.git' },
+      request: {
+        name: 'tf',
+        source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
+      },
     });
     expect(mockedInvoke).toHaveBeenCalledWith('list_skills', {
       instanceId: 'computer-a',
@@ -184,7 +187,7 @@ describe('skillStore', () => {
 
     const pendingAdd = useSkillStore.getState().addMarketplace('computer-a', {
       name: 'tf',
-      gitUrl: 'https://example.com/tf.git',
+      source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
     });
 
     expect(useSkillStore.getState().marketplaceOperation).toMatchObject({
@@ -269,7 +272,7 @@ describe('skillStore', () => {
 
     const staleAdd = useSkillStore.getState().addMarketplace('computer-a', {
       name: 'tf',
-      gitUrl: 'https://example.com/tf.git',
+      source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
     });
     const currentFetch = useSkillStore.getState().fetchMarketplaceCapabilities('computer-b');
 

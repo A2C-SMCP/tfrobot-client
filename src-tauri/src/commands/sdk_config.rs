@@ -249,8 +249,6 @@ async fn get_computer_config_state_for_projection(
     instance_id: &str,
     projection: ConfigStateProjection,
 ) -> Result<SdkConfigStateView, String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
     let (mut snapshot, report) = state
         .sdk_config
@@ -286,7 +284,6 @@ pub async fn upsert_computer_mcp_config_core(
     config: MCPServerConfig,
 ) -> Result<(), RuntimeActionError> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
     let bundle_id = resolve_bundle_id(&config);
     let server_name = config.name().to_string();
@@ -365,8 +362,6 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
     remove_input_ids_if_unused: Vec<String>,
 ) -> Result<(), RuntimeActionError> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _input_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
     let bundle_id = resolve_bundle_id(&config);
     let server_name = config.name().to_string();
@@ -518,8 +513,6 @@ pub async fn remove_computer_mcp_config_core(
     name: &str,
 ) -> Result<(), String> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let _input_guard = state.input_mutation_lock.lock().await;
     let instance_id = require_instance(state, instance_id)?;
     let name = name.trim();
     if name.is_empty() {

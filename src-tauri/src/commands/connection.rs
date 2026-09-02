@@ -5,7 +5,7 @@ use crate::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ComputerInstanceRuntime, ComputerRuntimeAction,
     ComputerRuntimeState, ManagerRobotBindingState, RobotBindingMetadata,
 };
-use crate::services::config::normalize_manual_smcp_target;
+use crate::services::config::{normalize_manual_smcp_target, stable_or_existing_manual_target_id};
 use crate::services::connection_targets::{manual_target_keychain_id, ManualSmcpTarget};
 use crate::services::manager_client::{
     ConnectionInfoResponse, DigitalEmployeeBrief, ExchangedToken, ManagerError,
@@ -180,33 +180,52 @@ pub async fn save_manual_smcp_target_core(
     target: ManualSmcpTarget,
     api_key_action: Option<ManualSmcpApiKeyAction>,
 ) -> Result<ManualSmcpTarget, String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
-    let target = normalize_manual_smcp_target(target);
+    let _target_guard = state.connection_target_lock.lock().await;
+    let mut target = normalize_manual_smcp_target(target);
+    target.id = stable_or_existing_manual_target_id(&target.id, &target);
     let credential_key = manual_target_keychain_id(&target.id);
-    let saved = state
-        .config
-        .save_manual_smcp_target(target)
-        .map_err(|e| e.to_string())?;
-
-    match api_key_action.unwrap_or_default() {
-        ManualSmcpApiKeyAction::Unchanged => {}
-        ManualSmcpApiKeyAction::Set { value } => {
-            let value = value.trim();
-            if !value.is_empty() {
-                state
-                    .secret_store
-                    .set_secret(&credential_key, value)
-                    .map_err(|e| e.to_string())?;
-            }
+    let secret_update = match api_key_action.unwrap_or_default() {
+        ManualSmcpApiKeyAction::Unchanged => None,
+        ManualSmcpApiKeyAction::Set { value } if !value.trim().is_empty() => {
+            Some(Some(value.trim().to_string()))
         }
-        ManualSmcpApiKeyAction::Clear => {
+        ManualSmcpApiKeyAction::Set { .. } => None,
+        ManualSmcpApiKeyAction::Clear => Some(None),
+    };
+    let previous_secret = match secret_update.as_ref() {
+        Some(_) => Some(
             state
                 .secret_store
-                .delete_secret_best_effort(&credential_key);
+                .get_secret(&credential_key)
+                .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
+    if let Some(secret) = secret_update.as_ref() {
+        write_manual_target_secret(
+            state.secret_store.as_ref(),
+            &credential_key,
+            secret.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    match state.config.save_manual_smcp_target(target) {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            if let Some(previous_secret) = previous_secret {
+                if let Err(restore_error) = write_manual_target_secret(
+                    state.secret_store.as_ref(),
+                    &credential_key,
+                    previous_secret.as_deref(),
+                ) {
+                    return Err(format!(
+                        "Failed to save manual SMCP target: {error}; additionally failed to restore its credential: {restore_error}"
+                    ));
+                }
+            }
+            Err(error.to_string())
         }
     }
-
-    Ok(saved)
 }
 
 #[tauri::command]
@@ -221,7 +240,7 @@ pub async fn delete_manual_smcp_target_core(
     state: &AppState,
     target_id: &str,
 ) -> Result<(), String> {
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _target_guard = state.connection_target_lock.lock().await;
     for runtime in state.computer_registry.list_runtimes().await {
         let connection = runtime.connection_state_snapshot().await;
         if connection
@@ -233,19 +252,39 @@ pub async fn delete_manual_smcp_target_core(
         }
     }
 
-    state
-        .config
-        .delete_manual_smcp_target(target_id)
-        .map_err(|e| e.to_string())?;
-    delete_manual_smcp_target_api_key(state.secret_store.as_ref(), target_id);
-    Ok(())
+    let credential_key = manual_target_keychain_id(target_id);
+    let previous_secret = state
+        .secret_store
+        .get_secret(&credential_key)
+        .map_err(|error| error.to_string())?;
+    write_manual_target_secret(state.secret_store.as_ref(), &credential_key, None)
+        .map_err(|error| error.to_string())?;
+    match state.config.delete_manual_smcp_target(target_id) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if let Err(restore_error) = write_manual_target_secret(
+                state.secret_store.as_ref(),
+                &credential_key,
+                previous_secret.as_deref(),
+            ) {
+                return Err(format!(
+                    "Failed to delete manual SMCP target: {error}; additionally failed to restore its credential: {restore_error}"
+                ));
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
-fn delete_manual_smcp_target_api_key(
+fn write_manual_target_secret(
     secret_store: &dyn crate::services::keychain::SecretStore,
-    target_id: &str,
-) {
-    secret_store.delete_secret_best_effort(&manual_target_keychain_id(target_id));
+    credential_key: &str,
+    value: Option<&str>,
+) -> Result<(), crate::services::keychain::KeychainError> {
+    match value {
+        Some(value) => secret_store.set_secret(credential_key, value),
+        None => secret_store.delete_secret(credential_key),
+    }
 }
 
 #[tauri::command]
@@ -303,15 +342,26 @@ async fn connect_connection_target_with_policy(
         policy_driven = required_policy_target.is_some(),
         "manual SMCP connection requested"
     );
-    let result = connect_connection_target_with_policy_inner_impl(
-        state,
-        instance_id,
-        target_id,
-        required_policy_target,
-        request_id,
-        requested_at,
-    )
-    .await;
+    // Once a connection token can be published, the transaction must outlive cancellation of the
+    // invoking command so it can always commit or clear the token/transport. Awaiting a detached
+    // task preserves the normal API while dropping this future no longer drops its compensation.
+    let transaction_state = state.clone();
+    let transaction_instance_id = instance_id.to_string();
+    let transaction_target_id = target_id.to_string();
+    let transaction_policy_target = required_policy_target.cloned();
+    let result = tokio::spawn(async move {
+        connect_connection_target_with_policy_inner_impl(
+            &transaction_state,
+            &transaction_instance_id,
+            &transaction_target_id,
+            transaction_policy_target.as_ref(),
+            request_id,
+            requested_at,
+        )
+        .await
+    })
+    .await
+    .map_err(|error| format!("connection transaction task failed: {error}"))?;
     match &result {
         Ok(()) => tracing::debug!(
             target: CONNECTION_LOG_TARGET,
@@ -353,12 +403,12 @@ async fn connect_connection_target_with_policy_inner_impl(
     requested_at: Instant,
 ) -> Result<(), String> {
     // The connection mutation is a two-phase transaction. Validate its authoritative inputs and
-    // publish the operation token under the Computer lifecycle lock, then release the lock before
-    // network I/O. The commit phase reacquires the lock and rejects stale targets, credentials,
+    // publish the operation token under the per-Computer transaction gate, then release all gates
+    // before network I/O. The commit phase reacquires them and rejects stale targets, credentials,
     // runtimes, or operation tokens.
     let instance_id = require_instance_id(instance_id)?.to_string();
     let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let target_guard = state.connection_target_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(&instance_id)
@@ -412,7 +462,7 @@ async fn connect_connection_target_with_policy_inner_impl(
         elapsed_ms = requested_at.elapsed().as_millis() as u64,
         "manual SMCP connection preflight completed"
     );
-    drop(lifecycle_guard);
+    drop(target_guard);
     drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token).await?;
 
@@ -547,7 +597,7 @@ async fn commit_manual_connection_target(
     expected_profile: &ConnectionProfileSnapshot,
 ) -> Result<(), String> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    let _target_guard = state.connection_target_lock.lock().await;
     runtime.ensure_connection_operation(operation_token).await?;
     state
         .computer_registry
@@ -773,11 +823,10 @@ async fn disconnect_smcp_inner(
     request_id: uuid::Uuid,
     requested_at: Instant,
 ) -> Result<(), String> {
-    // Publish the operation while the authoritative runtime is protected, release the global
-    // lifecycle lock for socket teardown, then reacquire it for token-guarded settlement.
+    // Publish the operation while the authoritative runtime is protected, release the
+    // per-Computer gate for socket teardown, then reacquire it for token-guarded settlement.
     let instance_id = require_instance_id(instance_id)?.to_string();
     let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     log::info!("Disconnecting instance {} from SMCP server", instance_id);
     let runtime = state
         .computer_registry
@@ -865,7 +914,6 @@ async fn disconnect_smcp_inner(
             .await;
         return Err(message);
     }
-    drop(lifecycle_guard);
     drop(operation_guard);
 
     if runtime.has_smcp_transport().await {
@@ -883,7 +931,6 @@ async fn disconnect_smcp_inner(
                 "SMCP transport teardown failed"
             );
             let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
-            let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
             if state
                 .computer_registry
                 .ensure_current_runtime(&runtime)
@@ -902,7 +949,6 @@ async fn disconnect_smcp_inner(
         }
     }
     let _operation_guard = state.computer_registry.operation_lease(&instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     state
         .computer_registry
         .ensure_current_runtime(&runtime)
@@ -992,7 +1038,6 @@ pub async fn get_connection_status_core(
     instance_id: &str,
 ) -> Result<ConnectionStatusInfo, String> {
     let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = state
         .computer_registry
         .runtime(instance_id)
@@ -1491,7 +1536,6 @@ async fn begin_manager_connect(
     ManagerError,
 > {
     let operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let instance = state
         .config
         .get_computer_instance(instance_id)
@@ -1521,7 +1565,6 @@ async fn begin_manager_connect(
     )
     .await
     .map_err(ManagerError::InvalidResponse)?;
-    drop(lifecycle_guard);
     drop(operation_guard);
     finish_connect_preparation(&runtime, operation_token)
         .await
@@ -1574,7 +1617,6 @@ async fn mark_manager_binding_dormant(
     employee_id: u64,
 ) -> Result<(), ManagerError> {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
         .await
@@ -2172,7 +2214,6 @@ async fn commit_robot_binding(
         ));
     }
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     runtime
         .ensure_connection_operation(operation_token)
         .await
@@ -2405,7 +2446,7 @@ mod tests {
         let key = manual_target_keychain_id("target-a");
         store.set_secret(&key, "api-key").unwrap();
 
-        delete_manual_smcp_target_api_key(&store, "target-a");
+        write_manual_target_secret(&store, &key, None).unwrap();
 
         assert_eq!(store.get_secret(&key).unwrap(), None);
     }

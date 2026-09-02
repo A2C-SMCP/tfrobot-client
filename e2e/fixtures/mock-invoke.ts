@@ -422,7 +422,10 @@ const mockResponses: Record<string, unknown> = {
     marketplaces: [
       {
         name: 'acme',
-        displayGitUrl: 'https://example.com/acme.git',
+        source: {
+          type: 'remoteGit',
+          displayGitUrl: 'https://example.com/acme.git',
+        },
         status: 'ready',
         message: null,
       },

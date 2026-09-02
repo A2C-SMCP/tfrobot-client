@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use futures_util::future::join_all;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex;
 
 use crate::services::chat_session::ChatSessionService;
 use crate::services::computer::{
@@ -83,10 +82,10 @@ impl ManagerTokenBridgeSink for TauriManagerTokenBridgeSink {
 
 /// Bridges a Manager identity transaction to all client-owned Computer runtimes without retaining
 /// `AppState` (and therefore without creating an `AppState -> coordinator -> sink` Arc cycle).
+#[derive(Clone)]
 pub(crate) struct TauriManagerContextLifecycleSink {
     config: Arc<ConfigService>,
     computer_registry: Arc<ComputerRegistry>,
-    computer_lifecycle_lock: Arc<Mutex<()>>,
     chat_sessions: Arc<ChatSessionService>,
 }
 
@@ -94,13 +93,11 @@ impl TauriManagerContextLifecycleSink {
     pub(crate) fn new(
         config: Arc<ConfigService>,
         computer_registry: Arc<ComputerRegistry>,
-        computer_lifecycle_lock: Arc<Mutex<()>>,
         chat_sessions: Arc<ChatSessionService>,
     ) -> Self {
         Self {
             config,
             computer_registry,
-            computer_lifecycle_lock,
             chat_sessions,
         }
     }
@@ -110,44 +107,38 @@ impl TauriManagerContextLifecycleSink {
         instance_id: &str,
         departing_context: &ManagerContextKey,
     ) -> Result<(), String> {
-        // The caller holds this Computer's operation gate. Keep the cross-Computer transaction
-        // lock around synchronous profile commits only; runtime replacement may wait on a prompt
-        // or lifecycle teardown and must never convoy unrelated Computers.
-        let (previous, updated) = {
-            let _lifecycle = self.computer_lifecycle_lock.lock().await;
-            let previous = self
-                .config
-                .get_computer_instance(instance_id)
-                .map_err(|error| error.to_string())?;
-            let mut candidate = previous.clone();
-            if !make_departing_manager_binding_dormant(&mut candidate, departing_context) {
-                return Ok(());
-            }
-            let updated = self
-                .config
-                .update_computer_instance(instance_id, |instance| {
-                    make_departing_manager_binding_dormant(instance, departing_context);
-                })
-                .map_err(|error| error.to_string())?;
-            (previous, updated)
-        };
+        // The caller holds this Computer's operation gate. ConfigService provides the short
+        // atomic filesystem commit; runtime replacement remains outside every cross-Computer
+        // coordinator so a slow teardown cannot convoy unrelated Computers.
+        let previous = self
+            .config
+            .get_computer_instance(instance_id)
+            .map_err(|error| error.to_string())?;
+        let mut candidate = previous.clone();
+        if !make_departing_manager_binding_dormant(&mut candidate, departing_context) {
+            return Ok(());
+        }
+        let updated = self
+            .config
+            .update_computer_instance(instance_id, |instance| {
+                make_departing_manager_binding_dormant(instance, departing_context);
+            })
+            .map_err(|error| error.to_string())?;
         if let Err(runtime_error) = self
             .computer_registry
             .update_runtime_instance(updated)
             .await
         {
-            let restored = {
-                let _lifecycle = self.computer_lifecycle_lock.lock().await;
-                self.config
-                    .update_computer_instance(instance_id, |instance| {
-                        *instance = previous.clone();
-                    })
-                    .map_err(|restore_error| {
-                        format!(
-                            "failed to mark Manager binding dormant in runtime: {runtime_error}; additionally failed to restore persisted profile: {restore_error}"
-                        )
-                    })?
-            };
+            let restored = self
+                .config
+                .update_computer_instance(instance_id, |instance| {
+                    *instance = previous.clone();
+                })
+                .map_err(|restore_error| {
+                    format!(
+                        "failed to mark Manager binding dormant in runtime: {runtime_error}; additionally failed to restore persisted profile: {restore_error}"
+                    )
+                })?;
             if let Err(restore_runtime_error) = self
                 .computer_registry
                 .update_runtime_instance(restored)
@@ -197,6 +188,43 @@ impl TauriManagerContextLifecycleSink {
         }
         diagnostics
     }
+
+    async fn cleanup_manager_context_transaction(
+        &self,
+        departing_context: Option<ManagerContextKey>,
+    ) -> Vec<String> {
+        // Chat is single-current-Context state. Clear every lease fail-closed so an abnormal
+        // historical lease can never survive an account, organization, environment, or auth
+        // transition.
+        self.chat_sessions.close_for_context(None).await;
+        // Publish a fail-closed Context tombstone and take the runtime snapshot in one short
+        // membership transaction. Duplicate publication checks the tombstone, so long teardown
+        // work can proceed without holding a cross-Computer guard.
+        let runtimes = {
+            let _membership_guard = self.computer_registry.membership_lease().await;
+            if let Some(context) = departing_context.as_ref() {
+                self.computer_registry
+                    .mark_manager_context_departing(context.clone());
+            }
+            self.computer_registry.list_runtimes().await
+        };
+        let diagnostics: Vec<String> =
+            join_all(runtimes.into_iter().map(|runtime| {
+                self.cleanup_runtime_for_context(runtime, departing_context.as_ref())
+            }))
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        if diagnostics.is_empty() {
+            if let Some(context) = departing_context.as_ref() {
+                let _membership_guard = self.computer_registry.membership_lease().await;
+                self.computer_registry
+                    .clear_departing_manager_context(context);
+            }
+        }
+        diagnostics
+    }
 }
 
 #[async_trait::async_trait]
@@ -205,30 +233,18 @@ impl ManagerContextLifecycleSink for TauriManagerContextLifecycleSink {
         &self,
         departing_context: Option<&ManagerContextKey>,
     ) -> Vec<String> {
-        // Chat is single-current-Context state. Clear every lease fail-closed so an abnormal
-        // historical lease can never survive an account, organization, environment, or auth
-        // transition.
-        self.chat_sessions.close_for_context(None).await;
-        // A duplicate may inherit an active Manager binding. Hold the dedicated membership
-        // transaction from snapshot through cleanup so a duplicate is either published before
-        // this snapshot and governed here, or published only after the Context transition has
-        // completed. This never holds the application-wide lifecycle lock while awaiting a
-        // Computer operation gate.
-        let _membership_guard = self.computer_registry.membership_lease().await;
-        let runtimes = self.computer_registry.list_runtimes().await;
-        join_all(
-            runtimes
-                .into_iter()
-                .map(|runtime| self.cleanup_runtime_for_context(runtime, departing_context)),
-        )
+        let sink = self.clone();
+        let departing_context = departing_context.cloned();
+        tokio::spawn(async move {
+            sink.cleanup_manager_context_transaction(departing_context)
+                .await
+        })
         .await
-        .into_iter()
-        .flatten()
-        .collect()
+        .unwrap_or_else(|error| vec![format!("Manager Context cleanup task failed: {error}")])
     }
 }
 
-fn make_departing_manager_binding_dormant(
+pub(crate) fn make_departing_manager_binding_dormant(
     instance: &mut ComputerInstance,
     departing_context: &ManagerContextKey,
 ) -> bool {
@@ -502,7 +518,6 @@ mod tests {
         let sink = TauriManagerContextLifecycleSink::new(
             config.clone(),
             registry.clone(),
-            Arc::new(Mutex::new(())),
             Arc::new(ChatSessionService::new(std::sync::Weak::new())),
         );
 
@@ -539,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_cleanup_does_not_hold_global_lock_behind_one_computer() {
+    async fn lifecycle_cleanup_does_not_convoy_behind_one_computer() {
         let directory = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
         let departing = context("account-a", "organization-a");
@@ -559,16 +574,14 @@ mod tests {
             config.load_computer_instances().unwrap(),
             directory.path().join("skills"),
         ));
-        let lifecycle_lock = Arc::new(Mutex::new(()));
         let sink = Arc::new(TauriManagerContextLifecycleSink::new(
             config.clone(),
             registry.clone(),
-            lifecycle_lock.clone(),
             Arc::new(ChatSessionService::new(std::sync::Weak::new())),
         ));
 
         // Model Computer A waiting indefinitely on Runtime Input. Cleanup for B must still finish,
-        // and the application-wide transaction lock must remain available to unrelated commands.
+        // because cleanup coordinates each Computer independently.
         let blocked_a = registry.operation_lease("computer-a").await;
         let cleanup_sink = sink.clone();
         let cleanup_context = departing.clone();
@@ -592,16 +605,66 @@ mod tests {
         })
         .await
         .expect("Computer B cleanup must not wait for Computer A's operation gate");
-        let global_guard =
-            tokio::time::timeout(std::time::Duration::from_millis(100), lifecycle_lock.lock())
-                .await
-                .expect("cleanup waiting on Computer A must not hold the global transaction lock");
-        drop(global_guard);
-
         drop(blocked_a);
         assert!(cleanup.await.unwrap().is_empty());
         let computer_a = config.get_computer_instance("computer-a").unwrap();
         assert!(computer_a
+            .robot_binding
+            .as_ref()
+            .is_some_and(|binding| binding.state == ManagerRobotBindingState::Dormant));
+    }
+
+    #[tokio::test]
+    async fn cancelled_cleanup_request_still_finishes_and_clears_its_tombstone() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().to_path_buf()).unwrap());
+        let departing = context("account-a", "organization-a");
+        let mut instance = ComputerInstance::new("computer-a", "Computer A");
+        instance.connection_policy.target = Some(ComputerConnectionTarget::manager_robot(
+            departing.clone(),
+            42,
+            None,
+        ));
+        instance.connection_policy.auto_connect = true;
+        instance.robot_binding = Some(RobotBindingMetadata::active(departing.clone(), 42));
+        config.add_computer_instance(instance).unwrap();
+        let registry = Arc::new(ComputerRegistry::from_config_with_skill_home_base(
+            config.load_computer_instances().unwrap(),
+            directory.path().join("skills"),
+        ));
+        let sink = Arc::new(TauriManagerContextLifecycleSink::new(
+            config.clone(),
+            registry.clone(),
+            Arc::new(ChatSessionService::new(std::sync::Weak::new())),
+        ));
+        let blocked = registry.operation_lease("computer-a").await;
+        let cleanup_sink = sink.clone();
+        let cleanup_context = departing.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_sink
+                .cleanup_manager_context(Some(&cleanup_context))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !registry.is_manager_context_departing(&departing) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup did not publish its tombstone");
+
+        cleanup.abort();
+        assert!(cleanup.await.unwrap_err().is_cancelled());
+        drop(blocked);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while registry.is_manager_context_departing(&departing) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup did not clear its tombstone");
+        let persisted = config.get_computer_instance("computer-a").unwrap();
+        assert!(persisted
             .robot_binding
             .as_ref()
             .is_some_and(|binding| binding.state == ManagerRobotBindingState::Dormant));
@@ -628,14 +691,13 @@ mod tests {
         let sink = Arc::new(TauriManagerContextLifecycleSink::new(
             config.clone(),
             registry.clone(),
-            Arc::new(Mutex::new(())),
             Arc::new(ChatSessionService::new(std::sync::Weak::new())),
         ));
 
-        // Model duplicate_computer_instance_core after it has entered the membership transaction
-        // and acquired its source operation lease, but before publishing the copied runtime.
-        let duplicate_membership = registry.membership_lease().await;
-        let duplicate_source = registry.operation_lease("computer-source").await;
+        // Keep source cleanup pending after the Context snapshot. An unrelated duplicate must
+        // still acquire membership and publish without waiting for this Computer, while the
+        // departing-Context tombstone removes the authority missed by the earlier snapshot.
+        let blocked_source = registry.operation_lease("computer-source").await;
         let cleanup_sink = sink.clone();
         let cleanup_context = departing.clone();
         let cleanup = tokio::spawn(async move {
@@ -643,19 +705,35 @@ mod tests {
                 .cleanup_manager_context(Some(&cleanup_context))
                 .await
         });
-        tokio::task::yield_now().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !registry.is_manager_context_departing(&departing) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Context cleanup did not publish its tombstone");
         assert!(
             !cleanup.is_finished(),
-            "Context cleanup must serialize with an in-flight membership publication"
+            "source cleanup must still be waiting for its per-Computer operation gate"
         );
 
+        let duplicate_membership = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registry.membership_lease(),
+        )
+        .await
+        .expect("duplicate publication must not wait for unrelated Computer cleanup");
         let mut duplicate = source;
         duplicate.id = "computer-duplicate".to_string();
         duplicate.name = "Computer Duplicate".to_string();
+        assert!(make_departing_manager_binding_dormant(
+            &mut duplicate,
+            &departing
+        ));
         config.add_computer_instance(duplicate.clone()).unwrap();
         registry.upsert_runtime(duplicate).await.unwrap();
-        drop(duplicate_source);
         drop(duplicate_membership);
+        drop(blocked_source);
 
         assert!(cleanup.await.unwrap().is_empty());
         let persisted = config.get_computer_instance("computer-duplicate").unwrap();

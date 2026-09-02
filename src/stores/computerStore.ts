@@ -99,6 +99,7 @@ export interface ComputerInstanceStatus {
   connection_policy?: ComputerConnectionPolicy;
   remote_control?: RemoteControlPolicy;
   command_line?: CommandLineToolPolicy;
+  mcp_start_concurrency?: number;
   connection?: ConnectionStateSummary | null;
 }
 
@@ -124,6 +125,7 @@ export interface ComputerInstance {
   connectionPolicy: ComputerConnectionPolicy;
   remoteControl?: RemoteControlPolicy;
   commandLine?: CommandLineToolPolicy;
+  mcpStartConcurrency?: number;
   mcpServerCount: number;
   runtime: ComputerRuntimeSnapshot;
 }
@@ -131,6 +133,7 @@ export interface ComputerInstance {
 export interface ComputerFormValues {
   name: string;
   description?: string;
+  mcpStartConcurrency?: number;
 }
 
 export type DuplicateSkillHomeMode = 'empty' | 'copy';
@@ -244,6 +247,7 @@ function toComputerInstance(status: ComputerInstanceStatus): ComputerInstance {
     connectionPolicy: status.connection_policy ?? { target: null, auto_connect: false },
     remoteControl: status.remote_control,
     commandLine: status.command_line,
+    mcpStartConcurrency: status.mcp_start_concurrency ?? 5,
     mcpServerCount: projection.mcpServerCount,
     runtime,
   };
@@ -255,6 +259,9 @@ function normalizeFormValues(values: ComputerFormValues): ComputerFormValues {
   return {
     name,
     description: description || undefined,
+    ...(values.mcpStartConcurrency === undefined
+      ? {}
+      : { mcpStartConcurrency: values.mcpStartConcurrency }),
   };
 }
 

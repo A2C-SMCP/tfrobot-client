@@ -597,6 +597,11 @@ impl ManagerContextCoordinator {
         robot_account_id: &str,
         scope: Option<String>,
     ) -> Result<ExchangedToken, ManagerError> {
+        super::public_id::validate_account_public_id(robot_account_id).map_err(|reason| {
+            ManagerError::InvalidResponse(format!(
+                "robotAccountId '{robot_account_id}' is not a valid public ID: {reason}"
+            ))
+        })?;
         self.ensure_authenticated_generation(expected_generation)
             .await?;
         let material = self
@@ -1068,5 +1073,15 @@ mod tests {
             validate_authenticated_identity(&login_user, &current),
             Err(ManagerError::InvalidResponse(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_rejects_non_public_robot_account_id_before_auth() {
+        let (coordinator, _dir) = coordinator();
+        let error = coordinator
+            .exchange_token_for_generation(0, "42", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ManagerError::InvalidResponse(_)));
     }
 }

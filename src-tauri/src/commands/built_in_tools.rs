@@ -143,7 +143,6 @@ pub async fn update_command_line_tool_policy_core(
         .computer_registry
         .operation_lease(&request.computer_id)
         .await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let previous = state
         .config
         .get_computer_instance(&request.computer_id)

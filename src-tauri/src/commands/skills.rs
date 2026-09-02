@@ -134,8 +134,6 @@ pub async fn refresh_skills_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<(), SkillCommandError> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
     let runtime = runtime_for_instance(state, instance_id).await?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
@@ -166,9 +164,10 @@ pub async fn open_configured_local_skills_root(
             .open_path(path.to_string_lossy().to_string(), None::<&str>)
             .map_err(|error| error.to_string())
     })
+    .await
 }
 
-pub fn open_configured_local_skills_root_core<F>(
+pub async fn open_configured_local_skills_root_core<F>(
     state: &AppState,
     instance_id: &str,
     open_path: F,
@@ -176,6 +175,10 @@ pub fn open_configured_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
+    let _operation_guard = state
+        .computer_registry
+        .shared_operation_lease(instance_id)
+        .await;
     let root = configured_local_user_skills_root(state, instance_id)?;
     std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
         path: root.to_string_lossy().to_string(),
@@ -218,8 +221,12 @@ pub async fn open_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let _lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    // Keep deletion/profile replacement out until the path has been created and handed to the
+    // platform opener. The SDK read session used to resolve the path ends before create_dir_all.
+    let _operation_guard = state
+        .computer_registry
+        .shared_operation_lease(instance_id)
+        .await;
     let root = local_user_skills_root(state, instance_id).await?;
     std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
         path: root.to_string_lossy().to_string(),
@@ -305,6 +312,7 @@ fn require_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, SkillCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::computer::delete_computer_instance_core;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
     use crate::services::observability::ObservabilityService;
@@ -588,6 +596,53 @@ mod tests {
         assert!(expected_root.is_dir());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_local_skills_root_blocks_delete_until_the_path_is_handed_off() {
+        let (state, _dir) = test_state();
+        let state = std::sync::Arc::new(state);
+        let opened_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let continue_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let opened_for_command = opened_barrier.clone();
+        let continue_for_command = continue_barrier.clone();
+        let open_state = state.clone();
+        let open = tokio::spawn(async move {
+            open_local_skills_root_core(&open_state, "computer-a", |path| {
+                assert!(path.ends_with("user"));
+                opened_for_command.wait();
+                continue_for_command.wait();
+                Ok(())
+            })
+            .await
+        });
+        tokio::task::spawn_blocking(move || opened_barrier.wait())
+            .await
+            .unwrap();
+        let opened_path = state
+            .computer_registry
+            .runtime("computer-a")
+            .await
+            .unwrap()
+            .sdk_skill_home()
+            .await
+            .join("user");
+
+        let delete_state = state.clone();
+        let mut delete = tokio::spawn(async move {
+            delete_computer_instance_core(&delete_state, "computer-a".to_string()).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut delete)
+                .await
+                .is_err(),
+            "delete must wait while the Skill Home opener owns a shared operation"
+        );
+
+        continue_barrier.wait();
+        open.await.unwrap().unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(!opened_path.exists());
+    }
+
     #[tokio::test]
     async fn open_local_skills_root_reports_missing_instance() {
         let (state, _dir) = test_state();
@@ -604,8 +659,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_configured_local_skills_root_uses_saved_root_without_runtime_restart() {
+    #[tokio::test]
+    async fn open_configured_local_skills_root_uses_saved_root_without_runtime_restart() {
         let (state, dir) = test_state();
         let configured_root = dir.path().join("saved-skill-home");
         let runtime_root = state.config.default_local_skills_root("computer-a");
@@ -621,6 +676,7 @@ mod tests {
             opened = Some(path.to_path_buf());
             Ok(())
         })
+        .await
         .unwrap();
 
         let expected = configured_root.join("user");

@@ -87,20 +87,35 @@ describe('computerStore', () => {
     expect(useComputerStore.getState().selectedInstanceId).toBe('computer-a');
   });
 
-  it('updates a Computer name and description', async () => {
+  it('atomically updates general settings including MCP startup concurrency', async () => {
     useComputerStore.setState({
       instances: [{ id: 'computer-a', name: 'Old', ...baseInstance }],
       selectedInstanceId: 'computer-a',
     });
-    mockedInvoke.mockResolvedValueOnce({ ...baseStatus, name: 'New', description: null });
+    mockedInvoke.mockResolvedValueOnce({
+      ...baseStatus,
+      name: 'New',
+      description: null,
+      mcp_start_concurrency: 9,
+    });
 
-    await useComputerStore.getState().updateInstance('computer-a', { name: 'New', description: '   ' });
+    await useComputerStore.getState().updateInstance('computer-a', {
+      name: 'New',
+      description: '   ',
+      mcpStartConcurrency: 9,
+    });
 
     expect(mockedInvoke).toHaveBeenCalledWith('rename_computer_instance', {
-      request: { id: 'computer-a', name: 'New', description: undefined },
+      request: {
+        id: 'computer-a',
+        name: 'New',
+        description: undefined,
+        mcpStartConcurrency: 9,
+      },
     });
     expect(useComputerStore.getState().instances[0].name).toBe('New');
     expect(useComputerStore.getState().instances[0].description).toBeUndefined();
+    expect(useComputerStore.getState().instances[0].mcpStartConcurrency).toBe(9);
   });
 
   it('does not let an older list response undo a profile update', async () => {

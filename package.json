@@ -1,7 +1,7 @@
 {
   "name": "tfrobot-client",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "runtime:prepare:tfbash": "node scripts/prepare-tfbash-runtime.mjs",
     "runtime:verify:tfbash": "node scripts/prepare-tfbash-runtime.mjs --verify",
+    "verify:a2c-smcp-source": "node scripts/verify-a2c-smcp-registry.mjs",
     "tauri:dev:signed": "CARGO_TARGET_DIR=\"$PWD/src-tauri/target-signed-dev\" CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=\"$PWD/scripts/tauri-dev-sign-runner.sh\" CARGO_TARGET_X86_64_APPLE_DARWIN_RUNNER=\"$PWD/scripts/tauri-dev-sign-runner.sh\" tauri dev",
     "tauri": "tauri",
     "test": "vitest run --maxWorkers=2",

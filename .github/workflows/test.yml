@@ -2,9 +2,12 @@ name: Test Suite
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+
+concurrency:
+  group: test-suite-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -134,6 +137,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+      - name: Verify Rust SDK registry source
+        run: pnpm verify:a2c-smcp-source
 
       - name: Run tests
         if: runner.os != 'Windows'

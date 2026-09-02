@@ -1,6 +1,6 @@
 [package]
 name = "tfrobot-client"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "TFRobot Client - A2C-SMCP Computer GUI"
 authors = ["TFRobot Team"]
@@ -21,7 +21,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 
 # A2C-SMCP Computer implementation
-a2c-smcp = { git = "https://github.com/A2C-SMCP/rust-sdk.git", rev = "b10afff61c9cf9004cc6883a7b4e13ef8291c2f1", features = ["computer"] }
+a2c-smcp = { version = "=0.4.1", features = ["computer"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

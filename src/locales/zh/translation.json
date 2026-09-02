@@ -441,6 +441,9 @@
       "name": "名称",
       "nameRequired": "名称不能为空",
       "description": "描述",
+      "mcpStartConcurrency": "MCP 启动并发数",
+      "mcpStartConcurrencyHint": "保存后将在此 Computer 下次启动时生效。",
+      "mcpStartConcurrencyRunningHint": "修改该值不会中断当前正在运行的 Computer。",
       "copyRobotBinding": "复制 Robot 绑定",
       "connectionTarget": "连接目标",
       "useOriginalConnectionConfig": "使用原 Computer 连接配置",
@@ -493,6 +496,10 @@
     "sdkOwnedState": "状态由 SDK governance API 管理。",
     "bundledSkills": "内置 Skills：{{skills}}",
     "bundledMcpServers": "内置 MCP servers：{{servers}}",
+    "source": {
+      "remoteGit": "远程仓库",
+      "localGit": "本地仓库"
+    },
     "details": {
       "title": "Plugin 内容",
       "emptyPlugin": "选择一个 Plugin 查看内容",
@@ -511,9 +518,14 @@
     "form": {
       "name": "名称",
       "nameRequired": "请输入 Marketplace 名称",
+      "sourceType": "来源类型",
       "gitUrl": "Git URL",
       "gitUrlRequired": "请输入 Git URL",
+      "remoteFileUrlForbidden": "file:// 地址必须通过“本地仓库”添加",
       "gitUrlEditHelp": "为安全起见，请重新输入完整 Git URL。展示地址不包含凭据、查询参数和片段。",
+      "localPath": "本地仓库路径",
+      "localPathRequired": "请选择本地 Git 仓库",
+      "sourceLocked": "此 Marketplace 已安装 Plugin，请先卸载后再更换来源。",
       "marketplace": "Marketplace",
       "marketplaceRequired": "请输入 Marketplace",
       "plugin": "Plugin",
@@ -521,6 +533,7 @@
     },
     "actions": {
       "addMarketplace": "添加 Marketplace",
+      "chooseFolder": "选择文件夹",
       "selectMarketplace": "选择 Marketplace {{marketplace}}",
       "selectPlugin": "选择 Plugin {{plugin}}（{{pluginId}}）",
       "refreshMarketplace": "刷新 Marketplace",

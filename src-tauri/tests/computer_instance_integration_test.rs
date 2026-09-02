@@ -12,9 +12,12 @@ use tfrobot_client_lib::commands::computer::{
     get_computer_instance_status_core, list_computer_instances_core, rename_computer_instance_core,
     start_computer_instance_core, stop_computer_instance_core, CreateComputerInstanceRequest,
     DuplicateComputerInstanceRequest, DuplicateSkillHomeMode, RenameComputerInstanceRequest,
+    UpdateComputerSkillHomeRequest,
 };
 use tfrobot_client_lib::commands::connection::{
-    connect_connection_target_core, connect_connection_target_for_policy_core, disconnect_smcp_core,
+    connect_connection_target_core, connect_connection_target_for_policy_core,
+    delete_manual_smcp_target_core, disconnect_smcp_core, save_manual_smcp_target_core,
+    ManualSmcpApiKeyAction,
 };
 use tfrobot_client_lib::commands::inputs::{self, InputDefinition};
 use tfrobot_client_lib::commands::sdk_config;
@@ -22,7 +25,9 @@ use tfrobot_client_lib::services::computer::{
     ComputerConnectionTarget, ComputerInstance, ManagerRobotBindingState, RobotBindingMetadata,
 };
 use tfrobot_client_lib::services::config::ConfigService;
-use tfrobot_client_lib::services::connection_targets::ManualSmcpTarget;
+use tfrobot_client_lib::services::connection_targets::{
+    manual_target_keychain_id, ManualSmcpTarget,
+};
 use tfrobot_client_lib::services::input_value_store::InputValueStore;
 use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
 use tfrobot_client_lib::services::observability::ObservabilityService;
@@ -35,6 +40,8 @@ const LEGACY_INSTANCE_ID: &str = "default";
 struct ToggleReadFailureSecretStore {
     secrets: Mutex<HashMap<String, String>>,
     fail_reads: AtomicBool,
+    fail_writes: AtomicBool,
+    fail_deletes: AtomicBool,
     read_count: AtomicUsize,
 }
 
@@ -46,10 +53,23 @@ impl ToggleReadFailureSecretStore {
     fn read_count(&self) -> usize {
         self.read_count.load(Ordering::SeqCst)
     }
+
+    fn fail_writes(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_deletes(&self) {
+        self.fail_deletes.store(true, Ordering::SeqCst);
+    }
 }
 
 impl SecretStore for ToggleReadFailureSecretStore {
     fn set_secret(&self, key: &str, secret: &str) -> Result<(), KeychainError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(KeychainError::Store(
+                "injected Keychain write failure".to_string(),
+            ));
+        }
         self.secrets
             .lock()
             .map_err(|error| KeychainError::Store(error.to_string()))?
@@ -73,6 +93,11 @@ impl SecretStore for ToggleReadFailureSecretStore {
     }
 
     fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(KeychainError::Store(
+                "injected Keychain delete failure".to_string(),
+            ));
+        }
         self.secrets
             .lock()
             .map_err(|error| KeychainError::Store(error.to_string()))?
@@ -137,6 +162,7 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
     assert_eq!(created.name, "Second Computer");
     assert_eq!(created.description.as_deref(), Some("Test description"));
     assert!(!created.running);
+    assert_eq!(created.mcp_start_concurrency, 5);
 
     let renamed = rename_computer_instance_core(
         &state,
@@ -144,12 +170,38 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
             id: created.id.clone(),
             name: "Renamed Computer".to_string(),
             description: Some("Renamed description".to_string()),
+            mcp_start_concurrency: Some(7),
         },
     )
     .await
     .unwrap();
     assert_eq!(renamed.name, "Renamed Computer");
     assert_eq!(renamed.description.as_deref(), Some("Renamed description"));
+    assert_eq!(renamed.mcp_start_concurrency, 7);
+    assert_eq!(
+        state
+            .config
+            .get_computer_instance(&created.id)
+            .unwrap()
+            .mcp_start_concurrency,
+        7
+    );
+
+    let invalid_concurrency = rename_computer_instance_core(
+        &state,
+        RenameComputerInstanceRequest {
+            id: created.id.clone(),
+            name: "Must Not Be Applied".to_string(),
+            description: None,
+            mcp_start_concurrency: Some(0),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid_concurrency.contains("between 1 and 64"));
+    let unchanged = state.config.get_computer_instance(&created.id).unwrap();
+    assert_eq!(unchanged.name, "Renamed Computer");
+    assert_eq!(unchanged.mcp_start_concurrency, 7);
 
     let list = list_computer_instances_core(&state).await.unwrap();
     assert_eq!(list.len(), 1);
@@ -309,6 +361,7 @@ async fn rename_does_not_require_keychain_reads() {
             id: id.clone(),
             name: "Renamed Without Keychain Reads".to_string(),
             description: None,
+            mcp_start_concurrency: None,
         },
     )
     .await
@@ -377,40 +430,41 @@ async fn duplicate_does_not_require_keychain_reads() {
 }
 
 #[tokio::test]
-async fn computer_lifecycle_commands_wait_for_the_transaction_lock() {
+async fn one_computer_transaction_does_not_block_another_computer_or_its_own_status() {
     let dir = TempDir::new().unwrap();
     let state = Arc::new(create_test_app_state(dir.path()));
-    let guard = state.computer_lifecycle_lock.lock().await;
+    let computer_a = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Computer A".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    let computer_b = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Computer B".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let blocked_a = state
+        .computer_registry
+        .operation_lease(&computer_a.id)
+        .await;
     let operation_state = state.clone();
-    let mut operation = tokio::spawn(async move {
-        create_computer_instance_core(
-            operation_state.as_ref(),
-            CreateComputerInstanceRequest {
-                name: "Serialized".to_string(),
-                description: None,
-            },
-        )
-        .await
-    });
-
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
-            .await
-            .is_err()
-    );
-    drop(guard);
-
-    let created = operation.await.unwrap().unwrap();
-
-    let guard = state.computer_lifecycle_lock.lock().await;
-    let operation_state = state.clone();
+    let computer_b_id = computer_b.id.clone();
     let mut input_operation = tokio::spawn(async move {
         inputs::add_or_update_input_core(
             operation_state.as_ref(),
-            &created.id,
+            &computer_b_id,
             InputDefinition::PromptString {
-                id: "serialized-input".to_string(),
-                label: Some("Serialized input".to_string()),
+                id: "independent-input".to_string(),
+                label: Some("Independent input".to_string()),
                 description: None,
                 default: None,
                 password: None,
@@ -419,18 +473,73 @@ async fn computer_lifecycle_commands_wait_for_the_transaction_lock() {
         .await
     });
 
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut input_operation)
-            .await
-            .is_err()
-    );
-    drop(guard);
-
-    input_operation.await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), &mut input_operation)
+        .await
+        .expect("Computer B input mutation must not wait for Computer A")
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        get_computer_instance_status_core(state.as_ref(), computer_a.id.clone()),
+    )
+    .await
+    .expect("status must remain observational during a same-Computer mutation")
+    .unwrap();
+    drop(blocked_a);
 }
 
 #[tokio::test]
-async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
+async fn shared_runtime_operations_coexist_and_only_block_the_same_computer_writer() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let shared_a_one = state
+        .computer_registry
+        .shared_operation_lease("computer-a")
+        .await;
+    let shared_a_two = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        state.computer_registry.shared_operation_lease("computer-a"),
+    )
+    .await
+    .expect("same-Computer shared runtime operations must coexist");
+
+    let writer_state = state.clone();
+    let mut writer_a = tokio::spawn(async move {
+        writer_state
+            .computer_registry
+            .operation_lease("computer-a")
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut writer_a)
+            .await
+            .is_err(),
+        "same-Computer writer must wait for admitted shared operations"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        state.computer_registry.operation_lease("computer-b"),
+    )
+    .await
+    .expect("another Computer writer must remain independent");
+
+    drop(shared_a_one);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut writer_a)
+            .await
+            .is_err(),
+        "writer must wait until every shared operation settles"
+    );
+    drop(shared_a_two);
+    tokio::time::timeout(std::time::Duration::from_secs(2), writer_a)
+        .await
+        .expect("same-Computer writer must resume after shared operations")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mcp_mutations_wait_for_the_same_computer_transaction() {
     let dir = TempDir::new().unwrap();
     let state = Arc::new(create_test_app_state(dir.path()));
     let created = create_computer_instance_core(
@@ -442,7 +551,7 @@ async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
     )
     .await
     .unwrap();
-    let guard = state.computer_lifecycle_lock.lock().await;
+    let guard = state.computer_registry.operation_lease(&created.id).await;
     let operation_state = state.clone();
     let instance_id = created.id.clone();
     let mut operation = tokio::spawn(async move {
@@ -458,7 +567,7 @@ async fn mcp_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
             .await
             .is_err(),
-        "MCP mutation escaped the Computer lifecycle transaction"
+        "MCP mutation escaped the same-Computer transaction"
     );
     drop(guard);
 
@@ -480,9 +589,12 @@ async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
     .unwrap();
     let storage_root = state.config.computer_instance_storage_root(&created.id);
 
-    // Hold the global transaction lock so the SDK config writer stops after acquiring the
-    // per-Computer gate. This makes the formerly split coordination domains deterministic.
-    let lifecycle_guard = state.computer_lifecycle_lock.lock().await;
+    // A shared runtime lease admits non-destructive work but queues exclusive config/delete
+    // transactions in arrival order.
+    let shared_guard = state
+        .computer_registry
+        .shared_operation_lease(&created.id)
+        .await;
     let upsert_state = state.clone();
     let upsert_id = created.id.clone();
     let upsert = tokio::spawn(async move {
@@ -501,7 +613,7 @@ async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
         )
         .await
         .is_err(),
-        "SDK config writer must own the per-Computer operation gate before its global commit"
+        "SDK config writer must queue for the per-Computer write transaction"
     );
 
     let delete_state = state.clone();
@@ -516,7 +628,7 @@ async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
         "Computer deletion must wait for the in-flight SDK config mutation"
     );
 
-    drop(lifecycle_guard);
+    drop(shared_guard);
     upsert.await.unwrap().unwrap();
     delete.await.unwrap().unwrap();
 
@@ -529,10 +641,10 @@ async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
 }
 
 #[tokio::test]
-async fn connection_mutations_wait_for_the_computer_lifecycle_transaction_lock() {
+async fn connection_mutations_wait_for_the_same_computer_transaction() {
     let dir = TempDir::new().unwrap();
     let state = Arc::new(create_test_app_state(dir.path()));
-    let guard = state.computer_lifecycle_lock.lock().await;
+    let guard = state.computer_registry.operation_lease("missing").await;
     let operation_state = state.clone();
     let mut operation = tokio::spawn(async move {
         connect_connection_target_core(operation_state.as_ref(), "missing", "missing-target").await
@@ -542,13 +654,13 @@ async fn connection_mutations_wait_for_the_computer_lifecycle_transaction_lock()
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
             .await
             .is_err(),
-        "connection mutation escaped the Computer lifecycle transaction"
+        "connection mutation escaped the same-Computer transaction"
     );
     drop(guard);
 
     assert!(operation.await.unwrap().is_err());
 
-    let guard = state.computer_lifecycle_lock.lock().await;
+    let guard = state.computer_registry.operation_lease("missing").await;
     let operation_state = state.clone();
     let mut operation =
         tokio::spawn(
@@ -559,11 +671,159 @@ async fn connection_mutations_wait_for_the_computer_lifecycle_transaction_lock()
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut operation)
             .await
             .is_err(),
-        "disconnect mutation escaped the Computer lifecycle transaction"
+        "disconnect mutation escaped the same-Computer transaction"
     );
     drop(guard);
 
     assert!(operation.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn cancelled_connect_request_does_not_cancel_token_cleanup() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let created = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Cancellation Connection".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    start_computer_instance_core(None, state.as_ref(), created.id.clone())
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    state
+        .config
+        .save_manual_smcp_target(manual_target(
+            "cancel-connect-target",
+            &format!("http://{address}"),
+        ))
+        .unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        let _ = release_rx.await;
+    });
+    let connect_state = state.clone();
+    let instance_id = created.id.clone();
+    let connect = tokio::spawn(async move {
+        connect_connection_target_core(
+            connect_state.as_ref(),
+            &instance_id,
+            "cancel-connect-target",
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+        .await
+        .expect("connection transaction did not reach network I/O")
+        .unwrap();
+    let runtime = state.computer_registry.runtime(&created.id).await.unwrap();
+    assert_eq!(
+        runtime.connection_snapshot().await.operation,
+        Some(tfrobot_client_lib::services::computer::ClientConnectionOperation::Connect)
+    );
+
+    connect.abort();
+    assert!(connect.await.unwrap_err().is_cancelled());
+    let _ = release_tx.send(());
+    server.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while runtime.connection_snapshot().await.operation.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached connection transaction left its operation token in progress");
+}
+
+fn manual_target(id: &str, url: &str) -> ManualSmcpTarget {
+    ManualSmcpTarget {
+        id: id.to_string(),
+        name: id.to_string(),
+        url: url.to_string(),
+        namespace: "/smcp".to_string(),
+        office_id: format!("{id}-office"),
+        headers: HashMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn manual_target_secret_failures_do_not_publish_profile_changes() {
+    let dir = TempDir::new().unwrap();
+    let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
+    let original = state
+        .config
+        .save_manual_smcp_target(manual_target("target-a", "https://old.example"))
+        .unwrap();
+    let credential_key = manual_target_keychain_id(&original.id);
+    secrets.set_secret(&credential_key, "old-secret").unwrap();
+    secrets.fail_writes();
+
+    let error = save_manual_smcp_target_core(
+        &state,
+        manual_target("target-a", "https://new.example"),
+        Some(ManualSmcpApiKeyAction::Set {
+            value: "new-secret".to_string(),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.contains("injected Keychain write failure"));
+    assert_eq!(
+        state.config.get_manual_smcp_target("target-a").unwrap(),
+        original
+    );
+    assert_eq!(
+        secrets.get_secret(&credential_key).unwrap().as_deref(),
+        Some("old-secret")
+    );
+}
+
+#[tokio::test]
+async fn manual_target_clear_and_delete_failures_preserve_profile_and_secret() {
+    for operation in ["clear", "delete"] {
+        let dir = TempDir::new().unwrap();
+        let (state, secrets) = create_state_with_toggle_secret_store(dir.path());
+        let original = state
+            .config
+            .save_manual_smcp_target(manual_target("target-a", "https://old.example"))
+            .unwrap();
+        let credential_key = manual_target_keychain_id(&original.id);
+        secrets.set_secret(&credential_key, "old-secret").unwrap();
+        secrets.fail_deletes();
+
+        let error = if operation == "clear" {
+            save_manual_smcp_target_core(
+                &state,
+                manual_target("target-a", "https://new.example"),
+                Some(ManualSmcpApiKeyAction::Clear),
+            )
+            .await
+            .unwrap_err()
+        } else {
+            delete_manual_smcp_target_core(&state, "target-a")
+                .await
+                .unwrap_err()
+        };
+
+        assert!(error.contains("injected Keychain delete failure"));
+        assert_eq!(
+            state.config.get_manual_smcp_target("target-a").unwrap(),
+            original
+        );
+        assert_eq!(
+            secrets.get_secret(&credential_key).unwrap().as_deref(),
+            Some("old-secret")
+        );
+    }
 }
 
 #[tokio::test]
@@ -651,7 +911,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
                 state: ManagerRobotBindingState::NeedsRebind,
                 employee_id: 42,
                 robot_id: Some("robot-42".to_string()),
-                last_resolved_robot_account_id: Some("4200".to_string()),
+                last_resolved_robot_account_id: Some("turingfocus:004200".to_string()),
                 namespace: Some("test".to_string()),
                 robot_name: Some("Robot 42".to_string()),
             });
@@ -811,6 +1071,85 @@ async fn duplicate_copies_configuration_without_runtime_state() {
             .is_running()
             .await
     );
+}
+
+#[tokio::test]
+async fn cancelled_duplicate_request_still_finishes_runtime_publication() {
+    let dir = TempDir::new().unwrap();
+    let state = Arc::new(create_test_app_state(dir.path()));
+    let source = create_computer_instance_core(
+        state.as_ref(),
+        CreateComputerInstanceRequest {
+            name: "Cancellation Source".to_string(),
+            description: None,
+        },
+    )
+    .await
+    .unwrap();
+    state
+        .config
+        .save_manual_smcp_target(manual_target(
+            "duplicate-cancel-target",
+            "https://smcp.example.com",
+        ))
+        .unwrap();
+    let target_guard = state.connection_target_lock.lock().await;
+    let duplicate_state = state.clone();
+    let source_id = source.id.clone();
+    let duplicate = tokio::spawn(async move {
+        duplicate_computer_instance_core(
+            duplicate_state.as_ref(),
+            DuplicateComputerInstanceRequest {
+                source_id,
+                name: "Cancellation Duplicate".to_string(),
+                description: None,
+                copy_robot_binding: false,
+                connection_target_id: Some("duplicate-cancel-target".to_string()),
+                skill_home_mode: DuplicateSkillHomeMode::Empty,
+            },
+        )
+        .await
+    });
+
+    let duplicate_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(instance) = state
+                .config
+                .load_computer_instances()
+                .unwrap()
+                .instances
+                .into_iter()
+                .find(|instance| instance.id != source.id)
+            {
+                break instance.id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("duplicate did not publish its durable profile before the blocked commit");
+    assert!(state
+        .computer_registry
+        .runtime(&duplicate_id)
+        .await
+        .is_none());
+    duplicate.abort();
+    assert!(duplicate.await.unwrap_err().is_cancelled());
+    drop(target_guard);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state
+            .computer_registry
+            .runtime(&duplicate_id)
+            .await
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached duplicate transaction did not publish its runtime");
+    assert!(state.config.get_computer_instance(&duplicate_id).is_ok());
 }
 
 #[tokio::test]
@@ -987,12 +1326,15 @@ async fn duplicate_copy_is_safe_when_custom_root_contains_target_storage() {
         r#"{"plugins":{"audit@acme":{"installPath":"/source/plugin"}}}"#,
     )
     .unwrap();
-    state
-        .config
-        .update_computer_instance(&source.id, |instance| {
-            instance.local_skills_root = Some(skill_home_base.clone());
-        })
-        .unwrap();
+    tfrobot_client_lib::commands::computer::update_computer_skill_home_core(
+        &state,
+        UpdateComputerSkillHomeRequest {
+            id: source.id.clone(),
+            local_skills_root: Some(skill_home_base.to_string_lossy().to_string()),
+        },
+    )
+    .await
+    .unwrap();
 
     let duplicate = duplicate_computer_instance_core(
         &state,
