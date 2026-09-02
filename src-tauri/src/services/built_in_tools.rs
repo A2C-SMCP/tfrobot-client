@@ -58,7 +58,6 @@ impl CommandLineToolPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandLineRuntimeAssets {
     pub python: PathBuf,
-    pub powershell: Option<PathBuf>,
 }
 
 impl CommandLineRuntimeAssets {
@@ -76,12 +75,7 @@ impl CommandLineRuntimeAssets {
         #[cfg(not(target_os = "windows"))]
         let python = runtime_root.join("python").join("bin").join("python3");
 
-        #[cfg(target_os = "windows")]
-        let powershell = Some(runtime_root.join("powershell").join("pwsh.exe"));
-        #[cfg(not(target_os = "windows"))]
-        let powershell = None;
-
-        let assets = Self { python, powershell };
+        let assets = Self { python };
         assets.validate()?;
         Ok(assets)
     }
@@ -92,14 +86,6 @@ impl CommandLineRuntimeAssets {
                 "bundled tfbash Python runtime is missing: {}",
                 self.python.display()
             ));
-        }
-        if let Some(powershell) = self.powershell.as_ref() {
-            if !powershell.is_file() {
-                return Err(format!(
-                    "bundled tfbash PowerShell runtime is missing: {}",
-                    powershell.display()
-                ));
-            }
         }
         Ok(())
     }
@@ -129,7 +115,8 @@ pub fn command_line_server_config_with_assets(
         )
     })?;
 
-    let mut arguments = vec![
+    // Do not pass --shell: tfbash 0.2 discovers a supported host Shell at runtime.
+    let arguments = vec![
         "-m".to_string(),
         "tfbash_mcp".to_string(),
         "--transport".to_string(),
@@ -141,11 +128,6 @@ pub fn command_line_server_config_with_assets(
         "--workspace-root".to_string(),
         workspace.to_string_lossy().into_owned(),
     ];
-    if let Some(powershell) = assets.powershell.as_ref() {
-        arguments.push("--shell".to_string());
-        arguments.push(powershell.to_string_lossy().into_owned());
-    }
-
     serde_json::from_value(serde_json::json!({
         "type": "stdio",
         "name": "TFRobot command line",
@@ -251,13 +233,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_reserved_stdio_config_with_default_workspace() {
+    fn builds_reserved_stdio_config_with_default_workspace_and_runtime_probe() {
         let temp = TempDir::new().unwrap();
         let python = temp.path().join("python");
         std::fs::write(&python, "probe").unwrap();
         let assets = CommandLineRuntimeAssets {
             python: python.clone(),
-            powershell: None,
         };
         let instance_root = temp.path().join("instance");
         let config = command_line_server_config_with_assets(
@@ -275,10 +256,10 @@ mod tests {
             json["server_parameters"]["command"],
             python.to_string_lossy().as_ref()
         );
-        assert!(json["server_parameters"]["args"]
-            .as_array()
-            .unwrap()
+        let arguments = json["server_parameters"]["args"].as_array().unwrap();
+        assert!(arguments
             .iter()
             .any(|value| value == instance_root.join("workspace").to_string_lossy().as_ref()));
+        assert!(!arguments.iter().any(|value| value == "--shell"));
     }
 }

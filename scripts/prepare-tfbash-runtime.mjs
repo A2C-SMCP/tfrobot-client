@@ -7,9 +7,8 @@ import { spawn } from 'node:child_process';
 
 const PYTHON_VERSION = '3.12.14';
 const PYTHON_RELEASE = '20260825';
-const TFBASH_VERSION = '0.1.0';
-const RESOLUTION_CUTOFF = '2026-08-27T00:00:00Z';
-const POWERSHELL_VERSION = '7.6.5';
+const TFBASH_VERSION = '0.2.0';
+const RESOLUTION_CUTOFF = '2026-09-01T00:00:00Z';
 
 const targets = {
   'aarch64-apple-darwin': {
@@ -27,7 +26,7 @@ const targets = {
   'x86_64-pc-windows-msvc': {
     pythonSha256: '8e6aad12ef6fc9685e67ce66253f8f72d6e8fa02cb7187e5850bd4db5ecd9e2a',
     uvPlatform: 'x86_64-pc-windows-msvc',
-    powershellSha256: '32eb8f6cdce08f86e987d625a2733e54ac3e289ae7e1621b14c0b5bcec2434ea',
+    // Shell binaries are host capabilities; tfbash discovers them at runtime.
   },
 };
 
@@ -51,7 +50,6 @@ const pythonPath = requestedTarget.includes('windows')
 const packagePath = requestedTarget.includes('windows')
   ? join(outputRoot, 'python', 'Lib', 'site-packages', 'tfbash_mcp', '__init__.py')
   : join(outputRoot, 'python', 'lib', 'python3.12', 'site-packages', 'tfbash_mcp', '__init__.py');
-const powershellPath = join(outputRoot, 'powershell', 'pwsh.exe');
 
 async function hashFile(path) {
   const digest = createHash('sha256');
@@ -95,17 +93,11 @@ const expectedManifestBase = {
     resolutionCutoff: RESOLUTION_CUTOFF,
     dependencyLockSha256,
   },
-  ...(target.powershellSha256 ? {
-    powershell: { version: POWERSHELL_VERSION, sha256: target.powershellSha256 },
-  } : {}),
 };
 
 if (refreshManifestOnly) {
   if (!existsSync(pythonPath) || !existsSync(packagePath)) {
     throw new Error(`tfbash runtime is missing for ${requestedTarget}`);
-  }
-  if (target.powershellSha256 && !existsSync(powershellPath)) {
-    throw new Error(`tfbash PowerShell runtime is missing for ${requestedTarget}`);
   }
   const payloadSha256 = await hashPayloadTree(outputRoot);
   await writeFile(manifestPath, `${JSON.stringify({
@@ -118,7 +110,6 @@ if (refreshManifestOnly) {
 
 async function isPrepared() {
   if (!existsSync(manifestPath) || !existsSync(pythonPath) || !existsSync(packagePath)) return false;
-  if (target.powershellSha256 && !existsSync(powershellPath)) return false;
   const actual = JSON.parse(await readFile(manifestPath, 'utf8'));
   const { payloadSha256, ...actualBase } = actual;
   if (JSON.stringify(actualBase) !== JSON.stringify(expectedManifestBase)) return false;
@@ -183,18 +174,6 @@ try {
     '--require-hashes',
     '--requirements', lockPath,
   ]);
-
-  if (target.powershellSha256) {
-    const powershellAsset = `PowerShell-${POWERSHELL_VERSION}-win-x64.zip`;
-    const powershellArchive = join(temporaryRoot, powershellAsset);
-    await download(
-      `https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershellAsset}`,
-      powershellArchive,
-      target.powershellSha256,
-    );
-    await mkdir(join(outputRoot, 'powershell'), { recursive: true });
-    await run('tar', ['-xf', powershellArchive, '-C', join(outputRoot, 'powershell')]);
-  }
 
   const payloadSha256 = await hashPayloadTree(outputRoot);
   await writeFile(manifestPath, `${JSON.stringify({
