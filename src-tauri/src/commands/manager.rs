@@ -28,15 +28,19 @@ use crate::services::manager_token_bridge::{
     ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
     ManagerTokenHttpResponse,
 };
+use crate::services::observability::{
+    redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityService,
+};
 use crate::AppState;
 
 pub(crate) struct TauriManagerContextEventSink {
     app: AppHandle,
+    observability: Arc<ObservabilityService>,
 }
 
 impl TauriManagerContextEventSink {
-    pub(crate) fn new(app: AppHandle) -> Self {
-        Self { app }
+    pub(crate) fn new(app: AppHandle, observability: Arc<ObservabilityService>) -> Self {
+        Self { app, observability }
     }
 }
 
@@ -48,6 +52,23 @@ impl ManagerContextEventSink for TauriManagerContextEventSink {
     }
 
     fn emit_auth_expired(&self) -> Result<(), String> {
+        let mut activity = ActivityEventDraft::client(
+            ActivityLevel::Warn,
+            "auth",
+            "manager_session",
+            "session_expired",
+            ActivityOutcome::Failed,
+            "Manager session expired",
+        );
+        activity.fields = Some(serde_json::json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "trigger": "system",
+            "error_code": "unauthorized",
+        }));
+        activity.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+        if let Err(error) = self.observability.record_activity(&activity) {
+            log::error!("failed to persist Manager session expiry activity: {error}");
+        }
         self.app
             .emit(MANAGER_AUTH_EXPIRED_EVENT, ())
             .map_err(|error| error.to_string())
@@ -362,11 +383,34 @@ pub async fn manager_login(
     identifier: String,
     password: String,
 ) -> Result<LoginResult, ManagerError> {
+    manager_login_core(&state, environment, identifier, password).await
+}
+
+async fn manager_login_core(
+    state: &AppState,
+    environment: ManagerEnvironment,
+    identifier: String,
+    password: String,
+) -> Result<LoginResult, ManagerError> {
+    let started = std::time::Instant::now();
     log::info!("manager_login: environment={environment:?}");
-    state
+    let result = state
         .manager_context
         .login(environment, &identifier, &password)
-        .await
+        .await;
+    record_manager_activity(
+        state,
+        ManagerActivityContext {
+            operation: "login",
+            trigger: "user",
+            started,
+            requested_environment: Some(environment),
+            target_account_id: None,
+        },
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -374,15 +418,56 @@ pub async fn manager_select_account(
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<UserInfo, ManagerError> {
+    manager_select_account_core(&state, account_id).await
+}
+
+async fn manager_select_account_core(
+    state: &AppState,
+    account_id: String,
+) -> Result<UserInfo, ManagerError> {
+    let started = std::time::Instant::now();
     log::info!("manager_select_account: account_id={account_id}");
-    state.manager_context.select_account(&account_id).await
+    let result = state.manager_context.select_account(&account_id).await;
+    record_manager_activity(
+        state,
+        ManagerActivityContext {
+            operation: "select_account",
+            trigger: "user",
+            started,
+            requested_environment: None,
+            target_account_id: Some(&account_id),
+        },
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
 pub async fn manager_restore_session(
     state: State<'_, AppState>,
 ) -> Result<Option<RestoredManagerSession>, ManagerError> {
-    state.manager_context.restore_session().await
+    manager_restore_session_core(&state).await
+}
+
+async fn manager_restore_session_core(
+    state: &AppState,
+) -> Result<Option<RestoredManagerSession>, ManagerError> {
+    let started = std::time::Instant::now();
+    let result = state.manager_context.restore_session().await;
+    record_manager_activity(
+        state,
+        ManagerActivityContext {
+            operation: "restore_session",
+            trigger: "system",
+            started,
+            requested_environment: None,
+            target_account_id: None,
+        },
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -404,25 +489,240 @@ pub async fn manager_switch_account(
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<(), ManagerError> {
+    manager_switch_account_core(&state, account_id).await
+}
+
+async fn manager_switch_account_core(
+    state: &AppState,
+    account_id: String,
+) -> Result<(), ManagerError> {
+    let started = std::time::Instant::now();
     log::info!("manager_switch_account: account_id={account_id}");
-    state.manager_context.switch_account(&account_id).await
+    let result = state.manager_context.switch_account(&account_id).await;
+    record_manager_activity(
+        state,
+        ManagerActivityContext {
+            operation: "switch_account",
+            trigger: "user",
+            started,
+            requested_environment: None,
+            target_account_id: Some(&account_id),
+        },
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
 pub async fn manager_logout(state: State<'_, AppState>) -> Result<(), ManagerError> {
+    manager_logout_core(&state).await
+}
+
+async fn manager_logout_core(state: &AppState) -> Result<(), ManagerError> {
+    let started = std::time::Instant::now();
     log::info!("manager_logout");
-    state.manager_context.logout().await
+    let result = state.manager_context.logout().await;
+    record_manager_activity(
+        state,
+        ManagerActivityContext {
+            operation: "logout",
+            trigger: "user",
+            started,
+            requested_environment: None,
+            target_account_id: None,
+        },
+        &result,
+    )
+    .await;
+    result
+}
+
+struct ManagerActivityContext<'a> {
+    operation: &'a str,
+    trigger: &'a str,
+    started: std::time::Instant,
+    requested_environment: Option<ManagerEnvironment>,
+    target_account_id: Option<&'a str>,
+}
+
+async fn record_manager_activity<T>(
+    state: &AppState,
+    context: ManagerActivityContext<'_>,
+    result: &Result<T, ManagerError>,
+) {
+    let snapshot = state.manager_context.snapshot().await;
+    let (level, outcome, message, error_code, error) = match result {
+        Ok(_) => (
+            ActivityLevel::Info,
+            ActivityOutcome::Succeeded,
+            format!("Manager {} succeeded", context.operation),
+            None,
+            None,
+        ),
+        Err(error) => {
+            let serialized = serde_json::to_value(error).unwrap_or_default();
+            (
+                ActivityLevel::Warn,
+                ActivityOutcome::Failed,
+                format!("Manager {} failed", context.operation),
+                serialized
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                Some(redact_text(&error.to_string())),
+            )
+        }
+    };
+    let mut activity = ActivityEventDraft::client(
+        level,
+        "auth",
+        "manager_session",
+        context.operation,
+        outcome,
+        message,
+    );
+    activity.fields = Some(serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "trigger": context.trigger,
+        "environment": context.requested_environment.or(snapshot.environment),
+        "target_id": context.target_account_id,
+        "account_id": snapshot.context_key.as_ref().map(|context| &context.account_id),
+        "organization_id": snapshot.context_key.as_ref().map(|context| &context.organization_id),
+        "auth_state": snapshot.auth_state,
+        "duration_ms": context.started.elapsed().as_millis(),
+        "error_code": error_code,
+        "error": error,
+    }));
+    activity.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+    if let Err(error) = state.observability.record_activity_async(activity).await {
+        log::error!(
+            "failed to persist Manager {} activity: {error}",
+            context.operation
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::config::ConfigService;
+    use crate::services::keychain::InMemorySecretStore;
+    use crate::services::observability::{
+        ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
+    use crate::services::settings::SettingsService;
+    use tempfile::tempdir;
     fn context(account_id: &str, organization_id: &str) -> ManagerContextKey {
         ManagerContextKey {
             environment: ManagerEnvironment::Staging,
             account_id: account_id.to_string(),
             organization_id: organization_id.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn manager_activity_records_stable_result_and_redacts_failure_details() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new_with_secret_store(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+
+        record_manager_activity(
+            &state,
+            ManagerActivityContext {
+                operation: "login",
+                trigger: "user",
+                started: std::time::Instant::now(),
+                requested_environment: Some(ManagerEnvironment::Staging),
+                target_account_id: None,
+            },
+            &Ok::<(), ManagerError>(()),
+        )
+        .await;
+        record_manager_activity(
+            &state,
+            ManagerActivityContext {
+                operation: "login",
+                trigger: "user",
+                started: std::time::Instant::now(),
+                requested_environment: Some(ManagerEnvironment::Staging),
+                target_account_id: None,
+            },
+            &Err::<(), ManagerError>(ManagerError::InvalidCredentials {
+                message: "password=super-secret".to_string(),
+            }),
+        )
+        .await;
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::ClientOnly,
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].category, "auth");
+        assert_eq!(page.items[0].outcome, ActivityOutcome::Failed);
+        assert_eq!(
+            page.items[0]
+                .fields
+                .as_ref()
+                .and_then(|fields| fields["error_code"].as_str()),
+            Some("invalid_credentials")
+        );
+        let serialized = serde_json::to_string(&page.items[0].fields).unwrap();
+        assert!(!serialized.contains("super-secret"));
+        assert_eq!(page.items[1].outcome, ActivityOutcome::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn manager_command_cores_audit_restore_switch_and_logout_results() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new_with_secret_store(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+
+        assert!(manager_restore_session_core(&state)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            manager_switch_account_core(&state, "missing-account".to_string())
+                .await
+                .is_err()
+        );
+        manager_logout_core(&state).await.unwrap();
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::ClientOnly,
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 3);
+        let outcomes = page
+            .items
+            .iter()
+            .map(|event| (event.operation.as_str(), event.outcome.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            outcomes.get("restore_session"),
+            Some(&ActivityOutcome::Succeeded)
+        );
+        assert_eq!(
+            outcomes.get("switch_account"),
+            Some(&ActivityOutcome::Failed)
+        );
+        assert_eq!(outcomes.get("logout"), Some(&ActivityOutcome::Succeeded));
     }
 
     #[test]

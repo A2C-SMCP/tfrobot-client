@@ -21,6 +21,19 @@ const TIME_PRESETS = [
   { label: '24h', hours: 24 },
   { label: '7d', hours: 168 },
 ];
+const ACTIVITY_CATEGORIES = [
+  'system',
+  'auth',
+  'config',
+  'security',
+  'update',
+  'observability',
+  'computer',
+  'connection',
+  'mcp',
+  'tool',
+  'client_control',
+];
 
 interface ActivityViewerProps {
   instanceId?: string;
@@ -32,6 +45,10 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
     useActivityStore();
   const { instances, fetchInstances } = useComputerStore();
   const [searchText, setSearchText] = useState(query.keyword ?? '');
+  const categoryOptions = [...new Set([
+    ...ACTIVITY_CATEGORIES,
+    ...items.map((item) => item.category),
+  ])];
 
   useEffect(() => {
     setQueryAndFetch({
@@ -129,7 +146,7 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
           allowClear
           value={query.categories}
           onChange={(categories) => void setQueryAndFetch({ categories: categories.length ? categories : undefined, offset: 0 })}
-          options={['system', 'mcp', 'connection', 'tool'].map((category) => ({ label: category, value: category }))}
+          options={categoryOptions.map((category) => ({ label: category, value: category }))}
         />
         {!instanceId && (
           <Select

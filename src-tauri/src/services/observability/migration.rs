@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Deserialize)]
 struct LegacyToolDetails {
@@ -77,7 +77,14 @@ fn create_schema(tx: &Transaction<'_>) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_tool_history_computer_timestamp
             ON tool_call_history(computer_instance_id, timestamp DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_history_request
-            ON tool_call_history(computer_instance_id, req_id);",
+            ON tool_call_history(computer_instance_id, req_id);
+
+        CREATE TABLE IF NOT EXISTS client_run_state (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            run_id TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            app_version TEXT NOT NULL
+        );",
     )
     .map_err(|error| error.to_string())
 }

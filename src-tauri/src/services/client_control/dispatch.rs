@@ -464,13 +464,13 @@ pub(super) async fn dispatch(
         }
         ToolId::ComputerCreate => {
             let request: computer::CreateComputerInstanceRequest = decode(parameters.clone())?;
-            computer::create_computer_instance_core(&state, request)
+            computer::create_computer_instance_with_trigger(&state, request, "client_control")
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerRename => {
             let args: ComputerNameArgs = decode(parameters.clone())?;
-            computer::rename_computer_instance_core(
+            computer::rename_computer_instance_with_trigger(
                 &state,
                 computer::RenameComputerInstanceRequest {
                     id: args.computer_id,
@@ -478,13 +478,14 @@ pub(super) async fn dispatch(
                     description: args.description,
                     mcp_start_concurrency: None,
                 },
+                "client_control",
             )
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDuplicate => {
             let args: ComputerDuplicateArgs = decode(parameters.clone())?;
-            computer::duplicate_computer_instance_core(
+            computer::duplicate_computer_instance_with_trigger(
                 &state,
                 computer::DuplicateComputerInstanceRequest {
                     source_id: args.computer_id,
@@ -494,15 +495,20 @@ pub(super) async fn dispatch(
                     connection_target_id: args.connection_target_id,
                     skill_home_mode: args.skill_home_mode,
                 },
+                "client_control",
             )
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDelete => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
-            computer::delete_computer_instance_core(&state, args.computer_id)
-                .await
-                .map(|_| serde_json::json!({"ok": true}))
+            computer::delete_computer_instance_with_trigger(
+                &state,
+                args.computer_id,
+                "client_control",
+            )
+            .await
+            .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerStart => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
