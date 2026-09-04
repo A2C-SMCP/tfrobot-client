@@ -16,8 +16,8 @@ use services::keychain::{SecretStore, SystemSecretStore};
 use services::manager_client::ManagerClient;
 use services::manager_context::ManagerContextCoordinator;
 use services::observability::{
-    initialize_tracing, ActivityEventDraft, ActivityLevel, ActivityOutcome, Diagnostics,
-    ObservabilityRetention, ObservabilityService,
+    initialize_tracing, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+    ComputerActivityCategory, Diagnostics, ObservabilityRetention, ObservabilityService,
 };
 use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
@@ -228,7 +228,7 @@ impl AppState {
                 let mut activity = ActivityEventDraft::computer(
                     &instance.id,
                     ActivityLevel::Info,
-                    "config",
+                    ComputerActivityCategory::Computer,
                     "data_migration",
                     "removed_http_oauth_fields",
                     ActivityOutcome::Succeeded,
@@ -283,6 +283,12 @@ impl AppState {
             ),
         );
         let observability = Arc::new(observability);
+        computer_registry.configure_runtime_event_sink(Arc::new(
+            services::observability::ConnectionActivitySink::new(observability.clone()),
+        ));
+        computer_registry
+            .runtime_input_bridge()
+            .configure_observability(observability.clone());
         let connection_target_reservations =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let connection_target_lock = Arc::new(Mutex::new(()));
@@ -363,7 +369,7 @@ fn record_migration_activity(
         Some(computer_id) => ActivityEventDraft::computer(
             computer_id,
             level,
-            "config",
+            ComputerActivityCategory::Computer,
             "data_migration",
             operation,
             outcome,

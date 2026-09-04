@@ -10,6 +10,7 @@ import {
   type ActivityScopeFilter,
 } from '@/stores/activityStore';
 import { useComputerStore } from '@/stores/computerStore';
+import { ACTIVITY_CATEGORIES } from './categories';
 
 const { Search } = Input;
 const { Title } = Typography;
@@ -21,20 +22,6 @@ const TIME_PRESETS = [
   { label: '24h', hours: 24 },
   { label: '7d', hours: 168 },
 ];
-const ACTIVITY_CATEGORIES = [
-  'system',
-  'auth',
-  'config',
-  'security',
-  'update',
-  'observability',
-  'computer',
-  'connection',
-  'mcp',
-  'tool',
-  'client_control',
-];
-
 interface ActivityViewerProps {
   instanceId?: string;
 }
@@ -141,6 +128,7 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         />
         <Select
           mode="multiple"
+          aria-label="Activity category"
           placeholder={t('logs.filterCategory')}
           style={{ minWidth: 150 }}
           allowClear
@@ -183,8 +171,16 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         size="small"
         scroll={{ x: 900 }}
         expandable={{
-          expandedRowRender: (record) => <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(record.fields, null, 2)}</pre>,
-          rowExpandable: (record) => record.fields !== undefined,
+          expandedRowRender: (record) => (
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+              {JSON.stringify({
+                event_type: record.event_type,
+                correlation_id: record.correlation_id,
+                fields: record.fields,
+              }, null, 2)}
+            </pre>
+          ),
+          rowExpandable: (record) => record.fields !== undefined || record.correlation_id !== undefined,
         }}
         pagination={{
           current: Math.floor((query.offset ?? 0) / (query.limit ?? 50)) + 1,

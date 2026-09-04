@@ -29,12 +29,16 @@ use crate::services::computer::{ComputerInstance, ComputerRegistry};
 use crate::services::config::ConfigService;
 use crate::services::keychain::SecretStore;
 use crate::services::manager_context::ManagerContextCoordinator;
-use crate::services::observability::{Diagnostics, ObservabilityService};
+use crate::services::observability::{
+    redact_text, ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome,
+    ActivityProvider, ActivityTrigger, ComputerActivityCategory, Diagnostics, ObservabilityService,
+};
 use crate::services::sdk_config::SdkConfigService;
 use crate::services::settings::SettingsService;
 use base64::Engine as _;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -74,6 +78,7 @@ struct SkillMutationAudit {
     computer_id: String,
     tool: ToolId,
     summary: serde_json::Value,
+    started: Instant,
 }
 
 impl ClientControlPlane {
@@ -391,10 +396,24 @@ impl ClientControlPlane {
         name: String,
         files: Vec<SkillFileInput>,
     ) -> Result<SkillMutationResult, ClientControlError> {
+        let started = Instant::now();
+        self.authorize(context.clone(), ToolId::SkillCreate, Some(computer_id))
+            .await?;
+        self.skill_create_authorized(context, computer_id, name, files, started)
+            .await
+    }
+
+    async fn skill_create_authorized(
+        &self,
+        context: InvocationContext,
+        computer_id: &str,
+        name: String,
+        files: Vec<SkillFileInput>,
+        started: Instant,
+    ) -> Result<SkillMutationResult, ClientControlError> {
         let request_id = context.request_id.clone();
         let source_id = context.source_computer_id.clone();
         let tool = ToolId::SkillCreate;
-        self.authorize(context, tool, Some(computer_id)).await?;
         let summary = serde_json::json!({
             "computer_id": computer_id,
             "name": name,
@@ -417,6 +436,7 @@ impl ClientControlPlane {
                         computer_id: computer_id.to_string(),
                         tool,
                         summary,
+                        started,
                     },
                     &error,
                 );
@@ -439,6 +459,7 @@ impl ClientControlPlane {
                 computer_id: computer_id.to_string(),
                 tool,
                 summary,
+                started,
             },
             lease,
             result,
@@ -454,10 +475,32 @@ impl ClientControlPlane {
         changes: Vec<SkillFileChange>,
         expected_revision: Option<String>,
     ) -> Result<SkillMutationResult, ClientControlError> {
+        let started = Instant::now();
+        self.authorize(context.clone(), ToolId::SkillUpdate, Some(computer_id))
+            .await?;
+        self.skill_update_authorized(
+            context,
+            computer_id,
+            name,
+            changes,
+            expected_revision,
+            started,
+        )
+        .await
+    }
+
+    async fn skill_update_authorized(
+        &self,
+        context: InvocationContext,
+        computer_id: &str,
+        name: String,
+        changes: Vec<SkillFileChange>,
+        expected_revision: Option<String>,
+        started: Instant,
+    ) -> Result<SkillMutationResult, ClientControlError> {
         let request_id = context.request_id.clone();
         let source_id = context.source_computer_id.clone();
         let tool = ToolId::SkillUpdate;
-        self.authorize(context, tool, Some(computer_id)).await?;
         let summary = serde_json::json!({
             "computer_id": computer_id,
             "name": name,
@@ -477,6 +520,7 @@ impl ClientControlPlane {
                         computer_id: computer_id.to_string(),
                         tool,
                         summary,
+                        started,
                     },
                     &error,
                 );
@@ -500,6 +544,7 @@ impl ClientControlPlane {
                 computer_id: computer_id.to_string(),
                 tool,
                 summary,
+                started,
             },
             lease,
             result,
@@ -514,10 +559,24 @@ impl ClientControlPlane {
         name: String,
         expected_revision: Option<String>,
     ) -> Result<SkillMutationResult, ClientControlError> {
+        let started = Instant::now();
+        self.authorize(context.clone(), ToolId::SkillDelete, Some(computer_id))
+            .await?;
+        self.skill_delete_authorized(context, computer_id, name, expected_revision, started)
+            .await
+    }
+
+    async fn skill_delete_authorized(
+        &self,
+        context: InvocationContext,
+        computer_id: &str,
+        name: String,
+        expected_revision: Option<String>,
+        started: Instant,
+    ) -> Result<SkillMutationResult, ClientControlError> {
         let request_id = context.request_id.clone();
         let source_id = context.source_computer_id.clone();
         let tool = ToolId::SkillDelete;
-        self.authorize(context, tool, Some(computer_id)).await?;
         let summary = serde_json::json!({
             "computer_id": computer_id,
             "name": name,
@@ -536,6 +595,7 @@ impl ClientControlPlane {
                         computer_id: computer_id.to_string(),
                         tool,
                         summary,
+                        started,
                     },
                     &error,
                 );
@@ -558,6 +618,7 @@ impl ClientControlPlane {
                 computer_id: computer_id.to_string(),
                 tool,
                 summary,
+                started,
             },
             lease,
             result,
@@ -616,6 +677,8 @@ impl ClientControlPlane {
             Ok(mut mutation) => {
                 lease.mark_skills_dirty().await;
                 mutation.mark_notified();
+                self.record_skill_domain_activity(&audit, ActivityOutcome::Succeeded, None)
+                    .await;
                 let _ = self.audit(ControlAuditRecord {
                     request_id: audit.request_id,
                     source_computer_id: audit.source_id,
@@ -624,11 +687,18 @@ impl ClientControlPlane {
                     parameters: audit.summary,
                     outcome: AuditOutcome::Succeeded,
                     error: None,
+                    duration_ms: audit.started.elapsed().as_millis(),
                 });
                 Ok(mutation)
             }
             Err(error) => {
                 let mapped = map_skill_package_error(error);
+                self.record_skill_domain_activity(
+                    &audit,
+                    ActivityOutcome::Failed,
+                    Some(&mapped.message),
+                )
+                .await;
                 let _ = self.audit(ControlAuditRecord {
                     request_id: audit.request_id,
                     source_computer_id: audit.source_id,
@@ -637,9 +707,57 @@ impl ClientControlPlane {
                     parameters: audit.summary,
                     outcome: AuditOutcome::Failed,
                     error: Some(mapped.message.clone()),
+                    duration_ms: audit.started.elapsed().as_millis(),
                 });
                 Err(mapped)
             }
+        }
+    }
+
+    async fn record_skill_domain_activity(
+        &self,
+        audit: &SkillMutationAudit,
+        outcome: ActivityOutcome,
+        error: Option<&str>,
+    ) {
+        let Some(host) = self.host.as_ref() else {
+            return;
+        };
+        let operation = match audit.tool {
+            ToolId::SkillCreate => "create",
+            ToolId::SkillUpdate => "update",
+            ToolId::SkillDelete => "delete",
+            _ => return,
+        };
+        let mut activity = ActivityEventDraft::computer(
+            &audit.computer_id,
+            if error.is_some() {
+                ActivityLevel::Warn
+            } else {
+                ActivityLevel::Info
+            },
+            ComputerActivityCategory::Skill,
+            "skill_package",
+            operation,
+            outcome,
+            format!("Skill package {operation}"),
+        )
+        .with_standard_fields(
+            ActivityTrigger::ClientControl,
+            Some(ActivityManagedBy::User),
+            Some(ActivityProvider::BuiltInMcp),
+        );
+        activity.correlation_id = Some(audit.request_id.clone());
+        activity.merge_fields(serde_json::json!({
+            "source_computer_id": audit.source_id,
+            "target_computer_id": audit.computer_id,
+            "change_summary": audit.summary,
+            "content_recorded": false,
+            "error": error.map(redact_text),
+            "duration_ms": audit.started.elapsed().as_millis(),
+        }));
+        if let Err(error) = host.observability.record_activity_async(activity).await {
+            log::error!("failed to persist target Skill activity: {error}");
         }
     }
 
@@ -652,6 +770,7 @@ impl ClientControlPlane {
             parameters: audit.summary,
             outcome: AuditOutcome::Failed,
             error: Some(error.message.clone()),
+            duration_ms: audit.started.elapsed().as_millis(),
         });
     }
 }
@@ -721,7 +840,9 @@ mod tests {
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
     use crate::services::keychain::InMemorySecretStore;
-    use crate::services::observability::ObservabilityService;
+    use crate::services::observability::{
+        ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use std::collections::BTreeSet;
@@ -767,6 +888,242 @@ mod tests {
             request_id: request.to_string(),
             source_computer_id: "source".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn source_tool_and_target_domain_activity_share_request_correlation() {
+        let temp = TempDir::new().unwrap();
+        let config = ConfigService::new(temp.path().to_path_buf()).unwrap();
+        for id in ["source", "target-b"] {
+            config
+                .add_computer_instance(ComputerInstance::new(id, id))
+                .unwrap();
+        }
+        let state = crate::AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(temp.path()).unwrap(),
+            SettingsService::new(temp.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        state
+            .client_control
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::All,
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .client_control
+            .dispatch(
+                context("request-correlated"),
+                ToolId::ComputerRename,
+                serde_json::json!({
+                    "computer_id": "target-b",
+                    "name": "Renamed target"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let source = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "source".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let target = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "target-b".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let source_tool = source
+            .items
+            .iter()
+            .find(|event| event.category == "tool")
+            .unwrap();
+        let target_domain = target
+            .items
+            .iter()
+            .find(|event| event.category == "computer" && event.operation == "update")
+            .unwrap();
+        assert_eq!(
+            source_tool.correlation_id.as_deref(),
+            Some("request-correlated")
+        );
+        assert_eq!(target_domain.correlation_id, source_tool.correlation_id);
+        assert_eq!(
+            target_domain.fields.as_ref().unwrap()["trigger"],
+            "client_control"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_dispatch_uses_one_duration_and_records_source_and_target_activity() {
+        let temp = TempDir::new().unwrap();
+        let config = ConfigService::new(temp.path().to_path_buf()).unwrap();
+        for id in ["source", "target-b"] {
+            config
+                .add_computer_instance(ComputerInstance::new(id, id))
+                .unwrap();
+        }
+        let state = crate::AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(temp.path()).unwrap(),
+            SettingsService::new(temp.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        state
+            .client_control
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::All,
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .client_control
+            .dispatch(
+                context("request-skill-create"),
+                ToolId::SkillCreate,
+                serde_json::json!({
+                    "computer_id": "target-b",
+                    "name": "managed-skill",
+                    "files": [{
+                        "path": "SKILL.md",
+                        "encoding": "utf8",
+                        "content": "---\nname: managed-skill\ndescription: Managed\n---\nbody\n"
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let source = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "source".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let target = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "target-b".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let source_tool = source
+            .items
+            .iter()
+            .find(|event| event.category == "tool" && event.operation == "skill_create")
+            .unwrap();
+        let target_skill = target
+            .items
+            .iter()
+            .find(|event| event.category == "skill" && event.operation == "create")
+            .unwrap();
+        assert_eq!(source_tool.correlation_id, target_skill.correlation_id);
+        assert_eq!(
+            source_tool.correlation_id.as_deref(),
+            Some("request-skill-create")
+        );
+        assert!(source_tool.fields.as_ref().unwrap()["duration_ms"].is_number());
+        assert!(target_skill.fields.as_ref().unwrap()["duration_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn duplicate_activity_identifies_the_new_computer_as_the_target() {
+        let temp = TempDir::new().unwrap();
+        let config = ConfigService::new(temp.path().to_path_buf()).unwrap();
+        for id in ["source", "target-b"] {
+            config
+                .add_computer_instance(ComputerInstance::new(id, id))
+                .unwrap();
+        }
+        let state = crate::AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(temp.path()).unwrap(),
+            SettingsService::new(temp.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        state
+            .client_control
+            .update_policy_local(
+                "source",
+                RemoteControlPolicy {
+                    enabled: true,
+                    target_scope: TargetScope::All,
+                    ..RemoteControlPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = state
+            .client_control
+            .dispatch(
+                context("request-duplicate"),
+                ToolId::ComputerDuplicate,
+                serde_json::json!({
+                    "computer_id": "target-b",
+                    "name": "Duplicated target"
+                }),
+            )
+            .await
+            .unwrap();
+        let new_id = response["id"].as_str().unwrap();
+        let target = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: new_id.to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let duplicate = target
+            .items
+            .iter()
+            .find(|event| event.operation == "duplicate")
+            .unwrap();
+        assert_eq!(
+            duplicate.correlation_id.as_deref(),
+            Some("request-duplicate")
+        );
+        assert_eq!(
+            duplicate.fields.as_ref().unwrap()["target_computer_id"],
+            new_id
+        );
+        assert_eq!(
+            duplicate.fields.as_ref().unwrap()["source_computer_id"],
+            "source"
+        );
+        assert_eq!(
+            duplicate.fields.as_ref().unwrap()["duplicate_source_computer_id"],
+            "target-b"
+        );
     }
 
     #[test]

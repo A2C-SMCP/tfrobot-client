@@ -56,14 +56,16 @@ impl ObservabilityService {
     }
 
     pub fn record_activity(&self, draft: &ActivityEventDraft) -> Result<i64, String> {
+        let draft = sanitize_activity(draft.clone().inherit_invocation_context());
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
-        let id = insert_activity(&conn, &Utc::now().to_rfc3339(), draft)?;
+        let id = insert_activity(&conn, &Utc::now().to_rfc3339(), &draft)?;
         drop(conn);
         self.maybe_cleanup_due();
         Ok(id)
     }
 
     pub async fn record_activity_async(&self, draft: ActivityEventDraft) -> Result<i64, String> {
+        let draft = draft.inherit_invocation_context();
         let service = self.clone();
         tauri::async_runtime::spawn_blocking(move || service.record_activity(&draft))
             .await
@@ -205,10 +207,12 @@ impl ObservabilityService {
         activity: &ActivityEventDraft,
         history: &ToolCallHistoryDraft,
     ) -> Result<(), String> {
+        let activity = sanitize_activity(activity.clone().inherit_invocation_context());
+        let history = sanitize_tool_history(history.clone());
         let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         let timestamp = Utc::now().to_rfc3339();
-        insert_activity(&tx, &timestamp, activity)?;
+        insert_activity(&tx, &timestamp, &activity)?;
         tx.execute(
             "INSERT INTO tool_call_history
              (timestamp, req_id, computer_instance_id, server, tool, parameters_json, timeout,
@@ -238,6 +242,7 @@ impl ObservabilityService {
         activity: ActivityEventDraft,
         history: ToolCallHistoryDraft,
     ) -> Result<(), String> {
+        let activity = activity.inherit_invocation_context();
         let service = self.clone();
         tauri::async_runtime::spawn_blocking(move || service.record_tool_call(&activity, &history))
             .await
@@ -441,6 +446,18 @@ impl ObservabilityService {
     }
 }
 
+fn sanitize_activity(mut activity: ActivityEventDraft) -> ActivityEventDraft {
+    activity.message = super::redact_text(&activity.message);
+    activity.fields = activity.fields.map(super::redact_json);
+    activity
+}
+
+fn sanitize_tool_history(mut history: ToolCallHistoryDraft) -> ToolCallHistoryDraft {
+    history.parameters = super::redact_json(history.parameters);
+    history.error = history.error.map(|error| super::redact_text(&error));
+    history
+}
+
 fn activity_clear_statement(scope: &ActivityScopeFilter) -> (String, Vec<SqlValue>) {
     match scope {
         ActivityScopeFilter::All => ("DELETE FROM activity_events".to_string(), vec![]),
@@ -465,7 +482,12 @@ fn insert_activity(
         ActivityScope::Client => ("client", None),
         ActivityScope::Computer { computer_id } => ("computer", Some(computer_id.as_str())),
     };
-    let fields_json = draft.fields.as_ref().map(serde_json::Value::to_string);
+    let fields_json = draft
+        .fields
+        .clone()
+        .map(super::redact_json)
+        .map(|fields| fields.to_string());
+    let message = super::redact_text(&draft.message);
     conn.execute(
         "INSERT INTO activity_events
          (timestamp, scope_kind, computer_id, level, category, event_type, operation, outcome,
@@ -480,7 +502,7 @@ fn insert_activity(
             draft.event_type,
             draft.operation,
             draft.outcome.as_str(),
-            draft.message,
+            message,
             fields_json,
             draft.correlation_id
         ],
@@ -607,6 +629,55 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].scope, ActivityScope::Client);
+    }
+
+    #[test]
+    fn persistence_boundary_sanitizes_url_fields_and_tool_parameters() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+        let mut activity = ActivityEventDraft::computer(
+            "computer-1",
+            ActivityLevel::Warn,
+            "resource",
+            "desktop_resource",
+            "read",
+            ActivityOutcome::Failed,
+            "read failed",
+        );
+        activity.fields = Some(serde_json::json!({
+            "uri": "https://user:password@example.com/window?access_token=secret&code=oauth#fragment",
+            "error": "request failed: https://alice:password@example.com/mcp?code=oauth#fragment"
+        }));
+        service
+            .record_tool_call(
+                &activity,
+                &ToolCallHistoryDraft {
+                    req_id: "request-sensitive-url".into(),
+                    computer_instance_id: "computer-1".into(),
+                    server: "desktop".into(),
+                    tool: "read".into(),
+                    parameters: serde_json::json!({
+                        "uri": "https://example.com/window?code=oauth",
+                        "args": ["--endpoint=https://alice:password@example.com/mcp?token=secret"]
+                    }),
+                    timeout: None,
+                    success: false,
+                    error: None,
+                },
+            )
+            .unwrap();
+
+        let page = service.query_activity(&ActivityQuery::default()).unwrap();
+        let serialized = serde_json::to_string(&page.items[0]).unwrap();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("oauth"));
+        assert!(!serialized.contains("password"));
+        let history = service.tool_history("computer-1", 10).unwrap();
+        assert_eq!(history[0].parameters["uri"], "https://example.com/window");
+        assert_eq!(
+            history[0].parameters["args"][0],
+            "--endpoint=https://example.com/mcp"
+        );
     }
 
     #[test]

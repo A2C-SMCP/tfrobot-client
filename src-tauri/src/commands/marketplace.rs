@@ -1,7 +1,11 @@
+use crate::commands::activity_support::{record_computer_activity, ComputerActivitySpec};
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::force_mcp_server_enabled;
 use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::oauth_credential_store::effective_http_oauth;
+use crate::services::observability::{
+    ActivityManagedBy, ActivityProvider, ActivityTrigger, ComputerActivityCategory,
+};
 use crate::AppState;
 use a2c_smcp::smcp_computer::errors::ComputerError;
 use a2c_smcp::smcp_computer::inputs::load_plugin_inputs;
@@ -195,40 +199,63 @@ pub async fn add_marketplace_core(
     instance_id: &str,
     request: AddMarketplaceRequest,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    let name = require_non_empty("marketplace name", &request.name)?;
-    let git_url = resolve_marketplace_source(request.source)?;
-    runtime
-        .sdk_add_marketplace(
-            &git_url,
-            AddMarketplaceParams {
-                name: Some(name),
-                auto_update: false,
-                no_clone: false,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = ensure_marketplace_healthy(&runtime, name, "add").await {
-        let cleanup_result = runtime
-            .sdk_remove_marketplace(
-                name,
-                RemoveMarketplaceParams {
-                    keep_plugins: true,
-                    hooks: None,
+    let started = std::time::Instant::now();
+    let marketplace = request.name.clone();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id).await?;
+        let name = require_non_empty("marketplace name", &request.name)?;
+        let git_url = resolve_marketplace_source(request.source)?;
+        runtime
+            .sdk_add_marketplace(
+                &git_url,
+                AddMarketplaceParams {
+                    name: Some(name),
+                    auto_update: false,
+                    no_clone: false,
                 },
             )
-            .await;
-        return match cleanup_result {
-            Ok(_) => Err(error),
-            Err(cleanup_error) => Err(format!(
-                "{error}; failed to clean up the rejected Marketplace: {cleanup_error}"
-            )),
-        };
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = ensure_marketplace_healthy(&runtime, name, "add").await {
+            let cleanup_result = runtime
+                .sdk_remove_marketplace(
+                    name,
+                    RemoveMarketplaceParams {
+                        keep_plugins: true,
+                        hooks: None,
+                    },
+                )
+                .await;
+            return match cleanup_result {
+                Ok(_) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}; failed to clean up the rejected Marketplace: {cleanup_error}"
+                )),
+            };
+        }
+        runtime.mark_sdk_skills_dirty().await;
+        Ok(())
     }
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Marketplace,
+            event_type: "marketplace_lifecycle",
+            operation: "add",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Marketplace add",
+            fields: serde_json::json!({"marketplace": marketplace}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -245,14 +272,36 @@ pub async fn refresh_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    require_non_empty("marketplace", marketplace)?;
-    let rows = runtime.sdk_refresh_marketplace(marketplace).await;
-    if let Some(missing) = rows.iter().find(|row| row.status.as_str() == "missing") {
-        return Err(format!("unknown marketplace: {:?}", missing.name));
+    let started = std::time::Instant::now();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id).await?;
+        require_non_empty("marketplace", marketplace)?;
+        let rows = runtime.sdk_refresh_marketplace(marketplace).await;
+        if let Some(missing) = rows.iter().find(|row| row.status.as_str() == "missing") {
+            return Err(format!("unknown marketplace: {:?}", missing.name));
+        }
+        ensure_marketplace_healthy(&runtime, marketplace, "refresh").await
     }
-    ensure_marketplace_healthy(&runtime, marketplace, "refresh").await
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Marketplace,
+            event_type: "marketplace_lifecycle",
+            operation: "refresh",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Marketplace refresh",
+            fields: serde_json::json!({"marketplace": marketplace}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -269,6 +318,8 @@ pub async fn remove_marketplace_core(
     instance_id: &str,
     marketplace: &str,
 ) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let result = async {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     let runtime = ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace", marketplace)?;
@@ -290,6 +341,26 @@ pub async fn remove_marketplace_core(
         .map_err(|error| error.to_string())?;
     runtime.mark_sdk_skills_dirty().await;
     Ok(())
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Marketplace,
+            event_type: "marketplace_lifecycle",
+            operation: "remove",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Marketplace remove",
+            fields: serde_json::json!({"marketplace": marketplace}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -306,6 +377,9 @@ pub async fn update_marketplace_core(
     instance_id: &str,
     request: UpdateMarketplaceRequest,
 ) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let marketplace = request.name.clone();
+    let result = async {
     let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
     ensure_runtime(state, instance_id).await?;
     require_non_empty("marketplace name", &request.name)?;
@@ -314,6 +388,26 @@ pub async fn update_marketplace_core(
         "Marketplace source updates are unavailable until smcp-computer provides an atomic update API; the existing Marketplace was left unchanged"
             .to_string(),
     )
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Marketplace,
+            event_type: "marketplace_lifecycle",
+            operation: "update",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Marketplace update",
+            fields: serde_json::json!({"marketplace": marketplace}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -330,36 +424,53 @@ pub async fn install_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    validate_plugin_request(&request)?;
-    let plugin_id = plugin_id(&request);
-    let env = sdk_settings_env(state, instance_id);
-    // Install is intentionally inactive, but the SDK still requires hooks to resolve existing
-    // bundle dependencies before recording installation intent.
-    let hooks = MarketplaceMcpHooks::for_plugin(
+    let started = std::time::Instant::now();
+    let marketplace = request.marketplace.clone();
+    let plugin = request.plugin.clone();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id).await?;
+        validate_plugin_request(&request)?;
+        let plugin_id = plugin_id(&request);
+        let env = sdk_settings_env(state, instance_id);
+        // Install is intentionally inactive, but the SDK still requires hooks to resolve existing
+        // bundle dependencies before recording installation intent.
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            state,
+            instance_id,
+            &request.marketplace,
+            &request.plugin,
+            UserMcpConflictPolicy::Reject,
+        )
+        .await?;
+        runtime
+            .sdk_install_plugin(
+                &plugin_id,
+                InstallOptions {
+                    scope: Some("user"),
+                    env: Some(&env),
+                    ..Default::default()
+                },
+                Some(&hooks),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        runtime.mark_sdk_skills_dirty().await;
+        Ok(())
+    }
+    .await;
+    record_plugin_activity(
         state,
         instance_id,
-        &request.marketplace,
-        &request.plugin,
-        UserMcpConflictPolicy::Reject,
+        "install",
+        &marketplace,
+        &plugin,
+        started,
+        &result,
     )
-    .await?;
-    runtime
-        .sdk_install_plugin(
-            &plugin_id,
-            InstallOptions {
-                scope: Some("user"),
-                env: Some(&env),
-                ..Default::default()
-            },
-            Some(&hooks),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -407,66 +518,83 @@ async fn enable_plugin_core_with_mode(
     request: PluginLifecycleRequest,
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<(), RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id)
-        .await
-        .map_err(RuntimeActionError::runtime)?;
-    runtime
-        .with_runtime_input_interaction(interaction_mode, async {
-            validate_plugin_request(&request).map_err(RuntimeActionError::runtime)?;
-            let plugin_id = plugin_id(&request);
-            let env = sdk_settings_env(state, instance_id);
-            let hooks = MarketplaceMcpHooks::for_plugin(
-                state,
-                instance_id,
-                &request.marketplace,
-                &request.plugin,
-                UserMcpConflictPolicy::KeepUserServer,
-            )
+    let started = std::time::Instant::now();
+    let marketplace = request.marketplace.clone();
+    let plugin = request.plugin.clone();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id)
             .await
             .map_err(RuntimeActionError::runtime)?;
-            hooks
-                .inject_installed_plugin_inputs(&runtime)
-                .await
-                .map_err(RuntimeActionError::runtime)?;
-            if let Err(error) = runtime
-                .sdk_enable_plugin(
-                    &plugin_id,
-                    EnableOptions {
-                        scope: Some("user"),
-                        env: Some(&env),
-                        ..Default::default()
-                    },
-                    Some(&hooks),
+        runtime
+            .with_runtime_input_interaction(interaction_mode, async {
+                validate_plugin_request(&request).map_err(RuntimeActionError::runtime)?;
+                let plugin_id = plugin_id(&request);
+                let env = sdk_settings_env(state, instance_id);
+                let hooks = MarketplaceMcpHooks::for_plugin(
+                    state,
+                    instance_id,
+                    &request.marketplace,
+                    &request.plugin,
+                    UserMcpConflictPolicy::KeepUserServer,
                 )
                 .await
-            {
-                let primary = hooks
-                    .take_runtime_action_error()
+                .map_err(RuntimeActionError::runtime)?;
+                hooks
+                    .inject_installed_plugin_inputs(&runtime)
                     .await
-                    .unwrap_or_else(|| RuntimeActionError::runtime(error.to_string()));
-                let cleanup = async {
-                    hooks
-                        .restore_deferred_servers_after_plugin_release(&runtime)
-                        .await?;
-                    hooks.reclaim_unowned_plugin_servers(&runtime).await
+                    .map_err(RuntimeActionError::runtime)?;
+                if let Err(error) = runtime
+                    .sdk_enable_plugin(
+                        &plugin_id,
+                        EnableOptions {
+                            scope: Some("user"),
+                            env: Some(&env),
+                            ..Default::default()
+                        },
+                        Some(&hooks),
+                    )
+                    .await
+                {
+                    let primary = hooks
+                        .take_runtime_action_error()
+                        .await
+                        .unwrap_or_else(|| RuntimeActionError::runtime(error.to_string()));
+                    let cleanup = async {
+                        hooks
+                            .restore_deferred_servers_after_plugin_release(&runtime)
+                            .await?;
+                        hooks.reclaim_unowned_plugin_servers(&runtime).await
+                    }
+                    .await;
+                    return match cleanup {
+                        Ok(()) => Err(primary),
+                        Err(cleanup_error) => Err(primary.append_context(format!(
+                            "Marketplace MCP rollback cleanup failed: {cleanup_error}"
+                        ))),
+                    };
                 }
-                .await;
-                return match cleanup {
-                    Ok(()) => Err(primary),
-                    Err(cleanup_error) => Err(primary.append_context(format!(
-                        "Marketplace MCP rollback cleanup failed: {cleanup_error}"
-                    ))),
-                };
-            }
 
-            runtime.mark_sdk_skills_dirty().await;
-            // Plugin ledger/config mutation is committed. Starting its MCPs may enter the
-            // interactive resolver while the instance-scoped operation lease keeps this
-            // Computer serialized without blocking unrelated Computers.
-            start_registered_plugin_servers_if_running(&runtime, &hooks).await
-        })
-        .await
+                runtime.mark_sdk_skills_dirty().await;
+                // Plugin ledger/config mutation is committed. Starting its MCPs may enter the
+                // interactive resolver while the instance-scoped operation lease keeps this
+                // Computer serialized without blocking unrelated Computers.
+                start_registered_plugin_servers_if_running(&runtime, &hooks).await
+            })
+            .await
+    }
+    .await;
+    record_plugin_activity(
+        state,
+        instance_id,
+        "enable",
+        &marketplace,
+        &plugin,
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -483,37 +611,54 @@ pub async fn disable_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    validate_plugin_request(&request)?;
-    let plugin_id = plugin_id(&request);
-    let env = sdk_settings_env(state, instance_id);
-    let hooks = MarketplaceMcpHooks::for_plugin(
+    let started = std::time::Instant::now();
+    let marketplace = request.marketplace.clone();
+    let plugin = request.plugin.clone();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id).await?;
+        validate_plugin_request(&request)?;
+        let plugin_id = plugin_id(&request);
+        let env = sdk_settings_env(state, instance_id);
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            state,
+            instance_id,
+            &request.marketplace,
+            &request.plugin,
+            UserMcpConflictPolicy::Reject,
+        )
+        .await?;
+        runtime
+            .sdk_disable_plugin(
+                &plugin_id,
+                DisableOptions {
+                    scope: Some("user"),
+                    env: Some(&env),
+                    ..Default::default()
+                },
+                Some(&hooks),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        hooks
+            .restore_deferred_servers_after_plugin_release(&runtime)
+            .await?;
+        hooks.reclaim_unowned_plugin_servers(&runtime).await?;
+        runtime.mark_sdk_skills_dirty().await;
+        Ok(())
+    }
+    .await;
+    record_plugin_activity(
         state,
         instance_id,
-        &request.marketplace,
-        &request.plugin,
-        UserMcpConflictPolicy::Reject,
+        "disable",
+        &marketplace,
+        &plugin,
+        started,
+        &result,
     )
-    .await?;
-    runtime
-        .sdk_disable_plugin(
-            &plugin_id,
-            DisableOptions {
-                scope: Some("user"),
-                env: Some(&env),
-                ..Default::default()
-            },
-            Some(&hooks),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    hooks
-        .restore_deferred_servers_after_plugin_release(&runtime)
-        .await?;
-    hooks.reclaim_unowned_plugin_servers(&runtime).await?;
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -530,46 +675,94 @@ pub async fn uninstall_plugin_core(
     instance_id: &str,
     request: PluginLifecycleRequest,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let runtime = ensure_runtime(state, instance_id).await?;
-    validate_plugin_request(&request)?;
-    let plugin_id = plugin_id(&request);
-    let env = sdk_settings_env(state, instance_id);
-    let hooks = MarketplaceMcpHooks::for_plugin(
+    let started = std::time::Instant::now();
+    let marketplace = request.marketplace.clone();
+    let plugin = request.plugin.clone();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let runtime = ensure_runtime(state, instance_id).await?;
+        validate_plugin_request(&request)?;
+        let plugin_id = plugin_id(&request);
+        let env = sdk_settings_env(state, instance_id);
+        let hooks = MarketplaceMcpHooks::for_plugin(
+            state,
+            instance_id,
+            &request.marketplace,
+            &request.plugin,
+            UserMcpConflictPolicy::Reject,
+        )
+        .await?;
+        let oauth_cleanup_configs = hooks.oauth_cleanup_configs(&runtime).await?;
+        let _oauth_admission_guard = if oauth_cleanup_configs.is_empty() {
+            None
+        } else {
+            Some(runtime.block_oauth_admission_for_server_change().await)
+        };
+        for config in oauth_cleanup_configs {
+            runtime.clear_oauth_for_server_config(config).await?;
+        }
+        runtime
+            .sdk_uninstall_plugin(
+                &plugin_id,
+                UninstallOptions {
+                    scope: Some("user"),
+                    keep_servers: false,
+                    env: Some(&env),
+                },
+                Some(&hooks),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        hooks
+            .restore_deferred_servers_after_plugin_release(&runtime)
+            .await?;
+        hooks.reclaim_unowned_plugin_servers(&runtime).await?;
+        runtime.mark_sdk_skills_dirty().await;
+        Ok(())
+    }
+    .await;
+    record_plugin_activity(
         state,
         instance_id,
-        &request.marketplace,
-        &request.plugin,
-        UserMcpConflictPolicy::Reject,
+        "uninstall",
+        &marketplace,
+        &plugin,
+        started,
+        &result,
     )
-    .await?;
-    let oauth_cleanup_configs = hooks.oauth_cleanup_configs(&runtime).await?;
-    let _oauth_admission_guard = if oauth_cleanup_configs.is_empty() {
-        None
-    } else {
-        Some(runtime.block_oauth_admission_for_server_change().await)
-    };
-    for config in oauth_cleanup_configs {
-        runtime.clear_oauth_for_server_config(config).await?;
-    }
-    runtime
-        .sdk_uninstall_plugin(
-            &plugin_id,
-            UninstallOptions {
-                scope: Some("user"),
-                keep_servers: false,
-                env: Some(&env),
-            },
-            Some(&hooks),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    hooks
-        .restore_deferred_servers_after_plugin_release(&runtime)
-        .await?;
-    hooks.reclaim_unowned_plugin_servers(&runtime).await?;
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    .await;
+    result
+}
+
+async fn record_plugin_activity<T, E: std::fmt::Display>(
+    state: &AppState,
+    instance_id: &str,
+    operation: &str,
+    marketplace: &str,
+    plugin: &str,
+    started: std::time::Instant,
+    result: &Result<T, E>,
+) {
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Marketplace,
+            event_type: "plugin_lifecycle",
+            operation,
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::Plugin),
+            provider: Some(ActivityProvider::PluginMcp),
+            message_subject: "Plugin lifecycle operation",
+            fields: serde_json::json!({
+                "marketplace": marketplace,
+                "plugin": plugin,
+            }),
+        },
+        started,
+        result,
+    )
+    .await;
 }
 
 async fn ensure_runtime(
@@ -1340,7 +1533,9 @@ mod tests {
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
     use crate::services::keychain::InMemorySecretStore;
-    use crate::services::observability::ObservabilityService;
+    use crate::services::observability::{
+        ActivityOutcome, ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
@@ -1364,6 +1559,33 @@ mod tests {
             .add_computer_instance(ComputerInstance::new(TEST_INSTANCE_ID, "Computer A"))
             .unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn marketplace_failure_is_recorded_in_the_marketplace_domain() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state_without_runtime(temp.path());
+        refresh_marketplace_core(&state, TEST_INSTANCE_ID, "private-market")
+            .await
+            .unwrap_err();
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: TEST_INSTANCE_ID.to_string(),
+                },
+                categories: Some(vec!["marketplace".to_string()]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].operation, "refresh");
+        assert_eq!(page.items[0].outcome, ActivityOutcome::Failed);
+        assert_eq!(
+            page.items[0].fields.as_ref().unwrap()["provider"],
+            ActivityProvider::Client.as_str()
+        );
     }
 
     fn server_config(name: &str) -> MCPServerConfig {

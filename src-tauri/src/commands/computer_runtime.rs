@@ -51,7 +51,7 @@ pub async fn enable_computer_runtime_events(
 ) -> Result<Vec<ComputerRuntimeSnapshotRecord>, String> {
     state
         .computer_registry
-        .set_runtime_event_sink(Arc::new(TauriComputerRuntimeEventSink { app }))
+        .set_runtime_ui_event_sink(Arc::new(TauriComputerRuntimeEventSink { app }))
         .await;
     Ok(runtime_snapshot_records(&state).await)
 }

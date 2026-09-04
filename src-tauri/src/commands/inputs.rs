@@ -1,6 +1,10 @@
+use super::activity_support::{record_computer_activity, ComputerActivitySpec};
 use crate::services::input_entry_store::{InputEntryStorageKind, InputEntryStore, InputEntryView};
 use crate::services::input_references::{find_project_input_references, InputReferenceLocation};
 use crate::services::input_value_index::{self, InputValueStorageKind};
+use crate::services::observability::{
+    ActivityManagedBy, ActivityProvider, ActivityTrigger, ComputerActivityCategory,
+};
 use crate::services::sdk_config::{ensure_portable_cli_arguments, SdkConfigService};
 use crate::AppState;
 use a2c_smcp::smcp_computer::inputs::{run_command, InputKind};
@@ -349,14 +353,42 @@ pub async fn upsert_input_entry_core(
     value: Option<String>,
     secret: bool,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    migrated_input_entry_store(state, instance_id)?.upsert(
-        key,
-        value.map(serde_json::Value::String),
-        secret,
+    let started = std::time::Instant::now();
+    let input_id = key.to_string();
+    let value_supplied = value.is_some();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        migrated_input_entry_store(state, instance_id)?.upsert(
+            key,
+            value.map(serde_json::Value::String),
+            secret,
+        )
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_entry",
+            operation: "upsert",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input entry upsert",
+            fields: serde_json::json!({
+                "input_id": input_id,
+                "secret": secret,
+                "value_supplied": value_supplied,
+            }),
+        },
+        started,
+        &result,
     )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -373,10 +405,32 @@ pub async fn delete_input_entry_core(
     instance_id: &str,
     key: &str,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    migrated_input_entry_store(state, instance_id)?.delete(key)
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        migrated_input_entry_store(state, instance_id)?.delete(key)
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_entry",
+            operation: "delete",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input entry delete",
+            fields: serde_json::json!({"input_id": key}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn input_entry_store(state: &AppState, instance_id: &str) -> InputEntryStore {
@@ -520,40 +574,64 @@ pub async fn add_or_update_input_core(
     instance_id: &str,
     input: InputDefinition,
 ) -> Result<(), String> {
-    let input = prepare_portable_input_definitions(std::slice::from_ref(&input))?
-        .into_iter()
-        .next()
-        .expect("one input definition was prepared");
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let id = input.id().to_string();
-    log::info!("Adding/updating input for instance {}: {}", instance_id, id);
-    require_existing_instance(state, instance_id)?;
+    let started = std::time::Instant::now();
+    let input_id = input.id().to_string();
+    let input_kind = input_type_name(&input);
+    let result = async {
+        let input = prepare_portable_input_definitions(std::slice::from_ref(&input))?
+            .into_iter()
+            .next()
+            .expect("one input definition was prepared");
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let id = input.id().to_string();
+        log::info!("Adding/updating input for instance {}: {}", instance_id, id);
+        require_existing_instance(state, instance_id)?;
 
-    let previous_config = state
-        .sdk_config
-        .load_project_input_document(instance_id)
-        .map_err(|e| e.to_string())?;
-    let mut inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
-        .map_err(|error| error.to_string())?;
-    inputs.retain(|i| i.id() != id);
-    inputs.push(input);
-    if let Err(error) = state
-        .sdk_config
-        .replace_input_definitions(instance_id, &inputs)
-    {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            Some(&previous_config),
-            error.to_string(),
-        )
-        .await);
+        let previous_config = state
+            .sdk_config
+            .load_project_input_document(instance_id)
+            .map_err(|e| e.to_string())?;
+        let mut inputs = state
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
+        inputs.retain(|i| i.id() != id);
+        inputs.push(input);
+        if let Err(error) = state
+            .sdk_config
+            .replace_input_definitions(instance_id, &inputs)
+        {
+            return Err(rollback_input_mutation(
+                state,
+                instance_id,
+                Some(&previous_config),
+                error.to_string(),
+            )
+            .await);
+        }
+
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_definition",
+            operation: "upsert",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input definition upsert",
+            fields: serde_json::json!({"input_id": input_id, "input_kind": input_kind}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn validate_pick_selection(id: &str, options: &[PickOption], value: &str) -> Result<(), String> {
@@ -589,65 +667,87 @@ pub async fn remove_input_core(
     instance_id: &str,
     id: &str,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    log::info!("Removing input for instance {}: {}", instance_id, id);
-    require_existing_instance(state, instance_id)?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        log::info!("Removing input for instance {}: {}", instance_id, id);
+        require_existing_instance(state, instance_id)?;
 
-    let references = find_project_input_references(
-        &state
-            .sdk_config
-            .load_raw_project_config(instance_id)
-            .map_err(|error| error.to_string())?,
-    )
-    .into_iter()
-    .filter(|reference| reference.input_id == id)
-    .collect::<Vec<_>>();
-    if !references.is_empty() {
-        let locations = references
-            .iter()
-            .map(|reference| {
-                format!(
-                    "{}:{}:{}",
-                    reference.layer, reference.server_name, reference.field_path
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!(
-            "Input '{id}' is still referenced by MCP configuration: {locations}"
-        ));
-    }
-
-    let previous_config = state
-        .sdk_config
-        .load_project_input_document(instance_id)
-        .map_err(|e| e.to_string())?;
-    let mut inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
-        .map_err(|error| error.to_string())?;
-    let original_len = inputs.len();
-    inputs.retain(|i| i.id() != id);
-
-    if inputs.len() == original_len {
-        return Err(format!("Input not found: {}", id));
-    }
-
-    if let Err(error) = state
-        .sdk_config
-        .replace_input_definitions(instance_id, &inputs)
-    {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            Some(&previous_config),
-            error.to_string(),
+        let references = find_project_input_references(
+            &state
+                .sdk_config
+                .load_raw_project_config(instance_id)
+                .map_err(|error| error.to_string())?,
         )
-        .await);
-    }
+        .into_iter()
+        .filter(|reference| reference.input_id == id)
+        .collect::<Vec<_>>();
+        if !references.is_empty() {
+            let locations = references
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "{}:{}:{}",
+                        reference.layer, reference.server_name, reference.field_path
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Input '{id}' is still referenced by MCP configuration: {locations}"
+            ));
+        }
 
-    Ok(())
+        let previous_config = state
+            .sdk_config
+            .load_project_input_document(instance_id)
+            .map_err(|e| e.to_string())?;
+        let mut inputs = state
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
+        let original_len = inputs.len();
+        inputs.retain(|i| i.id() != id);
+
+        if inputs.len() == original_len {
+            return Err(format!("Input not found: {}", id));
+        }
+
+        if let Err(error) = state
+            .sdk_config
+            .replace_input_definitions(instance_id, &inputs)
+        {
+            return Err(rollback_input_mutation(
+                state,
+                instance_id,
+                Some(&previous_config),
+                error.to_string(),
+            )
+            .await);
+        }
+
+        Ok(())
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_definition",
+            operation: "delete",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input definition delete",
+            fields: serde_json::json!({"input_id": id}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -730,36 +830,59 @@ pub async fn set_input_value_core(
     id: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    log::info!("Setting input value: {}", id);
-    require_existing_instance(state, instance_id)?;
-    let inputs = state.sdk_config.load_input_definitions(instance_id);
-    let definition = inputs
-        .iter()
-        .find(|input| input.id() == id)
-        .ok_or_else(|| format!("Input not found: {id}"))?;
-    if !definition.supports_persistent_value() {
-        return Err(format!(
-            "{} inputs do not support persistent values",
-            input_type_name(definition)
-        ));
+    let started = std::time::Instant::now();
+    let activity_input_id = id.clone();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        log::info!("Setting input value: {}", id);
+        require_existing_instance(state, instance_id)?;
+        let inputs = state.sdk_config.load_input_definitions(instance_id);
+        let definition = inputs
+            .iter()
+            .find(|input| input.id() == id)
+            .ok_or_else(|| format!("Input not found: {id}"))?;
+        if !definition.supports_persistent_value() {
+            return Err(format!(
+                "{} inputs do not support persistent values",
+                input_type_name(definition)
+            ));
+        }
+        let string_value = value.as_str().ok_or_else(|| {
+            format!(
+                "{} input '{id}' must be a string",
+                input_type_name(definition)
+            )
+        })?;
+        if let InputDefinition::PickString { options, .. } = definition {
+            validate_pick_selection(&id, options, string_value)?;
+        }
+        let store = migrated_input_entry_store(state, instance_id)?;
+        let secret = store
+            .storage_kind(&id)?
+            .map(InputEntryStorageKind::is_secret)
+            .unwrap_or_else(|| definition.is_secret());
+        store.upsert(&id, Some(value), secret)
     }
-    let string_value = value.as_str().ok_or_else(|| {
-        format!(
-            "{} input '{id}' must be a string",
-            input_type_name(definition)
-        )
-    })?;
-    if let InputDefinition::PickString { options, .. } = definition {
-        validate_pick_selection(&id, options, string_value)?;
-    }
-    let store = migrated_input_entry_store(state, instance_id)?;
-    let secret = store
-        .storage_kind(&id)?
-        .map(InputEntryStorageKind::is_secret)
-        .unwrap_or_else(|| definition.is_secret());
-    store.upsert(&id, Some(value), secret)
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_value",
+            operation: "set",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input value set",
+            fields: serde_json::json!({"input_id": activity_input_id, "value_recorded": false}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Stores a Computer-level InputEntry for an exact definition present in the SDK runtime InputPool.
@@ -782,32 +905,62 @@ pub async fn set_runtime_input_value_core(
     id: String,
     value: serde_json::Value,
 ) -> Result<bool, String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    let Some(runtime) = state.computer_registry.runtime(instance_id).await else {
-        return Ok(false);
-    };
-    let Some(kind) = runtime.runtime_input_kind(&id).await else {
-        return Ok(false);
-    };
+    let started = std::time::Instant::now();
+    let activity_input_id = id.clone();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        let Some(runtime) = state.computer_registry.runtime(instance_id).await else {
+            return Ok(false);
+        };
+        let Some(kind) = runtime.runtime_input_kind(&id).await else {
+            return Ok(false);
+        };
 
-    log::info!(
-        "Setting Computer InputEntry requested by runtime {} input for instance {}: {}",
-        kind,
-        instance_id,
-        id
-    );
-    if !value.is_string() {
-        return Err(format!("Runtime input '{id}' must be a string"));
+        log::info!(
+            "Setting Computer InputEntry requested by runtime {} input for instance {}: {}",
+            kind,
+            instance_id,
+            id
+        );
+        if !value.is_string() {
+            return Err(format!("Runtime input '{id}' must be a string"));
+        }
+        let store = migrated_input_entry_store(state, instance_id)?;
+        let secret = store
+            .storage_kind(&id)?
+            .map(InputEntryStorageKind::is_secret)
+            .unwrap_or(matches!(kind, InputKind::Secret));
+        store.upsert(&id, Some(value), secret)?;
+        Ok(true)
     }
-    let store = migrated_input_entry_store(state, instance_id)?;
-    let secret = store
-        .storage_kind(&id)?
-        .map(InputEntryStorageKind::is_secret)
-        .unwrap_or(matches!(kind, InputKind::Secret));
-    store.upsert(&id, Some(value), secret)?;
-    Ok(true)
+    .await;
+    let matched_runtime_definition = result.as_ref().ok().copied();
+    if result.as_ref().is_err() || matched_runtime_definition == Some(true) {
+        record_computer_activity(
+            state,
+            ComputerActivitySpec {
+                computer_id: instance_id,
+                category: ComputerActivityCategory::Input,
+                event_type: "runtime_input_value",
+                operation: "set",
+                trigger: ActivityTrigger::Runtime,
+                managed_by: Some(ActivityManagedBy::System),
+                provider: Some(ActivityProvider::Client),
+                message_subject: "Runtime input value set",
+                fields: serde_json::json!({
+                    "input_id": activity_input_id,
+                    "matched_runtime_definition": matched_runtime_definition,
+                    "value_recorded": false,
+                }),
+            },
+            started,
+            &result,
+        )
+        .await;
+    }
+    result
 }
 
 /// Remove a cached input value
@@ -825,10 +978,32 @@ pub async fn remove_input_value_core(
     instance_id: &str,
     id: &str,
 ) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    migrated_input_entry_store(state, instance_id)?.delete(id)
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        migrated_input_entry_store(state, instance_id)?.delete(id)
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_value",
+            operation: "delete",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input value delete",
+            fields: serde_json::json!({"input_id": id, "value_recorded": false}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Clear all cached input values
@@ -841,14 +1016,36 @@ pub async fn clear_input_values(
 }
 
 pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Result<(), String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    let store = migrated_input_entry_store(state, instance_id)?;
-    for entry in store.list()? {
-        store.delete(&entry.key)?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        let store = migrated_input_entry_store(state, instance_id)?;
+        for entry in store.list()? {
+            store.delete(&entry.key)?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_value",
+            operation: "clear_all",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input values clear",
+            fields: serde_json::json!({"value_recorded": false}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Import input definitions from a JSON file
@@ -909,41 +1106,64 @@ pub async fn import_inputs_core(
     instance_id: &str,
     path: &str,
 ) -> Result<usize, String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    require_existing_instance(state, instance_id)?;
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let imported: Vec<InputDefinition> =
-        serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let imported = prepare_portable_input_definitions(&imported)?;
-    let count = imported.len();
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        require_existing_instance(state, instance_id)?;
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let imported: Vec<InputDefinition> =
+            serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let imported = prepare_portable_input_definitions(&imported)?;
+        let count = imported.len();
 
-    let previous_config = state
-        .sdk_config
-        .load_project_input_document(instance_id)
-        .map_err(|e| e.to_string())?;
-    let mut inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
-        .map_err(|error| error.to_string())?;
-    for input in imported {
-        let id = input.id().to_string();
-        inputs.retain(|i| i.id() != id);
-        inputs.push(input);
+        let previous_config = state
+            .sdk_config
+            .load_project_input_document(instance_id)
+            .map_err(|e| e.to_string())?;
+        let mut inputs = state
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| error.to_string())?;
+        for input in imported {
+            let id = input.id().to_string();
+            inputs.retain(|i| i.id() != id);
+            inputs.push(input);
+        }
+        if let Err(error) = state
+            .sdk_config
+            .replace_input_definitions(instance_id, &inputs)
+        {
+            return Err(rollback_input_mutation(
+                state,
+                instance_id,
+                Some(&previous_config),
+                error.to_string(),
+            )
+            .await);
+        }
+        Ok(count)
     }
-    if let Err(error) = state
-        .sdk_config
-        .replace_input_definitions(instance_id, &inputs)
-    {
-        return Err(rollback_input_mutation(
-            state,
-            instance_id,
-            Some(&previous_config),
-            error.to_string(),
-        )
-        .await);
-    }
-    Ok(count)
+    .await;
+    let imported_count = result.as_ref().ok().copied();
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Input,
+            event_type: "input_definition",
+            operation: "import",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::Client),
+            message_subject: "Input definitions import",
+            fields: serde_json::json!({"imported_count": imported_count}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Replaces client-owned input definitions without rebuilding or reloading any runtime.
@@ -1134,7 +1354,9 @@ mod tests {
     use crate::services::config::ConfigService;
     use crate::services::input_value_store::InputValueStore;
     use crate::services::keychain::{self, InMemorySecretStore, KeychainError, SecretStore};
-    use crate::services::observability::ObservabilityService;
+    use crate::services::observability::{
+        ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -1154,6 +1376,63 @@ mod tests {
             store.clone(),
         );
         (state, store, dir)
+    }
+
+    #[tokio::test]
+    async fn secret_input_entry_activity_never_persists_the_value() {
+        let (state, _store, _dir) = test_state();
+        upsert_input_entry_core(
+            &state,
+            "computer-a",
+            "service-token",
+            Some("top-secret-value".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                categories: Some(vec!["input".to_string()]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let event = &page.items[0];
+        assert_eq!(event.event_type, "input_entry");
+        assert_eq!(event.fields.as_ref().unwrap()["input_id"], "service-token");
+        assert!(!serde_json::to_string(event)
+            .unwrap()
+            .contains("top-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_runtime_input_value_is_a_noop_without_activity() {
+        let (state, _store, _dir) = test_state();
+        assert!(!set_runtime_input_value_core(
+            &state,
+            "computer-a",
+            "missing-runtime-input".to_string(),
+            serde_json::json!("not-written"),
+        )
+        .await
+        .unwrap());
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                categories: Some(vec!["input".to_string()]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 0);
     }
 
     #[tokio::test]

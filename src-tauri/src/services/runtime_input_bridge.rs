@@ -1,3 +1,7 @@
+use crate::services::observability::{
+    redact_text, ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome,
+    ActivityProvider, ActivityTrigger, ComputerActivityCategory, ObservabilityService,
+};
 use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -80,6 +84,7 @@ pub struct RuntimeInputBridge {
     sink: RwLock<Option<Arc<dyn RuntimeInputRequestSink>>>,
     state: Mutex<BridgeState>,
     request_queue: tokio::sync::Mutex<()>,
+    observability: RwLock<Option<Arc<ObservabilityService>>>,
 }
 
 #[derive(Debug)]
@@ -112,7 +117,15 @@ impl RuntimeInputBridge {
             sink: RwLock::new(None),
             state: Mutex::new(BridgeState::new()),
             request_queue: tokio::sync::Mutex::new(()),
+            observability: RwLock::new(None),
         }
+    }
+
+    pub fn configure_observability(&self, observability: Arc<ObservabilityService>) {
+        *self
+            .observability
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(observability);
     }
 
     pub fn set_sink(&self, sink: Arc<dyn RuntimeInputRequestSink>) {
@@ -145,6 +158,7 @@ impl RuntimeInputBridge {
         reason: RuntimeInputRequestReason,
         secret: bool,
     ) -> Result<RuntimeInputResponse, String> {
+        let requested_at = std::time::Instant::now();
         let _queue_guard = self.request_queue.lock().await;
         let sink = self
             .sink
@@ -173,15 +187,105 @@ impl RuntimeInputBridge {
         }
         let mut pending_guard = PendingRequestGuard::new(self.clone(), request_id.clone());
         if let Err(error) = sink.emit(&request) {
+            self.record_request_activity(
+                &request,
+                "request",
+                ActivityOutcome::Failed,
+                Some(&error),
+                requested_at.elapsed().as_millis(),
+            )
+            .await;
             return Err(format!(
                 "Runtime Input prompt request could not be delivered: {error}"
             ));
         }
-        let completion = receiver
-            .await
-            .map_err(|_| "Runtime Input prompt request was interrupted".to_string())?;
+        self.record_request_activity(
+            &request,
+            "request",
+            ActivityOutcome::Unknown,
+            None,
+            requested_at.elapsed().as_millis(),
+        )
+        .await;
+        let completion = match receiver.await {
+            Ok(completion) => completion,
+            Err(_) => {
+                let error = "Runtime Input prompt request was interrupted";
+                self.record_request_activity(
+                    &request,
+                    "complete",
+                    ActivityOutcome::Failed,
+                    Some(error),
+                    requested_at.elapsed().as_millis(),
+                )
+                .await;
+                return Err(error.to_string());
+            }
+        };
         pending_guard.disarm();
+        let (operation, outcome) = match &completion.completion {
+            RuntimeInputCompletion::Confirmed { .. } => ("confirmed", ActivityOutcome::Succeeded),
+            RuntimeInputCompletion::Cancelled => ("cancelled", ActivityOutcome::Unknown),
+        };
+        self.record_request_activity(
+            &request,
+            operation,
+            outcome,
+            None,
+            requested_at.elapsed().as_millis(),
+        )
+        .await;
         Ok(completion)
+    }
+
+    async fn record_request_activity(
+        &self,
+        request: &RuntimeInputRequest,
+        operation: &str,
+        outcome: ActivityOutcome,
+        error: Option<&str>,
+        duration_ms: u128,
+    ) {
+        let observability = self
+            .observability
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(observability) = observability else {
+            return;
+        };
+        let mut activity = ActivityEventDraft::computer(
+            &request.instance_id,
+            if error.is_some() {
+                ActivityLevel::Warn
+            } else {
+                ActivityLevel::Info
+            },
+            ComputerActivityCategory::Input,
+            "runtime_input_request",
+            operation,
+            outcome,
+            format!("Runtime Input request {operation}"),
+        )
+        .with_standard_fields(
+            ActivityTrigger::Runtime,
+            Some(ActivityManagedBy::System),
+            Some(ActivityProvider::Client),
+        );
+        activity.correlation_id = Some(request.request_id.clone());
+        activity.merge_fields(serde_json::json!({
+            "request_id": request.request_id,
+            "input_id": request.definition.id(),
+            "input_kind": runtime_input_kind(&request.definition),
+            "reason": request.reason,
+            "secret": request.secret,
+            "value_recorded": false,
+            "duration_ms": duration_ms,
+            "error": error.map(redact_text),
+        }));
+        if let Err(error) = observability.record_activity_async(activity).await {
+            log::error!("failed to persist Runtime Input activity: {error}");
+        }
     }
 
     pub async fn complete(
@@ -215,6 +319,14 @@ impl RuntimeInputBridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pending
             .remove(request_id);
+    }
+}
+
+fn runtime_input_kind(input: &MCPServerInput) -> &'static str {
+    match input {
+        MCPServerInput::PromptString(_) => "prompt_string",
+        MCPServerInput::PickString(_) => "pick_string",
+        MCPServerInput::Command(_) => "command",
     }
 }
 

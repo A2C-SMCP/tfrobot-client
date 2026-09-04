@@ -3,7 +3,9 @@ use crate::services::client_control::{
     ToolId, ToolRisk,
 };
 use crate::services::observability::{
-    redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+    current_activity_invocation_context, redact_text, with_activity_invocation_context,
+    ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome, ActivityProvider,
+    ComputerActivityCategory,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -74,8 +76,18 @@ pub async fn update_remote_control_policy_core(
     request: UpdateRemoteControlPolicyRequest,
 ) -> Result<RemoteControlPolicy, ClientControlError> {
     let operation_state = state.clone();
+    let activity_context = current_activity_invocation_context();
     tokio::spawn(async move {
-        update_remote_control_policy_transaction(&operation_state, request).await
+        match activity_context {
+            Some(context) => {
+                with_activity_invocation_context(
+                    context,
+                    update_remote_control_policy_transaction(&operation_state, request),
+                )
+                .await
+            }
+            None => update_remote_control_policy_transaction(&operation_state, request).await,
+        }
     })
     .await
     .map_err(|error| {
@@ -122,8 +134,8 @@ async fn update_remote_control_policy_transaction(
         let mut activity = ActivityEventDraft::computer(
             &computer_id,
             level,
-            "security",
-            "client_control_policy",
+            ComputerActivityCategory::Mcp,
+            "built_in_mcp_policy",
             "update",
             outcome,
             message,
@@ -131,6 +143,9 @@ async fn update_remote_control_policy_transaction(
         activity.fields = Some(serde_json::json!({
             "app_version": env!("CARGO_PKG_VERSION"),
             "trigger": "user",
+            "managed_by": ActivityManagedBy::BuiltIn.as_str(),
+            "provider": ActivityProvider::BuiltInMcp.as_str(),
+            "bundle_id": crate::services::client_control::CLIENT_CONTROL_BUNDLE_ID,
             "changed_keys": changed_keys,
             "duration_ms": started.elapsed().as_millis(),
             "error_code": error_code,

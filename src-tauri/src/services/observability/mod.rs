@@ -1,4 +1,5 @@
 mod activity;
+mod connection_activity;
 mod connection_diagnostics;
 mod database;
 mod diagnostics;
@@ -7,9 +8,12 @@ mod redaction;
 mod tool_history;
 
 pub use activity::{
-    ActivityEvent, ActivityEventDraft, ActivityLevel, ActivityOutcome, ActivityPage, ActivityQuery,
-    ActivityScope, ActivityScopeFilter,
+    current_activity_invocation_context, with_activity_invocation_context, ActivityEvent,
+    ActivityEventDraft, ActivityInvocationContext, ActivityLevel, ActivityManagedBy,
+    ActivityOutcome, ActivityPage, ActivityProvider, ActivityQuery, ActivityScope,
+    ActivityScopeFilter, ActivityTrigger, ComputerActivityCategory,
 };
+pub(crate) use connection_activity::ConnectionActivitySink;
 pub use connection_diagnostics::{
     classify_connection_error, sanitize_connection_endpoint, CONNECTION_LOG_TARGET,
 };
