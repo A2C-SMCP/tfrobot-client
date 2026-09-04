@@ -1,7 +1,11 @@
+use crate::commands::activity_support::{
+    mcp_activity_ownership, record_computer_activity, ComputerActivitySpec,
+};
 pub use crate::services::observability::ToolCallHistoryRecord;
 use crate::services::observability::{
     redact_json as redact_sensitive_parameters, redact_text as redact_sensitive_text,
-    ActivityEventDraft, ActivityLevel, ActivityOutcome, ToolCallHistoryDraft,
+    ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome, ActivityProvider,
+    ActivityTrigger, ComputerActivityCategory, ToolCallHistoryDraft,
 };
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::model::{
@@ -139,27 +143,60 @@ pub async fn get_debug_resources_core(
     bundle_id: &BundleId,
     cursor: Option<String>,
 ) -> Result<DebugResourcesResponse, String> {
-    let instance_id = require_instance_id(instance_id)?.to_string();
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?.to_string();
 
-    let runtime = state
-        .computer_registry
-        .runtime(&instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
-    let server_name = runtime
-        .mcp_server_display_name(bundle_id)
-        .await
-        .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
+        let runtime = state
+            .computer_registry
+            .runtime(&instance_id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+        let server_name = runtime
+            .mcp_server_display_name(bundle_id)
+            .await
+            .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
-    let (resources, next_cursor) = runtime.resources(bundle_id, cursor).await?;
+        let (resources, next_cursor) = runtime.resources(bundle_id, cursor).await?;
 
-    Ok(DebugResourcesResponse {
-        resources: resources
-            .into_iter()
-            .map(|resource| resource_to_debug_info(&server_name, resource))
-            .collect(),
-        next_cursor,
-    })
+        Ok(DebugResourcesResponse {
+            resources: resources
+                .into_iter()
+                .map(|resource| resource_to_debug_info(&server_name, resource))
+                .collect(),
+            next_cursor,
+        })
+    }
+    .await;
+    let (managed_by, provider) = mcp_activity_ownership(state, instance_id, bundle_id.as_str());
+    let resource_count = result.as_ref().ok().map(|value| value.resources.len());
+    let has_more = result
+        .as_ref()
+        .ok()
+        .map(|value| value.next_cursor.is_some());
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Resource,
+            event_type: "mcp_resource",
+            operation: "list",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(managed_by),
+            provider: Some(provider),
+            message_subject: "MCP resource list",
+            fields: serde_json::json!({
+                "bundle_id": bundle_id,
+                "resource_count": resource_count,
+                "has_more": has_more,
+                "content_recorded": false,
+            }),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn resource_to_debug_info(server: &str, resource: Resource) -> DebugResourceInfo {
@@ -217,6 +254,15 @@ pub async fn execute_tool_core(
     let start = std::time::Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
     let tools = runtime.available_tools().await.unwrap_or_default();
+    let tool_bundle_id = tools
+        .iter()
+        .find(|tool| tool.name == tool_name)
+        .and_then(|tool| tool.name.split_once("__"))
+        .map(|(bundle_id, _)| bundle_id.to_string());
+    let (managed_by, provider) = tool_bundle_id
+        .as_deref()
+        .map(|bundle_id| mcp_activity_ownership(state, &instance_id, bundle_id))
+        .unwrap_or((ActivityManagedBy::User, ActivityProvider::UserMcp));
     let running_servers = connected_mcp_servers(runtime.mcp_server_runtime_statuses().await);
     let fallback_server = resolve_tool_server(&tools, &running_servers, tool_name);
     let history_parameters = redact_sensitive_parameters(params.clone());
@@ -247,6 +293,7 @@ pub async fn execute_tool_core(
             } else {
                 tool_result_error_summary(&call_result).map(|text| redact_sensitive_text(&text))
             };
+            let history_error = error.clone();
             let mut activity = ActivityEventDraft::computer(
                 &instance_id,
                 if success {
@@ -254,7 +301,7 @@ pub async fn execute_tool_core(
                 } else {
                     ActivityLevel::Error
                 },
-                "tool",
+                ComputerActivityCategory::Tool,
                 "tool_call",
                 history_tool.clone(),
                 if success {
@@ -263,8 +310,21 @@ pub async fn execute_tool_core(
                     ActivityOutcome::Failed
                 },
                 format!("Tool {tool_name} executed ({duration_ms}ms)"),
+            )
+            .with_standard_fields(
+                ActivityTrigger::User,
+                Some(managed_by),
+                Some(provider),
             );
             activity.correlation_id = Some(req_id.clone());
+            activity.merge_fields(serde_json::json!({
+                "bundle_id": tool_bundle_id,
+                "server_name": server,
+                "duration_ms": duration_ms,
+                "parameters_recorded": true,
+                "result_recorded": false,
+                "error": error,
+            }));
             if let Err(persist_error) = state
                 .observability
                 .record_tool_call_async(
@@ -277,7 +337,7 @@ pub async fn execute_tool_core(
                         parameters: history_parameters,
                         timeout,
                         success,
-                        error,
+                        error: history_error,
                     },
                 )
                 .await
@@ -298,13 +358,26 @@ pub async fn execute_tool_core(
             let mut activity = ActivityEventDraft::computer(
                 &instance_id,
                 ActivityLevel::Error,
-                "tool",
+                ComputerActivityCategory::Tool,
                 "tool_call",
                 history_tool.clone(),
                 ActivityOutcome::Failed,
                 format!("Tool {tool_name} failed: {redacted_error}"),
+            )
+            .with_standard_fields(
+                ActivityTrigger::User,
+                Some(managed_by),
+                Some(provider),
             );
             activity.correlation_id = Some(req_id.clone());
+            activity.merge_fields(serde_json::json!({
+                "bundle_id": tool_bundle_id,
+                "server_name": server,
+                "duration_ms": duration_ms,
+                "parameters_recorded": true,
+                "result_recorded": false,
+                "error": redacted_error,
+            }));
             if let Err(persist_error) = state
                 .observability
                 .record_tool_call_async(

@@ -3,7 +3,9 @@ use super::{
     ActivityQuery, ActivityScope, ActivityScopeFilter, ToolCallHistoryDraft, ToolCallHistoryRecord,
 };
 use chrono::{Duration, Utc};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, Row};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,18 +56,150 @@ impl ObservabilityService {
     }
 
     pub fn record_activity(&self, draft: &ActivityEventDraft) -> Result<i64, String> {
+        let draft = sanitize_activity(draft.clone().inherit_invocation_context());
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
-        let id = insert_activity(&conn, &Utc::now().to_rfc3339(), draft)?;
+        let id = insert_activity(&conn, &Utc::now().to_rfc3339(), &draft)?;
         drop(conn);
         self.maybe_cleanup_due();
         Ok(id)
     }
 
     pub async fn record_activity_async(&self, draft: ActivityEventDraft) -> Result<i64, String> {
+        let draft = draft.inherit_invocation_context();
         let service = self.clone();
         tauri::async_runtime::spawn_blocking(move || service.record_activity(&draft))
             .await
             .map_err(|error| error.to_string())?
+    }
+
+    /// Opens a durable client run and records startup in the same transaction.
+    ///
+    /// A surviving row identifies a previous run that never reached the graceful shutdown
+    /// commit point. The marker is deliberately independent from activity retention and manual
+    /// clearing so those operations cannot manufacture or hide an unclean-exit signal.
+    pub fn begin_client_run(&self, run_id: &str, app_version: &str) -> Result<bool, String> {
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let previous = tx
+            .query_row(
+                "SELECT run_id, started_at, app_version FROM client_run_state WHERE singleton_id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let detected_unclean_exit = previous.is_some();
+        let timestamp = Utc::now().to_rfc3339();
+
+        if let Some((previous_run_id, previous_started_at, previous_app_version)) = previous {
+            let mut activity = ActivityEventDraft::client(
+                ActivityLevel::Warn,
+                "system",
+                "application_lifecycle",
+                "unclean_exit",
+                ActivityOutcome::Unknown,
+                "Previous application run did not shut down cleanly",
+            );
+            activity.fields = Some(serde_json::json!({
+                "app_version": app_version,
+                "trigger": "system",
+                "previous_run_id": previous_run_id,
+                "previous_started_at": previous_started_at,
+                "previous_app_version": previous_app_version,
+            }));
+            activity.correlation_id = Some(previous_run_id);
+            insert_activity(&tx, &timestamp, &activity)?;
+        }
+
+        tx.execute(
+            "INSERT INTO client_run_state (singleton_id, run_id, started_at, app_version)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(singleton_id) DO UPDATE SET
+                 run_id = excluded.run_id,
+                 started_at = excluded.started_at,
+                 app_version = excluded.app_version",
+            params![run_id, timestamp, app_version],
+        )
+        .map_err(|error| error.to_string())?;
+        let mut activity = ActivityEventDraft::client(
+            ActivityLevel::Info,
+            "system",
+            "application_lifecycle",
+            "start",
+            ActivityOutcome::Succeeded,
+            "Application started",
+        );
+        activity.fields = Some(serde_json::json!({
+            "app_version": app_version,
+            "trigger": "system",
+            "run_id": run_id,
+        }));
+        activity.correlation_id = Some(run_id.to_string());
+        insert_activity(&tx, &timestamp, &activity)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        drop(conn);
+        self.maybe_cleanup_due();
+        Ok(detected_unclean_exit)
+    }
+
+    /// Closes the current client run exactly once and records the matching shutdown activity.
+    pub fn finish_client_run(&self, run_id: &str, app_version: &str) -> Result<bool, String> {
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let current_run_id = tx
+            .query_row(
+                "SELECT run_id FROM client_run_state WHERE singleton_id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if current_run_id.as_deref() != Some(run_id) {
+            return Ok(false);
+        }
+
+        let timestamp = Utc::now().to_rfc3339();
+        let mut activity = ActivityEventDraft::client(
+            ActivityLevel::Info,
+            "system",
+            "application_lifecycle",
+            "shutdown",
+            ActivityOutcome::Succeeded,
+            "Application shutting down",
+        );
+        activity.fields = Some(serde_json::json!({
+            "app_version": app_version,
+            "trigger": "system",
+            "run_id": run_id,
+        }));
+        activity.correlation_id = Some(run_id.to_string());
+        insert_activity(&tx, &timestamp, &activity)?;
+        tx.execute(
+            "DELETE FROM client_run_state WHERE singleton_id = 1 AND run_id = ?1",
+            [run_id],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    pub async fn finish_client_run_async(
+        &self,
+        run_id: String,
+        app_version: String,
+    ) -> Result<bool, String> {
+        let service = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            service.finish_client_run(&run_id, &app_version)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub fn record_tool_call(
@@ -73,10 +207,12 @@ impl ObservabilityService {
         activity: &ActivityEventDraft,
         history: &ToolCallHistoryDraft,
     ) -> Result<(), String> {
+        let activity = sanitize_activity(activity.clone().inherit_invocation_context());
+        let history = sanitize_tool_history(history.clone());
         let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         let timestamp = Utc::now().to_rfc3339();
-        insert_activity(&tx, &timestamp, activity)?;
+        insert_activity(&tx, &timestamp, &activity)?;
         tx.execute(
             "INSERT INTO tool_call_history
              (timestamp, req_id, computer_instance_id, server, tool, parameters_json, timeout,
@@ -106,6 +242,7 @@ impl ObservabilityService {
         activity: ActivityEventDraft,
         history: ToolCallHistoryDraft,
     ) -> Result<(), String> {
+        let activity = activity.inherit_invocation_context();
         let service = self.clone();
         tauri::async_runtime::spawn_blocking(move || service.record_tool_call(&activity, &history))
             .await
@@ -156,6 +293,13 @@ impl ObservabilityService {
     }
 
     pub fn export_activity(&self, query: &ActivityQuery) -> Result<String, String> {
+        self.export_activity_with_count(query).map(|(json, _)| json)
+    }
+
+    pub fn export_activity_with_count(
+        &self,
+        query: &ActivityQuery,
+    ) -> Result<(String, usize), String> {
         let mut export_query = query.clone();
         export_query.limit = Some(500);
         export_query.offset = Some(0);
@@ -168,26 +312,40 @@ impl ObservabilityService {
             }
             export_query.offset = Some(items.len() as i64);
         }
-        serde_json::to_string_pretty(&items).map_err(|error| error.to_string())
+        let count = items.len();
+        serde_json::to_string_pretty(&items)
+            .map(|json| (json, count))
+            .map_err(|error| error.to_string())
     }
 
     pub fn clear_activity(&self, scope: &ActivityScopeFilter) -> Result<u64, String> {
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
-        let (sql, values) = match scope {
-            ActivityScopeFilter::All => ("DELETE FROM activity_events".to_string(), vec![]),
-            ActivityScopeFilter::ClientOnly => (
-                "DELETE FROM activity_events WHERE scope_kind = 'client'".to_string(),
-                vec![],
-            ),
-            ActivityScopeFilter::Computer { computer_id } => (
-                "DELETE FROM activity_events WHERE scope_kind = 'computer' AND computer_id = ?1"
-                    .to_string(),
-                vec![SqlValue::Text(computer_id.clone())],
-            ),
-        };
+        let (sql, values) = activity_clear_statement(scope);
         conn.execute(&sql, params_from_iter(values.iter()))
             .map(|count| count as u64)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn clear_activity_with_audit(
+        &self,
+        scope: &ActivityScopeFilter,
+        mut audit: ActivityEventDraft,
+    ) -> Result<u64, String> {
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let (sql, values) = activity_clear_statement(scope);
+        let count = tx
+            .execute(&sql, params_from_iter(values.iter()))
+            .map_err(|error| error.to_string())? as u64;
+        let fields = audit.fields.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = fields.as_object_mut() {
+            object.insert("deleted_count".to_string(), serde_json::json!(count));
+        }
+        insert_activity(&tx, &Utc::now().to_rfc3339(), &audit)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        drop(conn);
+        self.maybe_cleanup_due();
+        Ok(count)
     }
 
     pub fn tool_history(
@@ -288,6 +446,33 @@ impl ObservabilityService {
     }
 }
 
+fn sanitize_activity(mut activity: ActivityEventDraft) -> ActivityEventDraft {
+    activity.message = super::redact_text(&activity.message);
+    activity.fields = activity.fields.map(super::redact_json);
+    activity
+}
+
+fn sanitize_tool_history(mut history: ToolCallHistoryDraft) -> ToolCallHistoryDraft {
+    history.parameters = super::redact_json(history.parameters);
+    history.error = history.error.map(|error| super::redact_text(&error));
+    history
+}
+
+fn activity_clear_statement(scope: &ActivityScopeFilter) -> (String, Vec<SqlValue>) {
+    match scope {
+        ActivityScopeFilter::All => ("DELETE FROM activity_events".to_string(), vec![]),
+        ActivityScopeFilter::ClientOnly => (
+            "DELETE FROM activity_events WHERE scope_kind = 'client'".to_string(),
+            vec![],
+        ),
+        ActivityScopeFilter::Computer { computer_id } => (
+            "DELETE FROM activity_events WHERE scope_kind = 'computer' AND computer_id = ?1"
+                .to_string(),
+            vec![SqlValue::Text(computer_id.clone())],
+        ),
+    }
+}
+
 fn insert_activity(
     conn: &Connection,
     timestamp: &str,
@@ -297,7 +482,12 @@ fn insert_activity(
         ActivityScope::Client => ("client", None),
         ActivityScope::Computer { computer_id } => ("computer", Some(computer_id.as_str())),
     };
-    let fields_json = draft.fields.as_ref().map(serde_json::Value::to_string);
+    let fields_json = draft
+        .fields
+        .clone()
+        .map(super::redact_json)
+        .map(|fields| fields.to_string());
+    let message = super::redact_text(&draft.message);
     conn.execute(
         "INSERT INTO activity_events
          (timestamp, scope_kind, computer_id, level, category, event_type, operation, outcome,
@@ -312,7 +502,7 @@ fn insert_activity(
             draft.event_type,
             draft.operation,
             draft.outcome.as_str(),
-            draft.message,
+            message,
             fields_json,
             draft.correlation_id
         ],
@@ -442,6 +632,55 @@ mod tests {
     }
 
     #[test]
+    fn persistence_boundary_sanitizes_url_fields_and_tool_parameters() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+        let mut activity = ActivityEventDraft::computer(
+            "computer-1",
+            ActivityLevel::Warn,
+            "resource",
+            "desktop_resource",
+            "read",
+            ActivityOutcome::Failed,
+            "read failed",
+        );
+        activity.fields = Some(serde_json::json!({
+            "uri": "https://user:password@example.com/window?access_token=secret&code=oauth#fragment",
+            "error": "request failed: https://alice:password@example.com/mcp?code=oauth#fragment"
+        }));
+        service
+            .record_tool_call(
+                &activity,
+                &ToolCallHistoryDraft {
+                    req_id: "request-sensitive-url".into(),
+                    computer_instance_id: "computer-1".into(),
+                    server: "desktop".into(),
+                    tool: "read".into(),
+                    parameters: serde_json::json!({
+                        "uri": "https://example.com/window?code=oauth",
+                        "args": ["--endpoint=https://alice:password@example.com/mcp?token=secret"]
+                    }),
+                    timeout: None,
+                    success: false,
+                    error: None,
+                },
+            )
+            .unwrap();
+
+        let page = service.query_activity(&ActivityQuery::default()).unwrap();
+        let serialized = serde_json::to_string(&page.items[0]).unwrap();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("oauth"));
+        assert!(!serialized.contains("password"));
+        let history = service.tool_history("computer-1", 10).unwrap();
+        assert_eq!(history[0].parameters["uri"], "https://example.com/window");
+        assert_eq!(
+            history[0].parameters["args"][0],
+            "--endpoint=https://example.com/mcp"
+        );
+    }
+
+    #[test]
     fn clearing_activity_does_not_clear_tool_history() {
         let dir = tempdir().unwrap();
         let service = ObservabilityService::new(dir.path()).unwrap();
@@ -471,6 +710,119 @@ mod tests {
             .unwrap();
         service.clear_activity(&ActivityScopeFilter::All).unwrap();
         assert_eq!(service.tool_history("computer-1", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn client_run_marker_detects_unclean_exit_independently_from_activity_history() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+
+        assert!(!service.begin_client_run("run-1", "1.0.0").unwrap());
+        service.clear_activity(&ActivityScopeFilter::All).unwrap();
+        assert!(service.begin_client_run("run-2", "1.0.1").unwrap());
+
+        let page = service.query_activity(&ActivityQuery::default()).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].operation, "start");
+        assert_eq!(page.items[0].correlation_id.as_deref(), Some("run-2"));
+        assert_eq!(page.items[1].operation, "unclean_exit");
+        assert_eq!(page.items[1].outcome, ActivityOutcome::Unknown);
+        assert_eq!(
+            page.items[1]
+                .fields
+                .as_ref()
+                .and_then(|fields| fields["previous_run_id"].as_str()),
+            Some("run-1")
+        );
+    }
+
+    #[test]
+    fn graceful_client_run_finish_is_idempotent_and_prevents_false_recovery() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+
+        assert!(!service.begin_client_run("run-1", "1.0.0").unwrap());
+        assert!(service.finish_client_run("run-1", "1.0.0").unwrap());
+        assert!(!service.finish_client_run("run-1", "1.0.0").unwrap());
+        assert!(!service.begin_client_run("run-2", "1.0.1").unwrap());
+
+        let page = service.query_activity(&ActivityQuery::default()).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.items
+                .iter()
+                .filter(|event| event.operation == "shutdown")
+                .count(),
+            1
+        );
+        assert!(page
+            .items
+            .iter()
+            .all(|event| event.operation != "unclean_exit"));
+    }
+
+    #[test]
+    fn schema_v1_is_upgraded_with_durable_client_run_state() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("logs.db");
+        drop(ObservabilityService::new(dir.path()).unwrap());
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute("DROP TABLE client_run_state", []).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+
+        let service = ObservabilityService::new(dir.path()).unwrap();
+        assert!(!service
+            .begin_client_run("run-after-upgrade", "1.0.0")
+            .unwrap());
+        assert!(service
+            .query_activity(&ActivityQuery::default())
+            .unwrap()
+            .items
+            .iter()
+            .any(|event| event.operation == "start"));
+    }
+
+    #[test]
+    fn audited_clear_commits_deletion_and_audit_together() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+        service
+            .record_activity(&ActivityEventDraft::client(
+                ActivityLevel::Info,
+                "system",
+                "lifecycle",
+                "start",
+                ActivityOutcome::Succeeded,
+                "started",
+            ))
+            .unwrap();
+        let mut audit = ActivityEventDraft::client(
+            ActivityLevel::Info,
+            "observability",
+            "activity_journal",
+            "clear",
+            ActivityOutcome::Succeeded,
+            "Activity cleared",
+        );
+        audit.fields = Some(serde_json::json!({"scope": {"kind": "all"}}));
+
+        assert_eq!(
+            service
+                .clear_activity_with_audit(&ActivityScopeFilter::All, audit)
+                .unwrap(),
+            1
+        );
+        let page = service.query_activity(&ActivityQuery::default()).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].operation, "clear");
+        assert_eq!(
+            page.items[0]
+                .fields
+                .as_ref()
+                .and_then(|fields| fields["deleted_count"].as_u64()),
+            Some(1)
+        );
     }
 
     #[test]

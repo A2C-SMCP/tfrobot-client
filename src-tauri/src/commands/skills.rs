@@ -1,4 +1,8 @@
 use crate::services::config::ConfigError;
+use crate::services::observability::{
+    redact_text, ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome,
+    ActivityProvider, ActivityTrigger, ComputerActivityCategory,
+};
 use crate::AppState;
 use a2c_smcp::smcp_computer::skills::SkillResourceView;
 use a2c_smcp::A2CSkillRef;
@@ -95,31 +99,55 @@ pub async fn get_skill_core(
     name: &str,
     rel_path: Option<&str>,
 ) -> Result<SkillResourceResponse, SkillCommandError> {
-    let runtime = runtime_for_instance(state, instance_id).await?;
-    let reader = runtime
-        .sdk_skill_reader()
-        .map_err(|message| SkillCommandError::RuntimeUnavailable { message })?;
-    let name = require_non_empty("skill name", name)?;
-    let skill_ref =
-        reader
-            .skill_ref(name)
+    let started = std::time::Instant::now();
+    let result = async {
+        let runtime = runtime_for_instance(state, instance_id).await?;
+        let reader = runtime
+            .sdk_skill_reader()
+            .map_err(|message| SkillCommandError::RuntimeUnavailable { message })?;
+        let name = require_non_empty("skill name", name)?;
+        let skill_ref =
+            reader
+                .skill_ref(name)
+                .await
+                .ok_or_else(|| SkillCommandError::SkillNotFound {
+                    name: name.to_string(),
+                })?;
+        let view = reader
+            .read_skill_resource(&skill_ref, rel_path)
             .await
-            .ok_or_else(|| SkillCommandError::SkillNotFound {
-                name: name.to_string(),
+            .map_err(|error| SkillCommandError::ResourceNotAccessible {
+                reason: error.reason.to_string(),
+                rel_path: error.rel_path.clone(),
+                message: format!(
+                    "Skill resource not accessible: reason={}, rel_path={}",
+                    error.reason, error.rel_path
+                ),
             })?;
-    let view = reader
-        .read_skill_resource(&skill_ref, rel_path)
-        .await
-        .map_err(|error| SkillCommandError::ResourceNotAccessible {
-            reason: error.reason.to_string(),
-            rel_path: error.rel_path.clone(),
-            message: format!(
-                "Skill resource not accessible: reason={}, rel_path={}",
-                error.reason, error.rel_path
-            ),
-        })?;
 
-    skill_resource_response(name, view)
+        skill_resource_response(name, view)
+    }
+    .await;
+    record_skill_activity(
+        state,
+        SkillActivity {
+            instance_id,
+            category: ComputerActivityCategory::Resource,
+            event_type: "skill_resource",
+            operation: "read",
+            message: if result.is_ok() {
+                "Skill resource read succeeded"
+            } else {
+                "Skill resource read failed"
+            },
+            started,
+            skill_name: Some(name),
+            rel_path,
+            error: result.as_ref().err(),
+        },
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -134,9 +162,33 @@ pub async fn refresh_skills_core(
     state: &AppState,
     instance_id: &str,
 ) -> Result<(), SkillCommandError> {
-    let runtime = runtime_for_instance(state, instance_id).await?;
-    runtime.mark_sdk_skills_dirty().await;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result = async {
+        let runtime = runtime_for_instance(state, instance_id).await?;
+        runtime.mark_sdk_skills_dirty().await;
+        Ok(())
+    }
+    .await;
+    record_skill_activity(
+        state,
+        SkillActivity {
+            instance_id,
+            category: ComputerActivityCategory::Skill,
+            event_type: "skill_registry",
+            operation: "refresh",
+            message: if result.is_ok() {
+                "Skill registry refresh succeeded"
+            } else {
+                "Skill registry refresh failed"
+            },
+            started,
+            skill_name: None,
+            rel_path: None,
+            error: result.as_ref().err(),
+        },
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -175,19 +227,41 @@ pub async fn open_configured_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    let _operation_guard = state
-        .computer_registry
-        .shared_operation_lease(instance_id)
+    let started = std::time::Instant::now();
+    let result = async {
+        let _operation_guard = state
+            .computer_registry
+            .shared_operation_lease(instance_id)
+            .await;
+        let root = configured_local_user_skills_root(state, instance_id)?;
+        std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
+            path: root.to_string_lossy().to_string(),
+            message: format!("Failed to create configured local skills root: {error}"),
+        })?;
+        open_path(&root).map_err(|message| SkillCommandError::OpenFailed {
+            path: root.to_string_lossy().to_string(),
+            message,
+        })
+    }
+    .await;
+    if let Err(error) = &result {
+        record_skill_activity(
+            state,
+            SkillActivity {
+                instance_id,
+                category: ComputerActivityCategory::Skill,
+                event_type: "skill_home",
+                operation: "open",
+                message: "Configured Skill home open failed",
+                started,
+                skill_name: None,
+                rel_path: None,
+                error: Some(error),
+            },
+        )
         .await;
-    let root = configured_local_user_skills_root(state, instance_id)?;
-    std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
-        path: root.to_string_lossy().to_string(),
-        message: format!("Failed to create configured local skills root: {error}"),
-    })?;
-    open_path(&root).map_err(|message| SkillCommandError::OpenFailed {
-        path: root.to_string_lossy().to_string(),
-        message,
-    })
+    }
+    result
 }
 
 pub fn configured_local_user_skills_root(
@@ -221,21 +295,89 @@ pub async fn open_local_skills_root_core<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    // Keep deletion/profile replacement out until the path has been created and handed to the
-    // platform opener. The SDK read session used to resolve the path ends before create_dir_all.
-    let _operation_guard = state
-        .computer_registry
-        .shared_operation_lease(instance_id)
+    let started = std::time::Instant::now();
+    let result = async {
+        // Keep deletion/profile replacement out until the path has been created and handed to the
+        // platform opener. The SDK read session used to resolve the path ends before create_dir_all.
+        let _operation_guard = state
+            .computer_registry
+            .shared_operation_lease(instance_id)
+            .await;
+        let root = local_user_skills_root(state, instance_id).await?;
+        std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
+            path: root.to_string_lossy().to_string(),
+            message: format!("Failed to create local skills root: {error}"),
+        })?;
+        open_path(&root).map_err(|message| SkillCommandError::OpenFailed {
+            path: root.to_string_lossy().to_string(),
+            message,
+        })
+    }
+    .await;
+    if let Err(error) = &result {
+        record_skill_activity(
+            state,
+            SkillActivity {
+                instance_id,
+                category: ComputerActivityCategory::Skill,
+                event_type: "skill_home",
+                operation: "open",
+                message: "Skill home open failed",
+                started,
+                skill_name: None,
+                rel_path: None,
+                error: Some(error),
+            },
+        )
         .await;
-    let root = local_user_skills_root(state, instance_id).await?;
-    std::fs::create_dir_all(&root).map_err(|error| SkillCommandError::OpenFailed {
-        path: root.to_string_lossy().to_string(),
-        message: format!("Failed to create local skills root: {error}"),
-    })?;
-    open_path(&root).map_err(|message| SkillCommandError::OpenFailed {
-        path: root.to_string_lossy().to_string(),
-        message,
-    })
+    }
+    result
+}
+
+struct SkillActivity<'a> {
+    instance_id: &'a str,
+    category: ComputerActivityCategory,
+    event_type: &'a str,
+    operation: &'a str,
+    message: &'a str,
+    started: std::time::Instant,
+    skill_name: Option<&'a str>,
+    rel_path: Option<&'a str>,
+    error: Option<&'a SkillCommandError>,
+}
+
+async fn record_skill_activity(state: &AppState, spec: SkillActivity<'_>) {
+    let mut activity = ActivityEventDraft::computer(
+        spec.instance_id,
+        if spec.error.is_some() {
+            ActivityLevel::Warn
+        } else {
+            ActivityLevel::Info
+        },
+        spec.category,
+        spec.event_type,
+        spec.operation,
+        if spec.error.is_some() {
+            ActivityOutcome::Failed
+        } else {
+            ActivityOutcome::Succeeded
+        },
+        spec.message,
+    )
+    .with_standard_fields(
+        ActivityTrigger::User,
+        Some(ActivityManagedBy::User),
+        Some(ActivityProvider::Client),
+    );
+    activity.merge_fields(serde_json::json!({
+        "skill_name": spec.skill_name,
+        "rel_path": spec.rel_path,
+        "duration_ms": spec.started.elapsed().as_millis(),
+        "error": spec.error.map(|error| redact_text(&format!("{error:?}"))),
+    }));
+    if let Err(error) = state.observability.record_activity_async(activity).await {
+        log::error!("failed to persist Skill activity: {error}");
+    }
 }
 
 pub async fn local_user_skills_root(
@@ -315,7 +457,9 @@ mod tests {
     use crate::commands::computer::delete_computer_instance_core;
     use crate::services::computer::ComputerInstance;
     use crate::services::config::ConfigService;
-    use crate::services::observability::ObservabilityService;
+    use crate::services::observability::{
+        ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
     use tempfile::TempDir;
 
@@ -436,6 +580,28 @@ mod tests {
         assert!(response.is_entry);
         assert!(response.is_text);
         assert_eq!(response.body.as_deref(), Some("Body\n"));
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                categories: Some(vec![ComputerActivityCategory::Resource
+                    .as_str()
+                    .to_string()]),
+                ..Default::default()
+            })
+            .unwrap();
+        let event = page
+            .items
+            .iter()
+            .find(|event| event.event_type == "skill_resource")
+            .expect("successful Skill resource read should be recorded");
+        assert_eq!(event.outcome, ActivityOutcome::Succeeded);
+        let fields = event.fields.as_ref().unwrap();
+        assert_eq!(fields["skill_name"], "example-skill");
+        assert_eq!(fields["rel_path"], serde_json::Value::Null);
     }
 
     #[tokio::test]

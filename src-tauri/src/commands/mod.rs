@@ -1,4 +1,5 @@
 pub mod activity;
+pub(crate) mod activity_support;
 pub mod built_in_tools;
 pub mod chat;
 pub mod client_control;

@@ -12,8 +12,10 @@ use crate::services::manager_client::{
 };
 use crate::services::manager_context::{ManagerContextCoordinator, ManagerContextKey};
 use crate::services::observability::{
-    classify_connection_error, redact_text, sanitize_connection_endpoint, ActivityEventDraft,
-    ActivityLevel, ActivityOutcome, CONNECTION_LOG_TARGET,
+    classify_connection_error, current_activity_invocation_context, redact_text,
+    sanitize_connection_endpoint, with_activity_invocation_context, ActivityEventDraft,
+    ActivityLevel, ActivityManagedBy, ActivityOutcome, ActivityProvider, ActivityTrigger,
+    ComputerActivityCategory, CONNECTION_LOG_TARGET,
 };
 use crate::AppState;
 use a2c_smcp::smcp_computer::computer::SocketIoAuthProvider;
@@ -349,16 +351,39 @@ async fn connect_connection_target_with_policy(
     let transaction_instance_id = instance_id.to_string();
     let transaction_target_id = target_id.to_string();
     let transaction_policy_target = required_policy_target.cloned();
+    let activity_context = current_activity_invocation_context();
     let result = tokio::spawn(async move {
-        connect_connection_target_with_policy_inner_impl(
-            &transaction_state,
-            &transaction_instance_id,
-            &transaction_target_id,
-            transaction_policy_target.as_ref(),
-            request_id,
-            requested_at,
-        )
-        .await
+        let operation = async {
+            let result = connect_connection_target_with_policy_inner_impl(
+                &transaction_state,
+                &transaction_instance_id,
+                &transaction_target_id,
+                transaction_policy_target.as_ref(),
+                request_id,
+                requested_at,
+            )
+            .await;
+            if let Err(error) = &result {
+                record_connection_failure(
+                    &transaction_state,
+                    ConnectionFailureActivity {
+                        instance_id: &transaction_instance_id,
+                        operation: "connect_manual",
+                        target_id: Some(&transaction_target_id),
+                        target_type: "manual_smcp",
+                        request_id,
+                        requested_at,
+                        error,
+                    },
+                )
+                .await;
+            }
+            result
+        };
+        match activity_context {
+            Some(context) => with_activity_invocation_context(context, operation).await,
+            None => operation.await,
+        }
     })
     .await
     .map_err(|error| format!("connection transaction task failed: {error}"))?;
@@ -569,19 +594,29 @@ async fn connect_connection_target_with_policy_inner_impl(
             "Connection operation was superseded by a runtime lifecycle change".to_string(),
         );
     }
-    if let Err(error) = state
-        .observability
-        .record_activity_async(ActivityEventDraft::computer(
-            &instance_id,
-            ActivityLevel::Info,
-            "connection",
-            "smcp_connection",
-            "connect_manual",
-            ActivityOutcome::Succeeded,
-            format!("Connected to manual SMCP target {}", target.name),
-        ))
-        .await
-    {
+    let mut activity = ActivityEventDraft::computer(
+        &instance_id,
+        ActivityLevel::Info,
+        ComputerActivityCategory::Connection,
+        "smcp_connection",
+        "connect_manual",
+        ActivityOutcome::Succeeded,
+        format!("Connected to manual SMCP target {}", target.name),
+    )
+    .with_standard_fields(
+        ActivityTrigger::Command,
+        Some(ActivityManagedBy::User),
+        Some(ActivityProvider::Smcp),
+    );
+    activity.correlation_id = Some(request_id.to_string());
+    activity.merge_fields(serde_json::json!({
+        "target_id": target.id,
+        "target_name": target.name,
+        "target_type": "manual_smcp",
+        "source_type": "manual",
+        "duration_ms": requested_at.elapsed().as_millis(),
+    }));
+    if let Err(error) = state.observability.record_activity_async(activity).await {
         log::error!("failed to persist connection activity: {error}");
     }
     Ok(())
@@ -814,6 +849,21 @@ pub async fn disconnect_smcp_core(state: &AppState, instance_id: &str) -> Result
             "SMCP disconnection request failed"
         ),
     }
+    if let Err(error) = &result {
+        record_connection_failure(
+            state,
+            ConnectionFailureActivity {
+                instance_id,
+                operation: "disconnect",
+                target_id: None,
+                target_type: "current_smcp",
+                request_id,
+                requested_at,
+                error,
+            },
+        )
+        .await;
+    }
     result
 }
 
@@ -976,19 +1026,25 @@ async fn disconnect_smcp_inner(
         "SMCP disconnection completed"
     );
 
-    if let Err(error) = state
-        .observability
-        .record_activity_async(ActivityEventDraft::computer(
-            &instance_id,
-            ActivityLevel::Info,
-            "connection",
-            "smcp_connection",
-            "disconnect",
-            ActivityOutcome::Succeeded,
-            "Disconnected from SMCP server",
-        ))
-        .await
-    {
+    let mut activity = ActivityEventDraft::computer(
+        &instance_id,
+        ActivityLevel::Info,
+        ComputerActivityCategory::Connection,
+        "smcp_connection",
+        "disconnect",
+        ActivityOutcome::Succeeded,
+        "Disconnected from SMCP server",
+    )
+    .with_standard_fields(
+        ActivityTrigger::Command,
+        Some(ActivityManagedBy::User),
+        Some(ActivityProvider::Smcp),
+    );
+    activity.correlation_id = Some(request_id.to_string());
+    activity.merge_fields(serde_json::json!({
+        "duration_ms": requested_at.elapsed().as_millis(),
+    }));
+    if let Err(error) = state.observability.record_activity_async(activity).await {
         log::error!("failed to persist disconnection activity: {error}");
     }
     Ok(())
@@ -1134,7 +1190,67 @@ pub async fn manager_connect_smcp_core(
             "Manager Robot SMCP connection request failed"
         ),
     }
+    if let Err(error) = &result {
+        let target_id = manager_target_id(employee_id);
+        let error_message = error.to_string();
+        record_connection_failure(
+            state,
+            ConnectionFailureActivity {
+                instance_id,
+                operation: "connect_manager",
+                target_id: Some(&target_id),
+                target_type: "manager_robot",
+                request_id,
+                requested_at,
+                error: &error_message,
+            },
+        )
+        .await;
+    }
     result
+}
+
+struct ConnectionFailureActivity<'a> {
+    instance_id: &'a str,
+    operation: &'a str,
+    target_id: Option<&'a str>,
+    target_type: &'a str,
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+    error: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct ConnectionRequestActivity {
+    request_id: uuid::Uuid,
+    requested_at: Instant,
+}
+
+async fn record_connection_failure(state: &AppState, spec: ConnectionFailureActivity<'_>) {
+    let mut activity = ActivityEventDraft::computer(
+        spec.instance_id,
+        ActivityLevel::Warn,
+        ComputerActivityCategory::Connection,
+        "smcp_connection",
+        spec.operation,
+        ActivityOutcome::Failed,
+        "SMCP connection operation failed",
+    );
+    activity.fields = Some(serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "trigger": "command",
+        "managed_by": ActivityManagedBy::User.as_str(),
+        "provider": ActivityProvider::Smcp.as_str(),
+        "target_id": spec.target_id,
+        "target_type": spec.target_type,
+        "duration_ms": spec.requested_at.elapsed().as_millis(),
+        "error_code": classify_connection_error(spec.error),
+        "error": redact_text(spec.error),
+    }));
+    activity.correlation_id = Some(spec.request_id.to_string());
+    if let Err(persist_error) = state.observability.record_activity_async(activity).await {
+        log::error!("failed to persist connection failure activity: {persist_error}");
+    }
 }
 
 async fn manager_connect_smcp_inner(
@@ -1276,6 +1392,10 @@ async fn manager_connect_smcp_inner(
             },
             token,
             &profile_snapshot,
+            ConnectionRequestActivity {
+                request_id,
+                requested_at,
+            },
         )
         .await
     }
@@ -1515,6 +1635,10 @@ async fn connect_manager_robot_target_for_policy_inner(
             },
             token,
             &profile_snapshot,
+            ConnectionRequestActivity {
+                request_id,
+                requested_at,
+            },
         )
         .await
     }
@@ -2080,6 +2204,7 @@ async fn establish_manager_connection(
     authority: ManagerConnectionAuthority,
     token: ExchangedToken,
     expected_profile: &ConnectionProfileSnapshot,
+    request_activity: ConnectionRequestActivity,
 ) -> Result<(), ManagerError> {
     let ManagerConnectionAuthority {
         manager_generation,
@@ -2174,22 +2299,29 @@ async fn establish_manager_connection(
         .await
         .map_err(ManagerError::InvalidResponse)?;
 
-    if let Err(error) = state
-        .observability
-        .record_activity_async(ActivityEventDraft::computer(
-            instance_id,
-            ActivityLevel::Info,
-            "connection",
-            "smcp_connection",
-            "connect_manager",
-            ActivityOutcome::Succeeded,
-            format!(
-                "Connected to {} (robot {})",
-                params.url, params.robot_account_id
-            ),
-        ))
-        .await
-    {
+    let mut activity = ActivityEventDraft::computer(
+        instance_id,
+        ActivityLevel::Info,
+        ComputerActivityCategory::Connection,
+        "smcp_connection",
+        "connect_manager",
+        ActivityOutcome::Succeeded,
+        "Connected to Manager SMCP target",
+    )
+    .with_standard_fields(
+        ActivityTrigger::Command,
+        Some(ActivityManagedBy::User),
+        Some(ActivityProvider::Smcp),
+    );
+    activity.correlation_id = Some(request_activity.request_id.to_string());
+    activity.merge_fields(serde_json::json!({
+        "target_id": manager_target_id(params.employee_id),
+        "target_type": "manager_robot",
+        "employee_id": params.employee_id,
+        "source_type": "manager",
+        "duration_ms": request_activity.requested_at.elapsed().as_millis(),
+    }));
+    if let Err(error) = state.observability.record_activity_async(activity).await {
         log::error!("failed to persist manager connection activity: {error}");
     }
     Ok(())

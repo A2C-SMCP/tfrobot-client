@@ -1,5 +1,6 @@
-import { render, screen, waitFor } from '../helpers/render';
+import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { ActivityViewer } from '@/components/ActivityViewer';
+import { ACTIVITY_CATEGORIES } from '@/components/ActivityViewer/categories';
 import { useActivityStore } from '@/stores/activityStore';
 
 const activityStore = {
@@ -68,6 +69,12 @@ describe('ActivityViewer', () => {
           operation: 'start',
           outcome: 'failed',
           message: 'Server failed',
+          correlation_id: 'request-1',
+          fields: {
+            trigger: 'client_control',
+            provider: 'built_in_mcp',
+            bundle_id: 'client_control',
+          },
         },
         {
           id: 2,
@@ -104,5 +111,33 @@ describe('ActivityViewer', () => {
     expect(screen.getByText('UNKNOWN')).toBeInTheDocument();
     expect(screen.getAllByText('start').length).toBeGreaterThan(0);
     expect(screen.getByText('Server failed')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand row' }));
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'PRE'
+      && element.textContent?.includes('"correlation_id": "request-1"') === true
+      && element.textContent?.includes('"provider": "built_in_mcp"') === true
+      && element.textContent?.includes('"bundle_id": "client_control"') === true
+    ))).toBeInTheDocument();
+  });
+
+  it('offers every Computer activity domain without a Client Control category', () => {
+    expect(ACTIVITY_CATEGORIES).toEqual(expect.arrayContaining([
+      'computer', 'runtime', 'connection', 'mcp', 'input',
+      'tool', 'resource', 'skill', 'marketplace',
+    ]));
+    expect(ACTIVITY_CATEGORIES).not.toContain('client_control');
+  });
+
+  it('applies a selected Computer category to the activity query', async () => {
+    render(<ActivityViewer instanceId="computer-a" />);
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Activity category' }));
+    fireEvent.click(await screen.findByText('runtime'));
+
+    await waitFor(() => expect(activityStore.setQueryAndFetch).toHaveBeenCalledWith({
+      categories: ['runtime'],
+      offset: 0,
+    }));
   });
 });

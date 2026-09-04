@@ -2,6 +2,10 @@ use a2c_smcp::smcp_computer::mcp_clients::model::{make_resource, BundleId, Resou
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::commands::activity_support::{
+    mcp_activity_ownership, record_computer_activity, ComputerActivitySpec,
+};
+use crate::services::observability::{ActivityTrigger, ComputerActivityCategory};
 use crate::AppState;
 
 /// Desktop window resource info (metadata only)
@@ -77,37 +81,67 @@ pub async fn get_desktop_core(
     instance_id: &str,
     uri: Option<&str>,
 ) -> Result<DesktopEnumerationResult, String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let runtime = state
+            .computer_registry
+            .runtime(instance_id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    log::info!("get_desktop called with uri filter: {:?}", uri);
+        log::info!(
+            "get_desktop called with uri filter present={}",
+            uri.is_some()
+        );
 
-    // The SDK identity-only API performs resources/list without resources/read. Window content is
-    // fetched exclusively through `get_window_detail` after an explicit user expansion.
-    let windows = runtime.desktop_windows(uri).await?;
+        // The SDK identity-only API performs resources/list without resources/read. Window content is
+        // fetched exclusively through `get_window_detail` after an explicit user expansion.
+        let windows = runtime.desktop_windows(uri).await?;
 
-    log::info!("Found {} window resources", windows.len());
+        log::info!("Found {} window resources", windows.len());
 
-    let windows = windows
-        .into_iter()
-        .map(|(bundle_id, server, resource)| DesktopWindow {
-            bundle_id,
-            uri: resource.uri.clone(),
-            title: resource.name.clone(),
-            server,
-            description: resource.description.clone(),
-            mime_type: resource.mime_type.clone(),
+        let windows = windows
+            .into_iter()
+            .map(|(bundle_id, server, resource)| DesktopWindow {
+                bundle_id,
+                uri: resource.uri.clone(),
+                title: resource.name.clone(),
+                server,
+                description: resource.description.clone(),
+                mime_type: resource.mime_type.clone(),
+            })
+            .collect();
+
+        Ok(DesktopEnumerationResult {
+            status: DesktopEnumerationStatus::Unverified,
+            windows,
         })
-        .collect();
-
-    Ok(DesktopEnumerationResult {
-        status: DesktopEnumerationStatus::Unverified,
-        windows,
-    })
+    }
+    .await;
+    let resource_count = result.as_ref().ok().map(|value| value.windows.len());
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Resource,
+            event_type: "desktop_resource",
+            operation: "list",
+            trigger: ActivityTrigger::User,
+            managed_by: None,
+            provider: None,
+            message_subject: "Desktop resource list",
+            fields: serde_json::json!({
+                "uri_filter_present": uri.is_some(),
+                "resource_count": resource_count,
+                "content_recorded": false,
+            }),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Get single window detail with content
@@ -127,77 +161,103 @@ pub async fn get_window_detail_core(
     bundle_id: &BundleId,
     uri: &str,
 ) -> Result<WindowDetail, String> {
-    let instance_id = require_instance_id(instance_id)?;
-    let runtime = state
-        .computer_registry
-        .runtime(instance_id)
-        .await
-        .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let instance_id = require_instance_id(instance_id)?;
+        let runtime = state
+            .computer_registry
+            .runtime(instance_id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {instance_id}"))?;
 
-    let server_name = runtime
-        .mcp_server_display_name(bundle_id)
-        .await
-        .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
+        let server_name = runtime
+            .mcp_server_display_name(bundle_id)
+            .await
+            .ok_or_else(|| format!("MCP server not found: {bundle_id}"))?;
 
-    log::info!(
-        "get_window_detail called: bundle_id={}, server={}, uri={}",
-        bundle_id,
-        server_name,
-        uri
-    );
+        log::info!(
+            "get_window_detail called: bundle_id={}, server={}, uri_present=true",
+            bundle_id,
+            server_name
+        );
 
-    // Create a Resource object for the request
-    let resource = make_resource(uri.to_string(), uri.to_string(), None, None);
+        // Create a Resource object for the request
+        let resource = make_resource(uri.to_string(), uri.to_string(), None, None);
 
-    // Window detail reads are owned by SDK Computer for the same reason as window discovery.
-    let result = runtime
-        .window_detail(bundle_id, resource)
-        .await
-        .map_err(|e| format!("Failed to get window detail: {}", e))?;
+        // Window detail reads are owned by SDK Computer for the same reason as window discovery.
+        let result = runtime
+            .window_detail(bundle_id, resource)
+            .await
+            .map_err(|e| format!("Failed to get window detail: {}", e))?;
 
-    // Convert ResourceContents to WindowContent
-    let contents: Vec<WindowContent> = result
-        .contents
-        .into_iter()
-        .filter_map(|rc| match rc {
-            ResourceContents::TextResourceContents {
-                uri,
-                mime_type,
-                text,
-                ..
-            } => Some(WindowContent {
-                content_type: "text".to_string(),
-                uri,
-                mime_type,
-                text: Some(text),
-                blob: None,
-            }),
-            ResourceContents::BlobResourceContents {
-                uri,
-                mime_type,
-                blob,
-                ..
-            } => Some(WindowContent {
-                content_type: "blob".to_string(),
-                uri,
-                mime_type,
-                text: None,
-                blob: Some(blob),
-            }),
-            _ => {
-                log::warn!("Ignoring unsupported MCP resource content variant");
-                None
-            }
+        // Convert ResourceContents to WindowContent
+        let contents: Vec<WindowContent> = result
+            .contents
+            .into_iter()
+            .filter_map(|rc| match rc {
+                ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => Some(WindowContent {
+                    content_type: "text".to_string(),
+                    uri,
+                    mime_type,
+                    text: Some(text),
+                    blob: None,
+                }),
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => Some(WindowContent {
+                    content_type: "blob".to_string(),
+                    uri,
+                    mime_type,
+                    text: None,
+                    blob: Some(blob),
+                }),
+                _ => {
+                    log::warn!("Ignoring unsupported MCP resource content variant");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(WindowDetail {
+            bundle_id: bundle_id.clone(),
+            uri: uri.to_string(),
+            title: None, // Title not available in detail response
+            server: server_name,
+            contents,
         })
-        .collect();
-
-    Ok(WindowDetail {
-        bundle_id: bundle_id.clone(),
-        uri: uri.to_string(),
-        title: None, // Title not available in detail response
-        server: server_name,
-        contents,
-    })
+    }
+    .await;
+    let (managed_by, provider) = mcp_activity_ownership(state, instance_id, bundle_id.as_str());
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Resource,
+            event_type: "desktop_resource",
+            operation: "read",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(managed_by),
+            provider: Some(provider),
+            message_subject: "Desktop resource read",
+            fields: serde_json::json!({
+                "bundle_id": bundle_id,
+                "uri": uri,
+                "content_recorded": false,
+            }),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn require_instance_id(instance_id: &str) -> Result<&str, String> {

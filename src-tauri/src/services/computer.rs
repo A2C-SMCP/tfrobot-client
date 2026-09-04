@@ -89,7 +89,57 @@ pub use runtime_lifecycle::{
 pub type ComputerInstanceId = String;
 pub type ComputerRuntimeState = LifecycleState;
 
-type SharedRuntimeEventSink = Arc<RwLock<Option<Arc<dyn ComputerRuntimeEventSink>>>>;
+struct RuntimeEventSinkHub {
+    durable: std::sync::RwLock<Option<Arc<dyn ComputerRuntimeEventSink>>>,
+    ui: std::sync::RwLock<Option<Arc<dyn ComputerRuntimeEventSink>>>,
+}
+
+impl RuntimeEventSinkHub {
+    fn new() -> Self {
+        Self {
+            durable: std::sync::RwLock::new(None),
+            ui: std::sync::RwLock::new(None),
+        }
+    }
+
+    fn has_sink(&self) -> bool {
+        self.durable
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+            || self
+                .ui
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+    }
+
+    fn emit(&self, event: &ComputerRuntimeStatusEvent) -> Result<(), String> {
+        let durable = self
+            .durable
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let ui = self
+            .ui
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let mut errors = Vec::new();
+        for sink in [durable, ui].into_iter().flatten() {
+            if let Err(error) = sink.emit(event) {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+type SharedRuntimeEventSink = Arc<RuntimeEventSinkHub>;
 
 static NEXT_RUNTIME_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
@@ -1039,7 +1089,7 @@ impl ComputerInstanceRuntime {
             instance,
             skill_home_base,
             secret_store,
-            Arc::new(RwLock::new(None)),
+            Arc::new(RuntimeEventSinkHub::new()),
             Arc::new(RuntimeInputBridge::new()),
             ClientControlBinding::default(),
         )
