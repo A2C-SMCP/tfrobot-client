@@ -52,6 +52,7 @@ use tfrobot_client_lib::services::runtime_input_bridge::{
 };
 use tfrobot_client_lib::services::settings::SettingsService;
 use tfrobot_client_lib::AppState;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tower::service_fn;
@@ -1980,6 +1981,168 @@ async fn start_all_materializes_a_new_input_definition_before_batch_retry() {
         .await
         .unwrap();
     assert!(servers.iter().all(|server| server.running));
+}
+
+async fn assert_six_mcp_startup_is_bounded(cold_start: bool) {
+    require_node();
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    if !cold_start {
+        start_computer_instance_core(None, &state, TEST_INSTANCE_ID.to_string())
+            .await
+            .unwrap();
+    }
+    for index in 0..6 {
+        let name = format!("controlled-{index}");
+        let config = serde_json::from_value(serde_json::json!({
+            "type": "stdio", "name": name, "bundle_id": name, "disabled": false,
+            "server_parameters": {
+                "command": "node",
+                "args": [echo_server_path().with_file_name("controlled-start.js"), port.to_string(), name]
+            }
+        })).unwrap();
+        sdk_config::upsert_computer_mcp_config_core(&state, TEST_INSTANCE_ID, config)
+            .await
+            .unwrap();
+    }
+    // Include a real launch failure: the remaining six must still start.
+    sdk_config::upsert_computer_mcp_config_core(
+        &state,
+        TEST_INSTANCE_ID,
+        unavailable_server_config("unavailable"),
+    )
+    .await
+    .unwrap();
+    let state = Arc::new(if cold_start {
+        drop(state);
+        create_mcp_test_app_state(tmp.path()).await
+    } else {
+        state
+    });
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .computer_registry
+        .set_runtime_event_sink(Arc::new(ChannelRuntimeEventSink { sender }))
+        .await;
+    let start_state = state.clone();
+    let start = tokio::spawn(async move {
+        if cold_start {
+            computer::start_computer_instance_interactive_core(
+                None,
+                &start_state,
+                TEST_INSTANCE_ID.to_string(),
+            )
+            .await
+            .unwrap();
+        } else {
+            let result = mcp::start_all_servers_interactive_core(&start_state, TEST_INSTANCE_ID)
+                .await
+                .unwrap();
+            assert_eq!(result.actual_operation_count, 6);
+            assert_eq!(result.failures.len(), 1);
+        }
+    });
+    let mut admitted = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let (stream, _) = timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("five MCP processes must initialize concurrently")
+            .unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut name = String::new();
+        timeout(Duration::from_secs(5), stream.read_line(&mut name))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(names.insert(name));
+        admitted.push(stream.into_inner());
+    }
+    assert!(
+        timeout(Duration::from_millis(250), listener.accept())
+            .await
+            .is_err(),
+        "sixth MCP must wait while all five startup slots are held"
+    );
+    assert!(
+        !start.is_finished(),
+        "command must wait for the batch to settle"
+    );
+    admitted
+        .pop()
+        .unwrap()
+        .write_all(b"release\n")
+        .await
+        .unwrap();
+    let (sixth, _) = timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .expect("sixth MCP must enter after one start completes")
+        .unwrap();
+    let mut sixth = BufReader::new(sixth);
+    let mut name = String::new();
+    timeout(Duration::from_secs(5), sixth.read_line(&mut name))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(names.insert(name));
+    assert_eq!(names.len(), 6);
+    admitted.push(sixth.into_inner());
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            if event.snapshot.active_mcp_servers > 0 {
+                return;
+            }
+        }
+        panic!("runtime event stream closed before a completed MCP was published");
+    })
+    .await
+    .expect("UI must receive active MCP status before the entire batch finishes");
+    assert!(!start.is_finished());
+    for mut stream in admitted {
+        stream.write_all(b"release\n").await.unwrap();
+    }
+    timeout(Duration::from_secs(15), start)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .mcp_server_runtime_statuses()
+            .await
+            .iter()
+            .filter(|s| s.bundle_id.as_str().starts_with("controlled-") && s.is_started())
+            .count(),
+        6
+    );
+    // Repeating start-all must not create a second process for any running MCP.
+    let repeated = mcp::start_all_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(repeated.unchanged_count, 6);
+    assert_eq!(repeated.failures.len(), 1);
+    assert!(timeout(Duration::from_millis(250), listener.accept())
+        .await
+        .is_err());
+    computer::stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn foreground_computer_start_bounds_six_mcp_and_isolates_failure() {
+    assert_six_mcp_startup_is_bounded(true).await;
+}
+
+#[tokio::test]
+async fn foreground_start_all_bounds_six_mcp_and_isolates_failure() {
+    assert_six_mcp_startup_is_bounded(false).await;
 }
 
 #[tokio::test]
@@ -7046,7 +7209,14 @@ async fn test_foreground_computer_start_stops_after_first_input_failure() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
-    for input_id in ["first-token", "second-token"] {
+    for input_id in [
+        "first-token",
+        "second-token",
+        "third-token",
+        "fourth-token",
+        "fifth-token",
+        "sixth-token",
+    ] {
         inputs::add_or_update_input_core(
             &state,
             TEST_INSTANCE_ID,

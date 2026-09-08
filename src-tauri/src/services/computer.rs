@@ -1790,9 +1790,7 @@ impl ComputerInstanceRuntime {
             .await
             .map_err(|error| error.to_string())?;
         if computer_running {
-            let failures = self
-                .start_desired_mcp_servers_inner(RuntimeMcpStartFailurePolicy::BestEffort)
-                .await;
+            let failures = self.start_desired_mcp_servers_inner().await;
             self.log_mcp_start_failures(&failures, "user MCP removal");
         }
         Ok(())
@@ -2268,11 +2266,7 @@ impl ComputerInstanceRuntime {
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, ComputerError)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.start_mcp_servers_with_failure_policy_inner(
-            bundle_ids,
-            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures,
-        )
-        .await
+        self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
     async fn start_mcp_servers_best_effort_inner(
@@ -2321,29 +2315,7 @@ impl ComputerInstanceRuntime {
         failures
     }
 
-    async fn start_mcp_servers_with_failure_policy_inner(
-        &self,
-        bundle_ids: Vec<BundleId>,
-        failure_policy: RuntimeMcpStartFailurePolicy,
-    ) -> Vec<(BundleId, ComputerError)> {
-        let mut failures = Vec::new();
-        for bundle_id in bundle_ids {
-            if let Err(error) = self.start_mcp_server_inner(&bundle_id).await {
-                let stop = failure_policy.propagates_runtime_input_failures()
-                    && matches!(error, ComputerError::InputResolution(_));
-                failures.push((bundle_id, error));
-                if stop {
-                    break;
-                }
-            }
-        }
-        failures
-    }
-
-    pub(super) async fn start_desired_mcp_servers_inner(
-        &self,
-        failure_policy: RuntimeMcpStartFailurePolicy,
-    ) -> Vec<(BundleId, ComputerError)> {
+    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership_internal()
             .await
@@ -2353,15 +2325,7 @@ impl ComputerInstanceRuntime {
             })
             .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok())
             .collect();
-        match failure_policy {
-            RuntimeMcpStartFailurePolicy::BestEffort => {
-                self.start_mcp_servers_best_effort_inner(bundle_ids).await
-            }
-            RuntimeMcpStartFailurePolicy::PropagateRuntimeInputFailures => {
-                self.start_mcp_servers_with_failure_policy_inner(bundle_ids, failure_policy)
-                    .await
-            }
-        }
+        self.start_mcp_servers_best_effort_inner(bundle_ids).await
     }
 
     pub(super) fn log_mcp_start_failures(
@@ -3048,7 +3012,7 @@ impl ComputerInstanceRuntime {
                 }
                 return Err(start_error);
             }
-            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            let failures = self.start_desired_mcp_servers_inner().await;
             if let Err(error) =
                 self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
             {
