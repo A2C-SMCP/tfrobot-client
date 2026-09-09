@@ -58,6 +58,11 @@
       "incompatible": "不支持对话"
     },
     "workspace": {
+      "attach": "添加附件",
+      "pastedTextTitle": "粘贴文本",
+      "removeAttachment": "移除附件",
+      "removeLongText": "移除粘贴文本",
+      "retryUpload": "重试上传",
       "askUserCancel": "取消",
       "askUserChatAboutThis": "围绕此项对话",
       "askUserLabel": "需要用户输入",
@@ -116,6 +121,17 @@
       "textSendingUnavailable": "当前无法发送文本消息。",
       "timelineLabel": "会话时间线",
       "lifecycleDegraded": "连接已恢复，但仅能尽力补回历史；部分瞬时更新可能缺失。"
+    },
+    "resourceErrors": {
+      "permission": "你没有访问此附件的权限。",
+      "not_found": "未找到此附件。",
+      "network": "无法连接附件服务，请重试。",
+      "timeout": "附件请求超时，请重试。",
+      "invalid": "附件地址无效。",
+      "too_large": "附件超过 1 GiB 大小限制。",
+      "busy": "附件请求过多，请在下载完成后重试。",
+      "save": "无法保存附件，请检查保存位置和磁盘空间。",
+      "unsupported": "此文件类型不支持自动打开，请使用下载保存文件。"
     }
   },
   "computer": {

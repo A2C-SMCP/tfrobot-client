@@ -58,6 +58,11 @@
       "incompatible": "Chat not supported"
     },
     "workspace": {
+      "attach": "Attach",
+      "pastedTextTitle": "Pasted text",
+      "removeAttachment": "Remove attachment",
+      "removeLongText": "Remove pasted text",
+      "retryUpload": "Retry upload",
       "askUserCancel": "Cancel",
       "askUserChatAboutThis": "Chat about this",
       "askUserLabel": "User input requested",
@@ -116,6 +121,17 @@
       "textSendingUnavailable": "Text sending is unavailable.",
       "timelineLabel": "Conversation timeline",
       "lifecycleDegraded": "Connected with best-effort history recovery; some transient updates may be missing."
+    },
+    "resourceErrors": {
+      "permission": "You do not have permission to access this attachment.",
+      "not_found": "This attachment was not found.",
+      "network": "The attachment service could not be reached. Please retry.",
+      "timeout": "The attachment request timed out. Please retry.",
+      "invalid": "This attachment address is invalid.",
+      "too_large": "This attachment exceeds the 1 GiB limit.",
+      "busy": "Too many attachment requests. Please retry after a download finishes.",
+      "save": "The attachment could not be saved. Check the destination and available disk space.",
+      "unsupported": "This file type cannot be opened automatically. Use Download to save it."
     }
   },
   "computer": {

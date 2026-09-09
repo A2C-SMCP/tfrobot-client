@@ -30,6 +30,7 @@ vi.mock('@turingfocus/chat-kit', () => ({
   OwnedChatProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   ChatUiShell: () => <div>Managed Chat Workspace</div>,
   ChatConversationView: () => null,
+  ChatResourceProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useConversationWorkspace: chatKitMock.useConversationWorkspace,
 }));
 
