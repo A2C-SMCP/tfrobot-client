@@ -558,6 +558,7 @@ pub fn run() {
                 commands::manager::TauriManagerTokenBridgeSink::new(app.handle().clone()),
             )));
             commands::runtime_input::install_runtime_input_sink(app.handle().clone(), &state);
+            commands::chat::install_resource_diagnostics(app.handle().clone(), &state.chat_sessions);
 
             if let Err(error) = state.observability.apply_retention(ObservabilityRetention {
                 activity_days: settings.activity_retention_days,
@@ -716,6 +717,12 @@ pub fn run() {
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,
+            commands::chat::chat_prepare_transfer,
+            commands::chat::chat_cancel_transfer,
+            commands::chat::chat_upload_request,
+            commands::chat::chat_resolve_resource,
+            commands::chat::chat_release_resource,
+            commands::chat::chat_save_resource,
             commands::chat::chat_close_session,
         ])
         .build(tauri::generate_context!())

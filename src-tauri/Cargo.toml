@@ -59,7 +59,7 @@ tauri-plugin-single-instance = "2"
 dirs = "6.0.0"
 
 # HTTP client for TFRSManager REST APIs (rustls to avoid OpenSSL dep)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 
 # Hashing for keychain key derivation (base_url → stable short hash)
 sha2 = "0.10"
@@ -67,6 +67,9 @@ hex = "0.4"
 base64 = "0.22"
 tempfile = "3"
 futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -74,7 +77,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio"] }
-http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
 smcp-server-core = "0.2.3"

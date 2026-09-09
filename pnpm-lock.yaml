@@ -5,11 +5,11 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@turingfocus/chat-gateway-tfrobot': 0.7.0
-  '@turingfocus/chat-protocol': 0.7.0
-  '@turingfocus/chat-react': 0.7.0
-  '@turingfocus/chat-runtime': 0.7.0
-  '@turingfocus/chat-ui-antd': 0.7.0
+  '@turingfocus/chat-gateway-tfrobot': 0.8.0
+  '@turingfocus/chat-protocol': 0.8.0
+  '@turingfocus/chat-react': 0.8.0
+  '@turingfocus/chat-runtime': 0.8.0
+  '@turingfocus/chat-ui-antd': 0.8.0
 
 importers:
 
@@ -34,8 +34,8 @@ importers:
         specifier: ^2.10.0
         version: 2.10.0
       '@turingfocus/chat-kit':
-        specifier: 0.7.0
-        version: 0.7.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        specifier: 0.8.0
+        version: 0.8.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@turingfocus/tfrs-auth':
         specifier: 0.2.0
         version: 0.2.0
@@ -1201,11 +1201,11 @@ packages:
   '@tootallnate/quickjs-emscripten@0.23.0':
     resolution: {integrity: sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA==}
 
-  '@turingfocus/chat-gateway-tfrobot@0.7.0':
-    resolution: {integrity: sha512-CRVkU3jYkdNA/7+Bxmd54yV8hgGYRPf7Nexo7/1j+LdRh89gkUHQkPDLzkkEF5563DIh/1bAu61cqSdKY1fpdg==}
+  '@turingfocus/chat-gateway-tfrobot@0.8.0':
+    resolution: {integrity: sha512-IlA5LZK+jz5avPo+rXOZu2UxB4j8UpJWqVNJUYdCzl9A7bT1s1rS0bbVhiAIYa3J22M7bEV+01Tfzy5VPznytQ==}
 
-  '@turingfocus/chat-kit@0.7.0':
-    resolution: {integrity: sha512-TQFvInwA9GkEjM+LLvegOPZoDNl9w1kXqx9mHgsa08/CW+ulccnHG/DH2qKUkRp9jY91VTjB857nFRWSFBXB1w==}
+  '@turingfocus/chat-kit@0.8.0':
+    resolution: {integrity: sha512-6XXBQkSAPNGRbcjrH8/WQ1Cy6ip66jPcikwyyDn0IkZT+z3m15lNmaLpsk/n12p2OEw4d8RhBlxRjYRp/WaoRg==}
     peerDependencies:
       antd: '>=5.23.4 <6.0.0'
       react: '>=18.2.0 <19.0.0'
@@ -1218,19 +1218,19 @@ packages:
       react-dom:
         optional: true
 
-  '@turingfocus/chat-protocol@0.7.0':
-    resolution: {integrity: sha512-4z6ibr0vArsl1rKFZvAvMUe/0bbnUxn91BOajUSa8pu7wEHh6HKLlAZ2m7viF1aT6oTf2T1WuN0T47RZ2I+AAA==}
+  '@turingfocus/chat-protocol@0.8.0':
+    resolution: {integrity: sha512-ZKDJeLd5YJSEg1cudp3XDqoyk9qhijA6YXHuSF/kO83VlKi/EpPYlGMHfvVvaN7/wuuZhKW1xYVAoznMjsjjrQ==}
 
-  '@turingfocus/chat-react@0.7.0':
-    resolution: {integrity: sha512-hD/4ZPTMcpbgp4+9WDCd6xHTlz2chTF+ETqA4f/ZsuNdVQaH3Tihz/O6yrD570clCV+lp3HUqFdlez6bBWOFyw==}
+  '@turingfocus/chat-react@0.8.0':
+    resolution: {integrity: sha512-+8lLvxR+S5Ckz0YhnjvZCCr3G+5gPenerpJoI1YT522EHqyDmEXzzQbi2v5jI1ZyV+RSNGjWsc8GumHkt8bSZg==}
     peerDependencies:
       react: '>=18.2.0 <19.0.0'
 
-  '@turingfocus/chat-runtime@0.7.0':
-    resolution: {integrity: sha512-y0f+GKJTeRIDHwPUiwVC/aWk6Tsszl3Bbm7SGObMjEhyXgDBFRhHQJihzFSMzJ/xraqZ/BB3e+i1EnOQ/5Nt9w==}
+  '@turingfocus/chat-runtime@0.8.0':
+    resolution: {integrity: sha512-3abgkno5qzfhtQTP0DcDAEtOD2HXR/YKK/CBqj7kMrkh/FmIiZi8hbVvPXP6b718H3CkZT9AgZ5G7VfS8nWt8w==}
 
-  '@turingfocus/chat-ui-antd@0.7.0':
-    resolution: {integrity: sha512-jP+Vch2avipgfPQ3azilwtfhvWMM2UZ4IZOOTsw5l6r3ZkqfTh3hKfdkrIC62YHBdRPAbQn9+PQylW6QJRKC2g==}
+  '@turingfocus/chat-ui-antd@0.8.0':
+    resolution: {integrity: sha512-V7fyjEc5Ht7Yk/J19Uy2OyLrBxRmIMfvrD6Z++sb+yV/iCJF4oOYRTIkXAcsJOab4nfgYNi6RT8Rq/bTd2+WCw==}
     peerDependencies:
       antd: '>=5.23.4 <6.0.0'
       react: '>=18.2.0 <19.0.0'
@@ -1959,6 +1959,10 @@ packages:
     resolution: {integrity: sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw==}
     engines: {node: '>=0.3.1'}
 
+  diff@9.0.0:
+    resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
+    engines: {node: '>=0.3.1'}
+
   dom-accessibility-api@0.5.16:
     resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
 
@@ -2347,6 +2351,10 @@ packages:
 
   hermes-parser@0.25.1:
     resolution: {integrity: sha512-6pEjquH3rqaI6cYAXYPcz9MS4rY6R4ngRgrgfDshRptUZIc3lw0MCIJIGDj9++mfySOuPTHB4nrSW99BCvOPIA==}
+
+  highlight.js@11.12.0:
+    resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
+    engines: {node: '>=12.0.0'}
 
   hosted-git-info@7.0.2:
     resolution: {integrity: sha512-puUZAUKT5m8Zzvs72XWy3HtvVbTWljRE66cP60bxJzAqf2DgICo7lYTY2IHUmLnNpjYvw5bvmoHvPc0QO2a62w==}
@@ -4986,9 +4994,9 @@ snapshots:
 
   '@tootallnate/quickjs-emscripten@0.23.0': {}
 
-  '@turingfocus/chat-gateway-tfrobot@0.7.0':
+  '@turingfocus/chat-gateway-tfrobot@0.8.0':
     dependencies:
-      '@turingfocus/chat-protocol': 0.7.0
+      '@turingfocus/chat-protocol': 0.8.0
       socket.io-client: 4.8.3
       zod: 4.0.17
     transitivePeerDependencies:
@@ -4996,13 +5004,13 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@turingfocus/chat-kit@0.7.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+  '@turingfocus/chat-kit@0.8.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
-      '@turingfocus/chat-gateway-tfrobot': 0.7.0
-      '@turingfocus/chat-protocol': 0.7.0
-      '@turingfocus/chat-react': 0.7.0(react@18.3.1)
-      '@turingfocus/chat-runtime': 0.7.0
-      '@turingfocus/chat-ui-antd': 0.7.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@turingfocus/chat-gateway-tfrobot': 0.8.0
+      '@turingfocus/chat-protocol': 0.8.0
+      '@turingfocus/chat-react': 0.8.0(react@18.3.1)
+      '@turingfocus/chat-runtime': 0.8.0
+      '@turingfocus/chat-ui-antd': 0.8.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     optionalDependencies:
       antd: 5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react: 18.3.1
@@ -5013,24 +5021,26 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@turingfocus/chat-protocol@0.7.0':
+  '@turingfocus/chat-protocol@0.8.0':
     dependencies:
       zod: 4.0.17
 
-  '@turingfocus/chat-react@0.7.0(react@18.3.1)':
+  '@turingfocus/chat-react@0.8.0(react@18.3.1)':
     dependencies:
-      '@turingfocus/chat-runtime': 0.7.0
+      '@turingfocus/chat-runtime': 0.8.0
       react: 18.3.1
 
-  '@turingfocus/chat-runtime@0.7.0':
+  '@turingfocus/chat-runtime@0.8.0':
     dependencies:
-      '@turingfocus/chat-protocol': 0.7.0
+      '@turingfocus/chat-protocol': 0.8.0
 
-  '@turingfocus/chat-ui-antd@0.7.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+  '@turingfocus/chat-ui-antd@0.8.0(@types/react@18.3.27)(antd@5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
-      '@turingfocus/chat-protocol': 0.7.0
-      '@turingfocus/chat-react': 0.7.0(react@18.3.1)
+      '@turingfocus/chat-protocol': 0.8.0
+      '@turingfocus/chat-react': 0.8.0(react@18.3.1)
       antd: 5.29.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      diff: 9.0.0
+      highlight.js: 11.12.0
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
       react-markdown: 10.1.0(@types/react@18.3.27)(react@18.3.1)
@@ -5981,6 +5991,8 @@ snapshots:
 
   diff@8.0.4: {}
 
+  diff@9.0.0: {}
+
   dom-accessibility-api@0.5.16: {}
 
   dom-accessibility-api@0.6.3: {}
@@ -6483,6 +6495,8 @@ snapshots:
   hermes-parser@0.25.1:
     dependencies:
       hermes-estree: 0.25.1
+
+  highlight.js@11.12.0: {}
 
   hosted-git-info@7.0.2:
     dependencies:

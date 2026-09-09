@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import {
   ApartmentOutlined,
   LoginOutlined,
@@ -24,6 +25,7 @@ import {
 } from 'antd';
 import {
   ChatConversationView,
+  ChatResourceProvider,
   ChatUiShell,
   OwnedChatProvider,
   useConversationWorkspace,
@@ -54,6 +56,7 @@ import {
   preferredChatRobotId,
 } from './availability';
 import styles from './Chat.module.css';
+import { createChatResourcePort } from './chatResources';
 
 const { Text, Title } = Typography;
 const EMPTY_EMPLOYEES: DigitalEmployeeBrief[] = [];
@@ -123,13 +126,28 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
     },
   }), [creator, descriptor]);
 
+  const [resourceError, setResourceError] = useState<string>();
+  const resources = useMemo(() => createChatResourcePort(descriptor.leaseId, setResourceError), [descriptor.leaseId]);
+  useEffect(() => {
+    let disposed = false;
+    const listener = listen<{ leaseId: string; error: { code: string } }>('chat-resource-error', ({ payload }) => {
+      if (!disposed && payload.leaseId === descriptor.leaseId) setResourceError(payload.error.code);
+    });
+    return () => { disposed = true; void listener.then((unlisten) => unlisten()).catch(() => undefined); };
+  }, [descriptor.leaseId]);
+
   return (
     <OwnedChatProvider
       factory={factory}
       fallback={<div className={styles.centered}><Spin /></div>}
       onDisposeError={() => warn('chat: failed to dispose ChatClient cleanly')}
     >
-      <CompactChatWorkspace labels={labels} />
+      {resourceError && <Alert type="error" showIcon closable
+        message={t(`chat.resourceErrors.${resourceError}`, { defaultValue: t('chat.resourceErrors.network') })}
+        onClose={() => setResourceError(undefined)} />}
+      <ChatResourceProvider port={resources} scope={descriptor.leaseId}>
+        <CompactChatWorkspace labels={labels} />
+      </ChatResourceProvider>
     </OwnedChatProvider>
   );
 }
