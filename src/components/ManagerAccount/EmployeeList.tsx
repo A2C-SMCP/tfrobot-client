@@ -1,3 +1,4 @@
+import { usePageActive } from '@/components/Navigation/pageActivityState';
 import { useEffect } from 'react';
 import {
   App,
@@ -137,14 +138,16 @@ export function EmployeeList({
   const orphanCleanupAvailable = backendConnectionStatus === 'disconnected'
     && disconnectCapability.enabled;
 
+  const pageActive = usePageActive();
+
   // 进入列表页：60s staleness 兜底拉取（与后端可见集合缓存 TTL 对齐）。
   useEffect(() => {
-    if (authenticatedScope) {
+    if (pageActive && authenticatedScope) {
       fetchEmployeesIfStale().catch(() => {
         /* error stored in store */
       });
     }
-  }, [authenticatedScope, fetchEmployeesIfStale]);
+  }, [pageActive, authenticatedScope, fetchEmployeesIfStale]);
 
   // 在线/离线探测：离线 → 在线跳变时 store 会自动校准 refetch。
   useEffect(() => {

@@ -19,6 +19,7 @@ interface MockMcpStore {
 }
 
 interface MockDebugStore {
+  resourceQuery: { instanceId: string; bundleId: string } | null;
   resources: Array<{
     server: string;
     uri: string;
@@ -75,6 +76,7 @@ function makeMcpStore(overrides?: Partial<MockMcpStore>): MockMcpStore {
 
 function makeDebugStore(overrides?: Partial<MockDebugStore>): MockDebugStore {
   return {
+    resourceQuery: { instanceId: 'computer-a', bundleId: 'fs-bundle' },
     resources: [
       {
         server: 'fs-server',
@@ -97,7 +99,7 @@ vi.mock('@/stores/mcpStore', () => ({
 }));
 
 vi.mock('@/stores/debugStore', () => ({
-  useDebugStore: vi.fn(() => mockDebugStore),
+  useDebugStore: Object.assign(vi.fn(() => mockDebugStore), { getState: () => mockDebugStore }),
 }));
 
 describe('ResourceBrowser', () => {

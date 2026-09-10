@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { McpConfig } from '@/components/McpConfig';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -215,6 +215,36 @@ describe('McpConfig', () => {
       instanceId,
       expect.objectContaining({ name: 'test-stdio', disabled: true }),
     ));
+  });
+
+  it('discards an editor when refreshed authoritative configuration removes its server', async () => {
+    const state = { ...mockSdkStore, activeInstanceId: instanceId,
+      snapshot: { revision: 'before', mcp: { servers: [configServers[0]] } },
+    };
+    mockUseSdkConfigStore.mockReturnValue(state as any);
+    const view = render(<McpConfig instanceId={instanceId} />);
+    fireEvent.click(screen.getByTitle('Edit'));
+    expect(await screen.findByRole('button', { name: 'Submit mocked server' })).toBeInTheDocument();
+    mockUseSdkConfigStore.mockReturnValue({ ...state, snapshot: { revision: 'after', mcp: { servers: [] } } } as any);
+    view.rerender(<McpConfig instanceId={instanceId} />);
+    // jsdom does not complete Ant's CSS leave animation; assert the close transition.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Submit mocked server' }).closest('.ant-modal')).toHaveClass('ant-zoom-leave'));
+    expect(mockSdkStore.upsertServer).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh the old Computer when its mutation completes after navigation', async () => {
+    let finish!: () => void;
+    mockSdkStore.upsertServer.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+    mockUseSdkConfigStore.mockReturnValue({ ...mockSdkStore,
+      snapshot: { revision: 'a', mcp: { servers: [configServers[0]] } },
+    } as any);
+    const view = render(<McpConfig instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('switch', { name: 'Toggle server test-stdio enabled state' }));
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledOnce());
+    view.rerender(<McpConfig instanceId="computer-b" />);
+    mockMcpStore.fetchServers.mockClear();
+    await act(async () => { finish(); });
+    expect(mockMcpStore.fetchServers).not.toHaveBeenCalled();
   });
 
   it('fails closed while authoritative MCP ownership is loading', () => {

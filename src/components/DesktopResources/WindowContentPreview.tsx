@@ -1,4 +1,5 @@
-import { Image, Spin, Typography } from 'antd';
+import { PageImage as Image } from '@/components/Navigation/PageOverlays';
+import { Spin, Typography } from 'antd';
 import { useTranslation } from 'react-i18next';
 import type { WindowContent } from '@/stores/desktopStore';
 

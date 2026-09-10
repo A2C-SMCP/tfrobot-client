@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from '../helpers/render';
+import { PageHost } from '@/components/Navigation/PageHost';
+import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -29,6 +30,19 @@ describe('SkillsSettings', () => {
     vi.clearAllMocks();
     useComputerStore.getState().reset();
     useSkillStore.getState().reset();
+  });
+
+  it('does not replay a confirmation when validation finishes after leaving the page', async () => {
+    const tree = (active: boolean) => <PageHost name="skills" active={active}><SkillsSettings instance={instance} /></PageHost>;
+    const view = render(tree(true));
+    fireEvent.change(screen.getByLabelText('Instance Skill Home'), { target: { value: '/draft/home' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    view.rerender(tree(false));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(tree(true));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Instance Skill Home')).toHaveValue('/draft/home');
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 
   it('renders only the saved Skill Home and saves a custom root after confirmation', async () => {

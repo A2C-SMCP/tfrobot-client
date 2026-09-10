@@ -1,3 +1,5 @@
+import { NavigationMemoryProvider, NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { NavigationMemory } from '@/stores/navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { StrictMode, useCallback, useState } from 'react';
@@ -863,6 +865,54 @@ describe('MarketplaceTab', () => {
     });
     expect(await screen.findByText('Summarizer')).toBeInTheDocument();
     expect(screen.getByText('Summarize text.')).toBeInTheDocument();
+  });
+
+  it('does not start the second refresh read after its page is released', async () => {
+    const governance = { capabilities: supportedCapabilities, marketplaces: [], plugins: [] };
+    let finish!: (value: unknown) => void;
+    let refreshing = false;
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return refreshing ? new Promise((resolve) => { finish = resolve; }) : governance;
+      if (command === 'list_skills') return [];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const view = render(<MarketplaceTab instanceId="computer-a" />);
+    await screen.findByText('No SDK marketplaces returned');
+    const count = mockedInvoke.mock.calls.filter(([command]) => command === 'list_skills').length;
+    refreshing = true;
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    view.unmount();
+    useSkillStore.getState().reset();
+    await act(async () => { finish(governance); });
+    expect(mockedInvoke.mock.calls.filter(([command]) => command === 'list_skills')).toHaveLength(count);
+    expect(useSkillStore.getState().recordsByInstanceId).toEqual({});
+  });
+
+  it('reloads the selected plugin skill after its Computer subtree is released', async () => {
+    const governance = { capabilities: supportedCapabilities,
+      marketplaces: [{ name: 'tf-market', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/tf.git' }, status: 'known', message: null }],
+      plugins: [{ marketplace: 'tf-market', plugin: 'desktop-tools', pluginId: 'plugin-1', version: '1.0.0',
+        installed: true, enabled: true, status: 'enabled', bundledMcpServers: [], bundledSkills: ['summarizer'], declared: null, message: null }],
+    };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return governance;
+      if (command === 'list_skills') return [];
+      if (command === 'get_skill') return { name: 'summarizer', isText: true, body: '# Restored preview' };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const memory = new NavigationMemory();
+    const tree = (id: string) => <NavigationMemoryProvider memory={memory}>
+      <NavigationScope id={`computer:${id}`} key={id}><MarketplaceTab instanceId={id} /></NavigationScope>
+    </NavigationMemoryProvider>;
+    const view = render(tree('computer-a'));
+    fireEvent.click(await screen.findByText('summarizer'));
+    expect(await screen.findByText('Restored preview')).toBeInTheDocument();
+    view.rerender(tree('computer-b'));
+    await screen.findByText('summarizer');
+    view.rerender(tree('computer-a'));
+    expect(await screen.findByText('Restored preview')).toBeInTheDocument();
+    expect(mockedInvoke.mock.calls.filter(([command, args]) => command === 'get_skill' && (args as { instanceId?: string } | undefined)?.instanceId === 'computer-a')).toHaveLength(2);
   });
 
   it('renders skill preview errors with a readable alert message', async () => {

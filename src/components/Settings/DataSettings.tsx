@@ -1,4 +1,5 @@
-import { Form, InputNumber, Button, Space, Popconfirm, Select } from 'antd';
+import { PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
+import { Form, InputNumber, Button, Space, Select } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useActivityStore } from '@/stores/activityStore';

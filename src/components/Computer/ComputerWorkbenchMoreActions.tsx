@@ -1,7 +1,8 @@
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import {
   Button,
   Dropdown,
-  Modal,
   Space,
   Typography,
   type MenuProps,
@@ -11,7 +12,7 @@ import {
   MoreOutlined,
   RetweetOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ComputerInstance } from '@/stores/computerStore';
 
@@ -32,6 +33,8 @@ export function ComputerWorkbenchMoreActions({
 }: ComputerWorkbenchMoreActionsProps) {
   const { t } = useTranslation();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const active = usePageActive();
+  useEffect(() => { if (!active) setDeleteOpen(false); }, [active]);
 
   const handleDelete = async () => {
     await onDelete();

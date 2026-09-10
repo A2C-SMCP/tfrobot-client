@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { App, Descriptions, Space, Button } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';
@@ -30,6 +31,14 @@ async function recordUpdateActivity(
 export function AboutSection() {
   const { t } = useTranslation();
   const { modal, message } = App.useApp();
+  const active = usePageActive();
+  const action = usePageAction();
+  const pendingConfirmation = useRef<(() => void) | null>(null);
+  const checkSequence = useRef(0);
+  useLayoutEffect(() => {
+    if (!active) { pendingConfirmation.current?.(); pendingConfirmation.current = null; }
+    return () => { pendingConfirmation.current?.(); pendingConfirmation.current = null; };
+  }, [active]);
   const { appInfo, fetchAppInfo } = useSettingsStore();
 
   useEffect(() => {
@@ -37,31 +46,48 @@ export function AboutSection() {
   }, [fetchAppInfo]);
 
   const checkForUpdates = async () => {
+    const pageCurrent = action();
+    const sequence = ++checkSequence.current;
+    const current = () => pageCurrent() && sequence === checkSequence.current;
+    pendingConfirmation.current?.();
+    pendingConfirmation.current = null;
     const correlationId = crypto.randomUUID();
     try {
       const update = await check();
       if (update) {
-        modal.confirm({
+        const release = () => { void update.close().catch((error) => logWarn(String(error))); };
+        if (!current()) { release(); return; }
+        let started = false;
+        let released = false;
+        const releaseOnce = () => { if (!released) { released = true; release(); } };
+        const confirmation = modal.confirm({
           title: t('settings.updateAvailable'),
           content: `${t('settings.newVersion')}: ${update.version}`,
+          onCancel: () => { releaseOnce(); pendingConfirmation.current = null; },
           onOk: async () => {
+            if (!current() || started) return;
+            started = true;
+            pendingConfirmation.current = null;
             await recordUpdateActivity('install_started', update.version, correlationId);
             try {
               await update.downloadAndInstall();
             } catch (error) {
               await recordUpdateActivity('install_failed', update.version, correlationId, String(error));
-              message.error(String(error));
+              if (current()) message.error(String(error));
+              releaseOnce();
               return;
             }
             await recordUpdateActivity('install_succeeded', update.version, correlationId);
+            releaseOnce();
           },
         });
-      } else {
+        pendingConfirmation.current = () => { confirmation.destroy(); if (!started) releaseOnce(); };
+      } else if (current()) {
         message.info(t('settings.upToDate'));
       }
     } catch (e) {
       await recordUpdateActivity('check_failed', null, correlationId, String(e));
-      message.error(String(e));
+      if (current()) message.error(String(e));
     }
   };
 

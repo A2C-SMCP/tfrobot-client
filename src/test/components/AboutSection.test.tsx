@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { PageActivity } from '@/components/Navigation/PageActivity';
+import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { invoke } from '@tauri-apps/api/core';
 import { check } from '@tauri-apps/plugin-updater';
 import { AboutSection } from '@/components/Settings/AboutSection';
@@ -12,6 +13,38 @@ vi.mock('@/stores/settingsStore', () => ({
 
 describe('AboutSection update activity', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('releases a late update result without opening a confirmation after leaving About', async () => {
+    let finish!: (value: Awaited<ReturnType<typeof check>>) => void;
+    vi.mocked(check).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const close = vi.fn().mockResolvedValue(undefined);
+    const install = vi.fn();
+    const tree = (active: boolean) => <PageActivity active={active}><AboutSection /></PageActivity>;
+    const view = render(tree(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+    view.rerender(tree(false));
+    await act(async () => { finish({ version: '0.3.0', close, downloadAndInstall: install } as never); });
+    view.rerender(tree(true));
+    expect(screen.queryByRole('button', { name: 'OK' })).not.toBeInTheDocument();
+    expect(close).toHaveBeenCalledOnce();
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it('dismisses an unconfirmed update when switching an internal Settings tab', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const install = vi.fn();
+    vi.mocked(check).mockResolvedValueOnce({ version: '0.3.0', close, downloadAndInstall: install } as never);
+    const tree = (active: boolean) => <PageActivity active={active}><AboutSection /></PageActivity>;
+    const view = render(tree(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+    const confirm = await screen.findByRole('button', { name: 'OK' });
+    view.rerender(tree(false));
+    view.rerender(tree(true));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    // Even a queued click from the closing portal cannot authorize installation.
+    fireEvent.click(confirm);
+    expect(install).not.toHaveBeenCalled();
+  });
 
   it('records update check failures without exposing them as successful checks', async () => {
     vi.mocked(check).mockRejectedValueOnce(new Error('network unavailable'));
@@ -34,6 +67,7 @@ describe('AboutSection update activity', () => {
     vi.mocked(check).mockResolvedValueOnce({
       version: '0.3.0',
       downloadAndInstall,
+      close: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     render(<AboutSection />);
@@ -62,6 +96,7 @@ describe('AboutSection update activity', () => {
     vi.mocked(check).mockResolvedValueOnce({
       version: '0.3.0',
       downloadAndInstall,
+      close: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     render(<AboutSection />);

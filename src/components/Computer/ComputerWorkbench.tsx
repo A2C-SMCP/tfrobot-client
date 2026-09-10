@@ -24,6 +24,7 @@ interface ComputerWorkbenchProps {
   instance: ComputerInstance;
   loading: boolean;
   initialSection: ComputerWorkbenchSection;
+  navigationRevision?: number;
   onBack: () => void;
   onOpenSettings: () => void;
   onDelete: () => Promise<void>;
@@ -38,6 +39,7 @@ export function ComputerWorkbench({
   instance,
   loading,
   initialSection,
+  navigationRevision,
   onBack,
   onOpenSettings,
   onDelete,
@@ -57,7 +59,7 @@ export function ComputerWorkbench({
     diagnosticPanels,
     changeDiagnosticPanels,
     openSection,
-  } = useComputerWorkbenchSections(initialSection);
+  } = useComputerWorkbenchSections(initialSection, navigationRevision);
 
   return (
     <div className={styles.page} aria-label={t('computer.workbench.pageLabel')}>

@@ -269,7 +269,7 @@ describe('App', () => {
     expect(managerStoreMock.restoreSession).not.toHaveBeenCalled();
   });
 
-  it('returns to the Computer list from a dashboard deep link when the sidebar item is clicked', async () => {
+  it('restores Computer detail when the sidebar item is clicked', async () => {
     render(<App />);
 
     fireEvent.click(screen.getByText('Computer'));
@@ -283,7 +283,7 @@ describe('App', () => {
       fireEvent.click(screen.getByText('Computer'));
     });
     await waitFor(() => {
-      expect(screen.getByText('Computer List View')).toBeInTheDocument();
+      expect(screen.getByText('Computer Detail View: top')).toBeVisible();
     });
   });
 

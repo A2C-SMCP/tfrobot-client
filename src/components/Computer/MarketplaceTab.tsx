@@ -1,6 +1,9 @@
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
+import { useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { App, Alert, Button, Card, Empty, Form, Input, List, Modal, Radio, Skeleton, Space, Tag, Typography } from 'antd';
+import { App, Alert, Button, Card, Empty, Form, Input, List, Radio, Skeleton, Space, Tag, Typography } from 'antd';
 import {
   CloudDownloadOutlined,
   DeleteOutlined,
@@ -87,14 +90,16 @@ export function MarketplaceTab({
   targetPlugin,
   onTargetPluginConsumed,
 }: MarketplaceTabProps) {
+  const pageActive = usePageActive();
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [marketplaceForm] = Form.useForm<MarketplaceFormValues>();
-  const [editingMarketplace, setEditingMarketplace] = useState<string | null>(null);
-  const [marketplaceModalOpen, setMarketplaceModalOpen] = useState(false);
-  const [selectedMarketplaceName, setSelectedMarketplaceName] = useState<string | null>(null);
-  const [selectedPluginKey, setSelectedPluginKey] = useState<string | null>(null);
-  const [selectedSkillName, setSelectedSkillName] = useState<string | null>(null);
+  const [editingMarketplace, setEditingMarketplace] = useNavigationState<string | null>('marketplace.editing', null);
+  const [marketplaceModalOpen, setMarketplaceModalOpen] = useNavigationState('marketplace.editorOpen', false);
+  const [selectedMarketplaceName, setSelectedMarketplaceName] = useNavigationState<string | null>('marketplace.selected', null);
+  const [selectedPluginKey, setSelectedPluginKey] = useNavigationState<string | null>('marketplace.plugin', null);
+  const [selectedSkillName, setSelectedSkillName] = useNavigationState<string | null>('marketplace.skill', null);
+  const previewKey = useRef<string | null>(null);
   const [skillPreview, setSkillPreview] = useState<SkillResource | null>(null);
   const [loadingSkillPreview, setLoadingSkillPreview] = useState(false);
   const [skillPreviewError, setSkillPreviewError] = useState<string | null>(null);
@@ -122,6 +127,8 @@ export function MarketplaceTab({
   const marketplaceOperation = recordsByInstanceId[instanceId]?.marketplaceOperation ?? null;
   const marketplaceBusy = loadingMarketplace || marketplaceOperation !== null;
   const marketplaceError = recordsByInstanceId[instanceId]?.marketplaceError ?? null;
+  const pageAction = usePageAction(instanceId);
+  const marketplaceDraft = useNavigationForm('marketplace.form', marketplaceForm, {} as MarketplaceFormValues);
   const marketplaceSourceType = Form.useWatch(['source', 'type'], marketplaceForm) ?? 'remoteGit';
   const editingMarketplaceLocked = editingMarketplace !== null
     && plugins.some((plugin) => (
@@ -136,9 +143,20 @@ export function MarketplaceTab({
   }, [instanceId]);
 
   useEffect(() => {
+    if (!pageActive) return;
     fetchMarketplaceGovernance(instanceId);
     fetchSkills(instanceId);
-  }, [fetchMarketplaceGovernance, fetchSkills, instanceId]);
+  }, [fetchMarketplaceGovernance, fetchSkills, instanceId, pageActive]);
+
+  useEffect(() => {
+    if (governance && !loadingMarketplace && !marketplaceError && editingMarketplace
+      && !marketplaces.some((marketplace) => marketplace.name === editingMarketplace)) {
+      marketplaceDraft.clearDraft();
+      marketplaceForm.resetFields();
+      setEditingMarketplace(null);
+      setMarketplaceModalOpen(false);
+    }
+  }, [governance, loadingMarketplace, marketplaceError, editingMarketplace, marketplaces, marketplaceDraft, marketplaceForm, setEditingMarketplace, setMarketplaceModalOpen]);
 
   useEffect(() => {
     if (marketplaces.length === 0) {
@@ -148,7 +166,7 @@ export function MarketplaceTab({
     if (!selectedMarketplaceName || !marketplaces.some((marketplace) => marketplace.name === selectedMarketplaceName)) {
       setSelectedMarketplaceName(marketplaces[0].name);
     }
-  }, [marketplaces, selectedMarketplaceName]);
+  }, [marketplaces, selectedMarketplaceName, setSelectedMarketplaceName]);
 
   const marketplacePlugins = useMemo(() => (
     selectedMarketplaceName
@@ -170,7 +188,7 @@ export function MarketplaceTab({
       setSkillPreview(null);
       setSkillPreviewError(null);
     }
-  }, [marketplacePlugins, selectedPluginKey]);
+  }, [marketplacePlugins, selectedPluginKey, setSelectedPluginKey, setSelectedSkillName]);
 
   useEffect(() => {
     if (!targetPlugin) return;
@@ -188,7 +206,7 @@ export function MarketplaceTab({
     setSkillPreview(null);
     setSkillPreviewError(null);
     onTargetPluginConsumed?.();
-  }, [onTargetPluginConsumed, plugins, targetPlugin]);
+  }, [onTargetPluginConsumed, plugins, targetPlugin, setSelectedMarketplaceName, setSelectedPluginKey, setSelectedSkillName]);
 
   const selectedMarketplace = marketplaces.find((marketplace) => marketplace.name === selectedMarketplaceName) ?? null;
   const selectedPlugin = marketplacePlugins.find((plugin) => pluginKey(plugin) === selectedPluginKey) ?? null;
@@ -232,8 +250,9 @@ export function MarketplaceTab({
 
   const handleOpenAddMarketplace = () => {
     setEditingMarketplace(null);
+    marketplaceDraft.clearDraft();
     marketplaceForm.resetFields();
-    marketplaceForm.setFieldsValue({
+    marketplaceDraft.setValues({
       name: '',
       source: { type: 'remoteGit', gitUrl: '' },
     });
@@ -241,12 +260,14 @@ export function MarketplaceTab({
   };
 
   const handleSubmitMarketplace = async () => {
+    const current = pageAction();
     let values: MarketplaceFormValues;
     try {
       values = await marketplaceForm.validateFields();
     } catch {
       return;
     }
+    if (!current() || (editingMarketplace && !marketplaces.some((marketplace) => marketplace.name === editingMarketplace))) return;
     const request = {
       name: values.name,
       source: values.source.type === 'localGit'
@@ -257,9 +278,6 @@ export function MarketplaceTab({
     const successMessage = editingMarketplace
       ? 'marketplace.messages.updated'
       : 'marketplace.messages.added';
-    marketplaceForm.resetFields();
-    setEditingMarketplace(null);
-    setMarketplaceModalOpen(false);
     try {
       if (editingMarketplace) {
         await updateMarketplace(instanceId, { ...request, name: editingMarketplace });
@@ -267,6 +285,11 @@ export function MarketplaceTab({
         await addMarketplace(instanceId, request);
       }
       if (currentInstanceIdRef.current !== instanceId) return;
+      if (!current()) return;
+      marketplaceDraft.clearDraft();
+      marketplaceForm.resetFields();
+      setEditingMarketplace(null);
+      setMarketplaceModalOpen(false);
       setSelectedMarketplaceName(marketplaceName);
       message.success(t(successMessage));
     } catch (e) {
@@ -278,7 +301,7 @@ export function MarketplaceTab({
   const handleEditMarketplace = (marketplace: MarketplaceSummary) => {
     setEditingMarketplace(marketplace.name);
     setSelectedMarketplaceName(marketplace.name);
-    marketplaceForm.setFieldsValue({
+    marketplaceDraft.setValues({
       name: marketplace.name,
       source: marketplace.source.type === 'localGit'
         ? { type: 'localGit', path: marketplace.source.path }
@@ -288,11 +311,13 @@ export function MarketplaceTab({
   };
 
   const handleChooseMarketplaceDirectory = async () => {
+    const current = pageAction();
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
+      if (!current()) return;
       const path = await open({ directory: true, multiple: false });
-      if (path) {
-        marketplaceForm.setFieldValue('source', { type: 'localGit', path });
+      if (path && current()) {
+        marketplaceDraft.setValues({ source: { type: 'localGit', path } });
       }
     } catch (error) {
       message.error(formatInvokeError(error));
@@ -301,13 +326,15 @@ export function MarketplaceTab({
 
   const handleCancelEditMarketplace = () => {
     setEditingMarketplace(null);
+    marketplaceDraft.clearDraft();
     marketplaceForm.resetFields();
     setMarketplaceModalOpen(false);
   };
 
   const handleRefresh = async () => {
+    const current = pageAction();
     await fetchMarketplaceGovernance(instanceId);
-    await fetchSkills(instanceId);
+    if (current()) await fetchSkills(instanceId);
   };
 
   const handleRefreshMarketplace = async (marketplace: string) => {
@@ -340,24 +367,24 @@ export function MarketplaceTab({
     }
   };
 
-  const handlePreviewSkill = async (name: string) => {
-    setSelectedSkillName(name);
-    setSkillPreview(null);
+  useEffect(() => {
+    if (!pageActive || !selectedSkillName) return;
+    let cancelled = false;
+    const key = JSON.stringify([instanceId, selectedSkillName]);
+    if (previewKey.current !== key) setSkillPreview(null);
     setSkillPreviewError(null);
     setLoadingSkillPreview(true);
-    try {
-      const resource = await invoke<SkillResource>('get_skill', {
-        instanceId,
-        name,
-        relPath: null,
-      });
-      setSkillPreview(resource);
-    } catch (e) {
-      setSkillPreviewError(formatInvokeError(e));
-    } finally {
-      setLoadingSkillPreview(false);
-    }
-  };
+    void invoke<SkillResource>('get_skill', {
+      instanceId, name: selectedSkillName, relPath: null,
+    }).then((resource) => {
+      if (!cancelled) { previewKey.current = key; setSkillPreview(resource); }
+    }).catch((error) => {
+      if (!cancelled) setSkillPreviewError(formatInvokeError(error));
+    }).finally(() => {
+      if (!cancelled) setLoadingSkillPreview(false);
+    });
+    return () => { cancelled = true; };
+  }, [instanceId, pageActive, selectedSkillName]);
 
   const renderPluginActions = (plugin: PluginSummary) => (
     <Space size="small" wrap>
@@ -424,7 +451,7 @@ export function MarketplaceTab({
     if (!selectedSkillName) {
       return <Empty description={t('marketplace.details.selectSkill')} image={Empty.PRESENTED_IMAGE_SIMPLE} />;
     }
-    if (loadingSkillPreview) {
+    if (loadingSkillPreview && !skillPreview) {
       return <Skeleton active paragraph={{ rows: 8 }} />;
     }
     if (skillPreviewError) {
@@ -532,6 +559,7 @@ export function MarketplaceTab({
                 <List
                   size="small"
                   dataSource={marketplaces}
+                  data-navigation-scroll="marketplace-plugins"
                   className={styles.scrollList}
                   renderItem={(marketplace) => (
                     <List.Item
@@ -627,6 +655,7 @@ export function MarketplaceTab({
               <List
                 size="small"
                 dataSource={marketplacePlugins}
+                data-navigation-scroll="marketplace-skills"
                 className={styles.scrollList}
                 renderItem={(plugin) => (
                   <List.Item
@@ -688,7 +717,7 @@ export function MarketplaceTab({
                         skillDescriptionByName.get(skill) ?? t('marketplace.details.emptyDescription'),
                         {
                           selected: selectedSkillName === skill,
-                          onClick: () => handlePreviewSkill(skill),
+                          onClick: () => setSelectedSkillName(skill),
                         },
                       )
                     ))}
@@ -711,7 +740,7 @@ export function MarketplaceTab({
                 )}
               </Space>
 
-              <div className={styles.previewPane}>
+              <div data-navigation-scroll="marketplace-preview" className={styles.previewPane}>
                 {renderSkillPreview()}
               </div>
             </Space>
@@ -720,7 +749,7 @@ export function MarketplaceTab({
       </div>
       <Modal
         title={editingMarketplace ? t('marketplace.actions.updateMarketplace') : t('marketplace.actions.addMarketplace')}
-        open={marketplaceModalOpen}
+        open={marketplaceModalOpen && marketplaceOperation?.kind !== 'add' && marketplaceOperation?.kind !== 'update'}
         okText={editingMarketplace ? t('common.update') : t('common.add')}
         cancelText={t('common.cancel')}
         confirmLoading={loadingMarketplace}
@@ -733,7 +762,7 @@ export function MarketplaceTab({
         onCancel={handleCancelEditMarketplace}
         destroyOnHidden
       >
-        <Form form={marketplaceForm} layout="vertical">
+        <Form name={`marketplace-${instanceId}`} form={marketplaceForm} onValuesChange={(_, values) => marketplaceDraft.onValuesChange(values)} layout="vertical">
           {editingMarketplaceLocked && (
             <Alert
               type="warning"

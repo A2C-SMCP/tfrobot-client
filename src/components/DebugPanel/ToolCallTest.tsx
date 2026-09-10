@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { Button, Form, InputNumber, Space, Segmented, Alert, Tag, Typography, Image } from 'antd';
+import { usePageAction } from '@/components/Navigation/pageActivityState';
+import { PageImage as Image } from '@/components/Navigation/PageOverlays';
+import { useNavigationState, useNavigationForm } from '@/components/Navigation/navigationMemoryState';
+import { Button, Form, InputNumber, Space, Segmented, Alert, Tag, Typography, } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useDebugStore, DEFAULT_TOOL_TIMEOUT_S, type ToolInfo, type ToolCallResponse } from '@/stores/debugStore';
@@ -9,13 +11,17 @@ const { Text } = Typography;
 
 export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
   const { t } = useTranslation();
+  const action = usePageAction(JSON.stringify([instanceId, tool.name]));
   const { executeTool, lastCallResult, calling } = useDebugStore();
   const [form] = Form.useForm();
-  const [mode, setMode] = useState<'form' | 'json'>('form');
-  const [jsonText, setJsonText] = useState('{}');
-  const [timeout, setTimeout] = useState<number | undefined>();
+  const [mode, setMode] = useNavigationState<'form' | 'json'>(`debug.${tool.name}.mode`, 'form');
+  const [jsonText, setJsonText] = useNavigationState(`debug.${tool.name}.json`, '{}');
+  const [timeout, setTimeout] = useNavigationState<number | undefined>(`debug.${tool.name}.timeout`, undefined);
+
+  const draft = useNavigationForm(`debug.${tool.name}.form`, form, {});
 
   const handleExecute = async () => {
+    const current = action();
     let params: Record<string, unknown>;
 
     if (mode === 'form') {
@@ -50,7 +56,7 @@ export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: T
       }
     }
 
-    await executeTool(instanceId, tool.name, params, timeout);
+    if (current()) await executeTool(instanceId, tool.name, params, timeout);
   };
 
   return (
@@ -79,7 +85,7 @@ export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: T
       </Space>
 
       {mode === 'form' ? (
-        <SchemaForm schema={tool.inputSchema} form={form} />
+        <SchemaForm schema={tool.inputSchema} form={form} onValuesChange={(_, values) => draft.onValuesChange(values)} />
       ) : (
         <Form.Item>
           <textarea

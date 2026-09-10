@@ -67,6 +67,17 @@ describe('InputVariables', () => {
     });
   });
 
+  it('discards a removed saved entry after an authoritative refresh', async () => {
+    mockUseInputStore.mockReturnValue({ ...mockStore, entries: [{ key: 'gone', value: 'old', secret: false }] } as any);
+    const view = render(<InputVariables instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit input gone' }));
+    expect(await screen.findByRole('button', { name: 'Save' })).toBeInTheDocument();
+    mockUseInputStore.mockReturnValue({ ...mockStore, entries: [] } as any);
+    view.rerender(<InputVariables instanceId="computer-a" />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument());
+    expect(mockStore.upsertEntry).not.toHaveBeenCalled();
+  });
+
   it('creates an arbitrary pre-provisioned entry', async () => {
     render(<InputVariables instanceId="computer-a" />);
     fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));

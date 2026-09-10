@@ -1,5 +1,8 @@
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
+import { useForgetNavigationState, useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, App, Button, Modal, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   DeleteOutlined,
   EditOutlined,
@@ -33,9 +36,10 @@ interface McpConfigProps {
 
 export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
   const { t } = useTranslation();
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const {
     snapshot,
+    activeInstanceId: configInstanceId,
     validation,
     loading: configLoading,
     validating,
@@ -64,16 +68,21 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     && !managedServersLoading
     && managedServersError === null;
 
-  const [formVisible, setFormVisible] = useState(false);
-  const [editingServer, setEditingServer] = useState<McpServerConfig | undefined>();
+  const pageActive = usePageActive();
+  const action = usePageAction(instanceId);
+  const forget = useForgetNavigationState();
+  const [exportOpen, setExportOpen] = useState(false);
+  useEffect(() => { if (!pageActive) setExportOpen(false); }, [pageActive]);
+  const [formVisible, setFormVisible] = useNavigationState('mcp.editorOpen', false);
+  const [editingServer, setEditingServer] = useNavigationState<McpServerConfig | undefined>('mcp.editing', undefined);
 
   useEffect(() => {
-    void fetchConfig(instanceId);
-  }, [fetchConfig, instanceId]);
+    if (pageActive) void fetchConfig(instanceId);
+  }, [fetchConfig, instanceId, pageActive]);
 
   useEffect(() => {
-    void fetchManagedServers(instanceId);
-  }, [fetchManagedServers, instanceId]);
+    if (pageActive) void fetchManagedServers(instanceId);
+  }, [fetchManagedServers, instanceId, pageActive]);
 
   const pluginOwnerByBundleId = useMemo(() => {
     const result = new Map<string, Extract<McpServerManagedBy, { type: 'plugin' }>>();
@@ -84,6 +93,20 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     }
     return result;
   }, [managedServers]);
+
+  const closeEditor = () => {
+    forget(`mcp.form.${JSON.stringify(editingServer?.name ?? null)}.`);
+    setFormVisible(false);
+  };
+
+  const editingExists = !editingServer || snapshot?.mcp.servers.some((server) => server.name === editingServer.name);
+  useEffect(() => {
+    if (configInstanceId === instanceId && snapshot && !configLoading && !configError && formVisible && !editingExists) {
+      forget(`mcp.form.${JSON.stringify(editingServer?.name ?? null)}.`);
+      setFormVisible(false);
+      setEditingServer(undefined);
+    }
+  }, [configInstanceId, instanceId, snapshot, configLoading, configError, formVisible, editingExists, editingServer, forget, setFormVisible, setEditingServer]);
 
   const handleAdd = () => {
     if (!ownershipReady) return;
@@ -101,112 +124,126 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     config: McpServerConfig,
     inputChanges?: InputDefinitionChanges,
   ) => {
-    if (!ownershipReady) return;
+    if (!ownershipReady || !editingExists || configLoading || configError) return false;
+    const current = action();
+    if (!current()) return false;
     try {
       if (inputChanges) await upsertServer(instanceId, config, inputChanges);
       else await upsertServer(instanceId, config);
+      if (!current()) return false;
       message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
         name: config.name,
       }));
       setFormVisible(false);
+      return true;
     } catch (cause) {
+      if (!current()) return false;
       if (isMissingInputDefinitionError(cause)) {
         message.error(t('mcp.messages.missingInputDefinition', {
           id: cause.input_id,
           name: cause.requesting_mcp?.name ?? config.name,
         }));
-        return;
+        return false;
       }
-      if (isRuntimeInputCancelledError(cause)) return;
+      if (isRuntimeInputCancelledError(cause)) return false;
       message.error(t('mcp.messages.operationFailed'));
+      return false;
     } finally {
-      await fetchManagedServers(instanceId);
+      if (current()) await fetchManagedServers(instanceId);
     }
   };
 
   const handleRemove = async (name: string) => {
-    if (!ownershipReady) return;
+    if (!ownershipReady) return false;
+    const current = action();
     try {
       await removeServer(instanceId, name);
+      if (!current()) return false;
       message.success(t('mcp.messages.removed', { name }));
     } catch {
+      if (!current()) return false;
       message.error(t('mcp.messages.operationFailed'));
+      return false;
     } finally {
-      await fetchManagedServers(instanceId);
+      if (current()) await fetchManagedServers(instanceId);
     }
   };
 
   const handleEnabledChange = async (record: SdkConfigServer, enabled: boolean) => {
-    if (!ownershipReady) return;
+    if (!ownershipReady) return false;
+    const current = action();
     const config = { ...record.config, disabled: !enabled };
     try {
       await upsertServer(instanceId, config);
+      if (!current()) return false;
       message.success(t(enabled ? 'mcp.messages.enabled' : 'mcp.messages.disabled', {
         name: record.name,
       }));
     } catch (cause) {
+      if (!current()) return false;
       if (isMissingInputDefinitionError(cause)) {
         message.error(t('mcp.messages.missingInputDefinition', {
           id: cause.input_id,
           name: cause.requesting_mcp?.name ?? config.name,
         }));
-        return;
+        return false;
       }
-      if (isRuntimeInputCancelledError(cause)) return;
+      if (isRuntimeInputCancelledError(cause)) return false;
       message.error(t('mcp.messages.operationFailed'));
+      return false;
     } finally {
-      await fetchManagedServers(instanceId);
+      if (current()) await fetchManagedServers(instanceId);
     }
   };
 
   const handleImport = async () => {
+    const current = action();
     if (!ownershipReady) return;
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
+      if (!current()) return;
       const path = await open({
         filters: [{ name: 'JSON', extensions: ['json'] }],
         multiple: false,
       });
-      if (path) {
+      if (path && current()) {
         const result = await (async () => {
           try {
             return await importConfig(instanceId, path as string);
           } finally {
-            await fetchManagedServers(instanceId);
+            if (current()) await fetchManagedServers(instanceId);
           }
         })();
+        if (!current()) return;
         message.success(t('mcp.messages.importSuccess', { servers: result.servers_imported, inputs: result.inputs_imported }));
       }
     } catch {
+      if (!current()) return;
       message.error(t('mcp.messages.operationFailed'));
     }
   };
 
   const exportToFile = async () => {
+    const current = action();
     try {
       const { save } = await import('@tauri-apps/plugin-dialog');
+      if (!current()) return;
       const path = await save({
         filters: [{ name: 'JSON', extensions: ['json'] }],
         defaultPath: 'mcp_config.json',
       });
-      if (path) {
+      if (path && current()) {
         await exportConfig(instanceId, path);
+        if (!current()) return;
         message.success(t('mcp.messages.exportSuccess'));
       }
     } catch {
+      if (!current()) return;
       message.error(t('mcp.messages.operationFailed'));
     }
   };
 
-  const handleExport = () => {
-    modal.confirm({
-      title: t('mcp.exportWarning.title'),
-      content: t('mcp.exportWarning.description'),
-      okText: t('mcp.exportWarning.confirm'),
-      okButtonProps: { danger: true },
-      onOk: exportToFile,
-    });
-  };
+  const handleExport = () => setExportOpen(true);
 
   const columns = [
     {
@@ -477,10 +514,16 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
         scroll={{ x: 'max-content' }}
       />
 
+      <Modal title={t('mcp.exportWarning.title')} open={exportOpen}
+        okText={t('mcp.exportWarning.confirm')} okButtonProps={{ danger: true }}
+        onCancel={() => setExportOpen(false)}
+        onOk={() => { setExportOpen(false); void exportToFile(); }}>
+        {t('mcp.exportWarning.description')}
+      </Modal>
       <Modal
         title={editingServer ? t('mcp.editServer') : t('mcp.addServer')}
         open={formVisible}
-        onCancel={() => setFormVisible(false)}
+        onCancel={closeEditor}
         footer={null}
         destroyOnHidden
         width={600}
@@ -489,7 +532,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           instanceId={instanceId}
           initialValues={editingServer}
           onSubmit={handleFormSubmit}
-          onCancel={() => setFormVisible(false)}
+          onCancel={closeEditor}
           loading={configLoading}
         />
       </Modal>

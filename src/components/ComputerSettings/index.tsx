@@ -1,3 +1,7 @@
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { PageHost } from '@/components/Navigation/PageHost';
+import { NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Button,
@@ -38,18 +42,27 @@ import styles from './ComputerSettings.module.css';
 const { Paragraph, Text, Title } = Typography;
 
 interface ComputerSettingsProps {
+  navigationRevision?: number;
   initialSection?: ComputerSettingsSection;
   targetPlugin?: PluginSettingsTarget | null;
   onNavigate?: (key: string) => void;
 }
 
-export function ComputerSettings({
+export function ComputerSettings(props: ComputerSettingsProps) {
+  const { instances, selectedInstanceId } = useComputerStore();
+  const id = selectedInstanceId ?? instances[0]?.id ?? 'none';
+  return <NavigationScope key={id} id={`computer:${id}`}><ComputerSettingsContent {...props} /></NavigationScope>;
+}
+
+function ComputerSettingsContent({
   initialSection = 'general',
+  navigationRevision = 0,
   targetPlugin = null,
   onNavigate,
 }: ComputerSettingsProps) {
+  const pageActive = usePageActive();
   const { t } = useTranslation();
-  const [activeSection, setActiveSection] = useState<ComputerSettingsSection>(initialSection);
+  const [activeSection, setActiveSection] = useNavigationState<ComputerSettingsSection>('settings.section', initialSection);
   const [focusedPlugin, setFocusedPlugin] = useState<PluginSettingsTarget | null>(targetPlugin);
   const {
     instances,
@@ -59,12 +72,15 @@ export function ComputerSettings({
   } = useComputerStore();
 
   useEffect(() => {
-    void fetchInstances();
-  }, [fetchInstances]);
+    if (pageActive) void fetchInstances();
+  }, [fetchInstances, pageActive]);
 
+  const [appliedRevision, setAppliedRevision] = useNavigationState('settings.navigationRevision', navigationRevision);
   useEffect(() => {
+    if (appliedRevision === navigationRevision) return;
+    setAppliedRevision(navigationRevision);
     setActiveSection(initialSection);
-  }, [initialSection]);
+  }, [appliedRevision, initialSection, navigationRevision, setActiveSection, setAppliedRevision]);
 
   useEffect(() => {
     setFocusedPlugin(targetPlugin);
@@ -98,9 +114,9 @@ export function ComputerSettings({
     onNavigate?.(computerSettingsNavigationKey(section));
   };
 
-  const renderSection = () => {
+  const renderSection = (section: ComputerSettingsSection) => {
     if (!selectedInstance) return null;
-    switch (activeSection) {
+    switch (section) {
       case 'general':
         return <GeneralSettings instance={selectedInstance} />;
       case 'skills':
@@ -190,7 +206,13 @@ export function ComputerSettings({
               {sectionDescription}
             </Paragraph>
           </div>
-          {renderSection()}
+          <NavigationScope key={selectedInstance.id} id={`computer:${selectedInstance.id}`}>
+            {sections.map(({ key }) => (
+              <PageHost key={key} name={`computer-settings-${key}`} active={activeSection === key}>
+                {renderSection(key)}
+              </PageHost>
+            ))}
+          </NavigationScope>
         </Card>
       </div>
     </div>

@@ -1,4 +1,5 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { PageHost } from '@/components/Navigation/PageHost';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { RemoteControlSettings } from '@/components/ComputerSettings/RemoteControlSettings';
@@ -41,6 +42,22 @@ describe('RemoteControlSettings', () => {
       }
       throw new Error(`unexpected command: ${command}`);
     });
+  });
+
+  it('does not refresh or show a completion message after the page loses ownership', async () => {
+    let finish!: (policy: unknown) => void;
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((command, args) => command === 'update_remote_control_policy'
+      ? new Promise((resolve) => { finish = resolve; }) : original(command, args));
+    const tree = (active: boolean) => <PageHost name="remote" active={active}><RemoteControlSettings instance={instance} /></PageHost>;
+    const view = render(tree(true));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Enable Robot control' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    view.rerender(tree(false));
+    await act(async () => { finish(instance.remoteControl); });
+    expect(useComputerStore.getState().fetchInstances).not.toHaveBeenCalled();
+    expect(screen.queryByText('Robot control policy saved')).not.toBeInTheDocument();
   });
 
   it('loads the exact catalog and persists an explicit enable decision', async () => {

@@ -1,3 +1,6 @@
+import { PageActivity } from '@/components/Navigation/PageActivity';
+import { NavigationMemoryProvider, NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { NavigationMemory } from '@/stores/navigationStore';
 import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
@@ -733,6 +736,53 @@ describe('McpServerForm technical fields and config value sources', () => {
       }],
       removeIfUnused: [],
     });
+  }, 30_000);
+
+  it('does not submit when Ant Form validation finishes after page navigation', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const tree = (active: boolean) => <PageActivity active={active}>
+      <McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} />
+    </PageActivity>;
+    const view = render(tree(true));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), { target: { value: 'old-context' } });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), { target: { value: 'echo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    view.rerender(tree(false));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(tree(true));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('retains confirmed child entries and a failed save across Computer switches', async () => {
+    const memory = new NavigationMemory();
+    const onSubmit = vi.fn().mockResolvedValue(false);
+    const tree = (id: string) => <NavigationMemoryProvider memory={memory}>
+      <NavigationScope id={`computer:${id}`} key={id}>
+        <McpServerForm instanceId={id} onSubmit={onSubmit} onCancel={() => {}} />
+      </NavigationScope>
+    </NavigationMemoryProvider>;
+    const view = render(tree('computer-a'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), { target: { value: 'draft-server' } });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), { target: { value: 'echo' } });
+    fireEvent.click(screen.getByRole('button', { name: /Add Variable/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable / header name' }), { target: { value: 'LOG_LEVEL' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Constant value' }), { target: { value: 'debug' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('LOG_LEVEL')).toBeInTheDocument();
+    inputState.activeInstanceId = 'computer-b';
+    view.rerender(tree('computer-b'));
+    expect(screen.queryByText('LOG_LEVEL')).not.toBeInTheDocument();
+    inputState.activeInstanceId = 'computer-a';
+    view.rerender(tree('computer-a'));
+    expect(await screen.findByText('LOG_LEVEL')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    inputState.activeInstanceId = 'computer-b';
+    view.rerender(tree('computer-b'));
+    inputState.activeInstanceId = 'computer-a';
+    view.rerender(tree('computer-a'));
+    expect(screen.getByRole('textbox', { name: 'Server Name' })).toHaveValue('draft-server');
+    expect(await screen.findByText('LOG_LEVEL')).toBeInTheDocument();
   }, 30_000);
 
   it('hydrates an existing definition when its ID is typed instead of selected', async () => {

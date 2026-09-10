@@ -40,6 +40,17 @@ describe('inputStore', () => {
     mockedInvoke.mockReset();
   });
 
+  it('keeps existing entries visible while refreshing the same Computer', async () => {
+    const entries: InputEntry[] = [{ key: 'name', value: 'retained', secret: false }];
+    useInputStore.setState({ entries, entriesLoadedInstanceId: instanceId });
+    const pending = deferred<InputEntry[]>();
+    mockedInvoke.mockReturnValueOnce(pending.promise);
+    const refresh = useInputStore.getState().fetchEntries(instanceId);
+    expect(useInputStore.getState().entries).toEqual(entries);
+    pending.resolve(entries);
+    await refresh;
+  });
+
   describe('fetchInputs', () => {
     it('populates inputs list', async () => {
       const mockInputs: InputDefinition[] = [

@@ -1,4 +1,9 @@
-import { App, Button, Card, Col, Empty, Form, Input, Modal, Popconfirm, Row, Select, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
+import { usePageAction } from '@/components/Navigation/pageActivityState';
+import { PageHost } from '@/components/Navigation/PageHost';
+import { NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
+import { App, Button, Card, Col, Empty, Form, Input, Row, Select, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   CopyOutlined,
@@ -33,6 +38,7 @@ import {
 const { Title, Text } = Typography;
 
 interface ComputerProps {
+  navigationRevision?: number;
   initialView?: 'list' | 'detail';
   initialSection?: ComputerWorkbenchSection;
   onNavigate?: (key: string) => void;
@@ -192,7 +198,8 @@ function ComputerCard({
   );
 }
 
-export function Computer({ initialView = 'list', initialSection = 'top', onNavigate }: ComputerProps) {
+export function Computer({ initialView = 'list', initialSection = 'top', navigationRevision = 0, onNavigate }: ComputerProps) {
+  const action = usePageAction();
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -211,7 +218,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     connectSelectedTarget,
     disconnectConnection,
   } = useComputerStore();
-  const [view, setView] = useState<'list' | 'detail'>(initialView);
+  const [view, setView] = useNavigationState<'list' | 'detail'>('computer.view', initialView);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [form] = Form.useForm<{
@@ -221,13 +228,15 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     skillHomeMode?: 'empty' | 'copy';
   }>();
 
+  const computerDraft = useNavigationForm('computer.editor', form, { name: '' });
+
   useEffect(() => {
     fetchInstances();
   }, [fetchInstances]);
 
   useEffect(() => {
     setView(initialView);
-  }, [initialView]);
+  }, [initialView, navigationRevision, setView]);
 
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
@@ -258,11 +267,14 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
   const closeModal = () => {
     setModalMode(null);
     setTargetInstance(null);
+    computerDraft.clearDraft();
     form.resetFields();
   };
 
   const handleModalOk = async () => {
+    const current = action();
     const values = await form.validateFields();
+    if (!current()) return;
     try {
       if (modalMode === 'create') {
         await createInstance({ name: values.name, description: values.description });
@@ -280,7 +292,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
         });
         message.success(t('computer.messages.duplicated'));
       }
-      closeModal();
+      if (current()) closeModal();
     } catch (e) {
       message.error(String(e));
     }
@@ -343,6 +355,14 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     }
   };
 
+  useEffect(() => {
+    if (targetInstance && !instances.some((instance) => instance.id === targetInstance.id)) {
+      setModalMode(null);
+      setTargetInstance(null);
+      form.resetFields();
+    }
+  }, [form, instances, targetInstance]);
+
   const modalTitle = modalMode === 'create'
     ? t('computer.create')
     : modalMode === 'edit'
@@ -359,7 +379,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
       forceRender
       destroyOnHidden
     >
-      <Form form={form} layout="vertical">
+      <Form name="computer-editor" form={form} onValuesChange={(_, values) => computerDraft.onValuesChange(values)} layout="vertical">
         <Form.Item
           name="name"
           label={t('computer.form.name')}
@@ -399,30 +419,29 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
     return <Skeleton active paragraph={{ rows: 4 }} />;
   }
 
-  if (showDetail) {
-    return (
-      <div>
-        <ComputerWorkbench
-          instance={selectedInstance}
-          loading={loading}
-          initialSection={initialSection}
-          onBack={() => setView('list')}
-          onOpenSettings={() => onNavigate?.('computer-settings:general')}
-          onDelete={() => handleDelete(selectedInstance)}
-          onStartStop={() => { void handleStartStop(selectedInstance); }}
-          onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
-          onConnect={() => { void handleConnect(selectedInstance); }}
-          onDisconnect={() => { void handleDisconnect(selectedInstance); }}
-          onOpenPlugin={(owner) => {
-            onNavigate?.(computerSettingsNavigationKey('plugins', owner));
-          }}
-        />
-      </div>
-    );
-  }
-
   return (
     <div>
+      {selectedInstance && (
+        <NavigationScope key={selectedInstance.id} id={`computer:${selectedInstance.id}`}>
+          <PageHost name="computer-detail" active={Boolean(showDetail)}>
+            <ComputerWorkbench
+              instance={selectedInstance}
+              loading={loading}
+              initialSection={initialSection}
+              navigationRevision={navigationRevision}
+              onBack={() => { setView('list'); onNavigate?.('computer'); }}
+              onOpenSettings={() => onNavigate?.('computer-settings:general')}
+              onDelete={() => handleDelete(selectedInstance)}
+              onStartStop={() => { void handleStartStop(selectedInstance); }}
+              onRestart={() => { void runRuntimeAction(selectedInstance, 'restart'); }}
+              onConnect={() => { void handleConnect(selectedInstance); }}
+              onDisconnect={() => { void handleDisconnect(selectedInstance); }}
+              onOpenPlugin={(owner) => onNavigate?.(computerSettingsNavigationKey('plugins', owner))}
+            />
+          </PageHost>
+        </NavigationScope>
+      )}
+      <PageHost name="computer-list" active={!showDetail}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('computer.title')}</Title>
         <Button type="primary" onClick={openCreateModal}>
@@ -441,6 +460,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
                 onOpen={() => {
                   selectInstance(instance.id);
                   setView('detail');
+                  onNavigate?.('computer-detail:top');
                 }}
                 onEdit={() => openEditModal(instance)}
                 onDuplicate={() => openDuplicateModal(instance)}
@@ -456,6 +476,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', onNavig
         </Row>
       )}
       {renderComputerModal()}
+      </PageHost>
     </div>
   );
 }

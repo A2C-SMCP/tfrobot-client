@@ -1,3 +1,4 @@
+import { PageActivity } from '@/components/Navigation/PageActivity';
 import { Collapse } from 'antd';
 import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -43,7 +44,7 @@ export function ComputerWorkbenchDiagnostics({
             label: t('nav.debugPanel'),
             children: (
               <div ref={debugRef} tabIndex={-1}>
-                <DebugPanel instanceId={instanceId} />
+                <PageActivity active={activePanels.includes('debug')}><DebugPanel instanceId={instanceId} /></PageActivity>
               </div>
             ),
           },
@@ -52,7 +53,7 @@ export function ComputerWorkbenchDiagnostics({
             label: t('logs.title'),
             children: (
               <div ref={logsRef} tabIndex={-1}>
-                <ActivityViewer instanceId={instanceId} />
+                <PageActivity active={activePanels.includes('logs')}><ActivityViewer instanceId={instanceId} /></PageActivity>
               </div>
             ),
           },

@@ -1,3 +1,5 @@
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -14,7 +16,6 @@ import {
   Card,
   Empty,
   Input,
-  Modal,
   Select,
   Space,
   Spin,
@@ -163,6 +164,8 @@ interface CompactChatWorkspaceProps {
  * workspace controller — only the navigation chrome is host-rendered.
  */
 function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
+  const active = usePageActive();
+  const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('auto');
   const workspace = useConversationWorkspace({
     getDeadlineAt: getChatDeadlineAt,
     initialSelection: 'first',
@@ -208,7 +211,7 @@ function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
     : snapshot.conversations.find((item) => item.id === snapshot.selectedConversationId);
   const compactNavigation = {
     conversationTitle: selectedConversation?.title ?? labels.conversationListLabel ?? 'Conversations',
-    conversationHistoryOpen: historyOpen,
+    conversationHistoryOpen: active && historyOpen,
     conversationHistoryItems: snapshot.conversations,
     conversationHistoryLoading: snapshot.listStatus === 'loading',
     conversationHistoryError: snapshot.listError?.message,
@@ -236,7 +239,8 @@ function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
         pendingConversationId={snapshot.pendingConversationId}
         selectedConversationId={snapshot.selectedConversationId}
       >
-        <ChatConversationView getDeadlineAt={getChatDeadlineAt} labels={labels} />
+        <ChatConversationView getDeadlineAt={getChatDeadlineAt} labels={labels}
+          eventDetailMode={active ? detailMode : 'split'} onEventDetailModeChange={setDetailMode} />
       </ChatUiShell>
       <Modal
         cancelButtonProps={{ disabled: snapshot.creating }}

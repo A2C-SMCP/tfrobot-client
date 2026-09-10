@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { Button, Form, Space, Tag, Typography } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -12,9 +12,11 @@ import {
 
 interface ConfigEntryListProps {
   name: 'env' | 'headers';
+  draftPrefix: string;
   instanceId: string;
   inputs: InputDefinition[];
   addLabel: string;
+  onEntriesChange: (name: 'env' | 'headers', entries: ConfigEntryFormValue[]) => void;
 }
 
 function entryType(entry: ConfigEntryFormValue | undefined): string {
@@ -33,11 +35,11 @@ function entrySummary(entry: ConfigEntryFormValue | undefined, unresolved: strin
   return definition.password ? `${definition.id} · Secret` : definition.id;
 }
 
-export function ConfigEntryList({ name, instanceId, inputs, addLabel }: ConfigEntryListProps) {
+export function ConfigEntryList({ name, instanceId, inputs, addLabel, draftPrefix, onEntriesChange }: ConfigEntryListProps) {
   const { t } = useTranslation();
   const form = Form.useFormInstance();
   const entries = (Form.useWatch(name, form) ?? []) as ConfigEntryFormValue[];
-  const [editor, setEditor] = useState<{ index?: number; value?: ConfigEntryFormValue } | null>(null);
+  const [editor, setEditor] = useNavigationState<{ index?: number; value?: ConfigEntryFormValue } | null>(`${draftPrefix}entry-editor.${name}`, null);
 
   return (
     <Form.List name={name}>
@@ -107,6 +109,7 @@ export function ConfigEntryList({ name, instanceId, inputs, addLabel }: ConfigEn
           </Form.Item>
           {editor && (
             <ConfigValueEditor
+              draftPrefix={`${draftPrefix}${name}.`}
               open
               instanceId={instanceId}
               initialValue={editor.value}
@@ -115,7 +118,7 @@ export function ConfigEntryList({ name, instanceId, inputs, addLabel }: ConfigEn
                 .filter((_, index) => index !== editor.index)
                 .map((entry) => entry.key)}
               onSubmit={(entry) => {
-                form.setFieldValue(name, applyConfigEntryEdit(entries, editor.index, entry));
+                onEntriesChange(name, applyConfigEntryEdit(entries, editor.index, entry));
                 setEditor(null);
               }}
               onCancel={() => setEditor(null)}

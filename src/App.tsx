@@ -12,19 +12,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import styles from './styles/App.module.css';
-import { ActivityViewer } from './components/ActivityViewer';
-import { Settings } from './components/Settings';
-import { RobotConnections } from './components/RobotConnections';
-import { Computer } from './components/Computer';
-import { ComputerSettings } from './components/ComputerSettings';
 import { GlobalManagerAccount } from './components/ManagerAccount/GlobalManagerAccount';
-import { Chat } from './components/Chat';
-import {
-  legacyComputerSettingsSection,
-  parsePluginSettingsTarget,
-  toComputerWorkbenchSection,
-  toComputerSettingsSection,
-} from './components/Computer/tabs';
+import { NavigationPages } from './components/Navigation/NavigationPages';
+import { createNavigationStore, menuForRoute } from './stores/navigationStore';
+import { useStore } from 'zustand';
 import { useThemeStore } from './stores/themeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
@@ -40,11 +31,9 @@ const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 
 function App() {
   const { t, i18n } = useTranslation();
-  const [selectedKey, setSelectedKey] = useState('chat');
-  const menuSelectedKey = selectedKey.startsWith('computer-detail')
-    || selectedKey.startsWith('computer-settings')
-    ? 'computer'
-    : selectedKey;
+  const [navigation] = useState(createNavigationStore);
+  const selectedKey = useStore(navigation, (state) => state.route);
+  const menuSelectedKey = menuForRoute(selectedKey);
   const { resolved, setMode, initFromSettings } = useThemeStore();
   const {
     applyContext,
@@ -223,59 +212,6 @@ function App() {
     },
   ];
 
-  const renderContent = () => {
-    const [pageKey, rawSubpage, ...routeParts] = selectedKey.split(':');
-    const legacySettingsSection = pageKey === 'computer-detail'
-      ? legacyComputerSettingsSection(rawSubpage)
-      : null;
-    if (legacySettingsSection) {
-      return (
-        <ComputerSettings
-          initialSection={legacySettingsSection}
-          onNavigate={setSelectedKey}
-        />
-      );
-    }
-
-    const workbenchSection = toComputerWorkbenchSection(rawSubpage);
-    const settingsSection = toComputerSettingsSection(rawSubpage);
-    const targetPlugin = settingsSection === 'plugins'
-      ? parsePluginSettingsTarget(routeParts)
-      : null;
-
-    switch (pageKey) {
-      case 'computer':
-        return <Computer key="computer-list" onNavigate={setSelectedKey} />;
-      case 'computer-detail':
-        return (
-          <Computer
-            key={`computer-detail-${workbenchSection}`}
-            initialView="detail"
-            initialSection={workbenchSection}
-            onNavigate={setSelectedKey}
-          />
-        );
-      case 'computer-settings':
-        return (
-          <ComputerSettings
-            initialSection={settingsSection}
-            targetPlugin={targetPlugin}
-            onNavigate={setSelectedKey}
-          />
-        );
-      case 'chat':
-        return <Chat />;
-      case 'robot-connections':
-        return <RobotConnections />;
-      case 'logs':
-        return <ActivityViewer />;
-      case 'settings':
-        return <Settings />;
-      default:
-        return null;
-    }
-  };
-
   return (
     <Layout className={styles.layout}>
       <Header className={styles.header}>
@@ -305,7 +241,7 @@ function App() {
             mode="inline"
             selectedKeys={[menuSelectedKey]}
             items={menuItems}
-            onClick={({ key }) => setSelectedKey(key)}
+            onClick={({ key }) => navigation.getState().openMenu(key)}
             className={styles.menu}
           />
         </Sider>
@@ -357,7 +293,7 @@ function App() {
                 style={{ marginBottom: 16 }}
               />
             )}
-            {renderContent()}
+            <NavigationPages navigation={navigation} />
           </div>
         </Content>
       </Layout>

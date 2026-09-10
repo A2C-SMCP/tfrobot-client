@@ -1,11 +1,16 @@
-import { useEffect, useState } from 'react';
-import { Button, Input, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
+import { usePageAction } from '@/components/Navigation/pageActivityState';
+import { useStore } from 'zustand';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
+import { useEffect, useMemo } from 'react';
+import { Button, Input, Select, Space, Table, Tag, Typography } from 'antd';
 import { DeleteOutlined, ExportOutlined, ReloadOutlined } from '@ant-design/icons';
 import { save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import { useTranslation } from 'react-i18next';
 import {
-  useActivityStore,
+  activityViewStore,
   type ActivityEvent,
   type ActivityScopeFilter,
 } from '@/stores/activityStore';
@@ -27,34 +32,31 @@ interface ActivityViewerProps {
 }
 
 export function ActivityViewer({ instanceId }: ActivityViewerProps) {
+  const action = usePageAction();
   const { t } = useTranslation();
-  const { items, total, loading, query, setQueryAndFetch, fetchActivity, exportActivity, clearActivity } =
-    useActivityStore();
+  const store = useMemo(() => activityViewStore(instanceId), [instanceId]);
+  const active = usePageActive();
+  const { items, total, loading, query, invalidated, setQueryAndFetch, fetchActivity, exportActivity, clearActivity } = useStore(store);
   const { instances, fetchInstances } = useComputerStore();
-  const [searchText, setSearchText] = useState(query.keyword ?? '');
+  const [searchText, setSearchText] = useNavigationState('activity.search', query.keyword ?? '');
   const categoryOptions = [...new Set([
     ...ACTIVITY_CATEGORIES,
     ...items.map((item) => item.category),
   ])];
 
   useEffect(() => {
-    setQueryAndFetch({
-      start_time: undefined,
-      end_time: undefined,
-      levels: undefined,
-      categories: undefined,
-      keyword: undefined,
-      limit: 50,
-      offset: 0,
-      scope: instanceId
-        ? { kind: 'computer', computer_id: instanceId }
-        : { kind: 'all' },
-    });
-  }, [instanceId, setQueryAndFetch]);
+    if (active) void fetchActivity();
+  }, [active, fetchActivity]);
 
   useEffect(() => {
-    if (!instanceId) void fetchInstances();
-  }, [fetchInstances, instanceId]);
+    if (active && invalidated && !loading) void fetchActivity();
+  }, [active, invalidated, loading, fetchActivity]);
+
+  useEffect(() => {
+    if (active && !instanceId) void fetchInstances();
+  }, [active, fetchInstances, instanceId]);
+
+  const [expandedRows, setExpandedRows] = useNavigationState<React.Key[]>('activity.expanded', []);
 
   const changeScope = (value: string) => {
     const scope: ActivityScopeFilter = value === 'all'
@@ -98,11 +100,12 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
   ];
 
   const handleExport = async () => {
+    const current = action();
     const path = await save({
       defaultPath: `activity-${dayjs().format('YYYY-MM-DD')}.json`,
       filters: [{ name: 'JSON', extensions: ['json'] }],
     });
-    if (path) await exportActivity(path);
+    if (path && current()) await exportActivity(path);
   };
 
   return (
@@ -171,6 +174,8 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         size="small"
         scroll={{ x: 900 }}
         expandable={{
+          expandedRowKeys: expandedRows,
+          onExpandedRowsChange: (keys) => setExpandedRows([...keys]),
           expandedRowRender: (record) => (
             <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
               {JSON.stringify({
