@@ -163,7 +163,7 @@ interface CompactChatWorkspaceProps {
  * listing, creation, paging, selection and async races stay owned by the
  * workspace controller — only the navigation chrome is host-rendered.
  */
-function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
+export function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
   const active = usePageActive();
   const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('auto');
   const workspace = useConversationWorkspace({

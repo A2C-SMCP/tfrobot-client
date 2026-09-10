@@ -1,3 +1,8 @@
+import { createElement } from 'react';
+import { ChatResourceProvider, ChatResourceView } from '@turingfocus/chat-kit';
+import { render, screen, fireEvent, waitFor } from '../helpers/render';
+import { chatUiLabels } from '@/components/Chat/chatBridge';
+import i18n from '@/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { describe, beforeEach, expect, it, vi } from 'vitest';
 import type { ChatResourceRequest } from '@turingfocus/chat-kit/headless';
@@ -31,7 +36,7 @@ describe('native private resource lifecycle', () => {
     const pending = createChatResourcePort('lease').resolve!(request(controller));
     controller.abort();
     complete(handle);
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
     expect(invoke).toHaveBeenCalledWith('chat_release_resource', { leaseId: 'lease', resourceId: 'opaque' });
   });
 
@@ -67,7 +72,7 @@ describe('native private resource lifecycle', () => {
     controller.abort();
     expect(invoke).toHaveBeenCalledWith('chat_release_resource', { leaseId: 'lease', resourceId: 'opaque' });
     fail({ code: 'cancelled' });
-    await expect(pending).rejects.toEqual({ code: 'cancelled' });
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -77,7 +82,7 @@ describe('native private resource lifecycle', () => {
       if (command === 'chat_save_resource') throw { code: 'permission' };
     });
     const onError = vi.fn();
-    await expect(createChatResourcePort('lease', onError).download!(request(undefined, 'download'))).rejects.toEqual({ code: 'permission' });
+    await expect(createChatResourcePort('lease', onError).download!(request(undefined, 'download'))).rejects.toMatchObject({ code: 'unauthorized' });
     expect(onError).toHaveBeenCalledWith('permission');
     expect(invoke).toHaveBeenCalledWith('chat_release_resource', { leaseId: 'lease', resourceId: 'opaque' });
   });
@@ -89,4 +94,61 @@ describe('native private resource lifecycle', () => {
       expect(invoke).toHaveBeenCalledWith('chat_release_resource', { leaseId: 'lease', resourceId: 'opaque' });
     },
   );
+});
+
+// Exercise the published resource renderer, including its retry policy and action UI.
+
+
+function renderResource(kind: 'image' | 'file' = 'image', onError = vi.fn()) {
+  const port = createChatResourcePort('lease', onError);
+  return render(createElement(ChatResourceProvider, { port, scope: 'lease' },
+    createElement(ChatResourceView, {
+      resource: { uri: 's3://bucket/photo.png', name: 'photo.png' }, kind,
+      labels: chatUiLabels((key) => i18n.t(key)),
+    })));
+}
+
+describe('0.8.1 resource errors and translations through the published UI', () => {
+  beforeEach(async () => { vi.clearAllMocks(); await i18n.changeLanguage('en'); });
+
+  it.each([
+    ['permission', 'unauthorized', true], ['not_found', 'not-found', false],
+    ['timeout', 'network', true], ['busy', 'network', true],
+    ['unsupported', 'unsupported', false], ['cancelled', 'cancelled', false],
+    ['save', 'unknown', true], ['too_large', 'unknown', true], ['invalid', 'unknown', true],
+    ['untrusted-message-token', 'unknown', true],
+  ] as const)('maps %s and applies the Kit retry policy', async (native, kit, retryable) => {
+    vi.mocked(invoke).mockRejectedValue({ code: native, message: 'secret payload must not reach UI' });
+    renderResource();
+    const labels = chatUiLabels((key) => i18n.t(key));
+    expect(await screen.findByText(labels.resource![kit]!)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry resource' }) !== null).toBe(retryable);
+    expect(screen.queryByText(/secret payload/)).not.toBeInTheDocument();
+    if (kit === 'cancelled') expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    if (retryable) {
+      vi.mocked(invoke).mockResolvedValue(handle);
+      fireEvent.click(screen.getByRole('button', { name: 'Retry resource' }));
+      await waitFor(() => expect(screen.getByRole('img', { name: 'photo.png' })).toHaveAttribute('src', handle.url));
+    }
+  });
+
+  it.each(['en', 'zh'])('localizes native download failure and cancellation in %s', async (language) => {
+    await i18n.changeLanguage(language);
+    let code = 'permission';
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'chat_resolve_resource') return handle;
+      if (command === 'chat_save_resource') throw { code };
+    });
+    const onError = vi.fn(); renderResource('file', onError);
+    const labels = chatUiLabels((key) => i18n.t(key)).resource!;
+    fireEvent.click(screen.getByRole('button', { name: labels.download! }));
+    expect(await screen.findByText(labels.unauthorized!)).toBeInTheDocument();
+    expect(onError).toHaveBeenCalledWith('permission');
+    code = 'cancelled'; onError.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: labels.download! }));
+    await waitFor(() => expect(screen.getByRole('button', { name: labels.download! })).toBeEnabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(onError).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('chat_release_resource', { leaseId: 'lease', resourceId: handle.id });
+  });
 });
