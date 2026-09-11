@@ -71,6 +71,8 @@ export function PageHost({ active, children, name }: PropsWithChildren<{ active:
     return () => { window.removeEventListener('scroll', save); observer?.disconnect(); resize?.disconnect(); };
   }, [name, scope, visible]);
 
+  // This host restores scroll explicitly; browser anchoring must not offset it
+  // again when retained pages or asynchronous content change layout.
   return (
     <div ref={host} onScrollCapture={(event) => {
       if (visible && event.target instanceof Element && event.target.closest('[data-page]') === host.current) {
@@ -82,7 +84,7 @@ export function PageHost({ active, children, name }: PropsWithChildren<{ active:
           scope?.set(`scroll-panes.${name}`, savedPanes.current);
         }
       }
-    }} hidden={!visible} aria-hidden={!visible} data-page={name} style={{ minWidth: 0 }}>
+    }} hidden={!visible} aria-hidden={!visible} data-page={name} style={{ minWidth: 0, overflowAnchor: 'none' }}>
       {visited && (
         <PageActivity active={active}>
           <ConfigProvider getPopupContainer={popupContainer}>

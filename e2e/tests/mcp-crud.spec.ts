@@ -46,7 +46,8 @@ test.describe('MCP Server configuration', () => {
   });
 
   test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
-    await page.locator('.ant-layout-sider').getByText('Computer').click();
+    await page.getByRole('button', { name: 'Back to Computer', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Computers', exact: true }).click();
     await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
     const managerConnect = page.getByRole('button', { name: 'Connect', exact: true });
     await expect(managerConnect).toBeDisabled();
