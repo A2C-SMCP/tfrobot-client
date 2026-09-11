@@ -126,7 +126,8 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     await screen.findByText('Fresh A');
     await waitFor(() => expect(client.getCacheState().status).toBe('ready'));
     expect(screen.queryByText('Showing cached conversation. Syncing latest updates…')).not.toBeInTheDocument();
-  });
+  // Real HTTP/Socket.IO and multiple workspace renders need a coverage-run budget.
+  }, 15_000);
 
   it('dismisses a cache notice without changing authority and shows a new failure notice', async () => {
     await seed();

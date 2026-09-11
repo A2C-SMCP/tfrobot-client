@@ -870,17 +870,23 @@ describe('MarketplaceTab', () => {
   it('does not start the second refresh read after its page is released', async () => {
     const governance = { capabilities: supportedCapabilities, marketplaces: [], plugins: [] };
     let finish!: (value: unknown) => void;
+    const initialLoad = deferred<typeof governance>();
     let refreshing = false;
     mockedInvoke.mockImplementation(async (command) => {
-      if (command === 'get_marketplace_governance') return refreshing ? new Promise((resolve) => { finish = resolve; }) : governance;
+      if (command === 'get_marketplace_governance') return refreshing ? new Promise((resolve) => { finish = resolve; }) : initialLoad.promise;
       if (command === 'list_skills') return [];
       throw new Error(`Unexpected command: ${command}`);
     });
     const view = render(<MarketplaceTab instanceId="computer-a" />);
     await screen.findByText('No SDK marketplaces returned');
+    const refreshButton = screen.getByRole('button', { name: /Refresh/ });
+    // The empty state is visible while the initial request is still pending.
+    expect(refreshButton).toBeDisabled();
+    await act(async () => { initialLoad.resolve(governance); });
+    expect(refreshButton).toBeEnabled();
     const count = mockedInvoke.mock.calls.filter(([command]) => command === 'list_skills').length;
     refreshing = true;
-    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    fireEvent.click(refreshButton);
     await waitFor(() => expect(finish).toBeDefined());
     view.unmount();
     useSkillStore.getState().reset();
