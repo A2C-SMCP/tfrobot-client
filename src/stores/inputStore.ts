@@ -1,3 +1,4 @@
+import { captureViewContext } from './viewContextLifetime';
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 
@@ -99,16 +100,17 @@ const initialState = {
 export const useInputStore = create<InputState>((set, get) => ({
   ...initialState,
 
-  reset: () => set(initialState),
+  reset: () => set((state) => ({ ...initialState, inputsRequestId: state.inputsRequestId + 1, valuesRequestId: state.valuesRequestId + 1, entriesRequestId: state.entriesRequestId + 1 })),
 
   fetchEntries: async (instanceId: string) => {
     const requestId = get().entriesRequestId + 1;
+    const sameInstance = get().entriesLoadedInstanceId === instanceId;
     set({
       activeInstanceId: instanceId,
       entriesRequestId: requestId,
-      entries: [],
+      entries: sameInstance ? get().entries : [],
       entriesLoading: true,
-      entriesLoadedInstanceId: null,
+      entriesLoadedInstanceId: sameInstance ? instanceId : null,
       entriesError: null,
     });
     try {
@@ -127,6 +129,7 @@ export const useInputStore = create<InputState>((set, get) => ({
   },
 
   upsertEntry: async (instanceId, key, value, secret) => {
+    const currentContext = captureViewContext();
     try {
       await invoke('upsert_input_entry', {
         instanceId,
@@ -134,19 +137,20 @@ export const useInputStore = create<InputState>((set, get) => ({
         value: value === undefined ? null : value,
         secret,
       });
-      if (get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ entriesError: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ entriesError: String(e) });
       throw e;
     }
   },
 
   deleteEntry: async (instanceId, key) => {
+    const currentContext = captureViewContext();
     try {
       await invoke('delete_input_entry', { instanceId, key });
-      if (get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchEntries(instanceId);
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ entriesError: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ entriesError: String(e) });
       throw e;
     }
   },
@@ -224,11 +228,12 @@ export const useInputStore = create<InputState>((set, get) => ({
   },
 
   fetchReferenceIssues: async (instanceId: string) => {
+    const currentContext = captureViewContext();
     try {
       const referenceIssues = await invoke<InputReferenceIssue[]>('list_input_reference_issues', { instanceId });
-      if (get().activeInstanceId === instanceId) set({ referenceIssues });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ referenceIssues });
     } catch (e) {
-      set({ error: String(e) });
+      if (currentContext()) set({ error: String(e) });
     }
   },
 
@@ -241,78 +246,85 @@ export const useInputStore = create<InputState>((set, get) => ({
   ),
 
   addOrUpdateInput: async (instanceId: string, input: InputDefinition) => {
+    const currentContext = captureViewContext();
     set({ loading: true, error: null });
     try {
       await invoke('add_or_update_input', { instanceId, input });
-      if (get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      if (currentContext()) set({ error: String(e), loading: false });
       throw e;
     }
   },
 
   removeInput: async (instanceId: string, id: string) => {
+    const currentContext = captureViewContext();
     set({ loading: true, error: null });
     try {
       await invoke('remove_input', { instanceId, id });
-      if (get().activeInstanceId === instanceId) {
+      if (currentContext() && get().activeInstanceId === instanceId) {
         await get().fetchInputs(instanceId);
-        await get().refreshValues(instanceId);
-        await get().fetchReferenceIssues(instanceId);
+        if (currentContext()) await get().refreshValues(instanceId);
+        if (currentContext()) await get().fetchReferenceIssues(instanceId);
       }
     } catch (e) {
-      set({ error: String(e), loading: false });
+      if (currentContext()) set({ error: String(e), loading: false });
       throw e;
     }
   },
 
   setValue: async (instanceId: string, id: string, value: unknown) => {
+    const currentContext = captureViewContext();
     try {
       await invoke('set_input_value', { instanceId, id, value });
-      await get().refreshValues(instanceId);
+      if (currentContext()) await get().refreshValues(instanceId);
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ error: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
 
   setRuntimeValue: async (instanceId: string, id: string, value: unknown) => {
+    const currentContext = captureViewContext();
     try {
       return await invoke<boolean>('set_runtime_input_value', { instanceId, id, value });
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ error: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
 
   removeValue: async (instanceId: string, id: string) => {
+    const currentContext = captureViewContext();
     try {
       await invoke('remove_input_value', { instanceId, id });
-      await get().refreshValues(instanceId);
+      if (currentContext()) await get().refreshValues(instanceId);
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ error: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
 
   clearValues: async (instanceId: string) => {
+    const currentContext = captureViewContext();
     try {
       await invoke('clear_input_values', { instanceId });
-      await get().refreshValues(instanceId);
+      if (currentContext()) await get().refreshValues(instanceId);
     } catch (e) {
-      if (get().activeInstanceId === instanceId) set({ error: String(e) });
+      if (currentContext() && get().activeInstanceId === instanceId) set({ error: String(e) });
       throw e;
     }
   },
 
   importInputs: async (instanceId: string, path: string) => {
+    const currentContext = captureViewContext();
     set({ loading: true, error: null });
     try {
       const count = await invoke<number>('import_inputs', { instanceId, path });
-      if (get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchInputs(instanceId);
       return count;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      if (currentContext()) set({ error: String(e), loading: false });
       throw e;
     }
   },

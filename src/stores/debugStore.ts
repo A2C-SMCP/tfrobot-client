@@ -61,17 +61,21 @@ export interface DebugResourceInfo {
 
 export interface DebugResourcesResponse {
   resources: DebugResourceInfo[];
+  resourceQuery: { instanceId: string; bundleId: string } | null;
   next_cursor?: string;
 }
 
 interface DebugState {
   tools: ToolInfo[];
   toolsLoading: boolean;
+  toolsLoadedInstanceId: string | null;
   selectedTool: ToolInfo | null;
   lastCallResult: ToolCallResponse | null;
   calling: boolean;
   resources: DebugResourceInfo[];
+  resourceQuery: { instanceId: string; bundleId: string } | null;
   resourcesLoading: boolean;
+  resourcePagesLoaded: number;
   resourcesNextCursor: string | null;
   history: ToolCallHistoryRecord[];
   historyLoading: boolean;
@@ -93,11 +97,14 @@ interface DebugState {
 const initialState = {
   tools: [] as ToolInfo[],
   toolsLoading: false,
+  toolsLoadedInstanceId: null,
   selectedTool: null as ToolInfo | null,
   lastCallResult: null as ToolCallResponse | null,
   calling: false,
   resources: [] as DebugResourceInfo[],
+  resourceQuery: null as { instanceId: string; bundleId: string } | null,
   resourcesLoading: false,
+  resourcePagesLoaded: 0,
   resourcesNextCursor: null as string | null,
   history: [] as ToolCallHistoryRecord[],
   historyLoading: false,
@@ -112,7 +119,7 @@ const initialState = {
 export const useDebugStore = create<DebugState>((set, get) => ({
   ...initialState,
 
-  reset: () => set(initialState),
+  reset: () => set((state) => ({ ...initialState, toolsRequestId: state.toolsRequestId + 1, resourcesRequestId: state.resourcesRequestId + 1, historyRequestId: state.historyRequestId + 1, executionRequestId: state.executionRequestId + 1 })),
 
   fetchTools: async (instanceId: string) => {
     const requestId = get().toolsRequestId + 1;
@@ -121,9 +128,9 @@ export const useDebugStore = create<DebugState>((set, get) => ({
       activeInstanceId: instanceId,
       toolsRequestId: requestId,
       executionRequestId: switchingInstance ? get().executionRequestId + 1 : get().executionRequestId,
-      tools: [],
-      selectedTool: null,
-      lastCallResult: null,
+      tools: switchingInstance ? [] : get().tools,
+      selectedTool: switchingInstance ? null : get().selectedTool,
+      lastCallResult: switchingInstance ? null : get().lastCallResult,
       calling: switchingInstance ? false : get().calling,
       toolsLoading: true,
       error: null,
@@ -133,7 +140,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
       if (get().toolsRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
       }
-      set({ tools, toolsLoading: false });
+      set({ tools, toolsLoading: false, toolsLoadedInstanceId: instanceId });
     } catch (e) {
       if (get().toolsRequestId !== requestId || get().activeInstanceId !== instanceId) {
         return;
@@ -148,8 +155,10 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     set({
       activeInstanceId: instanceId,
       resourcesRequestId: requestId,
+      resourceQuery: { instanceId, bundleId },
       executionRequestId: switchingInstance ? get().executionRequestId + 1 : get().executionRequestId,
       resources: cursor ? get().resources : [],
+      resourcePagesLoaded: cursor ? get().resourcePagesLoaded : 0,
       resourcesNextCursor: cursor ? get().resourcesNextCursor : null,
       lastCallResult: switchingInstance ? null : get().lastCallResult,
       calling: switchingInstance ? false : get().calling,
@@ -168,6 +177,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
       set((state) => ({
         resources: cursor ? [...state.resources, ...response.resources] : response.resources,
         resourcesNextCursor: response.next_cursor ?? null,
+        resourcePagesLoaded: cursor ? state.resourcePagesLoaded + 1 : 1,
         resourcesLoading: false,
       }));
     } catch (e) {

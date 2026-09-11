@@ -1,6 +1,9 @@
+import { useNavigationForm, useForgetNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Alert, AutoComplete, Button, Form, Modal, Select, Space, Switch } from 'antd';
+import { Alert, AutoComplete, Button, Form, Select, Space, Switch } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/common/Input';
@@ -26,6 +29,7 @@ interface EditorValues {
 interface ConfigValueEditorProps {
   open: boolean;
   instanceId: string;
+  draftPrefix?: string;
   initialValue?: ConfigEntryFormValue;
   inputs: InputDefinition[];
   existingKeys: string[];
@@ -104,6 +108,7 @@ function valuesToDefinition(values: EditorValues): InputDefinition {
 export function ConfigValueEditor({
   open,
   instanceId,
+  draftPrefix = 'mcp.config-value.',
   initialValue,
   inputs,
   existingKeys,
@@ -112,6 +117,11 @@ export function ConfigValueEditor({
 }: ConfigValueEditorProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm<EditorValues>();
+  const pageActive = usePageActive();
+  const forget = useForgetNavigationState();
+  const draftKey = `${draftPrefix}${JSON.stringify(initialValue?.key ?? null)}`;
+  const draft = useNavigationForm(draftKey, form, entryToValues(initialValue));
+  const discard = () => { draft.clearDraft(); forget(draftKey); onCancel(); };
   const type = Form.useWatch('type', form);
   const password = Form.useWatch('password', form);
   const pickOptions = Form.useWatch('options', form);
@@ -134,9 +144,7 @@ export function ConfigValueEditor({
       return;
     }
 
-    form.resetFields();
-    form.setFieldsValue(entryToValues(initialValue));
-  }, [form, initialValue, open]);
+  }, [initialValue, open, pageActive]);
 
   useEffect(() => {
     commandPreviewRequestId.current += 1;
@@ -160,17 +168,23 @@ export function ConfigValueEditor({
 
   const loadDefinition = (id: string) => {
     const definition = inputs.find((input) => input.id === id);
-    if (definition) form.setFieldsValue(definitionToValues(definition));
+    if (definition) draft.setValues(definitionToValues(definition));
+  };
+
+  const submit: typeof onSubmit = (value) => {
+    draft.clearDraft();
+    forget(draftKey);
+    onSubmit(value);
   };
 
   const handleFinish = (values: EditorValues) => {
     const key = values.key.trim();
     if (values.type === 'Constant') {
-      onSubmit({ key, value: { type: 'Constant', value: values.value ?? '' } });
+      submit({ key, value: { type: 'Constant', value: values.value ?? '' } });
       return;
     }
     const definition = valuesToDefinition(values);
-    onSubmit({
+    submit({
       key,
       value: { type: 'Input', inputId: definition.id, definition },
     });
@@ -223,7 +237,7 @@ export function ConfigValueEditor({
     <Modal
       title={initialValue ? t('mcp.form.editConfigItem') : t('mcp.form.addConfigItem')}
       open={open}
-      onCancel={onCancel}
+      onCancel={discard}
       footer={null}
       destroyOnHidden
       width={620}
@@ -231,6 +245,7 @@ export function ConfigValueEditor({
       <Form
         name="mcp-config-entry"
         form={form}
+        onValuesChange={draft.onValuesChange}
         layout="vertical"
         initialValues={entryToValues(initialValue)}
         onFinish={handleFinish}
@@ -422,7 +437,7 @@ export function ConfigValueEditor({
             >
               {t('common.confirm')}
             </Button>
-            <Button onClick={onCancel}>{t('common.cancel')}</Button>
+            <Button onClick={discard}>{t('common.cancel')}</Button>
           </Space>
         </Form.Item>
       </Form>

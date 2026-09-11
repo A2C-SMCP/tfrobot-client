@@ -7,12 +7,12 @@
 //! never logs request payloads because they contain the User JWT.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StateMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
 use crate::services::manager_client::{ExchangedToken, ManagerError};
@@ -107,9 +107,22 @@ struct BridgeState {
     pending: HashMap<String, PendingRequest>,
 }
 
+// State mutations never await. A synchronous guard lets cancellation revoke pending
+// transport authority immediately, including while event delivery is still awaiting.
+struct PendingExchange<'a> {
+    state: &'a StateMutex<BridgeState>,
+    request_id: &'a str,
+}
+
+impl Drop for PendingExchange<'_> {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().pending.remove(self.request_id);
+    }
+}
+
 pub struct ManagerTokenBridge {
     sink: RwLock<Option<Arc<dyn ManagerTokenBridgeSink>>>,
-    state: Mutex<BridgeState>,
+    state: StateMutex<BridgeState>,
     timeout: Duration,
 }
 
@@ -117,7 +130,7 @@ impl ManagerTokenBridge {
     pub fn new() -> Self {
         Self {
             sink: RwLock::new(None),
-            state: Mutex::new(BridgeState::default()),
+            state: StateMutex::new(BridgeState::default()),
             timeout: TOKEN_BRIDGE_TIMEOUT,
         }
     }
@@ -135,7 +148,7 @@ impl ManagerTokenBridge {
     }
 
     pub async fn set_ready(&self, lease_id: &str, ready: bool) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().unwrap();
         if ready {
             if state.ready_lease.as_deref() != Some(lease_id) {
                 state.pending.clear();
@@ -148,7 +161,7 @@ impl ManagerTokenBridge {
     }
 
     pub async fn force_not_ready(&self) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().unwrap();
         state.ready_lease = None;
         state.pending.clear();
     }
@@ -177,7 +190,7 @@ impl ManagerTokenBridge {
         };
         let (sender, receiver) = oneshot::channel();
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.lock().unwrap();
             if state.ready_lease.is_none() {
                 return Err(ManagerError::InvalidResponse(
                     "Manager token bridge is not ready".to_string(),
@@ -198,8 +211,11 @@ impl ManagerTokenBridge {
             );
         }
 
+        let _pending = PendingExchange {
+            state: &self.state,
+            request_id: &request_id,
+        };
         if let Err(error) = sink.emit_token_request(&request).await {
-            self.state.lock().await.pending.remove(&request_id);
             return Err(ManagerError::InvalidResponse(format!(
                 "Manager token bridge request could not be delivered: {error}"
             )));
@@ -208,12 +224,9 @@ impl ManagerTokenBridge {
         match tokio::time::timeout(self.timeout, receiver).await {
             Ok(Ok(completion)) => completion.into_result(),
             Ok(Err(_)) => Err(ManagerError::ContextChanged),
-            Err(_) => {
-                self.state.lock().await.pending.remove(&request_id);
-                Err(ManagerError::NetworkError(
-                    "Manager token bridge timed out".to_string(),
-                ))
-            }
+            Err(_) => Err(ManagerError::NetworkError(
+                "Manager token bridge timed out".to_string(),
+            )),
         }
     }
 
@@ -223,7 +236,7 @@ impl ManagerTokenBridge {
         generation: u64,
         body: &str,
     ) -> Result<String, ManagerError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().unwrap();
         if state.ready_lease.is_none() {
             return Err(ManagerError::ContextChanged);
         }
@@ -250,7 +263,7 @@ impl ManagerTokenBridge {
         generation: u64,
         attempt_id: &str,
     ) -> Result<(), ManagerError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().unwrap();
         let request = state
             .pending
             .get_mut(request_id)
@@ -270,7 +283,7 @@ impl ManagerTokenBridge {
         mut completion: ManagerTokenBridgeCompletion,
     ) -> Result<(), ManagerError> {
         let pending = {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.lock().unwrap();
             let request = state
                 .pending
                 .get(request_id)
@@ -418,6 +431,7 @@ impl ManagerTokenBridgeFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
 
     fn valid_form(user_jwt: &str, audience: &str, scope: Option<&str>) -> String {
         let mut form = vec![
@@ -509,6 +523,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(exchange.await.unwrap().unwrap().access_token, "short");
+    }
+
+    #[tokio::test]
+    async fn cancelled_exchange_revokes_pending_transport_authority() {
+        let bridge = Arc::new(ManagerTokenBridge::new());
+        let (sender, receiver) = oneshot::channel();
+        bridge
+            .set_sink(Arc::new(RecordingSink {
+                sender: Mutex::new(Some(sender)),
+            }))
+            .await;
+        bridge.set_ready("test-lease", true).await;
+        let task_bridge = bridge.clone();
+        let exchange = tokio::spawn(async move {
+            task_bridge
+                .exchange(
+                    3,
+                    "https://manager.example/api/v1/oauth/token".to_string(),
+                    "user-jwt".to_string(),
+                    "robot:r1".to_string(),
+                    Some("config:write".to_string()),
+                    ManagerTokenProfile::Session,
+                )
+                .await
+        });
+        let request = receiver.await.unwrap();
+        exchange.abort();
+        assert!(exchange.await.unwrap_err().is_cancelled());
+        assert!(bridge.state.lock().unwrap().pending.is_empty());
+        assert!(matches!(
+            bridge
+                .begin_transport(
+                    &request.request_id,
+                    3,
+                    &valid_form("user-jwt", "robot:r1", Some("config:write")),
+                )
+                .await,
+            Err(ManagerError::ContextChanged)
+        ));
     }
 
     #[tokio::test]
@@ -637,7 +690,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 attempt + 1,
-                bridge.state.lock().await.pending[&request.request_id].attempt_count
+                bridge.state.lock().unwrap().pending[&request.request_id].attempt_count
             );
         }
         assert!(matches!(
@@ -667,7 +720,7 @@ mod tests {
         bridge.set_ready("current", true).await;
         bridge.set_ready("old", false).await;
         assert_eq!(
-            bridge.state.lock().await.ready_lease.as_deref(),
+            bridge.state.lock().unwrap().ready_lease.as_deref(),
             Some("current")
         );
     }

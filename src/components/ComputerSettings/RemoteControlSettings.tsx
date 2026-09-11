@@ -1,7 +1,10 @@
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Alert,
+  App,
   Button,
   Checkbox,
   Divider,
@@ -11,7 +14,6 @@ import {
   Spin,
   Switch,
   Typography,
-  message,
 } from 'antd';
 import { useTranslation } from 'react-i18next';
 import {
@@ -41,15 +43,23 @@ interface RemoteControlSettingsProps {
 
 export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) {
   const { t } = useTranslation();
+  const { message } = App.useApp();
+  const active = usePageActive();
+  const action = usePageAction(instance.id);
   const { instances, fetchInstances } = useComputerStore();
   const [catalog, setCatalog] = useState<ClientControlTool[]>([]);
-  const [policy, setPolicy] = useState<RemoteControlPolicy>(
+  const [draftPolicy, setDraftPolicy] = useNavigationState<RemoteControlPolicy | null>('settings.remoteControl', null);
+  const [serverPolicy, setServerPolicy] = useState<RemoteControlPolicy>(
     instance.remoteControl ?? DEFAULT_POLICY,
   );
+  const policy = draftPolicy ?? serverPolicy;
+  const setPolicy: React.Dispatch<React.SetStateAction<RemoteControlPolicy>> = (next) => setDraftPolicy(typeof next === 'function' ? next(policy) : next);
+  const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     setLoading(true);
     Promise.all([
@@ -57,8 +67,9 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
       invoke<RemoteControlPolicy>('get_remote_control_policy', { computerId: instance.id }),
     ]).then(([nextCatalog, nextPolicy]) => {
       if (!cancelled) {
+        setLoaded(true);
         setCatalog(nextCatalog);
-        setPolicy(nextPolicy);
+        setServerPolicy(nextPolicy);
       }
     }).catch((error) => {
       if (!cancelled) void message.error(String(error));
@@ -66,7 +77,7 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [instance.id]);
+  }, [active, instance.id, message]);
 
   const grouped = useMemo(() => {
     const groups = new Map<string, ClientControlTool[]>();
@@ -79,22 +90,25 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
   const selectedTargets = policy.target_scope.mode === 'custom' ? policy.target_scope.targets : [];
 
   const save = async () => {
+    const current = action();
     setSaving(true);
     try {
       const updated = await invoke<RemoteControlPolicy>('update_remote_control_policy', {
         request: { computerId: instance.id, policy },
       });
-      setPolicy(updated);
+      if (!current()) return;
+      setServerPolicy(updated);
+      setDraftPolicy(null);
       await fetchInstances();
-      void message.success(t('computer.remoteControl.saved'));
+      if (current()) void message.success(t('computer.remoteControl.saved'));
     } catch (error) {
-      void message.error(String(error));
+      if (current()) void message.error(String(error));
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <Spin />;
+  if (loading && !loaded) return <Spin />;
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>

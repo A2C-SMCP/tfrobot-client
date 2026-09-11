@@ -1,3 +1,6 @@
+use crate::commands::activity_support::{
+    mcp_activity_ownership, record_computer_activity, ComputerActivitySpec,
+};
 use crate::commands::connection::{
     connect_connection_target_for_policy_inner, connect_manager_robot_target_for_policy,
     disconnect_smcp_core,
@@ -23,7 +26,9 @@ use crate::services::input_value_store::InputValueStore;
 use crate::services::keychain;
 use crate::services::manager_client::ManagerError;
 use crate::services::observability::{
-    redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+    current_activity_invocation_context, redact_text, with_activity_invocation_context,
+    ActivityEventDraft, ActivityLevel, ActivityManagedBy, ActivityOutcome, ActivityProvider,
+    ActivityTrigger, ComputerActivityCategory,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -167,7 +172,26 @@ pub async fn create_computer_instance_core(
     state: &AppState,
     request: CreateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
-    let name = normalize_name(&request.name)?;
+    create_computer_instance_with_trigger(state, request, "user").await
+}
+
+pub(crate) async fn create_computer_instance_with_trigger(
+    state: &AppState,
+    request: CreateComputerInstanceRequest,
+    trigger: &str,
+) -> Result<ComputerInstanceStatus, String> {
+    let started = std::time::Instant::now();
+    let name = match normalize_name(&request.name) {
+        Ok(name) => name,
+        Err(error) => {
+            let result = Err(error);
+            record_computer_profile_activity(
+                state, None, "create", trigger, started, None, &result,
+            )
+            .await;
+            return result;
+        }
+    };
     let instance = ComputerInstance {
         id: generate_instance_id(),
         name,
@@ -183,43 +207,58 @@ pub async fn create_computer_instance_core(
         robot_binding: None,
     };
 
-    state
-        .config
-        .add_computer_instance(instance.clone())
-        .map_err(|error| error.to_string())?;
-    let instance_storage_root = state.config.computer_instance_storage_root(&instance.id);
-    let instance = match load_hydrated_computer_instance(state, &instance.id) {
-        Ok(instance) => instance,
-        Err(error) => {
-            return Err(rollback_failed_computer_creation(
-                state,
-                &instance.id,
-                &instance_storage_root,
-                "create",
-                error.to_string(),
-            )
-            .await)
-        }
-    };
-    let runtime = match state
-        .computer_registry
-        .upsert_runtime(instance.clone())
-        .await
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return Err(rollback_failed_computer_creation(
-                state,
-                &instance.id,
-                &instance_storage_root,
-                "create",
-                error,
-            )
-            .await)
-        }
-    };
+    let computer_id = instance.id.clone();
+    let result = async {
+        state
+            .config
+            .add_computer_instance(instance.clone())
+            .map_err(|error| error.to_string())?;
+        let instance_storage_root = state.config.computer_instance_storage_root(&instance.id);
+        let instance = match load_hydrated_computer_instance(state, &instance.id) {
+            Ok(instance) => instance,
+            Err(error) => {
+                return Err(rollback_failed_computer_creation(
+                    state,
+                    &instance.id,
+                    &instance_storage_root,
+                    "create",
+                    error.to_string(),
+                )
+                .await)
+            }
+        };
+        let runtime = match state
+            .computer_registry
+            .upsert_runtime(instance.clone())
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return Err(rollback_failed_computer_creation(
+                    state,
+                    &instance.id,
+                    &instance_storage_root,
+                    "create",
+                    error,
+                )
+                .await)
+            }
+        };
 
-    Ok(status_from_instance(&instance, &runtime).await)
+        Ok(status_from_instance(&instance, &runtime).await)
+    }
+    .await;
+    record_computer_profile_activity(
+        state,
+        Some(&computer_id),
+        "create",
+        trigger,
+        started,
+        None,
+        &result,
+    )
+    .await;
+    result
 }
 
 #[tauri::command]
@@ -231,6 +270,34 @@ pub async fn rename_computer_instance(
 }
 
 pub async fn rename_computer_instance_core(
+    state: &AppState,
+    request: RenameComputerInstanceRequest,
+) -> Result<ComputerInstanceStatus, String> {
+    rename_computer_instance_with_trigger(state, request, "user").await
+}
+
+pub(crate) async fn rename_computer_instance_with_trigger(
+    state: &AppState,
+    request: RenameComputerInstanceRequest,
+    trigger: &str,
+) -> Result<ComputerInstanceStatus, String> {
+    let started = std::time::Instant::now();
+    let computer_id = request.id.clone();
+    let result = rename_computer_instance_transaction(state, request).await;
+    record_computer_profile_activity(
+        state,
+        Some(&computer_id),
+        "update",
+        trigger,
+        started,
+        None,
+        &result,
+    )
+    .await;
+    result
+}
+
+async fn rename_computer_instance_transaction(
     state: &AppState,
     request: RenameComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
@@ -275,19 +342,75 @@ pub async fn duplicate_computer_instance_core(
     state: &AppState,
     request: DuplicateComputerInstanceRequest,
 ) -> Result<ComputerInstanceStatus, String> {
+    duplicate_computer_instance_with_trigger(state, request, "user").await
+}
+
+pub(crate) async fn duplicate_computer_instance_with_trigger(
+    state: &AppState,
+    mut request: DuplicateComputerInstanceRequest,
+    trigger: &str,
+) -> Result<ComputerInstanceStatus, String> {
+    let started = std::time::Instant::now();
+    let duplicate_source_computer_id = request.source_id.clone();
+    request.name = match normalize_name(&request.name) {
+        Ok(name) => name,
+        Err(error) => {
+            let result = Err(error);
+            record_computer_profile_activity(
+                state,
+                None,
+                "duplicate",
+                trigger,
+                started,
+                Some(&duplicate_source_computer_id),
+                &result,
+            )
+            .await;
+            return result;
+        }
+    };
     let transaction_state = state.clone();
-    tokio::spawn(async move {
-        duplicate_computer_instance_transaction(&transaction_state, request).await
+    let transaction_computer_id = generate_instance_id();
+    let transaction_trigger = trigger.to_string();
+    let activity_context = current_activity_invocation_context().map(|mut context| {
+        context.target_computer_id = Some(transaction_computer_id.clone());
+        context
+    });
+    let result = tokio::spawn(async move {
+        let operation = async {
+            let result = duplicate_computer_instance_transaction(
+                &transaction_state,
+                request,
+                transaction_computer_id.clone(),
+            )
+            .await;
+            record_computer_profile_activity(
+                &transaction_state,
+                Some(&transaction_computer_id),
+                "duplicate",
+                &transaction_trigger,
+                started,
+                Some(&duplicate_source_computer_id),
+                &result,
+            )
+            .await;
+            result
+        };
+        match activity_context {
+            Some(context) => with_activity_invocation_context(context, operation).await,
+            None => operation.await,
+        }
     })
     .await
-    .map_err(|error| format!("Duplicate Computer transaction task failed: {error}"))?
+    .map_err(|error| format!("Duplicate Computer transaction task failed: {error}"))?;
+    result
 }
 
 async fn duplicate_computer_instance_transaction(
     state: &AppState,
     request: DuplicateComputerInstanceRequest,
+    duplicate_id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
-    let name = normalize_name(&request.name)?;
     let target_override = normalize_optional_text(request.connection_target_id);
     if let Some(target_id) = target_override.as_ref() {
         state
@@ -314,8 +437,8 @@ async fn duplicate_computer_instance_transaction(
         .ok_or_else(|| format!("Computer instance not found: {source_id}"))?;
     let skill_snapshot = source_runtime.acquire_skill_snapshot_lease().await?;
     let source_skill_root = skill_snapshot.configured_skill_home();
-    instance.id = generate_instance_id();
-    instance.name = name;
+    instance.id = duplicate_id;
+    instance.name = request.name;
     instance.description = normalize_optional_text(request.description);
     instance.local_skills_root = None;
     instance.remote_control = RemoteControlPolicy::default();
@@ -514,23 +637,100 @@ pub async fn delete_computer_instance(
     delete_computer_instance_core(&state, id).await
 }
 
+async fn record_computer_profile_activity<T>(
+    state: &AppState,
+    computer_id: Option<&str>,
+    operation: &str,
+    trigger: &str,
+    started: std::time::Instant,
+    duplicate_source_computer_id: Option<&str>,
+    result: &Result<T, String>,
+) {
+    let (level, outcome, message, error) = match result {
+        Ok(_) => (
+            ActivityLevel::Info,
+            ActivityOutcome::Succeeded,
+            format!("Computer profile {operation} succeeded"),
+            None,
+        ),
+        Err(error) => (
+            ActivityLevel::Warn,
+            ActivityOutcome::Failed,
+            format!("Computer profile {operation} failed"),
+            Some(redact_text(error)),
+        ),
+    };
+    let mut activity = match computer_id {
+        Some(computer_id) => ActivityEventDraft::computer(
+            computer_id,
+            level,
+            ComputerActivityCategory::Computer,
+            "computer_profile",
+            operation,
+            outcome,
+            message,
+        ),
+        None => ActivityEventDraft::client(
+            level,
+            ComputerActivityCategory::Computer,
+            "computer_profile",
+            operation,
+            outcome,
+            message,
+        ),
+    };
+    activity.fields = Some(serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "trigger": trigger,
+        "managed_by": ActivityManagedBy::User.as_str(),
+        "provider": ActivityProvider::Client.as_str(),
+        "target_id": computer_id,
+        "duplicate_source_computer_id": duplicate_source_computer_id,
+        "duration_ms": started.elapsed().as_millis(),
+        "error": error,
+    }));
+    activity.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+    if let Err(error) = state.observability.record_activity_async(activity).await {
+        log::error!("failed to persist Computer profile {operation} activity: {error}");
+    }
+}
+
 pub async fn delete_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(&id).await;
-    let instance_storage_root = state.config.computer_instance_storage_root(&id);
+    delete_computer_instance_with_trigger(state, id, "user").await
+}
+
+pub(crate) async fn delete_computer_instance_with_trigger(
+    state: &AppState,
+    id: ComputerInstanceId,
+    trigger: &str,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let result = delete_computer_instance_transaction(state, &id).await;
+    record_computer_profile_activity(state, Some(&id), "delete", trigger, started, None, &result)
+        .await;
+    result
+}
+
+async fn delete_computer_instance_transaction(
+    state: &AppState,
+    id: &ComputerInstanceId,
+) -> Result<(), String> {
+    let _operation_guard = state.computer_registry.operation_lease(id).await;
+    let instance_storage_root = state.config.computer_instance_storage_root(id);
     let persisted_instance = state
         .config
-        .get_computer_instance(&id)
+        .get_computer_instance(id)
         .map_err(|error| error.to_string())?;
     // Retire and drain the runtime before reading or mutating InputEntry storage. This prevents
     // an in-flight SDK resolver from adopting legacy metadata or reading a value while Computer
     // deletion snapshots and removes the authoritative Entry set.
-    let prepared_removal = state.computer_registry.prepare_runtime_removal(&id).await?;
+    let prepared_removal = state.computer_registry.prepare_runtime_removal(id).await?;
     let input_storage = snapshot_computer_input_storage(state, &persisted_instance)?;
-    if let Err(error) = delete_computer_input_storage(state, &id, &input_storage) {
-        let rollback = restore_computer_input_storage(state, &id, &input_storage);
+    if let Err(error) = delete_computer_input_storage(state, id, &input_storage) {
+        let rollback = restore_computer_input_storage(state, id, &input_storage);
         drop(prepared_removal);
         return match rollback {
             Ok(()) => Err(error),
@@ -545,7 +745,7 @@ pub async fn delete_computer_instance_core(
         Ok(quarantined_storage) => quarantined_storage,
         Err(error) => {
             drop(prepared_removal);
-            return match restore_computer_input_storage(state, &id, &input_storage) {
+            return match restore_computer_input_storage(state, id, &input_storage) {
                     Ok(()) => Err(error),
                     Err(rollback_error) => Err(format!(
                         "{error}; additionally failed to restore Computer input storage: {rollback_error}"
@@ -553,7 +753,7 @@ pub async fn delete_computer_instance_core(
                 };
         }
     };
-    if let Err(error) = state.config.remove_computer_instance(&id) {
+    if let Err(error) = state.config.remove_computer_instance(id) {
         let mut rollback_errors = Vec::new();
         if let Some(quarantined) = quarantined_storage.as_ref() {
             if let Err(restore_error) =
@@ -562,7 +762,7 @@ pub async fn delete_computer_instance_core(
                 rollback_errors.push(format!("restore SDK storage: {restore_error}"));
             }
         }
-        if let Err(restore_error) = restore_computer_input_storage(state, &id, &input_storage) {
+        if let Err(restore_error) = restore_computer_input_storage(state, id, &input_storage) {
             rollback_errors.push(format!("restore Computer input storage: {restore_error}"));
         }
         drop(prepared_removal);
@@ -594,7 +794,7 @@ pub async fn delete_computer_instance_core(
                     rollback_errors.push(format!("restore SDK storage: {restore_error}"));
                 }
             }
-            if let Err(restore_error) = restore_computer_input_storage(state, &id, &input_storage) {
+            if let Err(restore_error) = restore_computer_input_storage(state, id, &input_storage) {
                 rollback_errors.push(format!("restore Computer input storage: {restore_error}"));
             }
             if rollback_errors.is_empty() {
@@ -766,6 +966,19 @@ async fn start_computer_instance_core_with_mode(
     id: ComputerInstanceId,
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let started = std::time::Instant::now();
+    let result =
+        start_computer_instance_transaction(app, state, id.clone(), interaction_mode).await;
+    record_computer_runtime_activity(state, &id, "start", started, &result).await;
+    result
+}
+
+async fn start_computer_instance_transaction(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
     let operation_guard = state.computer_registry.operation_lease(&id).await;
     let instance = state
         .config
@@ -831,20 +1044,24 @@ async fn start_computer_instance_core_with_mode(
             if let Err(error) =
                 connect_computer_connection_target_by_policy(app, state, &id, target).await
             {
-                if let Err(persist_error) = state
-                    .observability
-                    .record_activity_async(ActivityEventDraft::computer(
-                        &id,
-                        ActivityLevel::Warn,
-                        "connection",
-                        "smcp_connection",
-                        "auto_connect",
-                        ActivityOutcome::Failed,
-                        crate::services::observability::redact_text(&format!(
-                            "Auto connect failed: {error}"
-                        )),
-                    ))
-                    .await
+                let error_summary = crate::services::observability::redact_text(&error);
+                let mut activity = ActivityEventDraft::computer(
+                    &id,
+                    ActivityLevel::Warn,
+                    ComputerActivityCategory::Connection,
+                    "smcp_connection",
+                    "auto_connect",
+                    ActivityOutcome::Failed,
+                    "Automatic SMCP connection failed",
+                )
+                .with_standard_fields(
+                    ActivityTrigger::Policy,
+                    Some(ActivityManagedBy::System),
+                    Some(ActivityProvider::Smcp),
+                );
+                activity.merge_fields(serde_json::json!({"error": error_summary}));
+                if let Err(persist_error) =
+                    state.observability.record_activity_async(activity).await
                 {
                     log::error!("failed to persist auto-connect failure activity: {persist_error}");
                 }
@@ -867,14 +1084,24 @@ pub async fn stop_computer_instance_core(
     state: &AppState,
     id: ComputerInstanceId,
 ) -> Result<ComputerInstanceStatus, String> {
-    let _operation_guard = state.computer_registry.operation_lease(&id).await;
+    let started = std::time::Instant::now();
+    let result = stop_computer_instance_transaction(state, &id).await;
+    record_computer_runtime_activity(state, &id, "stop", started, &result).await;
+    result
+}
+
+async fn stop_computer_instance_transaction(
+    state: &AppState,
+    id: &ComputerInstanceId,
+) -> Result<ComputerInstanceStatus, String> {
+    let _operation_guard = state.computer_registry.operation_lease(id).await;
     let instance = state
         .config
-        .get_computer_instance(&id)
+        .get_computer_instance(id)
         .map_err(|error| error.to_string())?;
     let runtime = state
         .computer_registry
-        .runtime(&id)
+        .runtime(id)
         .await
         .ok_or_else(|| format!("Computer instance not found: {id}"))?;
     runtime
@@ -924,6 +1151,19 @@ pub async fn restart_computer_instance_core(
 }
 
 async fn restart_computer_instance_core_with_mode(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: ComputerInstanceId,
+    interaction_mode: RuntimeInputInteractionMode,
+) -> Result<ComputerInstanceStatus, RuntimeActionError> {
+    let started = std::time::Instant::now();
+    let result =
+        restart_computer_instance_transaction(app, state, id.clone(), interaction_mode).await;
+    record_computer_runtime_activity(state, &id, "restart", started, &result).await;
+    result
+}
+
+async fn restart_computer_instance_transaction(
     app: Option<&AppHandle>,
     state: &AppState,
     id: ComputerInstanceId,
@@ -998,6 +1238,53 @@ async fn restart_computer_instance_core_with_mode(
     Ok(status_from_instance(&instance, &runtime).await)
 }
 
+async fn record_computer_runtime_activity<T, E>(
+    state: &AppState,
+    computer_id: &str,
+    operation: &str,
+    started: std::time::Instant,
+    result: &Result<T, E>,
+) where
+    E: std::fmt::Display,
+{
+    let (level, outcome, message, error) = match result {
+        Ok(_) => (
+            ActivityLevel::Info,
+            ActivityOutcome::Succeeded,
+            format!("Computer runtime {operation} succeeded"),
+            None,
+        ),
+        Err(error) => (
+            ActivityLevel::Warn,
+            ActivityOutcome::Failed,
+            format!("Computer runtime {operation} failed"),
+            Some(redact_text(&error.to_string())),
+        ),
+    };
+    let mut activity = ActivityEventDraft::computer(
+        computer_id,
+        level,
+        ComputerActivityCategory::Runtime,
+        "runtime_lifecycle",
+        operation,
+        outcome,
+        message,
+    );
+    activity.fields = Some(serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "trigger": "command",
+        "managed_by": ActivityManagedBy::User.as_str(),
+        "provider": ActivityProvider::Client.as_str(),
+        "target_id": computer_id,
+        "duration_ms": started.elapsed().as_millis(),
+        "error": error,
+    }));
+    activity.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+    if let Err(error) = state.observability.record_activity_async(activity).await {
+        log::error!("failed to persist Computer runtime {operation} activity: {error}");
+    }
+}
+
 async fn record_mcp_start_failure_activities(
     state: &AppState,
     instance_id: &str,
@@ -1018,16 +1305,22 @@ async fn record_mcp_start_failure_activities(
                 continue;
             };
             let server_label = name.as_deref().unwrap_or(&bundle_id);
+            let (managed_by, provider) = mcp_activity_ownership(state, instance_id, &bundle_id);
             let mut activity = ActivityEventDraft::computer(
                 instance_id,
                 ActivityLevel::Error,
-                "mcp",
+                ComputerActivityCategory::Mcp,
                 "mcp_server_lifecycle",
                 "start",
                 ActivityOutcome::Failed,
                 format!("Server start failed: {server_label}: {error_summary}"),
+            )
+            .with_standard_fields(
+                ActivityTrigger::Runtime,
+                Some(managed_by),
+                Some(provider),
             );
-            activity.fields = Some(serde_json::json!({
+            activity.merge_fields(serde_json::json!({
                 "bundle_id": bundle_id,
                 "server_name": name,
                 "error": error_summary.clone(),
@@ -1095,13 +1388,18 @@ async fn disable_command_line_after_failure(
     let mut activity = ActivityEventDraft::computer(
         instance_id,
         ActivityLevel::Error,
-        "mcp",
+        ComputerActivityCategory::Mcp,
         "built_in_command_line",
         "start",
         ActivityOutcome::Failed,
         format!("Built-in command line tool failed to start: {error_summary}"),
+    )
+    .with_standard_fields(
+        ActivityTrigger::Runtime,
+        Some(ActivityManagedBy::BuiltIn),
+        Some(ActivityProvider::BuiltInMcp),
     );
-    activity.fields = Some(serde_json::json!({
+    activity.merge_fields(serde_json::json!({
         "bundle_id": COMMAND_LINE_BUNDLE_ID,
         "error": error_summary,
         "policy_rolled_back": result.is_ok(),
@@ -1124,39 +1422,74 @@ pub async fn update_computer_connection_policy_core(
     state: &AppState,
     request: UpdateComputerConnectionPolicyRequest,
 ) -> Result<ComputerInstanceStatus, String> {
-    if let Some(ComputerConnectionTarget::ManagerRobot { context_key, .. }) =
-        request.target.as_ref()
-    {
-        let generation = state
-            .manager_context
-            .capture_authenticated_generation()
-            .await
-            .map_err(|error| error.to_string())?;
-        let current_context = state
-            .manager_context
-            .context_key_for_generation(generation)
-            .await
-            .map_err(|error| error.to_string())?;
-        if &current_context != context_key {
-            return Err("Manager Robot target does not belong to the active Context".to_string());
+    let started = std::time::Instant::now();
+    let computer_id = request.id.clone();
+    let auto_connect = request.auto_connect;
+    let target_type = request.target.as_ref().map(|target| match target {
+        ComputerConnectionTarget::ManagerRobot { .. } => "manager_robot",
+        ComputerConnectionTarget::ManualSmcp { .. } => "manual_smcp",
+    });
+    let result = async {
+        if let Some(ComputerConnectionTarget::ManagerRobot { context_key, .. }) =
+            request.target.as_ref()
+        {
+            let generation = state
+                .manager_context
+                .capture_authenticated_generation()
+                .await
+                .map_err(|error| error.to_string())?;
+            let current_context = state
+                .manager_context
+                .context_key_for_generation(generation)
+                .await
+                .map_err(|error| error.to_string())?;
+            if &current_context != context_key {
+                return Err(
+                    "Manager Robot target does not belong to the active Context".to_string()
+                );
+            }
+            return state
+                .manager_context
+                .commit_for_authenticated_generation(generation, || async {
+                    persist_computer_connection_policy(state, request)
+                        .await
+                        .map_err(ManagerError::InvalidResponse)
+                })
+                .await
+                .map_err(|error| error.to_string());
         }
-        return state
-            .manager_context
-            .commit_for_authenticated_generation(generation, || async {
-                persist_computer_connection_policy(state, request)
-                    .await
-                    .map_err(ManagerError::InvalidResponse)
-            })
-            .await
-            .map_err(|error| error.to_string());
+        persist_computer_connection_policy(state, request).await
     }
-    persist_computer_connection_policy(state, request).await
+    .await;
+    if result.as_ref().is_err() || result.as_ref().is_ok_and(|(_, changed)| *changed) {
+        record_computer_activity(
+            state,
+            ComputerActivitySpec {
+                computer_id: &computer_id,
+                category: ComputerActivityCategory::Computer,
+                event_type: "connection_policy",
+                operation: "update",
+                trigger: ActivityTrigger::User,
+                managed_by: Some(ActivityManagedBy::User),
+                provider: Some(ActivityProvider::Client),
+                message_subject: "Computer connection policy update",
+                fields: serde_json::json!({
+                    "auto_connect": auto_connect,
+                    "target_type": target_type,
+                }),
+            },
+            started,
+            &result,
+        )
+        .await;
+    }
+    result.map(|(status, _)| status)
 }
 
 async fn persist_computer_connection_policy(
     state: &AppState,
     request: UpdateComputerConnectionPolicyRequest,
-) -> Result<ComputerInstanceStatus, String> {
+) -> Result<(ComputerInstanceStatus, bool), String> {
     let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
     let _target_guard = state.connection_target_lock.lock().await;
     validate_connection_target_reference(state, request.target.as_ref())?;
@@ -1164,6 +1497,19 @@ async fn persist_computer_connection_policy(
         .config
         .get_computer_instance(&request.id)
         .map_err(|error| error.to_string())?;
+
+    let mut candidate = previous.clone();
+    apply_selected_connection_policy(&mut candidate, &request);
+    if candidate.connection_policy == previous.connection_policy
+        && candidate.robot_binding == previous.robot_binding
+    {
+        let runtime = state
+            .computer_registry
+            .runtime(&request.id)
+            .await
+            .ok_or_else(|| format!("Computer instance not found: {}", request.id))?;
+        return Ok((status_from_instance(&previous, &runtime).await, false));
+    }
 
     let updated = state
         .config
@@ -1173,7 +1519,7 @@ async fn persist_computer_connection_policy(
         .map_err(|error| error.to_string())?;
     let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
 
-    Ok(status_from_instance(&updated, &runtime).await)
+    Ok((status_from_instance(&updated, &runtime).await, true))
 }
 
 fn apply_selected_connection_policy(
@@ -1226,22 +1572,57 @@ pub async fn update_computer_skill_home_core(
     state: &AppState,
     request: UpdateComputerSkillHomeRequest,
 ) -> Result<ComputerInstanceStatus, String> {
-    let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
-    let previous = state
-        .config
-        .get_computer_instance(&request.id)
-        .map_err(|error| error.to_string())?;
-    let root = normalize_optional_text(request.local_skills_root).map(PathBuf::from);
+    let started = std::time::Instant::now();
+    let computer_id = request.id.clone();
+    let custom_root = request.local_skills_root.is_some();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(&request.id).await;
+        let previous = state
+            .config
+            .get_computer_instance(&request.id)
+            .map_err(|error| error.to_string())?;
+        let root = normalize_optional_text(request.local_skills_root).map(PathBuf::from);
 
-    let updated = state
-        .config
-        .update_computer_instance(&request.id, |instance| {
-            instance.local_skills_root = root;
-        })
-        .map_err(|error| error.to_string())?;
-    let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
+        if previous.local_skills_root == root {
+            let runtime = state
+                .computer_registry
+                .runtime(&request.id)
+                .await
+                .ok_or_else(|| format!("Computer instance not found: {}", request.id))?;
+            return Ok((status_from_instance(&previous, &runtime).await, false));
+        }
 
-    Ok(status_from_instance(&updated, &runtime).await)
+        let updated = state
+            .config
+            .update_computer_instance(&request.id, |instance| {
+                instance.local_skills_root = root;
+            })
+            .map_err(|error| error.to_string())?;
+        let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
+
+        Ok((status_from_instance(&updated, &runtime).await, true))
+    }
+    .await;
+    if result.as_ref().is_err() || result.as_ref().is_ok_and(|(_, changed)| *changed) {
+        record_computer_activity(
+            state,
+            ComputerActivitySpec {
+                computer_id: &computer_id,
+                category: ComputerActivityCategory::Computer,
+                event_type: "skill_home_policy",
+                operation: "update",
+                trigger: ActivityTrigger::User,
+                managed_by: Some(ActivityManagedBy::User),
+                provider: Some(ActivityProvider::Client),
+                message_subject: "Computer Skill home policy update",
+                fields: serde_json::json!({"custom_root": custom_root}),
+            },
+            started,
+            &result,
+        )
+        .await;
+    }
+    result.map(|(status, _)| status)
 }
 
 #[tauri::command]
@@ -1655,7 +2036,9 @@ mod tests {
     use crate::services::keychain::{InMemorySecretStore, KeychainError, SecretStore};
     use crate::services::manager_context::ManagerContextKey;
     use crate::services::manager_environment::ManagerEnvironment;
-    use crate::services::observability::ObservabilityService;
+    use crate::services::observability::{
+        ActivityOutcome, ActivityQuery, ActivityScope, ActivityScopeFilter, ObservabilityService,
+    };
     use crate::services::settings::SettingsService;
     use crate::services::storage::write_json_atomically;
     use a2c_smcp::smcp_computer::settings::config::{ConfigEdit, ConfigEntity, EditIntent};
@@ -1726,6 +2109,217 @@ mod tests {
         let log_service = ObservabilityService::new(dir.path()).unwrap();
         let settings_service = SettingsService::new(dir.path().to_path_buf());
         (AppState::new(config, log_service, settings_service), dir)
+    }
+
+    #[tokio::test]
+    async fn computer_profile_lifecycle_is_audited_in_target_scope_for_shared_entrypoints() {
+        let (state, _dir) = test_state();
+        let created = create_computer_instance_with_trigger(
+            &state,
+            CreateComputerInstanceRequest {
+                name: "Remote Computer".to_string(),
+                description: None,
+            },
+            "client_control",
+        )
+        .await
+        .unwrap();
+        delete_computer_instance_with_trigger(&state, created.id.clone(), "client_control")
+            .await
+            .unwrap();
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: created.id.clone(),
+                },
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(activity.total, 2);
+        assert_eq!(activity.items[0].operation, "delete");
+        assert_eq!(activity.items[1].operation, "create");
+        assert!(activity.items.iter().all(|event| {
+            event.category == "computer"
+                && event.outcome == ActivityOutcome::Succeeded
+                && event
+                    .fields
+                    .as_ref()
+                    .and_then(|fields| fields["trigger"].as_str())
+                    == Some("client_control")
+        }));
+    }
+
+    #[tokio::test]
+    async fn unchanged_connection_and_skill_home_policies_do_not_emit_activity() {
+        let (state, _dir) = test_state();
+        update_computer_connection_policy_core(
+            &state,
+            UpdateComputerConnectionPolicyRequest {
+                id: "computer-a".to_string(),
+                target: None,
+                auto_connect: false,
+            },
+        )
+        .await
+        .unwrap();
+        update_computer_skill_home_core(
+            &state,
+            UpdateComputerSkillHomeRequest {
+                id: "computer-a".to_string(),
+                local_skills_root: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(activity.total, 0);
+    }
+
+    #[tokio::test]
+    async fn computer_profile_validation_failure_is_redacted_and_client_scoped() {
+        let (state, _dir) = test_state();
+        let result = create_computer_instance_with_trigger(
+            &state,
+            CreateComputerInstanceRequest {
+                name: "   ".to_string(),
+                description: Some("token=must-not-be-recorded".to_string()),
+            },
+            "user",
+        )
+        .await;
+        assert!(result.is_err());
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::ClientOnly,
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(activity.total, 1);
+        assert_eq!(activity.items[0].operation, "create");
+        assert_eq!(activity.items[0].outcome, ActivityOutcome::Failed);
+        assert!(!serde_json::to_string(&activity.items[0])
+            .unwrap()
+            .contains("must-not-be-recorded"));
+    }
+
+    #[tokio::test]
+    async fn computer_runtime_core_records_success_and_failure_in_computer_scope() {
+        let (state, _dir) = test_state();
+        start_computer_instance_core(None, &state, "computer-a".to_string())
+            .await
+            .unwrap();
+        stop_computer_instance_core(&state, "computer-a".to_string())
+            .await
+            .unwrap();
+        assert!(crate::commands::connection::connect_connection_target_core(
+            &state,
+            "computer-a",
+            "missing-target",
+        )
+        .await
+        .is_err());
+        assert!(
+            start_computer_instance_core(None, &state, "missing-computer".to_string())
+                .await
+                .is_err()
+        );
+
+        let successful = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        let operations = successful
+            .items
+            .iter()
+            .filter(|event| event.event_type == "runtime_lifecycle")
+            .map(|event| event.operation.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(operations, vec!["stop", "start"]);
+        assert!(successful.items.iter().all(|event| {
+            event.event_type != "runtime_lifecycle" || event.outcome == ActivityOutcome::Succeeded
+        }));
+        let connection_failure = successful
+            .items
+            .iter()
+            .find(|event| event.operation == "connect_manual")
+            .expect("manual connection failure activity");
+        assert_eq!(connection_failure.category, "connection");
+        assert_eq!(connection_failure.outcome, ActivityOutcome::Failed);
+        assert_eq!(
+            connection_failure.fields.as_ref().unwrap()["target_id"],
+            "missing-target"
+        );
+
+        let failed = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "missing-computer".to_string(),
+                },
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(failed.total, 1);
+        assert_eq!(failed.items[0].event_type, "runtime_lifecycle");
+        assert_eq!(failed.items[0].outcome, ActivityOutcome::Failed);
+    }
+
+    #[tokio::test]
+    async fn duplicate_failure_after_target_id_generation_keeps_computer_scope() {
+        let (state, _dir) = test_state();
+        let result = duplicate_computer_instance_with_trigger(
+            &state,
+            DuplicateComputerInstanceRequest {
+                source_id: "missing-source".to_string(),
+                name: "Duplicate".to_string(),
+                description: None,
+                copy_robot_binding: false,
+                connection_target_id: None,
+                skill_home_mode: DuplicateSkillHomeMode::Empty,
+            },
+            "client_control",
+        )
+        .await;
+        assert!(result.is_err());
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery::default())
+            .unwrap();
+        let event = activity
+            .items
+            .iter()
+            .find(|event| event.operation == "duplicate")
+            .expect("duplicate failure activity");
+        let ActivityScope::Computer { computer_id } = &event.scope else {
+            panic!("generated duplicate target must use Computer scope");
+        };
+        assert_eq!(event.outcome, ActivityOutcome::Failed);
+        assert_eq!(
+            event
+                .fields
+                .as_ref()
+                .and_then(|fields| fields["target_id"].as_str()),
+            Some(computer_id.as_str())
+        );
     }
 
     #[tokio::test]
@@ -2063,6 +2657,29 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-a".to_string(),
+                },
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        let policy_event = activity
+            .items
+            .iter()
+            .find(|event| event.event_type == "built_in_mcp_policy")
+            .expect("policy update should be visible in Computer activity");
+        assert_eq!(
+            policy_event.scope,
+            ActivityScope::Computer {
+                computer_id: "computer-a".to_string()
+            }
+        );
+        assert_eq!(policy_event.category, "mcp");
+        assert_eq!(policy_event.outcome, ActivityOutcome::Succeeded);
 
         let stopped = get_computer_instance_status_core(&state, "computer-a".to_string())
             .await

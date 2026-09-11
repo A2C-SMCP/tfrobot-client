@@ -1,3 +1,4 @@
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useState } from 'react';
 import { Alert, Button, Select, Space, Switch, Typography } from 'antd';
 import { Input } from '@/components/common/Input';
@@ -30,16 +31,16 @@ export function InputEntryEditor({
   onCancel,
 }: InputEntryEditorProps) {
   const { t } = useTranslation();
-  const [key, setKey] = useState(fixedKey ?? entry?.key ?? '');
-  const [value, setValue] = useState<string | undefined>(
+  const [key, setKey] = useNavigationState(`input.${fixedKey ?? entry?.key ?? 'new'}.key`, fixedKey ?? entry?.key ?? '');
+  const [value, setValue] = useNavigationState<string | undefined>(`input.${fixedKey ?? entry?.key ?? 'new'}.value`,
     entry?.value === undefined
       ? (initialValue ?? (definition?.type === 'PickString' ? undefined : ''))
       : String(entry.value),
   );
-  const [valueTouched, setValueTouched] = useState(
+  const [valueTouched, setValueTouched] = useNavigationState(`input.${fixedKey ?? entry?.key ?? 'new'}.valueTouched`,
     entry?.value !== undefined || initialValue !== undefined,
   );
-  const [secret, setSecret] = useState(entry?.secret ?? initialSecret);
+  const [secret, setSecret] = useNavigationState(`input.${fixedKey ?? entry?.key ?? 'new'}.secret`, entry?.secret ?? initialSecret);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

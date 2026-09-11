@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect } from 'react';
 import {
   Alert,
   Button,
@@ -40,7 +41,7 @@ export function DesktopResources({
   const bindRuntime = useDesktopStore((state) => state.bindRuntime);
   const fetchDesktop = useDesktopStore((state) => state.fetchDesktop);
   const fetchWindowDetail = useDesktopStore((state) => state.fetchWindowDetail);
-  const [activePanels, setActivePanels] = useState<string[]>(
+  const [activePanels, setActivePanels] = useNavigationState<string[]>('desktop.panels',
     initiallyExpanded ? ['desktop-resources'] : [],
   );
   const canLoad = canEnumerateDesktopResources(runtime);
@@ -53,7 +54,7 @@ export function DesktopResources({
     if (initiallyExpanded) {
       setActivePanels(['desktop-resources']);
     }
-  }, [initiallyExpanded]);
+  }, [initiallyExpanded, setActivePanels]);
 
   const content = (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>

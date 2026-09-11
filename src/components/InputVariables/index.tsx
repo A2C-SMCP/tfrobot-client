@@ -1,5 +1,8 @@
-import { useEffect, useState } from 'react';
-import { App, Alert, Button, Modal, Popconfirm, Space, Table, Typography } from 'antd';
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
+import { useForgetNavigationState, useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
+import { useEffect, useRef } from 'react';
+import { App, Alert, Button, Space, Table, Typography } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useInputStore, type InputEntry } from '@/stores/inputStore';
@@ -12,6 +15,8 @@ interface InputVariablesProps {
 }
 
 export function InputVariables({ instanceId }: InputVariablesProps) {
+  const action = usePageAction(instanceId);
+  const active = usePageActive();
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -23,18 +28,31 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     upsertEntry,
     deleteEntry,
   } = useInputStore();
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editing, setEditing] = useState<InputEntry>();
+  const [editorOpen, setEditorOpen] = useNavigationState('inputs.editorOpen', false);
+  const [editing, setEditing] = useNavigationState<InputEntry | undefined>('inputs.editing', undefined);
+  const forget = useForgetNavigationState();
+  const previousInstance = useRef(instanceId);
+  useEffect(() => {
+    if (previousInstance.current === instanceId) return;
+    previousInstance.current = instanceId;
+    setEditorOpen(false);
+    setEditing(undefined);
+  }, [instanceId, setEditorOpen, setEditing]);
+  const closeEditor = () => { forget(`input.${editing?.key ?? 'new'}.`); setEditorOpen(false); };
   const ready = entriesLoadedInstanceId === instanceId && !entriesLoading && !entriesError;
 
   useEffect(() => {
-    fetchEntries(instanceId);
-  }, [fetchEntries, instanceId]);
+    if (active) void fetchEntries(instanceId);
+  }, [active, fetchEntries, instanceId]);
 
   useEffect(() => {
-    setEditorOpen(false);
-    setEditing(undefined);
-  }, [instanceId]);
+    if (ready && editorOpen && editing && !entries.some((entry) => entry.key === editing.key)) {
+      forget(`input.${editing.key}.`);
+      setEditorOpen(false);
+      setEditing(undefined);
+    }
+  }, [ready, editorOpen, editing, entries, forget, setEditorOpen, setEditing]);
+
 
   const openCreate = () => {
     setEditing(undefined);
@@ -45,13 +63,17 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     setEditorOpen(true);
   };
   const handleSubmit = async (key: string, value: string | undefined, secret: boolean) => {
+    const current = action();
+    if (!current() || !ready || (editing && !entries.some((entry) => entry.key === editing.key))) return;
     await upsertEntry(instanceId, key, value, secret);
+    if (!current()) return;
     message.success(t(editing ? 'inputs.messages.entryUpdated' : 'inputs.messages.entryCreated'));
-    setEditorOpen(false);
+    closeEditor();
   };
   const handleDelete = async (key: string) => {
     try {
       await deleteEntry(instanceId, key);
+      forget(`input.${key}.`);
       message.success(t('inputs.messages.entryDeleted'));
     } catch (cause) {
       message.error(String(cause));
@@ -144,12 +166,12 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
         <Modal
           title={t(editing ? 'inputs.entry.edit' : 'inputs.entry.add')}
           open
-          onCancel={() => setEditorOpen(false)}
+          onCancel={closeEditor}
           footer={null}
           destroyOnHidden
           width={440}
         >
-          <InputEntryEditor entry={editing} onSubmit={handleSubmit} onCancel={() => setEditorOpen(false)} />
+          <InputEntryEditor entry={editing} onSubmit={handleSubmit} onCancel={closeEditor} />
         </Modal>
       )}
     </div>

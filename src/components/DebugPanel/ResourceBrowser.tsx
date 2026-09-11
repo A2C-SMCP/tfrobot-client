@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Empty, List, Select, Space, Spin, Tag, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -13,22 +15,31 @@ interface ResourceBrowserProps {
 
 export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
   const { t } = useTranslation();
+  const pageActive = usePageActive();
   const { servers, loading: serversLoading, activeInstanceId, fetchServers } = useMcpStore();
   const {
-    resources,
+    resources: storedResources,
+    resourceQuery,
     resourcesLoading,
     resourcesNextCursor,
     error,
     fetchResources,
   } = useDebugStore();
-  const [selectedServer, setSelectedServer] = useState<{
+  const [selectedServer, setSelectedServer] = useNavigationState<{
     instanceId: string;
     bundleId: string;
     name: string;
-  } | null>(null);
+  } | null>('debug.resourceServer', null);
   const [serversReady, setServersReady] = useState(false);
   const selectedBundleId = selectedServer?.instanceId === instanceId ? selectedServer.bundleId : undefined;
   const serversBelongToInstance = activeInstanceId === instanceId;
+  const [pageCounts, setPageCounts] = useNavigationState<Record<string, number>>('debug.resourcePages', {});
+  const pageCount = selectedBundleId ? pageCounts[selectedBundleId] ?? 1 : 1;
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const forceRefresh = useRef(false);
+  const queryKey = JSON.stringify([instanceId, selectedBundleId]);
+  const resultKey = JSON.stringify([resourceQuery?.instanceId, resourceQuery?.bundleId]);
+  const resources = resultKey === queryKey ? storedResources : [];
 
   const runningServers = useMemo(
     () => (
@@ -40,9 +51,9 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
   );
 
   useEffect(() => {
+    if (!pageActive) return;
     let active = true;
     setServersReady(false);
-    setSelectedServer(null);
     fetchServers(instanceId).finally(() => {
       if (active) {
         setServersReady(true);
@@ -51,11 +62,15 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
     return () => {
       active = false;
     };
-  }, [fetchServers, instanceId]);
+  }, [fetchServers, instanceId, pageActive]);
 
   useEffect(() => {
-    if (!serversReady) {
+    if (!pageActive || !serversReady || serversLoading || !serversBelongToInstance) {
       return;
+    }
+    const ids = new Set(servers.map((server) => server.bundleId));
+    if (Object.keys(pageCounts).some((id) => !ids.has(id))) {
+      setPageCounts(Object.fromEntries(Object.entries(pageCounts).filter(([id]) => ids.has(id))));
     }
     if (selectedBundleId && !runningServers.some((server) => server.bundleId === selectedBundleId)) {
       setSelectedServer(null);
@@ -68,27 +83,41 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
         name: runningServers[0].name,
       });
     }
-  }, [instanceId, runningServers, selectedBundleId, serversReady]);
+  }, [instanceId, runningServers, selectedBundleId, serversReady, serversLoading, serversBelongToInstance, pageActive, setSelectedServer, servers, pageCounts, setPageCounts]);
 
+  const selectedAvailable = runningServers.some((server) => server.bundleId === selectedBundleId);
   useEffect(() => {
-    if (
-      serversReady &&
-      selectedBundleId &&
-      runningServers.some((server) => server.bundleId === selectedBundleId)
-    ) {
-      fetchResources(instanceId, selectedBundleId);
-    }
-  }, [fetchResources, instanceId, runningServers, selectedBundleId, serversReady]);
+    if (!pageActive || !serversReady || serversLoading || !selectedBundleId || !selectedAvailable) return;
+    let cancelled = false;
+    const ownsResult = () => {
+      const query = useDebugStore.getState().resourceQuery;
+      return query?.instanceId === instanceId && query.bundleId === selectedBundleId;
+    };
+    const restoreRange = async () => {
+      let pages = !forceRefresh.current && ownsResult() ? useDebugStore.getState().resourcePagesLoaded ?? 0 : 0;
+      if (pages === 0) {
+        await fetchResources(instanceId, selectedBundleId);
+        if (cancelled || !ownsResult() || useDebugStore.getState().error) return;
+        pages = 1;
+        forceRefresh.current = false;
+      }
+      while (!cancelled && pages < pageCount) {
+        const cursor = useDebugStore.getState().resourcesNextCursor;
+        if (!cursor) break;
+        await fetchResources(instanceId, selectedBundleId, cursor);
+        if (cancelled || !ownsResult() || useDebugStore.getState().error) return;
+        pages += 1;
+        forceRefresh.current = false;
+      }
+    };
+    void restoreRange();
+    return () => { cancelled = true; };
+  }, [fetchResources, instanceId, pageActive, pageCount, queryKey, selectedAvailable, selectedBundleId, serversLoading, serversReady, refreshRevision]);
 
   const handleRefresh = () => {
-    setServersReady(false);
-    fetchServers(instanceId).finally(() => setServersReady(true));
-    if (
-      selectedBundleId &&
-      runningServers.some((server) => server.bundleId === selectedBundleId)
-    ) {
-      fetchResources(instanceId, selectedBundleId);
-    }
+    forceRefresh.current = true;
+    setRefreshRevision((revision) => revision + 1);
+    void fetchServers(instanceId);
   };
 
   return (
@@ -128,7 +157,7 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
         )}
       </Space>
 
-      {serversLoading || (resourcesLoading && resources.length === 0) ? (
+      {(serversLoading || resourcesLoading) && resources.length === 0 ? (
         <Spin style={{ display: 'block', marginTop: 40 }} />
       ) : runningServers.length === 0 ? (
         <Empty description={t('debug.noRunningServers')} />
@@ -167,11 +196,7 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
           />
           {resourcesNextCursor && (
             <Button
-              onClick={() => selectedBundleId && fetchResources(
-                instanceId,
-                selectedBundleId,
-                resourcesNextCursor,
-              )}
+              onClick={() => selectedBundleId && setPageCounts((counts) => ({ ...counts, [selectedBundleId]: (counts[selectedBundleId] ?? 1) + 1 }))}
               loading={resourcesLoading}
             >
               {t('debug.loadMoreResources')}

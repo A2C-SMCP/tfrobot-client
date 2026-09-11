@@ -3,6 +3,9 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { ToolBrowser } from '@/components/DebugPanel/ToolBrowser';
 
 const mockDebugStore = {
+  activeInstanceId: 'computer-a',
+  toolsLoadedInstanceId: 'computer-a',
+  error: null,
   tools: [
     {
       name: 'click',

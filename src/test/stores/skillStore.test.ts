@@ -23,6 +23,32 @@ describe('skillStore', () => {
     mockedInvoke.mockReset();
   });
 
+  it('invalidates a deleted selected Skill and ignores its late detail response', async () => {
+    const pending = deferred<unknown>();
+    mockedInvoke.mockReturnValueOnce(pending.promise);
+    const selection = useSkillStore.getState().selectSkill('computer-a', 'deleted');
+    mockedInvoke.mockResolvedValueOnce([]);
+    await useSkillStore.getState().fetchSkills('computer-a');
+    pending.resolve({ name: 'deleted', body: 'obsolete' });
+    await selection;
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a']).toMatchObject({
+      selectedSkillName: null, selectedSkill: null, loadingSkill: false,
+    });
+  });
+
+  it('refreshes an existing selected Skill without clearing its displayed content during the read', async () => {
+    mockedInvoke.mockResolvedValueOnce({ name: 'kept', body: 'old' });
+    await useSkillStore.getState().selectSkill('computer-a', 'kept');
+    const detail = deferred<unknown>();
+    mockedInvoke.mockResolvedValueOnce([{ name: 'kept', description: '', path: '', source: 'user' }]).mockReturnValueOnce(detail.promise);
+    const refresh = useSkillStore.getState().fetchSkills('computer-a');
+    await vi.waitFor(() => expect(useSkillStore.getState().recordsByInstanceId['computer-a'].loadingSkill).toBe(true));
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].selectedSkill?.body).toBe('old');
+    detail.resolve({ name: 'kept', body: 'new' });
+    await refresh;
+    expect(useSkillStore.getState().recordsByInstanceId['computer-a'].selectedSkill?.body).toBe('new');
+  });
+
   it('fetches active skills for an instance', async () => {
     const skills = [
       {

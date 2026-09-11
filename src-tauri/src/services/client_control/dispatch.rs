@@ -2,12 +2,17 @@ use super::*;
 use crate::commands::{computer, connection, debug, desktop, inputs, marketplace, mcp, sdk_config};
 use crate::services::computer::ComputerConnectionTarget;
 use crate::services::connection_targets::ManualSmcpTarget;
+use crate::services::observability::{
+    with_activity_invocation_context, ActivityInvocationContext, ActivityManagedBy,
+    ActivityProvider, ActivityTrigger,
+};
 use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn decode<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, ClientControlError> {
     serde_json::from_value(value).map_err(|error| {
@@ -42,14 +47,19 @@ fn operation_error(
     )
 }
 
+struct AuditCompletion {
+    outcome: AuditOutcome,
+    error: Option<String>,
+    started: Instant,
+}
+
 fn audit(
     plane: &ClientControlPlane,
     context: &InvocationContext,
     tool: ToolId,
     target: Option<&str>,
     parameters: serde_json::Value,
-    outcome: AuditOutcome,
-    error: Option<String>,
+    completion: AuditCompletion,
 ) {
     let parameters = safe_audit_parameters(tool, parameters);
     let _ = plane.audit(ControlAuditRecord {
@@ -58,8 +68,9 @@ fn audit(
         target_computer_id: target.map(str::to_string),
         tool,
         parameters,
-        outcome,
-        error,
+        outcome: completion.outcome,
+        error: completion.error,
+        duration_ms: completion.started.elapsed().as_millis(),
     });
 }
 
@@ -132,6 +143,7 @@ struct PendingAudit<'a> {
     tool: ToolId,
     target: Option<String>,
     parameters: serde_json::Value,
+    started: Instant,
     active: bool,
 }
 
@@ -150,8 +162,13 @@ impl Drop for PendingAudit<'_> {
                 self.tool,
                 self.target.as_deref(),
                 self.parameters.clone(),
-                AuditOutcome::Failed,
-                Some("Client Control request failed before execution completed".to_string()),
+                AuditCompletion {
+                    outcome: AuditOutcome::Failed,
+                    error: Some(
+                        "Client Control request failed before execution completed".to_string(),
+                    ),
+                    started: self.started,
+                },
             );
         }
     }
@@ -352,6 +369,33 @@ pub(super) async fn dispatch(
     tool: ToolId,
     parameters: serde_json::Value,
 ) -> Result<serde_json::Value, ClientControlError> {
+    let started = Instant::now();
+    let target_computer_id = parameters
+        .get("computer_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let activity_context = ActivityInvocationContext {
+        correlation_id: context.request_id.clone(),
+        trigger: ActivityTrigger::ClientControl,
+        provider: ActivityProvider::BuiltInMcp,
+        managed_by: ActivityManagedBy::BuiltIn,
+        source_computer_id: context.source_computer_id.clone(),
+        target_computer_id,
+    };
+    with_activity_invocation_context(
+        activity_context,
+        dispatch_with_activity_context(plane, context, tool, parameters, started),
+    )
+    .await
+}
+
+async fn dispatch_with_activity_context(
+    plane: &Arc<ClientControlPlane>,
+    context: InvocationContext,
+    tool: ToolId,
+    parameters: serde_json::Value,
+    started: Instant,
+) -> Result<serde_json::Value, ClientControlError> {
     let target = parameters
         .get("computer_id")
         .and_then(serde_json::Value::as_str)
@@ -370,8 +414,11 @@ pub(super) async fn dispatch(
             tool,
             None,
             parameters,
-            AuditOutcome::Denied,
-            Some(error.message.clone()),
+            AuditCompletion {
+                outcome: AuditOutcome::Denied,
+                error: Some(error.message.clone()),
+                started,
+            },
         );
         return Err(error);
     }
@@ -385,8 +432,11 @@ pub(super) async fn dispatch(
             tool,
             target.as_deref(),
             parameters,
-            AuditOutcome::Denied,
-            Some(error.message.clone()),
+            AuditCompletion {
+                outcome: AuditOutcome::Denied,
+                error: Some(error.message.clone()),
+                started,
+            },
         );
         return Err(error);
     }
@@ -396,6 +446,7 @@ pub(super) async fn dispatch(
         tool,
         target: target.clone(),
         parameters: parameters.clone(),
+        started,
         active: true,
     };
 
@@ -405,7 +456,7 @@ pub(super) async fn dispatch(
         ToolId::SkillCreate => {
             let args: SkillCreateArgs = decode(parameters)?;
             let result = plane
-                .skill_create(context, &args.computer_id, args.name, args.files)
+                .skill_create_authorized(context, &args.computer_id, args.name, args.files, started)
                 .await;
             pending_audit.disarm();
             return encode(result?);
@@ -413,12 +464,13 @@ pub(super) async fn dispatch(
         ToolId::SkillUpdate => {
             let args: SkillUpdateArgs = decode(parameters)?;
             let result = plane
-                .skill_update(
+                .skill_update_authorized(
                     context,
                     &args.computer_id,
                     args.name,
                     args.changes,
                     args.expected_revision,
+                    started,
                 )
                 .await;
             pending_audit.disarm();
@@ -427,11 +479,12 @@ pub(super) async fn dispatch(
         ToolId::SkillDelete => {
             let args: SkillDeleteArgs = decode(parameters)?;
             let result = plane
-                .skill_delete(
+                .skill_delete_authorized(
                     context,
                     &args.computer_id,
                     args.name,
                     args.expected_revision,
+                    started,
                 )
                 .await;
             pending_audit.disarm();
@@ -464,13 +517,13 @@ pub(super) async fn dispatch(
         }
         ToolId::ComputerCreate => {
             let request: computer::CreateComputerInstanceRequest = decode(parameters.clone())?;
-            computer::create_computer_instance_core(&state, request)
+            computer::create_computer_instance_with_trigger(&state, request, "client_control")
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerRename => {
             let args: ComputerNameArgs = decode(parameters.clone())?;
-            computer::rename_computer_instance_core(
+            computer::rename_computer_instance_with_trigger(
                 &state,
                 computer::RenameComputerInstanceRequest {
                     id: args.computer_id,
@@ -478,13 +531,14 @@ pub(super) async fn dispatch(
                     description: args.description,
                     mcp_start_concurrency: None,
                 },
+                "client_control",
             )
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDuplicate => {
             let args: ComputerDuplicateArgs = decode(parameters.clone())?;
-            computer::duplicate_computer_instance_core(
+            computer::duplicate_computer_instance_with_trigger(
                 &state,
                 computer::DuplicateComputerInstanceRequest {
                     source_id: args.computer_id,
@@ -494,15 +548,20 @@ pub(super) async fn dispatch(
                     connection_target_id: args.connection_target_id,
                     skill_home_mode: args.skill_home_mode,
                 },
+                "client_control",
             )
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDelete => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
-            computer::delete_computer_instance_core(&state, args.computer_id)
-                .await
-                .map(|_| serde_json::json!({"ok": true}))
+            computer::delete_computer_instance_with_trigger(
+                &state,
+                args.computer_id,
+                "client_control",
+            )
+            .await
+            .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerStart => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
@@ -852,8 +911,11 @@ pub(super) async fn dispatch(
                 tool,
                 target.as_deref(),
                 parameters,
-                AuditOutcome::Succeeded,
-                None,
+                AuditCompletion {
+                    outcome: AuditOutcome::Succeeded,
+                    error: None,
+                    started,
+                },
             );
             Ok(value)
         }
@@ -866,8 +928,11 @@ pub(super) async fn dispatch(
                 tool,
                 target.as_deref(),
                 parameters,
-                AuditOutcome::Failed,
-                Some(error.message.clone()),
+                AuditCompletion {
+                    outcome: AuditOutcome::Failed,
+                    error: Some(error.message.clone()),
+                    started,
+                },
             );
             Err(error)
         }

@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { createTauriChatFetch } from './chatTransport';
+export { createTauriChatFetch } from './chatTransport';
 import {
   createTFRobotChatClientFactory,
   type ChatClientFactory,
@@ -23,12 +25,6 @@ interface ChatSessionCredential {
   expiresAt: number;
 }
 
-interface ChatHttpResponse {
-  status: number;
-  body: string;
-  contentType?: string;
-}
-
 export interface ChatMessageCreator {
   uid: string;
   name: string;
@@ -47,47 +43,6 @@ export const CURRENT_SERVER_PROFILE = Object.freeze({
 });
 
 export const getChatDeadlineAt = (): number => Date.now() + REQUEST_TIMEOUT_MS;
-
-function abortError(): DOMException {
-  return new DOMException('The chat request was aborted', 'AbortError');
-}
-
-async function invokeWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw abortError();
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(abortError());
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
-  });
-}
-
-/**
- * Fetch-compatible adapter that deliberately discards browser-provided headers. Rust derives the
- * target and injects the short credential plus Manager-provided route headers from the lease.
- */
-export function createTauriChatFetch(leaseId: string): typeof globalThis.fetch {
-  return async (input, init) => {
-    const request = new Request(input, init);
-    const body = request.method === 'GET' || request.method === 'HEAD'
-      ? undefined
-      : await request.text();
-    const response = await invokeWithAbort(
-      invoke<ChatHttpResponse>('chat_http_request', {
-        leaseId,
-        url: request.url,
-        method: request.method,
-        body,
-      }),
-      request.signal,
-    );
-    const headers = new Headers();
-    if (response.contentType) headers.set('Content-Type', response.contentType);
-    return new Response(response.body, {
-      status: response.status,
-      headers,
-    });
-  };
-}
 
 interface CreateChatFactoryOptions {
   descriptor: ChatSessionDescriptor;
@@ -131,6 +86,37 @@ export function createClientChatFactory({
 export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
   const label = (key: string) => t(`chat.workspace.${key}`);
   return {
+    cacheSyncing: label('cacheSyncing'),
+    cacheStale: label('cacheStale'),
+    cacheSyncFailed: label('cacheSyncFailed'),
+    cacheAttachmentUnavailable: label('cacheAttachmentUnavailable'),
+    cacheStorageFailed: label('cacheStorageFailed'),
+    resource: {
+      'screenshot': label('resource.screenshot'),
+      'generatedFile': label('resource.generatedFile'),
+      'fileTitle': label('resource.fileTitle'),
+      'image': label('resource.image'),
+      'audio': label('resource.audio'),
+      'video': label('resource.video'),
+      'loading': label('resource.loading'),
+      'retry': label('resource.retry'),
+      'open': label('resource.open'),
+      'download': label('resource.download'),
+      'opening': label('resource.opening'),
+      'downloading': label('resource.downloading'),
+      'unauthorized': label('resource.unauthorized'),
+      'network': label('resource.network'),
+      'not-found': label('resource.not-found'),
+      'expired': label('resource.expired'),
+      'unsupported': label('resource.unsupported'),
+      'cancelled': label('resource.cancelled'),
+      'unknown': label('resource.unknown'),
+    },
+    attach: label('attach'),
+    pastedTextTitle: label('pastedTextTitle'),
+    removeAttachment: label('removeAttachment'),
+    removeLongText: label('removeLongText'),
+    retryUpload: label('retryUpload'),
     askUserCancel: label('askUserCancel'),
     askUserChatAboutThis: label('askUserChatAboutThis'),
     askUserLabel: label('askUserLabel'),

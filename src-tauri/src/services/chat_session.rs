@@ -4,6 +4,11 @@
 //! endpoints; short `chat:read chat:send` tokens are returned on demand for the browser-owned
 //! Socket.IO transport and are retained only in memory.
 
+mod resources;
+mod transfers;
+pub use resources::{ChatResourceDiagnostic, ChatResourceError, ChatResourceHandle};
+pub use transfers::ChatUploadFile;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -131,6 +136,8 @@ pub struct ChatSessionService {
     leases: RwLock<HashMap<String, Arc<Mutex<ChatLease>>>>,
     active_selections: Mutex<HashMap<ManagerContextKey, ActiveChatSelection>>,
     preference_write: Mutex<()>,
+    transfers: std::sync::Mutex<HashMap<String, transfers::PendingTransfer>>,
+    resources: resources::ResourceState,
 }
 
 impl ChatSessionService {
@@ -168,6 +175,8 @@ impl ChatSessionService {
             leases: RwLock::new(HashMap::new()),
             active_selections: Mutex::new(HashMap::new()),
             preference_write: Mutex::new(()),
+            transfers: std::sync::Mutex::new(HashMap::new()),
+            resources: resources::ResourceState::new(),
         }
     }
 
@@ -438,7 +447,9 @@ impl ChatSessionService {
             let current = lease.lock().await;
             let context = current.target.context_key.clone();
             let revision = current.selection_revision;
-            let _ = current.cancelled.send(true);
+            current.cancelled.send_replace(true);
+            self.cancel_transfers(lease_id);
+            self.resources.revoke_lease(lease_id);
             drop(current);
             let mut active = self.active_selections.lock().await;
             if active.get(&context)
@@ -526,11 +537,26 @@ impl ChatSessionService {
                 ))
             }
         };
+        let mut request = self.authorized_request(&target, url, request_method, &credential)?;
+        if let Some(body) = body {
+            request = request.header(CONTENT_TYPE, "application/json").body(body);
+        }
+
+        self.read_response(request, &mut cancelled).await
+    }
+
+    fn authorized_request(
+        &self,
+        target: &ResolvedChatTarget,
+        url: Url,
+        request_method: reqwest::Method,
+        credential: &ChatSessionCredential,
+    ) -> Result<reqwest::RequestBuilder, ManagerError> {
         let mut request = self
             .http
             .request(request_method, url)
             .header(ACCEPT, "application/json")
-            .header(COOKIE, frontend_session_cookie(&target, &credential.token)?);
+            .header(COOKIE, frontend_session_cookie(target, &credential.token)?);
         for (name, value) in &target.routing_headers {
             let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                 ManagerError::InvalidResponse(
@@ -544,10 +570,17 @@ impl ChatSessionService {
             })?;
             request = request.header(header_name, header_value);
         }
-        if let Some(body) = body {
-            request = request.header(CONTENT_TYPE, "application/json").body(body);
-        }
+        Ok(request)
+    }
 
+    async fn read_response(
+        &self,
+        request: reqwest::RequestBuilder,
+        cancelled: &mut watch::Receiver<bool>,
+    ) -> Result<ChatHttpResponse, ManagerError> {
+        if *cancelled.borrow() {
+            return Err(ManagerError::ContextChanged);
+        }
         let mut response = tokio::select! {
             result = request.send() => result.map_err(|error| ManagerError::NetworkError(error.to_string()))?,
             _ = cancelled.changed() => return Err(ManagerError::ContextChanged),
@@ -839,7 +872,10 @@ mod tests {
         }
     }
 
-    fn test_target(http_base_url: Url, context_key: ManagerContextKey) -> ResolvedChatTarget {
+    pub(super) fn test_target(
+        http_base_url: Url,
+        context_key: ManagerContextKey,
+    ) -> ResolvedChatTarget {
         ResolvedChatTarget {
             context_key,
             manager_generation: 7,
@@ -863,7 +899,7 @@ mod tests {
         }
     }
 
-    async fn insert_test_lease(
+    pub(super) async fn insert_test_lease(
         service: &ChatSessionService,
         id: &str,
         target: ResolvedChatTarget,

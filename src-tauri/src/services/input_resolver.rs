@@ -10,7 +10,7 @@ use a2c_smcp::smcp_computer::mcp_clients::model::MCPServerInput;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) const REDACTED_SECRET_SELECTION: &str = "<redacted secret selection>";
 pub(crate) const RUNTIME_INPUT_CANCELLED: &str = "Runtime Input request was cancelled";
@@ -27,6 +27,7 @@ pub enum RuntimeInputInteractionMode {
 struct RuntimeInputInteractionContext {
     instance_id: Arc<str>,
     mode: RuntimeInputInteractionMode,
+    failure: Arc<Mutex<Option<InputResolutionError>>>,
 }
 
 tokio::task_local! {
@@ -84,6 +85,7 @@ impl RuntimeInputResolver {
                 RuntimeInputInteractionContext {
                     instance_id: self.instance_id.clone(),
                     mode,
+                    failure: Arc::new(Mutex::new(None)),
                 },
                 future,
             )
@@ -97,6 +99,37 @@ impl RuntimeInputResolver {
                     && context.mode == RuntimeInputInteractionMode::Interactive
             })
             .unwrap_or(false)
+    }
+
+    async fn resolve_in_interaction<T>(
+        &self,
+        resolution: impl Future<Output = Result<T, InputResolutionError>>,
+    ) -> Result<T, InputResolutionError> {
+        // SDK batches serialize input resolution but continue after individual failures.
+        // Keep a failed foreground interaction terminal within this operation, so queued
+        // servers cannot open more prompts after cancellation or a persistence failure.
+        // A new operation gets a fresh context; background recovery is unaffected.
+        let failure = RUNTIME_INPUT_INTERACTION
+            .try_with(|context| {
+                (context.instance_id == self.instance_id
+                    && context.mode == RuntimeInputInteractionMode::Interactive)
+                    .then(|| context.failure.clone())
+            })
+            .ok()
+            .flatten();
+        if let Some(failure) = &failure {
+            if let Some(error) = failure.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Err(error);
+            }
+        }
+        let result = resolution.await;
+        if let (Some(failure), Err(error)) = (failure, &result) {
+            failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(|| error.clone());
+        }
+        result
     }
 
     async fn request_value(
@@ -184,9 +217,8 @@ fn validate_pick_value(
     }
 }
 
-#[async_trait]
-impl InputValueResolver for RuntimeInputResolver {
-    async fn resolve_input(
+impl RuntimeInputResolver {
+    async fn resolve_input_value(
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<Value>, InputResolutionError> {
@@ -243,9 +275,8 @@ impl InputValueResolver for RuntimeInputResolver {
     }
 }
 
-#[async_trait]
-impl SecretValueResolver for RuntimeInputResolver {
-    async fn resolve_secret(
+impl RuntimeInputResolver {
+    async fn resolve_secret_value(
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<String>, InputResolutionError> {
@@ -275,6 +306,28 @@ impl SecretValueResolver for RuntimeInputResolver {
                 .map(|value| Some(value.to_string()))
                 .ok_or_else(|| resolver_failed(definition.id(), "secret value is not a string"))
         })
+    }
+}
+
+#[async_trait]
+impl InputValueResolver for RuntimeInputResolver {
+    async fn resolve_input(
+        &self,
+        definition: &MCPServerInput,
+    ) -> Result<Option<Value>, InputResolutionError> {
+        self.resolve_in_interaction(self.resolve_input_value(definition))
+            .await
+    }
+}
+
+#[async_trait]
+impl SecretValueResolver for RuntimeInputResolver {
+    async fn resolve_secret(
+        &self,
+        definition: &MCPServerInput,
+    ) -> Result<Option<String>, InputResolutionError> {
+        self.resolve_in_interaction(self.resolve_secret_value(definition))
+            .await
     }
 }
 
@@ -630,6 +683,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_batch_suppresses_later_prompts_but_new_operation_can_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let (resolver, bridge, mut requests) =
+            interactive_resolver(directory.path(), Arc::new(InMemorySecretStore::default()));
+        let task_resolver = resolver.clone();
+        let batch = tokio::spawn(async move {
+            task_resolver
+                .with_interaction_mode(RuntimeInputInteractionMode::Interactive, async {
+                    let first = task_resolver
+                        .resolve_input(&definition("first", false))
+                        .await;
+                    let second = task_resolver
+                        .resolve_secret(&definition("second", true))
+                        .await;
+                    (first, second)
+                })
+                .await
+        });
+        let request = requests.recv().await.unwrap();
+        let completion = bridge.complete(&request.request_id, RuntimeInputCompletion::Cancelled);
+        let (completion, batch) = tokio::join!(completion, batch);
+        completion.unwrap();
+        let (first, second) = batch.unwrap();
+        for error in [first.unwrap_err(), second.unwrap_err()] {
+            assert!(
+                matches!(error, InputResolutionError::ResolverFailed { id, reason }
+                if id == "first" && reason == RUNTIME_INPUT_CANCELLED)
+            );
+        }
+        assert!(requests.try_recv().is_err());
+
+        let retry = tokio::spawn(async move {
+            resolver
+                .with_interaction_mode(
+                    RuntimeInputInteractionMode::Interactive,
+                    resolver.resolve_input(&definition("first", false)),
+                )
+                .await
+        });
+        let request = requests.recv().await.unwrap();
+        let completion = bridge.complete(
+            &request.request_id,
+            RuntimeInputCompletion::Confirmed {
+                value: "confirmed".to_string(),
+            },
+        );
+        let (completion, retry) = tokio::join!(completion, retry);
+        completion.unwrap();
+        assert_eq!(
+            retry.unwrap().unwrap(),
+            Some(Value::String("confirmed".to_string()))
+        );
+    }
+
+    #[tokio::test]
     async fn interactive_stale_pick_is_reconfirmed_and_preserves_storage_kind() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = Arc::new(InMemorySecretStore::default());
@@ -964,6 +1072,56 @@ mod tests {
                 .unwrap()
                 .as_ref(),
             Some(&serde_json::json!("value-b"))
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_read_failure_stops_later_prompts_only_in_the_current_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let (resolver, bridge, mut requests) =
+            interactive_resolver(directory.path(), Arc::new(FailingSecretStore));
+        resolver
+            .with_interaction_mode(RuntimeInputInteractionMode::Interactive, async {
+                let first = resolver
+                    .resolve_secret(&definition("secret", true))
+                    .await
+                    .unwrap_err();
+                let later = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    resolver.resolve_input(&definition("plain", false)),
+                )
+                .await
+                .expect("failed input read must prevent the next prompt")
+                .unwrap_err();
+                assert_eq!(first.to_string(), later.to_string());
+                assert!(first.to_string().contains("keychain unavailable"));
+            })
+            .await;
+        assert!(requests.try_recv().is_err());
+
+        let retry = tokio::spawn(async move {
+            resolver
+                .with_interaction_mode(
+                    RuntimeInputInteractionMode::Interactive,
+                    resolver.resolve_input(&definition("plain", false)),
+                )
+                .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
+            .await
+            .expect("a new operation must be able to request plain input")
+            .unwrap();
+        let completion = bridge.complete(
+            &request.request_id,
+            RuntimeInputCompletion::Confirmed {
+                value: "plain-value".to_string(),
+            },
+        );
+        let (completion, retry) = tokio::join!(completion, retry);
+        completion.unwrap();
+        assert_eq!(
+            retry.unwrap().unwrap(),
+            Some(Value::String("plain-value".to_string()))
         );
     }
 

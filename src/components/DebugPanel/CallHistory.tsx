@@ -1,3 +1,4 @@
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useEffect } from 'react';
 import { Table, Tag, Typography, Empty, Button, Space, Descriptions } from 'antd';
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons';
@@ -11,6 +12,8 @@ interface CallHistoryProps {
 }
 
 export function CallHistory({ instanceId }: CallHistoryProps) {
+  const [page, setPage] = useNavigationState('debug.historyPage', 1);
+  const [expanded, setExpanded] = useNavigationState<React.Key[]>('debug.historyExpanded', []);
   const { t } = useTranslation();
   const { history, historyLoading, fetchHistory, selectTool, tools } = useDebugStore();
 
@@ -77,8 +80,10 @@ export function CallHistory({ instanceId }: CallHistoryProps) {
           rowKey="req_id"
           loading={historyLoading}
           size="small"
-          pagination={{ pageSize: 20 }}
+          pagination={{ current: page, onChange: setPage, pageSize: 20 }}
           expandable={{
+            expandedRowKeys: expanded,
+            onExpandedRowsChange: (keys) => setExpanded([...keys]),
             expandedRowRender: (record) => (
               <div>
                 <Descriptions size="small" column={1}>

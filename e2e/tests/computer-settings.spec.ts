@@ -134,7 +134,8 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     const navigation = page.getByRole('menu', { name: 'Computer settings sections' });
     await navigation.getByText('MCP Servers', { exact: true }).click();
 
-    await expect(page.getByText(
+    const settings = page.getByLabel('Computer settings', { exact: true });
+    await expect(settings.getByText(
       'Managed by plugin audit from acme. Use Marketplace to manage its lifecycle.',
     )).toBeVisible();
     await page.getByRole('button', { name: 'Manage audit' }).click();
@@ -151,8 +152,9 @@ test.describe('Computer settings navigation and runtime boundary', () => {
     await expect(marketplace).toHaveAttribute('aria-pressed', 'true');
     await expect(previousOwner).toHaveAttribute('aria-pressed', 'false');
     await expect(plugin).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByText('plugin-tools', { exact: true })).toBeVisible();
-    await expect(page.getByText('legacy-audit-mcp', { exact: true })).toHaveCount(0);
+    const pluginsPage = settings.locator('[data-page="computer-settings-plugins"]');
+    await expect(pluginsPage.getByText('plugin-tools', { exact: true })).toBeVisible();
+    await expect(pluginsPage.getByText('legacy-audit-mcp', { exact: true })).toHaveCount(0);
 
     await plugin.focus();
     await expect(plugin).toBeFocused();

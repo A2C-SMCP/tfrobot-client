@@ -1,8 +1,12 @@
+use crate::commands::activity_support::{record_computer_activity, ComputerActivitySpec};
 use crate::commands::inputs::{prepare_portable_input_definitions, InputDefinition};
 use crate::commands::runtime_error::RuntimeActionError;
 use crate::services::computer::is_reserved_built_in_bundle_id;
 use crate::services::input_references;
 use crate::services::oauth_credential_store::clear_oauth_credentials_for_config;
+use crate::services::observability::{
+    ActivityManagedBy, ActivityProvider, ActivityTrigger, ComputerActivityCategory,
+};
 use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -283,54 +287,87 @@ pub async fn upsert_computer_mcp_config_core(
     instance_id: &str,
     config: MCPServerConfig,
 ) -> Result<(), RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    let bundle_id = resolve_bundle_id(&config);
-    let server_name = config.name().to_string();
-    if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
-        return Err(RuntimeActionError::runtime(format!(
-            "bundleId '{bundle_id}' is reserved for a built-in provider"
-        )));
-    }
-    let defined_inputs = state.sdk_config.load_input_definitions(instance_id);
-    let referenced_input_ids = referenced_input_ids(&config)?;
-    let missing_input_id = referenced_input_ids
-        .into_iter()
-        .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
-    let previous_config = state
-        .sdk_config
-        .load(instance_id)
-        .mcp
-        .servers
-        .into_iter()
-        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
-        .map(|server| server.config);
-    let runtime = state.computer_registry.runtime(instance_id).await;
-    let oauth_identity_change = previous_config
-        .as_ref()
-        .filter(|previous| oauth_credential_identity_changed(previous, &config));
-    let _oauth_admission_guard = if oauth_identity_change.is_some() {
-        match runtime.as_ref() {
-            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
-            None => None,
+    let started = std::time::Instant::now();
+    let activity_bundle_id = resolve_bundle_id(&config).to_string();
+    let activity_server_name = config.name().to_string();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let instance_id =
+            require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
+        let bundle_id = resolve_bundle_id(&config);
+        let server_name = config.name().to_string();
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err(RuntimeActionError::runtime(format!(
+                "bundleId '{bundle_id}' is reserved for a built-in provider"
+            )));
         }
-    } else {
-        None
-    };
-    if let Some(previous) = oauth_identity_change {
-        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, previous.clone())
+        let defined_inputs = state.sdk_config.load_input_definitions(instance_id);
+        let referenced_input_ids = referenced_input_ids(&config)?;
+        let missing_input_id = referenced_input_ids
+            .into_iter()
+            .find(|id| !defined_inputs.iter().any(|input| input.id() == id));
+        let previous_config = state
+            .sdk_config
+            .load(instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
+            .map(|server| server.config);
+        let runtime = state.computer_registry.runtime(instance_id).await;
+        let oauth_identity_change = previous_config
+            .as_ref()
+            .filter(|previous| oauth_credential_identity_changed(previous, &config));
+        let _oauth_admission_guard = if oauth_identity_change.is_some() {
+            match runtime.as_ref() {
+                Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(previous) = oauth_identity_change {
+            clear_oauth_before_config_change(
+                state,
+                runtime.as_ref(),
+                instance_id,
+                previous.clone(),
+            )
             .await
             .map_err(RuntimeActionError::runtime)?;
+        }
+        state
+            .sdk_config
+            .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
+            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+        if let Some(input_id) = missing_input_id {
+            return Err(missing_input_definition_error(input_id)
+                .with_requesting_mcp(bundle_id.to_string(), server_name));
+        }
+        Ok(())
     }
-    state
-        .sdk_config
-        .upsert_mcp_configs(instance_id, std::slice::from_ref(&config))
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    if let Some(input_id) = missing_input_id {
-        return Err(missing_input_definition_error(input_id)
-            .with_requesting_mcp(bundle_id.to_string(), server_name));
-    }
-    Ok(())
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Mcp,
+            event_type: "mcp_server_config",
+            operation: "upsert",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::UserMcp),
+            message_subject: "MCP server configuration upsert",
+            fields: serde_json::json!({
+                "bundle_id": activity_bundle_id,
+                "server_name": activity_server_name,
+            }),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 /// Commits one Client editor draft as the SDK's top-level Input definitions plus canonical
@@ -361,83 +398,120 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
     input_definitions: Vec<InputDefinition>,
     remove_input_ids_if_unused: Vec<String>,
 ) -> Result<(), RuntimeActionError> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let instance_id = require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
-    let bundle_id = resolve_bundle_id(&config);
-    let server_name = config.name().to_string();
-    if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
-        return Err(RuntimeActionError::runtime(format!(
-            "bundleId '{bundle_id}' is reserved for a built-in provider"
-        )));
-    }
-
-    let input_definitions = prepare_portable_input_definitions(&input_definitions)
-        .map_err(RuntimeActionError::runtime)?;
-    let edited_input_ids = input_definitions
-        .iter()
-        .map(|definition| definition.id().to_string())
-        .collect::<std::collections::HashSet<_>>();
-    let mut project_inputs = state
-        .sdk_config
-        .load_project_input_definitions(instance_id)
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    for definition in &input_definitions {
-        project_inputs.retain(|item| item.id() != definition.id());
-        project_inputs.push(definition.clone());
-    }
-
-    let mut available_inputs = state.sdk_config.load_input_definitions(instance_id);
-    // Only the submitted definitions are candidates for this operation. Replacing the merged
-    // view with every Project definition would incorrectly override Local/Policy precedence.
-    for definition in &input_definitions {
-        available_inputs.retain(|item| item.id() != definition.id());
-        available_inputs.push(definition.clone());
-    }
-    if let Some(input_id) = referenced_input_ids(&config)?
-        .into_iter()
-        .find(|id| !available_inputs.iter().any(|input| input.id() == id))
-    {
-        return Err(missing_input_definition_error(input_id)
-            .with_requesting_mcp(bundle_id.to_string(), server_name));
-    }
-
-    let previous_config = state
-        .sdk_config
-        .load(instance_id)
-        .mcp
-        .servers
-        .into_iter()
-        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
-        .map(|server| server.config);
-    let runtime = state.computer_registry.runtime(instance_id).await;
-    let oauth_identity_change = previous_config
-        .as_ref()
-        .filter(|previous| oauth_credential_identity_changed(previous, &config));
-    let _oauth_admission_guard = if oauth_identity_change.is_some() {
-        match runtime.as_ref() {
-            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
-            None => None,
+    let started = std::time::Instant::now();
+    let activity_bundle_id = resolve_bundle_id(&config).to_string();
+    let activity_server_name = config.name().to_string();
+    let input_definition_count = input_definitions.len();
+    let requested_gc_count = remove_input_ids_if_unused.len();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let instance_id =
+            require_instance(state, instance_id).map_err(RuntimeActionError::runtime)?;
+        let bundle_id = resolve_bundle_id(&config);
+        let server_name = config.name().to_string();
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err(RuntimeActionError::runtime(format!(
+                "bundleId '{bundle_id}' is reserved for a built-in provider"
+            )));
         }
-    } else {
-        None
-    };
-    if let Some(previous) = oauth_identity_change {
-        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, previous.clone())
+
+        let input_definitions = prepare_portable_input_definitions(&input_definitions)
+            .map_err(RuntimeActionError::runtime)?;
+        let edited_input_ids = input_definitions
+            .iter()
+            .map(|definition| definition.id().to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let mut project_inputs = state
+            .sdk_config
+            .load_project_input_definitions(instance_id)
+            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+        for definition in &input_definitions {
+            project_inputs.retain(|item| item.id() != definition.id());
+            project_inputs.push(definition.clone());
+        }
+
+        let mut available_inputs = state.sdk_config.load_input_definitions(instance_id);
+        // Only the submitted definitions are candidates for this operation. Replacing the merged
+        // view with every Project definition would incorrectly override Local/Policy precedence.
+        for definition in &input_definitions {
+            available_inputs.retain(|item| item.id() != definition.id());
+            available_inputs.push(definition.clone());
+        }
+        if let Some(input_id) = referenced_input_ids(&config)?
+            .into_iter()
+            .find(|id| !available_inputs.iter().any(|input| input.id() == id))
+        {
+            return Err(missing_input_definition_error(input_id)
+                .with_requesting_mcp(bundle_id.to_string(), server_name));
+        }
+
+        let previous_config = state
+            .sdk_config
+            .load(instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .find(|server| server.origin != ProvenanceScope::Plugin && server.name == config.name())
+            .map(|server| server.config);
+        let runtime = state.computer_registry.runtime(instance_id).await;
+        let oauth_identity_change = previous_config
+            .as_ref()
+            .filter(|previous| oauth_credential_identity_changed(previous, &config));
+        let _oauth_admission_guard = if oauth_identity_change.is_some() {
+            match runtime.as_ref() {
+                Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(previous) = oauth_identity_change {
+            clear_oauth_before_config_change(
+                state,
+                runtime.as_ref(),
+                instance_id,
+                previous.clone(),
+            )
             .await
             .map_err(RuntimeActionError::runtime)?;
-    }
+        }
 
-    state
-        .sdk_config
-        .upsert_mcp_config_with_inputs_atomically(
-            instance_id,
-            &config,
-            &project_inputs,
-            &edited_input_ids,
-            &remove_input_ids_if_unused.into_iter().collect(),
-        )
-        .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
-    Ok(())
+        state
+            .sdk_config
+            .upsert_mcp_config_with_inputs_atomically(
+                instance_id,
+                &config,
+                &project_inputs,
+                &edited_input_ids,
+                &remove_input_ids_if_unused.into_iter().collect(),
+            )
+            .map_err(|error| RuntimeActionError::runtime(error.to_string()))?;
+        Ok(())
+    }
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Mcp,
+            event_type: "mcp_server_config",
+            operation: "upsert_with_inputs",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::UserMcp),
+            message_subject: "MCP server configuration and inputs upsert",
+            fields: serde_json::json!({
+                "bundle_id": activity_bundle_id,
+                "server_name": activity_server_name,
+                "input_definition_count": input_definition_count,
+                "requested_input_gc_count": requested_gc_count,
+            }),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn oauth_credential_identity_changed(previous: &MCPServerConfig, next: &MCPServerConfig) -> bool {
@@ -512,41 +586,66 @@ pub async fn remove_computer_mcp_config_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
-    let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
-    let instance_id = require_instance(state, instance_id)?;
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("name is required".to_string());
+    let started = std::time::Instant::now();
+    let activity_server_name = name.trim().to_string();
+    let result = async {
+        let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
+        let instance_id = require_instance(state, instance_id)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("name is required".to_string());
+        }
+        let previous_config = state
+            .sdk_config
+            .load(instance_id)
+            .mcp
+            .servers
+            .into_iter()
+            .find(|server| server.origin != ProvenanceScope::Plugin && server.name == name)
+            .map(|server| server.config);
+        let runtime = state.computer_registry.runtime(instance_id).await;
+        let _oauth_admission_guard = match (previous_config.as_ref(), runtime.as_ref()) {
+            (Some(_), Some(runtime)) => {
+                Some(runtime.block_oauth_admission_for_server_change().await)
+            }
+            _ => None,
+        };
+        if let Some(config) = previous_config.clone() {
+            clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
+        }
+        let input_candidates = previous_config
+            .as_ref()
+            .map(referenced_input_ids)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        state
+            .sdk_config
+            .remove_mcp_config_with_input_gc_atomically(instance_id, name, &input_candidates)
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
-    let previous_config = state
-        .sdk_config
-        .load(instance_id)
-        .mcp
-        .servers
-        .into_iter()
-        .find(|server| server.origin != ProvenanceScope::Plugin && server.name == name)
-        .map(|server| server.config);
-    let runtime = state.computer_registry.runtime(instance_id).await;
-    let _oauth_admission_guard = match (previous_config.as_ref(), runtime.as_ref()) {
-        (Some(_), Some(runtime)) => Some(runtime.block_oauth_admission_for_server_change().await),
-        _ => None,
-    };
-    if let Some(config) = previous_config.clone() {
-        clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
-    }
-    let input_candidates = previous_config
-        .as_ref()
-        .map(referenced_input_ids)
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    state
-        .sdk_config
-        .remove_mcp_config_with_input_gc_atomically(instance_id, name, &input_candidates)
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    .await;
+    record_computer_activity(
+        state,
+        ComputerActivitySpec {
+            computer_id: instance_id,
+            category: ComputerActivityCategory::Mcp,
+            event_type: "mcp_server_config",
+            operation: "delete",
+            trigger: ActivityTrigger::User,
+            managed_by: Some(ActivityManagedBy::User),
+            provider: Some(ActivityProvider::UserMcp),
+            message_subject: "MCP server configuration delete",
+            fields: serde_json::json!({"server_name": activity_server_name}),
+        },
+        started,
+        &result,
+    )
+    .await;
+    result
 }
 
 fn validation_view(

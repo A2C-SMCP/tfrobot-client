@@ -1,4 +1,6 @@
-import { useEffect } from 'react';
+import { usePageAction } from '@/components/Navigation/pageActivityState';
+import { useForgetNavigationState, useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect, useRef } from 'react';
 import { Alert, Form, Select, Button, Space, Card, Collapse, Switch, Spin } from 'antd';
 import { Input } from '@/components/common/Input';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
@@ -104,7 +106,7 @@ interface FormValues {
 interface McpServerFormProps {
   instanceId: string;
   initialValues?: McpServerConfig;
-  onSubmit: (config: McpServerConfig, inputChanges: InputDefinitionChanges) => Promise<void>;
+  onSubmit: (config: McpServerConfig, inputChanges: InputDefinitionChanges) => Promise<void | boolean>;
   onCancel: () => void;
   loading?: boolean;
 }
@@ -118,6 +120,8 @@ export function McpServerForm({
 }: McpServerFormProps) {
   const { t } = useTranslation();
   const [form] = Form.useForm<FormValues>();
+  const action = usePageAction(JSON.stringify([instanceId, initialValues?.name]));
+  const submission = useRef<() => boolean>(() => false);
   const serverType = Form.useWatch('type', form);
   const inputs = useInputStore((state) => state.inputs);
   const fetchInputs = useInputStore((state) => state.fetchInputs);
@@ -183,7 +187,14 @@ export function McpServerForm({
     return { type: 'stdio', name: '', env: [], args: [] };
   };
 
+  const forget = useForgetNavigationState();
+  const draftKey = `mcp.form.${JSON.stringify(initialValues?.name ?? null)}.`;
+  const [advanced, setAdvanced] = useNavigationState<string[]>(`${draftKey}advanced`, []);
+  const draft = useNavigationForm(draftKey, form, getInitialFormValues()!);
+
   const handleFinish = async (values: FormValues) => {
+    const current = submission.current;
+    if (!current()) return;
     let config: McpServerConfig;
     const entries = values.type === 'stdio' ? values.env : values.headers;
     const serializedEntries = serializeConfigEntries(entries);
@@ -273,10 +284,13 @@ export function McpServerForm({
         ? projectConfigEntries(initialValues.server_parameters.env, inputs)
         : projectConfigEntries(initialValues.server_parameters.headers, inputs)
       : [];
-    await onSubmit(
+    const saved = await onSubmit(
       config,
       buildInputDefinitionChanges(initialEntries, serializedEntries.definitions, inputs),
     );
+    if (saved === false || !current()) return;
+    draft.clearDraft();
+    forget(draftKey);
   };
 
   if (inputInstanceId !== instanceId || inputsLoading) {
@@ -297,9 +311,12 @@ export function McpServerForm({
 
   return (
     <Form
+      name={`mcp-server-${instanceId}`}
       form={form}
+      onValuesChange={draft.onValuesChange}
       layout="vertical"
       initialValues={getInitialFormValues()}
+      onSubmitCapture={() => { submission.current = action(); }}
       onFinish={handleFinish}
     >
       <Form.Item
@@ -366,6 +383,8 @@ export function McpServerForm({
 
           <Card size="small" title={t('mcp.form.envVars')} style={{ marginBottom: 16 }}>
             <ConfigEntryList
+              draftPrefix={draftKey}
+              onEntriesChange={(name, entries) => draft.setValues({ [name]: entries })}
               name="env"
               instanceId={instanceId}
               inputs={inputs}
@@ -387,6 +406,8 @@ export function McpServerForm({
 
           <Card size="small" title={t('mcp.form.headers')} style={{ marginBottom: 16 }}>
             <ConfigEntryList
+              draftPrefix={draftKey}
+              onEntriesChange={(name, entries) => draft.setValues({ [name]: entries })}
               name="headers"
               instanceId={instanceId}
               inputs={inputs}
@@ -396,7 +417,7 @@ export function McpServerForm({
         </>
       )}
 
-      <Collapse ghost style={{ marginBottom: 16 }}>
+      <Collapse activeKey={advanced} onChange={(keys) => setAdvanced(Array.isArray(keys) ? keys : [keys])} ghost style={{ marginBottom: 16 }}>
         <Collapse.Panel header={t('mcp.form.advancedSettings')} key="advanced">
           <Form.Item name="disabled" label={t('mcp.form.disabled')} valuePropName="checked">
             <Switch />
@@ -446,7 +467,7 @@ export function McpServerForm({
           <Button type="primary" htmlType="submit" loading={loading}>
             {initialValues ? t('common.save') : t('common.add')}
           </Button>
-          <Button onClick={onCancel}>
+          <Button onClick={() => { forget(draftKey); onCancel(); }}>
             {t('common.cancel')}
           </Button>
         </Space>

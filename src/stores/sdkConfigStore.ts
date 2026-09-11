@@ -1,3 +1,4 @@
+import { captureViewContext } from './viewContextLifetime';
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import type { McpServerConfig } from './mcpStore';
@@ -194,6 +195,7 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
     config: McpServerConfig,
     inputChanges?: InputDefinitionChanges,
   ) => {
+    const currentContext = captureViewContext();
     beginMutation(set, get, instanceId);
     try {
       const hasInputChanges = inputChanges
@@ -208,31 +210,33 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
       } else {
         await invoke('upsert_computer_mcp_config', { instanceId, config });
       }
-      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
-      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
-      reportMutationError(set, get, instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
+      if (currentContext()) reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
-      finishMutation(set, get, instanceId);
+      if (currentContext()) finishMutation(set, get, instanceId);
     }
   },
 
   removeServer: async (instanceId: string, name: string) => {
+    const currentContext = captureViewContext();
     beginMutation(set, get, instanceId);
     try {
       await invoke('remove_computer_mcp_config', { instanceId, name });
-      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
     } catch (cause) {
-      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
-      reportMutationError(set, get, instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
+      if (currentContext()) reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
-      finishMutation(set, get, instanceId);
+      if (currentContext()) finishMutation(set, get, instanceId);
     }
   },
 
   importConfig: async (instanceId: string, path: string) => {
+    const currentContext = captureViewContext();
     beginMutation(set, get, instanceId);
     try {
       const result = await invoke<ImportResult>('import_config', {
@@ -240,27 +244,28 @@ export const useSdkConfigStore = create<SdkConfigState>((set, get) => ({
         instanceId,
         format: null,
       });
-      if (get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
+      if (currentContext() && get().activeInstanceId === instanceId) await get().fetchConfig(instanceId);
       return result;
     } catch (cause) {
-      reportMutationError(set, get, instanceId);
+      if (currentContext()) reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
-      finishMutation(set, get, instanceId);
+      if (currentContext()) finishMutation(set, get, instanceId);
     }
   },
 
   exportConfig: async (instanceId: string, path: string, serverNames?: string[]) => {
+    const currentContext = captureViewContext();
     beginMutation(set, get, instanceId);
     try {
       await invoke('export_config', { path, instanceId, serverNames: serverNames ?? null });
     } catch (cause) {
-      reportMutationError(set, get, instanceId);
+      if (currentContext()) reportMutationError(set, get, instanceId);
       throw cause;
     } finally {
-      finishMutation(set, get, instanceId);
+      if (currentContext()) finishMutation(set, get, instanceId);
     }
   },
 
-  reset: () => set(initialState),
+  reset: () => set((state) => ({ ...initialState, requestId: state.requestId + 1, validationRequestId: state.validationRequestId + 1 })),
 }));

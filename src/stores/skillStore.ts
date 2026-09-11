@@ -273,17 +273,19 @@ export function formatInvokeError(error: unknown): string {
   return String(error);
 }
 
+let navigationRequestSequence = 0;
+
 export const useSkillStore = create<SkillState>((set, get) => ({
   ...initialState,
 
   fetchSkills: async (instanceId) => {
-    const requestId = (get().recordsByInstanceId[instanceId]?.skillsRequestId ?? 0) + 1;
+    const requestId = ++navigationRequestSequence;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
       skillsRequestId: requestId,
-      skills: [],
-      selectedSkillName: null,
-      selectedSkill: null,
+      skills: record.skills,
+      selectedSkillName: record.selectedSkillName,
+      selectedSkill: record.selectedSkill,
       loadingSkills: true,
       error: null,
       skillError: null,
@@ -291,11 +293,20 @@ export const useSkillStore = create<SkillState>((set, get) => ({
     try {
       const skills = await invoke<SkillRef[]>('list_skills', { instanceId });
       if (!isCurrentRequest(get(), instanceId, requestId, 'skillsRequestId')) return;
-      setInstanceRecord(set, instanceId, (record) => ({
-        ...record,
-        skills,
-        loadingSkills: false,
-      }));
+      setInstanceRecord(set, instanceId, (record) => {
+        const selectedExists = skills.some((skill) => skill.name === record.selectedSkillName);
+        return {
+          ...record, skills, loadingSkills: false,
+          ...(!selectedExists ? {
+            selectedSkillName: null, selectedSkill: null, loadingSkill: false, skillError: null,
+            skillRequestId: ++navigationRequestSequence,
+          } : {}),
+        };
+      });
+      const selectedName = get().recordsByInstanceId[instanceId]?.selectedSkillName;
+      if (selectedName && isCurrentRequest(get(), instanceId, requestId, 'skillsRequestId')) {
+        await get().selectSkill(instanceId, selectedName);
+      }
     } catch (e) {
       if (!isCurrentRequest(get(), instanceId, requestId, 'skillsRequestId')) return;
       setInstanceRecord(set, instanceId, (record) => ({
@@ -307,7 +318,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
   },
 
   refreshSkills: async (instanceId) => {
-    const requestId = (get().recordsByInstanceId[instanceId]?.skillsRequestId ?? 0) + 1;
+    const requestId = ++navigationRequestSequence;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
       skillsRequestId: requestId,
@@ -330,12 +341,12 @@ export const useSkillStore = create<SkillState>((set, get) => ({
   },
 
   selectSkill: async (instanceId, name) => {
-    const requestId = (get().recordsByInstanceId[instanceId]?.skillRequestId ?? 0) + 1;
+    const requestId = ++navigationRequestSequence;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
       skillRequestId: requestId,
       selectedSkillName: name,
-      selectedSkill: null,
+      selectedSkill: record.selectedSkillName === name ? record.selectedSkill : null,
       loadingSkill: true,
       skillError: null,
     }));
@@ -374,11 +385,11 @@ export const useSkillStore = create<SkillState>((set, get) => ({
   },
 
   fetchMarketplaceGovernance: async (instanceId) => {
-    const requestId = (get().recordsByInstanceId[instanceId]?.marketplaceRequestId ?? 0) + 1;
+    const requestId = ++navigationRequestSequence;
     setInstanceRecord(set, instanceId, (record) => ({
       ...record,
       marketplaceRequestId: requestId,
-      governance: null,
+      governance: record.governance,
       loadingMarketplace: true,
       marketplaceError: null,
     }));
@@ -496,7 +507,7 @@ async function runMarketplaceLifecycle(
       `Marketplace operation already in progress: ${existingOperation.kind} ${existingOperation.target}`,
     );
   }
-  const requestId = (get().recordsByInstanceId[instanceId]?.marketplaceRequestId ?? 0) + 1;
+  const requestId = ++navigationRequestSequence;
   const activeOperation: MarketplaceOperation = { id: requestId, ...operation };
   setInstanceRecord(set, instanceId, (record) => ({
     ...record,

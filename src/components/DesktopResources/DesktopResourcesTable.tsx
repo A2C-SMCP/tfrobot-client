@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect, useMemo } from 'react';
 import {
   Alert,
   Button,
@@ -38,11 +39,11 @@ export function DesktopResourcesTable({
   fetchWindowDetail,
 }: DesktopResourcesTableProps) {
   const { t } = useTranslation();
-  const [expandedUris, setExpandedUris] = useState<Set<string>>(new Set());
+  const [expandedUris, setExpandedUris] = useNavigationState<Set<string>>('desktop.expanded', new Set());
 
   useEffect(() => {
-    setExpandedUris(new Set());
-  }, [instanceId, runtimeKey, desktop.windows]);
+    setExpandedUris((current) => new Set([...current].filter((key) => desktop.windows.some((item) => desktopWindowKey(item) === key))));
+  }, [instanceId, runtimeKey, desktop.windows, setExpandedUris]);
 
   const columns = useMemo(() => [
     {

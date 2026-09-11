@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect, useMemo, useRef } from 'react';
 import { Button, Select, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
 import { Input } from '@/components/common/Input';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
@@ -8,6 +9,7 @@ import { ToolCallTest } from './ToolCallTest';
 
 const { Text, Paragraph } = Typography;
 const UNKNOWN_SERVER = 'unknown';
+const EMPTY_TOOLS: ToolInfo[] = [];
 
 interface ToolBrowserProps {
   instanceId: string;
@@ -15,14 +17,26 @@ interface ToolBrowserProps {
 
 export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   const { t } = useTranslation();
-  const { tools, toolsLoading, selectedTool, fetchTools, selectTool } = useDebugStore();
-  const [search, setSearch] = useState('');
-  const [serverFilter, setServerFilter] = useState<string | undefined>();
+  const state = useDebugStore();
+  const { fetchTools, selectTool } = state;
+  const ownsTools = state.activeInstanceId === instanceId && state.toolsLoadedInstanceId === instanceId;
+  const tools = ownsTools ? state.tools : EMPTY_TOOLS;
+  const toolsLoading = state.toolsLoading || !ownsTools;
+  const selectedTool = ownsTools ? state.selectedTool : null;
+  const authoritative = ownsTools && !state.toolsLoading && !state.error;
+  const [selectedName, setSelectedName] = useNavigationState<string | null>('debug.selectedTool', null);
+  const [search, setSearch] = useNavigationState('debug.search', '');
+  const [serverFilter, setServerFilter] = useNavigationState<string | undefined>('debug.server', undefined);
 
+  const restoredSelection = useRef(selectedName);
   useEffect(() => {
-    selectTool(null);
+    if (!restoredSelection.current) selectTool(null);
     fetchTools(instanceId);
   }, [fetchTools, instanceId, selectTool]);
+
+  useEffect(() => {
+    if (selectedName && authoritative) selectTool(tools.find((tool) => tool.name === selectedName) ?? null);
+  }, [selectedName, tools, authoritative, selectTool]);
 
   const servers = useMemo(
     () => [...new Set(tools.map((t) => t.server).filter((server) => server && server !== UNKNOWN_SERVER))],
@@ -30,10 +44,10 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   );
 
   useEffect(() => {
-    if (serverFilter && !servers.includes(serverFilter)) {
+    if (authoritative && serverFilter && !servers.includes(serverFilter)) {
       setServerFilter(undefined);
     }
-  }, [serverFilter, servers]);
+  }, [serverFilter, servers, setServerFilter, authoritative]);
 
   const filtered = tools.filter((tool) => {
     if (search && !tool.displayName.toLowerCase().includes(search.toLowerCase()) && !tool.description.toLowerCase().includes(search.toLowerCase())) {
@@ -70,8 +84,8 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
           )}
         </Space>
 
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          {toolsLoading ? (
+        <div data-navigation-scroll="tools-list" style={{ flex: 1, overflow: 'auto' }}>
+          {toolsLoading && tools.length === 0 ? (
             <Spin style={{ display: 'block', marginTop: 40 }} />
           ) : filtered.length === 0 ? (
             <Empty description={t('debug.noTools')} />
@@ -81,7 +95,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
               dataSource={filtered}
               renderItem={(tool) => (
                 <List.Item
-                  onClick={() => selectTool(tool)}
+                  onClick={() => { setSelectedName(tool.name); selectTool(tool); }}
                   style={{
                     cursor: 'pointer',
                     background: selectedTool?.name === tool.name ? '#e6f4ff' : undefined,
@@ -109,7 +123,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
       </div>
 
       {/* Right: Tool Detail + Call Test */}
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      <div data-navigation-scroll="tools-detail" style={{ flex: 1, overflow: 'auto' }}>
         {selectedTool ? (
           <ToolDetail instanceId={instanceId} tool={selectedTool} />
         ) : (
@@ -133,12 +147,12 @@ function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }
       <Paragraph>{tool.description}</Paragraph>
 
       <Divider orientation="left">{t('debug.inputSchema')}</Divider>
-      <pre style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
+      <pre data-navigation-scroll="tool-schema" style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
         {JSON.stringify(tool.inputSchema, null, 2)}
       </pre>
 
       <Divider orientation="left">{t('debug.callTest')}</Divider>
-      <ToolCallTest instanceId={instanceId} tool={tool} />
+      <ToolCallTest key={tool.name} instanceId={instanceId} tool={tool} />
     </div>
   );
 }

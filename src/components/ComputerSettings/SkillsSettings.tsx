@@ -1,3 +1,6 @@
+import { useNavigationForm } from '@/components/Navigation/navigationMemoryState';
+import { usePageAction, usePageActive } from '@/components/Navigation/pageActivityState';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import { useEffect, useState } from 'react';
 import {
   App,
@@ -5,7 +8,6 @@ import {
   Descriptions,
   Form,
   Input,
-  Modal,
   Space,
   Typography,
 } from 'antd';
@@ -45,44 +47,52 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
     ?? instance.effectiveSkillHome
     ?? '';
 
-  useEffect(() => {
-    form.setFieldsValue({ localSkillsRoot: instance.localSkillsRoot ?? '' });
-  }, [form, instance.id, instance.localSkillsRoot]);
+  const active = usePageActive();
+  const action = usePageAction(instance.id);
+  const draft = useNavigationForm('settings.skillHome', form, { localSkillsRoot: instance.localSkillsRoot ?? '' });
+  useEffect(() => { if (!active) setPendingSkillHomeRoot(undefined); }, [active]);
 
   const handleChooseSkillHome = async () => {
+    const current = action();
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
+      if (!current()) return;
       const path = await open({ directory: true, multiple: false });
-      if (path) {
-        form.setFieldsValue({ localSkillsRoot: path as string });
+      if (path && current()) {
+        draft.setValues({ localSkillsRoot: path as string });
       }
     } catch (error) {
-      message.error(String(error));
+      if (current()) message.error(String(error));
     }
   };
 
   const handleOpenSkillHome = async () => {
+    const current = action();
     try {
       await openConfiguredLocalSkillsRoot(instance.id);
     } catch (error) {
-      message.error(formatInvokeError(error));
+      if (current()) message.error(formatInvokeError(error));
     }
   };
 
   const applySkillHomeChange = async () => {
+    const current = action();
     if (pendingSkillHomeRoot === undefined) return;
     try {
       await updateSkillHome(instance.id, pendingSkillHomeRoot);
+      if (!current()) return;
+      draft.clearDraft();
       setPendingSkillHomeRoot(undefined);
       message.success(t('common.saved'));
     } catch (error) {
-      message.error(String(error));
+      if (current()) message.error(String(error));
     }
   };
 
   const handleSaveSkillHome = async () => {
+    const current = action();
     const values = await form.validateFields();
-    setPendingSkillHomeRoot(values.localSkillsRoot?.trim() || null);
+    if (current()) setPendingSkillHomeRoot(values.localSkillsRoot?.trim() || null);
   };
 
   return (
@@ -96,7 +106,7 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
           </Descriptions.Item>
         </Descriptions>
 
-        <Form form={form} layout="vertical">
+        <Form name={`computer-skills-${instance.id}`} form={form} onValuesChange={draft.onValuesChange} layout="vertical">
           <Form.Item label={t('computer.runtime.localSkillsRoot')}>
             <Space.Compact style={{ width: '100%' }}>
               <Form.Item name="localSkillsRoot" noStyle>
@@ -120,7 +130,7 @@ export function SkillsSettings({ instance, onNavigate }: SkillsSettingsProps) {
             <Button
               loading={loading}
               onClick={() => {
-                form.setFieldsValue({ localSkillsRoot: '' });
+                draft.setValues({ localSkillsRoot: '' });
                 setPendingSkillHomeRoot(null);
               }}
             >

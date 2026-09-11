@@ -224,7 +224,7 @@ describe('Computer', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Second Computer' }));
 
-    expect(screen.getByText('Second Computer')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Second Computer' })).toBeVisible();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-b');
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-b');
     expect(screen.getByTestId('desktop-resources')).toHaveTextContent('computer-b');

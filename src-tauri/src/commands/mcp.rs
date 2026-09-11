@@ -10,7 +10,8 @@ use crate::services::computer_runtime_events::PublicOAuthStatus;
 use crate::services::input_references::referenced_input_ids;
 use crate::services::input_resolver::RuntimeInputInteractionMode;
 use crate::services::observability::{
-    redact_json, redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+    redact_json, redact_text, ActivityEventDraft, ActivityLevel, ActivityManagedBy,
+    ActivityOutcome, ActivityProvider, ActivityTrigger, ComputerActivityCategory,
 };
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
@@ -313,6 +314,7 @@ async fn start_mcp_server_core_with_mode(
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let started = std::time::Instant::now();
     let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Starting MCP server for instance {}: {}",
@@ -374,14 +376,17 @@ async fn start_mcp_server_core_with_mode(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                ActivityLevel::Info,
-                "start",
-                ActivityOutcome::Succeeded,
-                format!("Server started: {server_name}"),
-                Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "server_name": server_name,
-                })),
+                McpLifecycleActivity {
+                    level: ActivityLevel::Info,
+                    operation: "start",
+                    outcome: ActivityOutcome::Succeeded,
+                    message: format!("Server started: {server_name}"),
+                    fields: Some(serde_json::json!({
+                        "bundle_id": bundle_id,
+                        "server_name": server_name,
+                    })),
+                    started,
+                },
             )
             .await;
         }
@@ -390,14 +395,17 @@ async fn start_mcp_server_core_with_mode(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                ActivityLevel::Error,
-                "start",
-                ActivityOutcome::Failed,
-                format!("Server start failed: {bundle_id}: {summary}"),
-                Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "error": summary,
-                })),
+                McpLifecycleActivity {
+                    level: ActivityLevel::Error,
+                    operation: "start",
+                    outcome: ActivityOutcome::Failed,
+                    message: format!("Server start failed: {bundle_id}: {summary}"),
+                    fields: Some(serde_json::json!({
+                        "bundle_id": bundle_id,
+                        "error": summary,
+                    })),
+                    started,
+                },
             )
             .await;
         }
@@ -405,27 +413,42 @@ async fn start_mcp_server_core_with_mode(
     result.map(|_| ())
 }
 
-async fn record_mcp_lifecycle_activity(
-    state: &AppState,
-    instance_id: &str,
+struct McpLifecycleActivity<'a> {
     level: ActivityLevel,
-    operation: &str,
+    operation: &'a str,
     outcome: ActivityOutcome,
     message: String,
     fields: Option<serde_json::Value>,
+    started: std::time::Instant,
+}
+
+async fn record_mcp_lifecycle_activity(
+    state: &AppState,
+    instance_id: &str,
+    spec: McpLifecycleActivity<'_>,
 ) {
     let mut activity = ActivityEventDraft::computer(
         instance_id,
-        level,
-        "mcp",
+        spec.level,
+        ComputerActivityCategory::Mcp,
         "mcp_server_lifecycle",
-        operation,
-        outcome,
-        message,
+        spec.operation,
+        spec.outcome,
+        spec.message,
+    )
+    .with_standard_fields(
+        ActivityTrigger::User,
+        Some(ActivityManagedBy::User),
+        Some(ActivityProvider::UserMcp),
     );
-    activity.fields = fields.map(redact_json);
+    if let Some(fields) = spec.fields.map(redact_json) {
+        activity.merge_fields(fields);
+    }
+    activity.merge_fields(serde_json::json!({
+        "duration_ms": spec.started.elapsed().as_millis(),
+    }));
     if let Err(error) = state.observability.record_activity_async(activity).await {
-        log::error!("failed to persist MCP {operation} activity: {error}");
+        log::error!("failed to persist MCP {} activity: {error}", spec.operation);
     }
 }
 
@@ -444,6 +467,7 @@ pub async fn stop_mcp_server_core(
     bundle_id: &BundleId,
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let started = std::time::Instant::now();
     let _operation_guard = state
         .computer_registry
         .shared_operation_lease(instance_id)
@@ -482,15 +506,18 @@ pub async fn stop_mcp_server_core(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                ActivityLevel::Info,
-                "stop",
-                ActivityOutcome::Succeeded,
-                format!("Server stopped: {server_name}"),
-                Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "server_name": server_name,
-                    "changed": stopped,
-                })),
+                McpLifecycleActivity {
+                    level: ActivityLevel::Info,
+                    operation: "stop",
+                    outcome: ActivityOutcome::Succeeded,
+                    message: format!("Server stopped: {server_name}"),
+                    fields: Some(serde_json::json!({
+                        "bundle_id": bundle_id,
+                        "server_name": server_name,
+                        "changed": stopped,
+                    })),
+                    started,
+                },
             )
             .await;
         }
@@ -499,14 +526,17 @@ pub async fn stop_mcp_server_core(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                ActivityLevel::Error,
-                "stop",
-                ActivityOutcome::Failed,
-                format!("Server stop failed: {bundle_id}: {summary}"),
-                Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "error": summary,
-                })),
+                McpLifecycleActivity {
+                    level: ActivityLevel::Error,
+                    operation: "stop",
+                    outcome: ActivityOutcome::Failed,
+                    message: format!("Server stop failed: {bundle_id}: {summary}"),
+                    fields: Some(serde_json::json!({
+                        "bundle_id": bundle_id,
+                        "error": summary,
+                    })),
+                    started,
+                },
             )
             .await;
         }
@@ -550,6 +580,7 @@ async fn start_all_servers_core_with_mode(
     interaction_mode: RuntimeInputInteractionMode,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let started = std::time::Instant::now();
     let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!("Starting all MCP servers for instance {}", instance_id);
 
@@ -647,7 +678,15 @@ async fn start_all_servers_core_with_mode(
         Ok(result)
     }
     .await;
-    record_mcp_batch_activity(state, instance_id, "start_all", "Start all", &result).await;
+    record_mcp_batch_activity(
+        state,
+        instance_id,
+        "start_all",
+        "Start all",
+        started,
+        &result,
+    )
+    .await;
     result
 }
 
@@ -664,6 +703,7 @@ pub async fn stop_all_servers_core(
     instance_id: &str,
 ) -> Result<McpBatchOperationResult, RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
+    let started = std::time::Instant::now();
     let _operation_guard = state
         .computer_registry
         .shared_operation_lease(instance_id)
@@ -701,7 +741,7 @@ pub async fn stop_all_servers_core(
         Ok::<_, RuntimeActionError>(result)
     }
     .await;
-    record_mcp_batch_activity(state, instance_id, "stop_all", "Stop all", &result).await;
+    record_mcp_batch_activity(state, instance_id, "stop_all", "Stop all", started, &result).await;
     result
 }
 
@@ -710,6 +750,7 @@ async fn record_mcp_batch_activity(
     instance_id: &str,
     operation: &str,
     action_label: &str,
+    started: std::time::Instant,
     result: &Result<McpBatchOperationResult, RuntimeActionError>,
 ) {
     match result {
@@ -729,30 +770,33 @@ async fn record_mcp_batch_activity(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                if failed {
-                    ActivityLevel::Error
-                } else {
-                    ActivityLevel::Info
+                McpLifecycleActivity {
+                    level: if failed {
+                        ActivityLevel::Error
+                    } else {
+                        ActivityLevel::Info
+                    },
+                    operation,
+                    outcome: if failed {
+                        ActivityOutcome::Failed
+                    } else {
+                        ActivityOutcome::Succeeded
+                    },
+                    message: format!(
+                        "{action_label} completed: changed={}, unchanged={}, failures={}",
+                        batch.actual_operation_count,
+                        batch.unchanged_count,
+                        batch.failures.len()
+                    ),
+                    fields: Some(serde_json::json!({
+                        "candidate_count": batch.candidate_count,
+                        "actual_operation_count": batch.actual_operation_count,
+                        "unchanged_count": batch.unchanged_count,
+                        "excluded_plugin_owned_count": batch.excluded_plugin_owned_count,
+                        "failures": failures,
+                    })),
+                    started,
                 },
-                operation,
-                if failed {
-                    ActivityOutcome::Failed
-                } else {
-                    ActivityOutcome::Succeeded
-                },
-                format!(
-                    "{action_label} completed: changed={}, unchanged={}, failures={}",
-                    batch.actual_operation_count,
-                    batch.unchanged_count,
-                    batch.failures.len()
-                ),
-                Some(serde_json::json!({
-                    "candidate_count": batch.candidate_count,
-                    "actual_operation_count": batch.actual_operation_count,
-                    "unchanged_count": batch.unchanged_count,
-                    "excluded_plugin_owned_count": batch.excluded_plugin_owned_count,
-                    "failures": failures,
-                })),
             )
             .await;
         }
@@ -761,11 +805,14 @@ async fn record_mcp_batch_activity(
             record_mcp_lifecycle_activity(
                 state,
                 instance_id,
-                ActivityLevel::Error,
-                operation,
-                ActivityOutcome::Failed,
-                format!("{action_label} failed: {summary}"),
-                Some(serde_json::json!({ "error": summary })),
+                McpLifecycleActivity {
+                    level: ActivityLevel::Error,
+                    operation,
+                    outcome: ActivityOutcome::Failed,
+                    message: format!("{action_label} failed: {summary}"),
+                    fields: Some(serde_json::json!({"error": summary})),
+                    started,
+                },
             )
             .await;
         }
@@ -1061,10 +1108,50 @@ async fn mcp_server_runtime_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::config::ConfigService;
+    use crate::services::observability::{
+        ActivityQuery, ActivityScopeFilter, ObservabilityService,
+    };
+    use crate::services::settings::SettingsService;
     use a2c_smcp::smcp_computer::errors::ComputerError;
     use a2c_smcp::smcp_computer::inputs::{InputKind, InputResolutionError};
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use a2c_smcp::smcp_computer::oauth::OAuthStatus;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn mcp_lifecycle_writer_always_records_duration() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+        );
+        record_mcp_lifecycle_activity(
+            &state,
+            "computer-1",
+            McpLifecycleActivity {
+                level: ActivityLevel::Info,
+                operation: "start",
+                outcome: ActivityOutcome::Succeeded,
+                message: "Server started".to_string(),
+                fields: Some(serde_json::json!({"bundle_id": "example"})),
+                started: std::time::Instant::now(),
+            },
+        )
+        .await;
+
+        let page = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::Computer {
+                    computer_id: "computer-1".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(page.items[0].fields.as_ref().unwrap()["duration_ms"].is_number());
+    }
 
     #[test]
     fn oauth_status_projection_is_non_sensitive_and_uses_six_ui_states() {

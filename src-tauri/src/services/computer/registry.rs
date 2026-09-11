@@ -90,7 +90,7 @@ impl ComputerRegistry {
     ) -> (Self, Option<ComputerInstanceRuntime>) {
         config.normalize();
         let mut runtimes = HashMap::new();
-        let runtime_event_sink: SharedRuntimeEventSink = Arc::new(RwLock::new(None));
+        let runtime_event_sink: SharedRuntimeEventSink = Arc::new(RuntimeEventSinkHub::new());
         let runtime_input_bridge =
             Arc::new(crate::services::runtime_input_bridge::RuntimeInputBridge::new());
         let client_control_binding = ClientControlBinding::default();
@@ -138,7 +138,30 @@ impl ComputerRegistry {
     }
 
     pub async fn set_runtime_event_sink(&self, sink: Arc<dyn ComputerRuntimeEventSink>) {
-        *self.runtime_event_sink.write().await = Some(sink);
+        *self
+            .runtime_event_sink
+            .durable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+        for runtime in self.list_runtimes().await {
+            runtime.start_runtime_event_relay().await;
+        }
+    }
+
+    pub fn configure_runtime_event_sink(&self, sink: Arc<dyn ComputerRuntimeEventSink>) {
+        *self
+            .runtime_event_sink
+            .durable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+    }
+
+    pub async fn set_runtime_ui_event_sink(&self, sink: Arc<dyn ComputerRuntimeEventSink>) {
+        *self
+            .runtime_event_sink
+            .ui
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
         for runtime in self.list_runtimes().await {
             runtime.start_runtime_event_relay().await;
         }

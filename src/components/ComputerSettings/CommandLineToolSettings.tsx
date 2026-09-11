@@ -1,7 +1,8 @@
+import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Alert, Button, Input, Space, Spin, Switch, Tag, Typography, message } from 'antd';
+import { Alert, App, Button, Input, Space, Spin, Switch, Tag, Typography } from 'antd';
 import { FolderOpenOutlined, UndoOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useComputerStore, type CommandLineToolPolicy } from '@/stores/computerStore';
@@ -27,6 +28,9 @@ const isWorkspaceLocked = (runtimeState: RuntimeState) => (
 );
 
 export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsProps) {
+  const action = usePageAction(computerId);
+  const { message } = App.useApp();
+  const pageActive = usePageActive();
   const { t } = useTranslation();
   const fetchInstances = useComputerStore((store) => store.fetchInstances);
   const runtimeRevision = useComputerStore((store) => (
@@ -50,21 +54,27 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [computerId]);
+  }, [computerId, message]);
 
-  useEffect(() => { void load(); }, [load, runtimeRevision]);
+  useEffect(() => {
+    if (pageActive) void load();
+    return () => { loadSequence.current += 1; };
+  }, [load, runtimeRevision, pageActive]);
 
   const update = async (policy: CommandLineToolPolicy) => {
+    const current = action();
     ++loadSequence.current;
     setSaving(true);
     try {
       const next = await invoke<CommandLineToolState>('update_command_line_tool_policy', {
         request: { computerId, policy },
       });
+      if (!current()) return;
       setState(next);
       await fetchInstances();
-      void message.success(t('computer.builtInTools.commandLine.saved'));
+      if (current()) void message.success(t('computer.builtInTools.commandLine.saved'));
     } catch (error) {
+      if (!current()) return;
       void message.error(String(error));
       await load();
     } finally {
@@ -78,16 +88,18 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
       || saving
       || isWorkspaceLocked(state.runtimeState)
     ) return;
+    const current = action();
     const selected = await open({
       directory: true,
       multiple: false,
       title: t('computer.builtInTools.commandLine.chooseWorkspace'),
       defaultPath: state.effectiveWorkspace,
     });
-    if (typeof selected === 'string') {
+    if (typeof selected === 'string' && current()) {
       const latest = await invoke<CommandLineToolState>('get_command_line_tool_state', {
         computerId,
       });
+      if (!current()) return;
       setState(latest);
       if (!isWorkspaceLocked(latest.runtimeState)) {
         await update({ ...latest.policy, workspace_root: selected });

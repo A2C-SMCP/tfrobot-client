@@ -11,13 +11,13 @@ use services::client_control::{
 };
 use services::computer::{ComputerInstance, ComputerInstancesConfig, ComputerRegistry};
 use services::config::ConfigService;
-use services::config_migration::{migrate_legacy_config, MigrationError};
+use services::config_migration::{migrate_legacy_config, MigrationError, MigrationOutcome};
 use services::keychain::{SecretStore, SystemSecretStore};
 use services::manager_client::ManagerClient;
 use services::manager_context::ManagerContextCoordinator;
 use services::observability::{
-    initialize_tracing, ActivityEventDraft, ActivityLevel, ActivityOutcome, Diagnostics,
-    ObservabilityRetention, ObservabilityService,
+    initialize_tracing, ActivityEventDraft, ActivityLevel, ActivityOutcome,
+    ComputerActivityCategory, Diagnostics, ObservabilityRetention, ObservabilityService,
 };
 use services::sdk_config::SdkConfigService;
 use services::settings::SettingsService;
@@ -57,6 +57,8 @@ pub struct AppState {
     pub manager_context: Arc<ManagerContextCoordinator>,
     /// Context-bound in-memory chat leases and narrow RobotServer HTTP BFF.
     pub chat_sessions: Arc<ChatSessionService>,
+    /// Stable correlation identity for this application process lifetime.
+    pub client_run_id: Arc<str>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -90,11 +92,27 @@ impl AppState {
         observability: ObservabilityService,
         settings_service: SettingsService,
     ) -> Result<Self, AppStateInitError> {
-        Self::try_new_with_secret_store(
+        Self::try_new_with_secret_store_and_run_id(
             config,
             observability,
             settings_service,
             Arc::new(SystemSecretStore),
+            Arc::from(uuid::Uuid::new_v4().to_string()),
+        )
+    }
+
+    fn try_new_for_run(
+        config: ConfigService,
+        observability: ObservabilityService,
+        settings_service: SettingsService,
+        client_run_id: Arc<str>,
+    ) -> Result<Self, AppStateInitError> {
+        Self::try_new_with_secret_store_and_run_id(
+            config,
+            observability,
+            settings_service,
+            Arc::new(SystemSecretStore),
+            client_run_id,
         )
     }
 
@@ -114,6 +132,22 @@ impl AppState {
         settings_service: SettingsService,
         secret_store: Arc<dyn SecretStore>,
     ) -> Result<Self, AppStateInitError> {
+        Self::try_new_with_secret_store_and_run_id(
+            config,
+            observability,
+            settings_service,
+            secret_store,
+            Arc::from(uuid::Uuid::new_v4().to_string()),
+        )
+    }
+
+    fn try_new_with_secret_store_and_run_id(
+        config: ConfigService,
+        observability: ObservabilityService,
+        settings_service: SettingsService,
+        secret_store: Arc<dyn SecretStore>,
+        client_run_id: Arc<str>,
+    ) -> Result<Self, AppStateInitError> {
         let config = Arc::new(config);
         let sdk_config = Arc::new(SdkConfigService::new(config.clone()));
         let initial_settings = settings_service.load();
@@ -129,23 +163,82 @@ impl AppState {
             settings_service.clone(),
         ));
 
-        migrate_legacy_config(
+        let migration_started = std::time::Instant::now();
+        let legacy_migration = migrate_legacy_config(
             config.as_ref(),
             sdk_config.as_ref(),
             settings_service.as_ref(),
             secret_store.as_ref(),
-        )?;
+        );
+        match legacy_migration {
+            Ok(MigrationOutcome::Completed) => {
+                record_migration_activity(
+                    &observability,
+                    None,
+                    "legacy_configuration",
+                    ActivityOutcome::Succeeded,
+                    migration_started.elapsed(),
+                    None,
+                    Some(client_run_id.as_ref()),
+                );
+            }
+            Ok(MigrationOutcome::NotNeeded | MigrationOutcome::AlreadyCompleted) => {}
+            Err(error) => {
+                record_migration_activity(
+                    &observability,
+                    None,
+                    "legacy_configuration",
+                    ActivityOutcome::Failed,
+                    migration_started.elapsed(),
+                    Some(&error.to_string()),
+                    Some(client_run_id.as_ref()),
+                );
+                return Err(error.into());
+            }
+        }
         let stored_instances = config.load_computer_instances()?;
         for instance in &stored_instances.instances {
-            let migration = sdk_config
-                .migrate_removed_http_oauth_fields(&instance.id)
-                .map_err(|error| {
-                    AppStateInitError::RemovedHttpOAuthMigration(format!(
+            let migration_started = std::time::Instant::now();
+            let migration = match sdk_config.migrate_removed_http_oauth_fields(&instance.id) {
+                Ok(migration) => migration,
+                Err(error) => {
+                    record_migration_activity(
+                        &observability,
+                        Some(&instance.id),
+                        "removed_http_oauth_fields",
+                        ActivityOutcome::Failed,
+                        migration_started.elapsed(),
+                        Some(&error.to_string()),
+                        Some(client_run_id.as_ref()),
+                    );
+                    return Err(AppStateInitError::RemovedHttpOAuthMigration(format!(
                         "Computer '{}': {error}",
                         instance.id
-                    ))
-                })?;
+                    )));
+                }
+            };
             if migration.removed_fields > 0 {
+                let mut fields = serde_json::json!({
+                    "app_version": env!("CARGO_PKG_VERSION"),
+                    "trigger": "system",
+                    "duration_ms": migration_started.elapsed().as_millis(),
+                    "removed_fields": migration.removed_fields,
+                    "disabled_opt_out_servers": migration.disabled_opt_out_servers,
+                });
+                let mut activity = ActivityEventDraft::computer(
+                    &instance.id,
+                    ActivityLevel::Info,
+                    ComputerActivityCategory::Computer,
+                    "data_migration",
+                    "removed_http_oauth_fields",
+                    ActivityOutcome::Succeeded,
+                    "Computer configuration migration succeeded",
+                );
+                activity.fields = Some(std::mem::take(&mut fields));
+                activity.correlation_id = Some(client_run_id.to_string());
+                if let Err(error) = observability.record_activity(&activity) {
+                    log::error!("failed to persist Computer migration activity: {error}");
+                }
                 log::info!(
                     "Migrated {} removed rust-sdk HTTP OAuth field(s) for Computer '{}'",
                     migration.removed_fields,
@@ -190,6 +283,12 @@ impl AppState {
             ),
         );
         let observability = Arc::new(observability);
+        computer_registry.configure_runtime_event_sink(Arc::new(
+            services::observability::ConnectionActivitySink::new(observability.clone()),
+        ));
+        computer_registry
+            .runtime_input_bridge()
+            .configure_observability(observability.clone());
         let connection_target_reservations =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let connection_target_lock = Arc::new(Mutex::new(()));
@@ -207,6 +306,7 @@ impl AppState {
                 settings_service: settings_service.clone(),
                 manager_context: manager_context.clone(),
                 chat_sessions: chat_sessions.clone(),
+                client_run_id: client_run_id.clone(),
             },
         ));
         computer_registry.bind_client_control(&client_control);
@@ -224,6 +324,7 @@ impl AppState {
             settings_service,
             manager_context,
             chat_sessions,
+            client_run_id,
         })
     }
 
@@ -242,6 +343,65 @@ impl AppState {
             self.secret_store.as_ref(),
         )?)
     }
+}
+
+fn record_migration_activity(
+    observability: &ObservabilityService,
+    computer_id: Option<&str>,
+    operation: &str,
+    outcome: ActivityOutcome,
+    duration: std::time::Duration,
+    error: Option<&str>,
+    correlation_id: Option<&str>,
+) {
+    let succeeded = outcome == ActivityOutcome::Succeeded;
+    let level = if succeeded {
+        ActivityLevel::Info
+    } else {
+        ActivityLevel::Error
+    };
+    let message = if succeeded {
+        "Configuration migration succeeded"
+    } else {
+        "Configuration migration failed"
+    };
+    let mut activity = match computer_id {
+        Some(computer_id) => ActivityEventDraft::computer(
+            computer_id,
+            level,
+            ComputerActivityCategory::Computer,
+            "data_migration",
+            operation,
+            outcome,
+            message,
+        ),
+        None => ActivityEventDraft::client(
+            level,
+            "config",
+            "data_migration",
+            operation,
+            outcome,
+            message,
+        ),
+    };
+    activity.fields = Some(serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "trigger": "system",
+        "duration_ms": duration.as_millis(),
+        "error": error.map(services::observability::redact_text),
+    }));
+    activity.correlation_id = correlation_id.map(str::to_string);
+    if let Err(error) = observability.record_activity(&activity) {
+        log::error!("failed to persist configuration migration activity: {error}");
+    }
+}
+
+fn open_client_run(observability: &ObservabilityService, app_version: &str) -> Arc<str> {
+    let client_run_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
+    if let Err(error) = observability.begin_client_run(client_run_id.as_ref(), app_version) {
+        log::error!("failed to persist client run startup: {error}");
+    }
+    client_run_id
 }
 
 fn hydrate_computer_instances(
@@ -344,6 +504,12 @@ pub fn run() {
             let observability = ObservabilityService::new(&app_data_dir)
                 .expect("Failed to initialize observability database");
 
+            // Establish the durable run boundary as soon as the journal is available. Any crash
+            // during settings loading, migration, recovery, or runtime hydration must leave a
+            // marker that the next launch can diagnose.
+            let app_version = app.package_info().version.to_string();
+            let client_run_id = open_client_run(&observability, &app_version);
+
             let settings_service = SettingsService::new_with_client_computers_paths(
                 app_data_dir.clone(),
                 client_computers_paths,
@@ -368,7 +534,12 @@ pub fn run() {
                 );
             }
 
-            let state = AppState::try_new(config_service, observability, settings_service)?;
+            let state = AppState::try_new_for_run(
+                config_service,
+                observability,
+                settings_service,
+                client_run_id,
+            )?;
             state.diagnostics.set_level(settings.diagnostic_log_level);
             tauri::async_runtime::block_on(state.manager_context.set_lifecycle_sink(Arc::new(
                 commands::manager::TauriManagerContextLifecycleSink::new(
@@ -378,27 +549,17 @@ pub fn run() {
                 ),
             )));
             tauri::async_runtime::block_on(state.manager_context.set_event_sink(Arc::new(
-                commands::manager::TauriManagerContextEventSink::new(app.handle().clone()),
+                commands::manager::TauriManagerContextEventSink::new(
+                    app.handle().clone(),
+                    state.observability.clone(),
+                ),
             )));
             tauri::async_runtime::block_on(state.manager_context.set_token_bridge_sink(Arc::new(
                 commands::manager::TauriManagerTokenBridgeSink::new(app.handle().clone()),
             )));
             commands::runtime_input::install_runtime_input_sink(app.handle().clone(), &state);
+            commands::chat::install_resource_diagnostics(app.handle().clone(), &state.chat_sessions);
 
-            // Write startup log and cleanup old entries
-            if let Err(error) = state
-                .observability
-                .record_activity(&ActivityEventDraft::client(
-                    ActivityLevel::Info,
-                    "system",
-                    "application_lifecycle",
-                    "start",
-                    ActivityOutcome::Succeeded,
-                    "Application started",
-                ))
-            {
-                log::error!("failed to persist startup activity: {error}");
-            }
             if let Err(error) = state.observability.apply_retention(ObservabilityRetention {
                 activity_days: settings.activity_retention_days,
                 tool_history_days: settings.tool_history_retention_days,
@@ -527,6 +688,7 @@ pub fn run() {
             commands::activity::get_activity,
             commands::activity::export_activity,
             commands::activity::clear_activity,
+            commands::activity::record_application_update_activity,
             commands::diagnostics::set_diagnostic_log_level,
             // Dashboard
             commands::dashboard::get_dashboard_data,
@@ -555,6 +717,12 @@ pub fn run() {
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,
+            commands::chat::chat_prepare_transfer,
+            commands::chat::chat_cancel_transfer,
+            commands::chat::chat_upload_request,
+            commands::chat::chat_resolve_resource,
+            commands::chat::chat_release_resource,
+            commands::chat::chat_save_resource,
             commands::chat::chat_close_session,
         ])
         .build(tauri::generate_context!())
@@ -567,19 +735,16 @@ pub fn run() {
                     state.manager_context.force_token_bridge_not_ready().await;
                     state.chat_sessions.close_for_context(None).await;
                     state.computer_registry.shutdown_all().await;
+                    let app_version = app_handle.package_info().version.to_string();
                     if let Err(error) = state
                         .observability
-                        .record_activity_async(ActivityEventDraft::client(
-                            ActivityLevel::Info,
-                            "system",
-                            "application_lifecycle",
-                            "shutdown",
-                            ActivityOutcome::Succeeded,
-                            "Application shutting down",
-                        ))
+                        .finish_client_run_async(
+                            state.client_run_id.to_string(),
+                            app_version,
+                        )
                         .await
                     {
-                        log::error!("failed to persist shutdown activity: {error}");
+                        log::error!("failed to persist client run shutdown: {error}");
                     }
                 });
             }
@@ -649,6 +814,31 @@ mod tests {
         let path = std::path::Path::new("/tmp/nonexistent_log_dir_test_12345");
         // Should not panic
         cleanup_old_log_files(path, 3);
+    }
+
+    #[test]
+    fn startup_boundary_precedes_fallible_initialization_work() {
+        let dir = TempDir::new().unwrap();
+        let first = ObservabilityService::new(dir.path()).unwrap();
+        let first_run = open_client_run(&first, "1.0.0");
+        drop(first);
+
+        // Model a process terminating anywhere in AppState initialization: no graceful finish is
+        // committed. The next launch must diagnose that run before doing its own initialization.
+        let second = ObservabilityService::new(dir.path()).unwrap();
+        let second_run = open_client_run(&second, "1.0.1");
+        let page = second
+            .query_activity(&services::observability::ActivityQuery::default())
+            .unwrap();
+        assert_eq!(
+            page.items[0].correlation_id.as_deref(),
+            Some(second_run.as_ref())
+        );
+        assert_eq!(page.items[1].operation, "unclean_exit");
+        assert_eq!(
+            page.items[1].correlation_id.as_deref(),
+            Some(first_run.as_ref())
+        );
     }
 
     #[tokio::test]
@@ -726,6 +916,20 @@ mod tests {
         assert!(server.get("oauth").is_none());
         assert!(server.get("authPolicy").is_none());
         assert_eq!(server["futureField"], serde_json::json!({"preserve": true}));
+        let activity = state
+            .observability
+            .query_activity(&services::observability::ActivityQuery {
+                scope: services::observability::ActivityScopeFilter::Computer {
+                    computer_id: "one".to_string(),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(activity.items.iter().any(|event| {
+            event.event_type == "data_migration"
+                && event.operation == "removed_http_oauth_fields"
+                && event.outcome == ActivityOutcome::Succeeded
+        }));
         assert!(state.computer_registry.runtime("one").await.is_some());
     }
 

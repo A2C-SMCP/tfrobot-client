@@ -5,14 +5,15 @@ import type { FormInstance } from 'antd';
 interface SchemaFormProps {
   schema: Record<string, unknown>;
   form: FormInstance;
+  onValuesChange?: (changed: Record<string, unknown>, values: Record<string, unknown>) => void;
 }
 
-export function SchemaForm({ schema, form }: SchemaFormProps) {
+export function SchemaForm({ schema, form, onValuesChange }: SchemaFormProps) {
   const properties = (schema.properties || {}) as Record<string, Record<string, unknown>>;
   const required = (schema.required || []) as string[];
 
   return (
-    <Form form={form} layout="vertical" size="small">
+    <Form name="debug-tool-parameters" form={form} onValuesChange={onValuesChange} layout="vertical" size="small">
       {Object.entries(properties).map(([key, propSchema]) => (
         <SchemaFormItem
           key={key}

@@ -86,7 +86,7 @@ impl ComputerInstanceRuntime {
             )
             .await
             .map_err(ComputerRuntimeStartError::from)?;
-            let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+            let failures = self.start_desired_mcp_servers_inner().await;
             self.handle_desired_mcp_start_failures(
                 failures,
                 "idempotent Computer startup",
@@ -127,7 +127,7 @@ impl ComputerInstanceRuntime {
             }
             return Err(start_error);
         }
-        let failures = self.start_desired_mcp_servers_inner(failure_policy).await;
+        let failures = self.start_desired_mcp_servers_inner().await;
         if let Err(error) =
             self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
         {
@@ -207,16 +207,16 @@ impl ComputerInstanceRuntime {
     }
 
     pub(super) async fn publish_runtime_status(&self, cause: ComputerRuntimeEventCause) {
-        let Some(sink) = self.runtime_event_sink.read().await.clone() else {
+        if !self.runtime_event_sink.has_sink() {
             return;
-        };
+        }
         let event = ComputerRuntimeStatusEvent::from_observation(
             self.instance.id.clone(),
             cause,
             self.runtime_snapshot().await,
             self.connection_snapshot().await,
         );
-        if let Err(error) = sink.emit(&event) {
+        if let Err(error) = self.runtime_event_sink.emit(&event) {
             log::warn!(
                 "Failed to publish runtime status event for instance {}: {}",
                 self.instance.id,
@@ -226,7 +226,7 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn start_runtime_event_relay(&self) {
-        if self.is_retired() || self.runtime_event_sink.read().await.is_none() {
+        if self.is_retired() || !self.runtime_event_sink.has_sink() {
             return;
         }
 
@@ -355,9 +355,9 @@ impl ComputerInstanceRuntime {
                     .await;
                     runtime_snapshot
                 };
-                let Some(sink) = sink.read().await.clone() else {
+                if !sink.has_sink() {
                     break;
-                };
+                }
                 let (connection_snapshot, connection_generation) = {
                     let connection = connection.read().await;
                     let operation = connection_operation.read().await;

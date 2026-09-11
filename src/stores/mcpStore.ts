@@ -1,3 +1,4 @@
+import { captureViewContext } from './viewContextLifetime';
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { info } from '@/utils/logger';
@@ -299,19 +300,20 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   startServer: async (instanceId: string, bundleId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       await invoke('start_mcp_server', { instanceId, bundleId });
       info(`MCP server started: ${bundleId}`);
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
     } catch (e) {
       const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: actionError, loading: false });
       }
       throw e;
@@ -319,15 +321,16 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   stopServer: async (instanceId: string, bundleId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       await invoke('stop_mcp_server', { instanceId, bundleId });
       info(`MCP server stopped: ${bundleId}`);
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
     } catch (e) {
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: formatRuntimeActionError(e), loading: false });
       }
       throw e;
@@ -335,20 +338,21 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   startAll: async (instanceId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       const result = await invoke<McpBatchOperationResult>('start_all_servers', { instanceId });
       info('MCP start-all completed');
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
       return result;
     } catch (e) {
       const actionError = isRuntimeInputCancelledError(e) ? null : formatRuntimeActionError(e);
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: actionError, loading: false });
       }
       throw e;
@@ -356,16 +360,17 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   stopAll: async (instanceId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       const result = await invoke<McpBatchOperationResult>('stop_all_servers', { instanceId });
       info('All MCP servers stopped');
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         await get().fetchServers(instanceId);
       }
       return result;
     } catch (e) {
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: formatRuntimeActionError(e), loading: false });
       }
       throw e;
@@ -373,12 +378,13 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   authorizeServer: async (instanceId: string, bundleId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       await invoke('authorize_mcp_server', { instanceId, bundleId });
-      if (isActiveInstance(instanceId)) set({ loading: false });
+      if (currentContext() && isActiveInstance(instanceId)) set({ loading: false });
     } catch (e) {
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: formatRuntimeActionError(e), loading: false });
       }
       throw e;
@@ -386,12 +392,13 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   cancelAuthorization: async (instanceId: string, bundleId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       await invoke('cancel_mcp_authorization', { instanceId, bundleId });
-      if (isActiveInstance(instanceId)) set({ loading: false });
+      if (currentContext() && isActiveInstance(instanceId)) set({ loading: false });
     } catch (e) {
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: formatRuntimeActionError(e), loading: false });
       }
       throw e;
@@ -399,12 +406,13 @@ export const useMcpStore = create<McpServerState>((set, get) => {
   },
 
   clearAuthorization: async (instanceId: string, bundleId: string) => {
+    const currentContext = captureViewContext();
     beginInstanceAction(instanceId);
     try {
       await invoke('clear_mcp_authorization', { instanceId, bundleId });
-      if (isActiveInstance(instanceId)) set({ loading: false });
+      if (currentContext() && isActiveInstance(instanceId)) set({ loading: false });
     } catch (e) {
-      if (isActiveInstance(instanceId)) {
+      if (currentContext() && isActiveInstance(instanceId)) {
         set({ error: formatRuntimeActionError(e), loading: false });
       }
       throw e;
@@ -433,6 +441,6 @@ export const useMcpStore = create<McpServerState>((set, get) => {
     });
   },
 
-  reset: () => set(initialState),
+  reset: () => set((state) => ({ ...initialState, serversRequestId: state.serversRequestId + 1, oauthEventEpoch: state.oauthEventEpoch + 1 })),
   };
 });

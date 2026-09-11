@@ -1,0 +1,17 @@
+export const ACTIVITY_CATEGORIES = [
+  'system',
+  'auth',
+  'config',
+  'security',
+  'update',
+  'observability',
+  'computer',
+  'runtime',
+  'connection',
+  'mcp',
+  'input',
+  'tool',
+  'resource',
+  'skill',
+  'marketplace',
+] as const;

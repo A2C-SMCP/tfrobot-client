@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useEffect, useMemo } from 'react';
 import { App, Alert, Button, Empty, Input, List, Skeleton, Space, Tag, Typography } from 'antd';
 import { FolderOpenOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -53,9 +55,10 @@ function renderMarkdown(markdown: string) {
 }
 
 export function SkillsTab({ instanceId }: SkillsTabProps) {
+  const pageActive = usePageActive();
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useNavigationState('skills.search', '');
   const {
     recordsByInstanceId,
     fetchSkills,
@@ -73,8 +76,8 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
   const skillError = record?.skillError ?? null;
 
   useEffect(() => {
-    fetchSkills(instanceId);
-  }, [fetchSkills, instanceId]);
+    if (pageActive) fetchSkills(instanceId);
+  }, [fetchSkills, instanceId, pageActive]);
 
   const filteredSkills = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -107,7 +110,7 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
     if (!selectedSkillName) {
       return <Empty description={t('skills.emptySelection')} />;
     }
-    if (loadingSkill) {
+    if (loadingSkill && !selectedSkill) {
       return <Skeleton active paragraph={{ rows: 8 }} />;
     }
     if (skillError) {
@@ -155,14 +158,14 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          {loadingSkills ? (
+          {loadingSkills && skills.length === 0 ? (
             <Skeleton active paragraph={{ rows: 8 }} />
           ) : skills.length === 0 ? (
             <Empty description={t('skills.empty')} />
           ) : filteredSkills.length === 0 ? (
             <Empty description={t('skills.emptySearch')} />
           ) : (
-            <Space direction="vertical" size={12} className={styles.list}>
+            <Space direction="vertical" size={12} data-navigation-scroll="skills-list" className={styles.list}>
               {Object.entries(grouped).map(([source, sourceSkills]) => (
                 <List
                   key={source}
@@ -193,7 +196,7 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
           )}
         </div>
 
-        <div className={styles.detail} role="region" aria-label={t('skills.preview')}>
+        <div data-navigation-scroll="skills-detail" className={styles.detail} role="region" aria-label={t('skills.preview')}>
           {renderSkillDetail()}
         </div>
       </div>

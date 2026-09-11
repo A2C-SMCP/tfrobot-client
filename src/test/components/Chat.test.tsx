@@ -1,3 +1,4 @@
+import { PageHost } from '@/components/Navigation/PageHost';
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { invoke } from '@tauri-apps/api/core';
 import { StrictMode } from 'react';
@@ -30,6 +31,7 @@ vi.mock('@turingfocus/chat-kit', () => ({
   OwnedChatProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   ChatUiShell: () => <div>Managed Chat Workspace</div>,
   ChatConversationView: () => null,
+  ChatResourceProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useConversationWorkspace: chatKitMock.useConversationWorkspace,
 }));
 
@@ -127,6 +129,32 @@ describe('Chat', () => {
       refresh: vi.fn(),
       selectConversation: vi.fn(),
     });
+  });
+
+  it('keeps the same Rust session and ChatClient factory through repeated menu round trips', async () => {
+    setAuthenticatedEmployees([employee()]);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'chat_get_recent_robot') return null;
+      if (command === 'chat_open_session') return {
+        leaseId: 'navigation-lease', employeeId: 42, robotName: 'Robot A',
+        httpBaseUrl: 'https://robot.example/proxy/', socketNamespaceUrl: 'https://robot.example/chat', socketPath: '/socket.io',
+      };
+      return undefined;
+    });
+    const tree = (active: boolean) => <PageHost name="chat" active={active}><Chat /></PageHost>;
+    const view = render(tree(true));
+    await screen.findByText('Managed Chat Workspace');
+    const factories = chatKitMock.createFactory.mock.calls.length;
+    for (let index = 0; index < 5; index++) {
+      view.rerender(tree(false));
+      expect(screen.getByText('Managed Chat Workspace')).not.toBeVisible();
+      view.rerender(tree(true));
+    }
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_open_session')).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_close_session')).toHaveLength(0);
+    expect(chatKitMock.createFactory).toHaveBeenCalledTimes(factories);
+    view.unmount();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_close_session')).toHaveLength(1);
   });
 
   it('requires a Manager login before showing Robot chat controls', () => {
