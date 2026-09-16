@@ -41,6 +41,7 @@
     "title": "机器人列表"
   },
   "chat": {
+    "restoreFailed": "无法恢复或保存上次对话位置。请重试，或手动选择机器人和会话。",
     "title": "对话",
     "context": "当前组织：{{organization}}",
     "availableRobots": "{{count}} 个可用",
@@ -1093,6 +1094,7 @@
       "forbidden": "当前账号没有访问该资源的权限。",
       "payment_required": "账号已欠费或被暂停，请前往续费页面。",
       "not_found": "未找到对应的资源。",
+      "chat_unavailable": "此机器人当前无法提供对话服务。",
       "not_found_or_no_permission": "该资源已不可见或你的访问权限已变更。",
       "other": "Manager 返回了意料之外的响应。",
       "no_session": "尚未登录 Manager，请先登录。",

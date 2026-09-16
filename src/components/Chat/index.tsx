@@ -57,6 +57,7 @@ import {
   preferredChatRobotId,
 } from './availability';
 import styles from './Chat.module.css';
+import { useChatRestoration } from './useChatRestoration';
 import { createChatResourcePort } from './chatResources';
 
 const { Text, Title } = Typography;
@@ -147,13 +148,14 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
         message={t(`chat.resourceErrors.${resourceError}`, { defaultValue: t('chat.resourceErrors.network') })}
         onClose={() => setResourceError(undefined)} />}
       <ChatResourceProvider port={resources} scope={descriptor.leaseId}>
-        <CompactChatWorkspace labels={labels} />
+        <CompactChatWorkspace labels={labels} leaseId={descriptor.leaseId} />
       </ChatResourceProvider>
     </OwnedChatProvider>
   );
 }
 
 interface CompactChatWorkspaceProps {
+  leaseId?: string;
   labels: ChatUiLabelOverrides;
 }
 
@@ -163,15 +165,17 @@ interface CompactChatWorkspaceProps {
  * listing, creation, paging, selection and async races stay owned by the
  * workspace controller — only the navigation chrome is host-rendered.
  */
-export function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
+export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspaceProps) {
+  const { t } = useTranslation();
   const active = usePageActive();
   const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('auto');
   const workspace = useConversationWorkspace({
     getDeadlineAt: getChatDeadlineAt,
-    initialSelection: 'first',
+    initialSelection: leaseId ? 'none' : 'first',
     onUnhandledError: () => warn('chat: unhandled workspace error'),
     pageSize: 50,
   });
+  const restoration = useChatRestoration(workspace, leaseId);
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -194,17 +198,20 @@ export function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
       }),
     [retryConversationId, workspace],
   );
-  const contentState = contentStateFor(workspace.ready, snapshot, refresh, retrySelection);
+  const contentState: ChatContentState = restoration.restoring ? { kind: 'loading' }
+    : restoration.empty ? { kind: 'empty' }
+    : contentStateFor(workspace.ready, snapshot, refresh, retrySelection);
 
   const create = useCallback(async () => {
     const normalizedTitle = title.trim();
     if (normalizedTitle.length === 0 || snapshot.creating) return;
+    restoration.manualSelection();
     const result = await workspace.createConversation({ title: normalizedTitle });
     if (result?.ok === true) {
       setCreateOpen(false);
       setTitle('');
     }
-  }, [title, workspace, snapshot.creating]);
+  }, [title, workspace, snapshot.creating, restoration]);
 
   const selectedConversation = snapshot.selectedConversationId === undefined
     ? undefined
@@ -221,6 +228,8 @@ export function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
 
   return (
     <>
+      {restoration.error && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+        action={<Button onClick={restoration.retry}>{t('common.retry')}</Button>} />}
       <ChatUiShell
         compactNavigation={compactNavigation}
         contentState={contentState}
@@ -234,6 +243,7 @@ export function CompactChatWorkspace({ labels }: CompactChatWorkspaceProps) {
         labels={labels}
         navigationMode="compact"
         onConversationSelect={(conversationId) => {
+          restoration.manualSelection();
           void workspace.selectConversation(conversationId);
         }}
         pendingConversationId={snapshot.pendingConversationId}
@@ -283,11 +293,13 @@ interface ChatSessionHostProps {
   creator: { uid: string; name: string };
   employeeId: number;
   onOpened: (employeeId: number) => void;
+  onUnavailable: (employeeId: number) => void;
 }
 
-function ChatSessionHost({ creator, employeeId, onOpened }: ChatSessionHostProps) {
+function ChatSessionHost({ creator, employeeId, onOpened, onUnavailable }: ChatSessionHostProps) {
   const { t } = useTranslation();
   const [descriptor, setDescriptor] = useState<ChatSessionDescriptor | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
   const [error, setError] = useState<ManagerError | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -306,12 +318,16 @@ function ChatSessionHost({ creator, employeeId, onOpened }: ChatSessionHostProps
         setDescriptor(opened);
         onOpened(employeeId);
         void invoke('chat_remember_robot', { leaseId: opened.leaseId }).catch(() => {
+          if (active) setSaveFailed(true);
           warn('chat: failed to save recent Robot preference');
         });
         return undefined;
       })
       .catch((reason: ManagerError) => {
-        if (active) setError(reason);
+        if (active) {
+          if (['not_found', 'not_found_or_no_permission', 'forbidden', 'chat_unavailable'].includes(reason.kind)) onUnavailable(employeeId);
+          else setError(reason);
+        }
       });
     return () => {
       active = false;
@@ -319,7 +335,7 @@ function ChatSessionHost({ creator, employeeId, onOpened }: ChatSessionHostProps
         void invoke('chat_close_session', { leaseId }).catch(() => undefined);
       }
     };
-  }, [attempt, employeeId, onOpened]);
+  }, [attempt, employeeId, onOpened, onUnavailable]);
 
   if (error) {
     return (
@@ -333,7 +349,14 @@ function ChatSessionHost({ creator, employeeId, onOpened }: ChatSessionHostProps
     );
   }
   if (!descriptor) return <div className={styles.centered}><Spin /></div>;
-  return <ActiveChat descriptor={descriptor} creator={creator} />;
+  return <>
+    {saveFailed && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+      action={<Button onClick={() => {
+        void invoke('chat_remember_robot', { leaseId: descriptor.leaseId })
+          .then(() => setSaveFailed(false)).catch(() => setSaveFailed(true));
+      }}>{t('common.retry')}</Button>} />}
+    <ActiveChat descriptor={descriptor} creator={creator} />
+  </>;
 }
 
 export function Chat() {
@@ -354,8 +377,14 @@ export function Chat() {
   ).length;
   const hasEmployeeSnapshot = resource?.lastFetchAt != null;
   const resourceError = resource?.error ?? identityError;
+  const [unavailable, setUnavailable] = useState<{ scope: string | null; ids: number[] }>({ scope: null, ids: [] });
+  const handleUnavailable = useCallback((employeeId: number) => {
+    setUnavailable((previous) => ({ scope, ids: [...(previous.scope === scope ? previous.ids : []), employeeId] }));
+  }, [scope]);
   const [selection, setSelection] = useState<ChatSelection | null>(null);
   const [recentEmployeeId, setRecentEmployeeId] = useState<number | null>(null);
+  const [preferenceError, setPreferenceError] = useState(false);
+  const [preferenceAttempt, setPreferenceAttempt] = useState(0);
   const [preferenceScope, setPreferenceScope] = useState<string | null>(null);
   const selectedEmployeeId = selection?.scope === scope ? selection.employeeId : null;
   const handleSessionOpened = useCallback((employeeId: number) => {
@@ -379,17 +408,19 @@ export function Chat() {
     setSelection(null);
     setRecentEmployeeId(null);
     setPreferenceScope(null);
+    setPreferenceError(false);
     if (scope) {
       let active = true;
       void invoke<number | null>('chat_get_recent_robot')
         .then((employeeId) => {
-          if (active) setRecentEmployeeId(employeeId ?? null);
+          if (active) {
+            setRecentEmployeeId(employeeId ?? null);
+            setPreferenceScope(scope);
+          }
         })
         .catch(() => {
+          if (active) setPreferenceError(true);
           warn('chat: failed to load recent Robot preference');
-        })
-        .finally(() => {
-          if (active) setPreferenceScope(scope);
         });
       void fetchEmployeesIfStale().catch(() => undefined);
       return () => {
@@ -397,17 +428,18 @@ export function Chat() {
       };
     }
     return undefined;
-  }, [fetchEmployeesIfStale, scope]);
+  }, [fetchEmployeesIfStale, scope, preferenceAttempt]);
 
   const orderedEmployees = useMemo(() => orderChatRobots(
-    employees,
+    employees.filter((employee) => unavailable.scope !== scope || !unavailable.ids.includes(employee.id)),
     i18n.resolvedLanguage ?? i18n.language,
-  ), [employees, i18n.language, i18n.resolvedLanguage]);
+  ), [employees, i18n.language, i18n.resolvedLanguage, scope, unavailable]);
   const employeeListResolved = resource?.loading !== true
     && (hasEmployeeSnapshot || resourceError !== null);
   const selectionDecisionReady = scope !== null
     && preferenceScope === scope
-    && employeeListResolved;
+    && employeeListResolved
+    && resourceError == null;
 
   useEffect(() => {
     if (!selectionDecisionReady) return;
@@ -495,13 +527,17 @@ export function Chat() {
                 icon={<ReloadOutlined />}
                 loading={resource?.loading === true}
                 size="large"
-                onClick={() => { void fetchEmployees().catch(() => undefined); }}
+                onClick={() => {
+                  void fetchEmployees().then(() => setUnavailable({ scope, ids: [] })).catch(() => undefined);
+                }}
               />
             </Tooltip>
           </div>
         </div>
       </section>
 
+      {preferenceError && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+        action={<Button onClick={() => setPreferenceAttempt((value) => value + 1)}>{t('common.retry')}</Button>} />}
       {resourceError && (
         <Alert
           type="error"
@@ -513,7 +549,7 @@ export function Chat() {
 
       <Card className={styles.workspaceCard}>
         <div className={styles.workspace}>
-          {selectedEmployeeId === null && !selectionDecisionReady ? (
+          {selectedEmployeeId === null && !selectionDecisionReady && !preferenceError && !resourceError ? (
             <div className={styles.centered}><Spin /></div>
           ) : selectedEmployeeId === null ? (
             <div className={styles.emptyState}>
@@ -529,6 +565,7 @@ export function Chat() {
               creator={creator}
               employeeId={selectedEmployeeId}
               onOpened={handleSessionOpened}
+              onUnavailable={handleUnavailable}
             />
           )}
         </div>

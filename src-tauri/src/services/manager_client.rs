@@ -69,6 +69,10 @@ pub enum ManagerError {
     #[error("Not found or no permission (visibility revoked)")]
     NotFoundOrNoPermission,
 
+    /// Robot exists but its current state, type or chat identity cannot support chat.
+    #[error("Robot is unavailable for chat")]
+    ChatUnavailable,
+
     /// 其他 HTTP 非成功状态。
     #[error("HTTP {status}: {body}")]
     Other { status: u16, body: String },

@@ -116,7 +116,11 @@ describe('Chat', () => {
     };
     managerStoreMock.employeeResources = {};
     chatKitMock.useConversationWorkspace.mockReturnValue({
-      controller: {},
+      controller: {
+        subscribe: vi.fn(() => ({ dispose: vi.fn() })),
+        refresh: vi.fn().mockResolvedValue({ ok: true, value: { conversations: [] } }),
+        getSnapshot: vi.fn(() => ({ conversations: [] })),
+      },
       ready: true,
       snapshot: {
         conversations: [],
@@ -129,6 +133,49 @@ describe('Chat', () => {
       refresh: vi.fn(),
       selectConversation: vi.fn(),
     });
+  });
+
+  it('does not open or overwrite the default robot after a preference read failure; retry restores the saved robot', async () => {
+    setAuthenticatedEmployees([employee(), employee({ id: 43, name: 'Robot B' })]);
+    let readFails = true;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'chat_get_recent_robot') {
+        if (readFails) throw new Error('disk unavailable');
+        return 43;
+      }
+      if (command === 'chat_open_session') return {
+        leaseId: 'restored', employeeId: (args as { employeeId: number }).employeeId, robotName: 'Robot B',
+        httpBaseUrl: 'https://robot.example/', socketNamespaceUrl: 'https://robot.example/chat', socketPath: '/socket.io',
+      };
+      return undefined;
+    });
+    render(<Chat />);
+    await screen.findByText(/Could not restore or save/);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'chat_open_session')).toBe(false);
+    readFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Managed Chat Workspace');
+    const opens = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_open_session');
+    expect(opens).toHaveLength(1);
+    expect(opens[0][1]).toMatchObject({ employeeId: 43 });
+  });
+
+  it.each(['not_found_or_no_permission', 'chat_unavailable'])('falls back when a previously listed robot is unavailable at open time (%s)', async (kind) => {
+    setAuthenticatedEmployees([employee(), employee({ id: 43, name: 'Robot B' })]);
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'chat_get_recent_robot') return 42;
+      if (command === 'chat_open_session') {
+        const id = (args as { employeeId: number }).employeeId;
+        if (id === 42) throw { kind };
+        return { leaseId: 'fallback', employeeId: id, robotName: 'Robot B',
+          httpBaseUrl: 'https://robot.example/', socketNamespaceUrl: 'https://robot.example/chat', socketPath: '/socket.io' };
+      }
+      return undefined;
+    });
+    render(<Chat />);
+    await screen.findByText('Managed Chat Workspace');
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_open_session').map(([, args]) =>
+      (args as { employeeId: number }).employeeId)).toEqual([42, 43]);
   });
 
   it('keeps the same Rust session and ChatClient factory through repeated menu round trips', async () => {

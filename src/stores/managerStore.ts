@@ -120,6 +120,7 @@ export type ManagerError =
   | { kind: 'payment_required'; detail: { message: string; redirect_url?: string } }
   | { kind: 'not_found' }
   | { kind: 'not_found_or_no_permission' }
+  | { kind: 'chat_unavailable' }
   | { kind: 'other'; detail: { status: number; body: string } }
   | { kind: 'no_session' }
   | { kind: 'context_changed' }

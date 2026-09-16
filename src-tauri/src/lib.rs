@@ -714,6 +714,8 @@ pub fn run() {
             commands::chat::chat_open_session,
             commands::chat::chat_get_recent_robot,
             commands::chat::chat_remember_robot,
+            commands::chat::chat_get_recent_conversation,
+            commands::chat::chat_remember_conversation,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,

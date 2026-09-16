@@ -41,6 +41,7 @@
     "title": "Robot List"
   },
   "chat": {
+    "restoreFailed": "Could not restore or save your last conversation. Retry, or choose a robot and conversation manually.",
     "title": "Chat",
     "context": "Organization: {{organization}}",
     "availableRobots": "{{count}} available",
@@ -1093,6 +1094,7 @@
       "forbidden": "You do not have permission to access this resource.",
       "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
       "not_found": "The requested resource was not found.",
+      "chat_unavailable": "This Robot is currently unavailable for chat.",
       "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
