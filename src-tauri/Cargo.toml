@@ -94,7 +94,12 @@ harness = false
 name = "chat_restoration_acceptance"
 required-features = ["chat-restoration-acceptance"]
 
+[[example]]
+name = "marketplace_ipc_acceptance"
+required-features = ["marketplace-ipc-acceptance"]
+
 [features]
+marketplace-ipc-acceptance = []
 chat-restoration-acceptance = []
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
