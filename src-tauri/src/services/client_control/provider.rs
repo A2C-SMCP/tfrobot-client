@@ -94,10 +94,13 @@ impl ClientControlMcpClient {
             .expect("Client Control schemas must be JSON objects");
         Tool::new(
             definition.id.as_str().to_string(),
-            format!(
-                "TFRobot Client Control: {} ({:?})",
-                definition.id, definition.risk
-            ),
+            match definition.id {
+                ToolId::McpServerList => super::mcp_list::TOOL_DESCRIPTION.to_string(),
+                _ => format!(
+                    "TFRobot Client Control: {} ({:?})",
+                    definition.id, definition.risk
+                ),
+            },
             Arc::new(input_schema),
         )
     }

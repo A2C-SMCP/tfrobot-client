@@ -2,6 +2,7 @@ mod audit;
 mod catalog;
 mod dispatch;
 mod error;
+mod mcp_list;
 mod package;
 mod policy;
 mod provider;

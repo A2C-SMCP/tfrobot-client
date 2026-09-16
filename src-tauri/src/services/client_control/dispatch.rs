@@ -660,7 +660,7 @@ async fn dispatch_with_activity_context(
         }
         ToolId::McpServerList => {
             let args: ComputerIdArgs = decode(parameters.clone())?;
-            mcp::get_mcp_servers_core(&state, &args.computer_id)
+            super::mcp_list::list(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
