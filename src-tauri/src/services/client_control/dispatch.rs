@@ -679,18 +679,13 @@ async fn dispatch_with_activity_context(
         }
         ToolId::McpServerRemove => {
             let args: BundleArgs = decode(parameters.clone())?;
-            let name = match state.computer_registry.runtime(&args.computer_id).await {
-                Some(runtime) => runtime.mcp_server_display_name(&args.bundle_id).await,
-                None => None,
-            };
-            match name {
-                Some(name) => {
-                    sdk_config::remove_computer_mcp_config_core(&state, &args.computer_id, &name)
-                        .await
-                        .map(|_| serde_json::json!({"ok": true}))
-                }
-                None => Err(format!("MCP server not found: {}", args.bundle_id)),
-            }
+            sdk_config::remove_computer_mcp_by_bundle_id_core(
+                &state,
+                &args.computer_id,
+                &args.bundle_id,
+            )
+            .await
+            .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpServerStart => {
             let args: BundleArgs = decode(parameters.clone())?;

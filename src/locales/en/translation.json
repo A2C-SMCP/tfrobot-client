@@ -800,7 +800,7 @@
       "updated": "Server saved; restart Runtime to apply changes",
       "enabled": "Server {{name}} saved as enabled; restart Runtime to apply it",
       "disabled": "Server {{name}} saved as disabled; restart Runtime to apply it",
-      "removed": "Server removed; restart Runtime to apply it",
+      "removed": "Server removed",
       "started": "Server {{name}} started",
       "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",

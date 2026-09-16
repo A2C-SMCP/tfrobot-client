@@ -800,7 +800,7 @@
       "updated": "服务器已保存，重启 Runtime 后生效",
       "enabled": "服务器 {{name}} 已保存为启用，重启 Runtime 后生效",
       "disabled": "服务器 {{name}} 已保存为禁用，重启 Runtime 后生效",
-      "removed": "服务器已删除，重启 Runtime 后生效",
+      "removed": "服务器已删除",
       "started": "服务器 {{name}} 已启动",
       "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",

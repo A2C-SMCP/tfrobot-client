@@ -1268,6 +1268,22 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
         .await
         .unwrap();
 
+    let plugin_id = BundleId::try_from("audit-mcp").unwrap();
+    let removal_error =
+        sdk_config::remove_computer_mcp_by_bundle_id_core(&state, TEST_INSTANCE_ID, &plugin_id)
+            .await
+            .unwrap_err();
+    assert!(
+        removal_error.contains("Marketplace plugin"),
+        "{removal_error}"
+    );
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| server.bundle_id == plugin_id
+            && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })));
+
     let add_error =
         mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
             .await
@@ -3237,4 +3253,21 @@ async fn client_control_mcp_list_keeps_same_name_plugin_and_user_connections_dis
     ] {
         assert!(!encoded.to_string().contains(secret));
     }
+    sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &BundleId::try_from("user-remote").unwrap(),
+    )
+    .await
+    .unwrap();
+    let remaining = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!remaining
+        .iter()
+        .any(|row| row.bundle_id.as_str() == "user-remote"));
+    assert!(remaining
+        .iter()
+        .any(|row| row.bundle_id.as_str() == "plugin-remote"
+            && matches!(row.managed_by, McpServerManagedBy::Plugin { .. })));
 }
