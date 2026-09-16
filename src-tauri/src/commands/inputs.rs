@@ -329,8 +329,39 @@ pub fn list_input_entries_core(
 ) -> Result<Vec<InputEntryView>, String> {
     let instance_id = require_instance_id(instance_id)?;
     require_existing_instance(state, instance_id)?;
-    let store = migrated_input_entry_store(state, instance_id)?;
-    store.list()
+    input_entry_store(state, instance_id).list()
+}
+
+#[tauri::command]
+pub async fn input_migration_pending(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<bool, String> {
+    let instance_id = require_instance_id(&instance_id)?;
+    require_existing_instance(&state, instance_id)?;
+    input_entry_store(&state, instance_id).migration_pending()
+}
+
+#[tauri::command]
+pub async fn migrate_input_entries(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    let instance_id = require_instance_id(&instance_id)?.to_string();
+    let state = state.inner().clone();
+    let operation_guard = state.computer_registry.operation_lease(&instance_id).await;
+    tokio::task::spawn_blocking(move || {
+        let _operation_guard = operation_guard;
+        migrate_input_entries_core(&state, &instance_id)
+    })
+    .await
+    .map_err(|_| "Variable migration task failed".to_string())?
+}
+
+pub fn migrate_input_entries_core(state: &AppState, instance_id: &str) -> Result<(), String> {
+    let instance_id = require_instance_id(instance_id)?;
+    require_existing_instance(state, instance_id)?;
+    migrated_input_entry_store(state, instance_id, None).map(|_| ())
 }
 
 /// Create or update a client-owned InputEntry. A missing value preserves the current value, which
@@ -360,7 +391,7 @@ pub async fn upsert_input_entry_core(
         let instance_id = require_instance_id(instance_id)?;
         let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
         require_existing_instance(state, instance_id)?;
-        migrated_input_entry_store(state, instance_id)?.upsert(
+        migrated_input_entry_store(state, instance_id, Some(key))?.upsert(
             key,
             value.map(serde_json::Value::String),
             secret,
@@ -410,7 +441,7 @@ pub async fn delete_input_entry_core(
         let instance_id = require_instance_id(instance_id)?;
         let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
         require_existing_instance(state, instance_id)?;
-        migrated_input_entry_store(state, instance_id)?.delete(key)
+        migrated_input_entry_store(state, instance_id, Some(key))?.delete(key)
     }
     .await;
     record_computer_activity(
@@ -439,11 +470,13 @@ fn input_entry_store(state: &AppState, instance_id: &str) -> InputEntryStore {
         instance_id.to_string(),
         state.secret_store.clone(),
     )
+    .for_operation()
 }
 
 fn migrated_input_entry_store(
     state: &AppState,
     instance_id: &str,
+    only_key: Option<&str>,
 ) -> Result<InputEntryStore, String> {
     let store = input_entry_store(state, instance_id);
     let preferred = state
@@ -459,9 +492,10 @@ fn migrated_input_entry_store(
             })
         })
         .collect();
-    store.migrate_legacy(
+    store.migrate_legacy_selected(
         input_value_index::load_with_provenance(state.config.as_ref(), instance_id)?,
         &preferred,
+        only_key,
     )?;
     Ok(store)
 }
@@ -857,7 +891,7 @@ pub async fn set_input_value_core(
         if let InputDefinition::PickString { options, .. } = definition {
             validate_pick_selection(&id, options, string_value)?;
         }
-        let store = migrated_input_entry_store(state, instance_id)?;
+        let store = migrated_input_entry_store(state, instance_id, Some(&id))?;
         let secret = store
             .storage_kind(&id)?
             .map(InputEntryStorageKind::is_secret)
@@ -927,7 +961,7 @@ pub async fn set_runtime_input_value_core(
         if !value.is_string() {
             return Err(format!("Runtime input '{id}' must be a string"));
         }
-        let store = migrated_input_entry_store(state, instance_id)?;
+        let store = migrated_input_entry_store(state, instance_id, Some(&id))?;
         let secret = store
             .storage_kind(&id)?
             .map(InputEntryStorageKind::is_secret)
@@ -983,7 +1017,7 @@ pub async fn remove_input_value_core(
         let instance_id = require_instance_id(instance_id)?;
         let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
         require_existing_instance(state, instance_id)?;
-        migrated_input_entry_store(state, instance_id)?.delete(id)
+        migrated_input_entry_store(state, instance_id, Some(id))?.delete(id)
     }
     .await;
     record_computer_activity(
@@ -1021,7 +1055,7 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
         let instance_id = require_instance_id(instance_id)?;
         let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
         require_existing_instance(state, instance_id)?;
-        let store = migrated_input_entry_store(state, instance_id)?;
+        let store = migrated_input_entry_store(state, instance_id, None)?;
         for entry in store.list()? {
             store.delete(&entry.key)?;
         }
@@ -1288,13 +1322,22 @@ fn input_value_view(
             value: None,
         });
     }
-    let legacy_preference = if definition.is_secret() {
-        InputEntryStorageKind::Secret
-    } else {
-        InputEntryStorageKind::Value
-    };
-    let stored = migrated_input_entry_store(state, instance_id)?
-        .resolve_entry(definition.id(), legacy_preference)?;
+    // Status projection uses authoritative metadata, never resolves password plaintext.
+    // Actual existence and PickString validation are checked when the runtime uses the value.
+    let entry = input_entry_store(state, instance_id).get(definition.id())?;
+    if entry.as_ref().is_some_and(|entry| entry.secret) {
+        return Ok(InputValueView {
+            configured: true,
+            status: InputValueStatus::Configured,
+            value: None,
+        });
+    }
+    let stored = entry.and_then(|entry| entry.value).map(|value| {
+        crate::services::input_entry_store::ResolvedInputEntry {
+            value,
+            storage_kind: InputEntryStorageKind::Value,
+        }
+    });
     match definition {
         InputDefinition::PromptString { default, .. } => Ok(match stored {
             Some(entry) => InputValueView {
@@ -1566,6 +1609,83 @@ mod tests {
         fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
             Err(KeychainError::Store("keychain unavailable".to_string()))
         }
+    }
+
+    #[tokio::test]
+    async fn migrated_value_status_and_entry_lists_never_read_passwords() {
+        let (mut state, _secrets, _dir) = test_state();
+        add_or_update_input_core(
+            &state,
+            "computer-a",
+            InputDefinition::PromptString {
+                id: "password".into(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        upsert_input_entry_core(
+            &state,
+            "computer-a",
+            "password",
+            Some("private".into()),
+            true,
+        )
+        .await
+        .unwrap();
+        state.secret_store = Arc::new(AlwaysFailSecretStore);
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap()[0].value,
+            None
+        );
+        let statuses = list_input_values_core(&state, "computer-a").unwrap();
+        assert!(statuses["password"].configured);
+        assert_eq!(statuses["password"].value, None);
+    }
+
+    #[tokio::test]
+    async fn legacy_secret_does_not_block_listing_or_unrelated_plain_entry() {
+        let dir = TempDir::new().unwrap();
+        let config = ConfigService::new(dir.path().to_path_buf()).unwrap();
+        config
+            .add_computer_instance(ComputerInstance::new("computer-a", "A"))
+            .unwrap();
+        let state = AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            Arc::new(AlwaysFailSecretStore),
+        );
+        input_value_index::record(
+            state.config.as_ref(),
+            "computer-a",
+            "legacy-secret",
+            InputValueStorageKind::Secret,
+        )
+        .unwrap();
+        assert!(input_entry_store(&state, "computer-a")
+            .migration_pending()
+            .unwrap());
+        assert!(list_input_entries_core(&state, "computer-a")
+            .unwrap()
+            .is_empty());
+        assert!(migrate_input_entries_core(&state, "computer-a").is_err());
+        upsert_input_entry_core(&state, "computer-a", "plain", Some("value".into()), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_input_entries_core(&state, "computer-a").unwrap()[0].key,
+            "plain"
+        );
+        delete_input_entry_core(&state, "computer-a", "plain")
+            .await
+            .unwrap();
+        assert!(input_entry_store(&state, "computer-a")
+            .migration_pending()
+            .unwrap());
     }
 
     #[tokio::test]
@@ -2375,7 +2495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_list_migrates_singleton_secret_index_over_a_stale_plain_copy() {
+    async fn explicit_migration_preserves_singleton_secret_index_over_a_stale_plain_copy() {
         let (state, secrets, _dir) = test_state();
         add_or_update_input_core(
             &state,
@@ -2408,6 +2528,10 @@ mod tests {
         )
         .unwrap();
 
+        assert!(list_input_entries_core(&state, "computer-a")
+            .unwrap()
+            .is_empty());
+        migrate_input_entries_core(&state, "computer-a").unwrap();
         assert_eq!(
             list_input_entries_core(&state, "computer-a").unwrap(),
             vec![InputEntryView {

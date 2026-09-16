@@ -128,6 +128,24 @@ impl InputEntryStore {
         }
     }
 
+    pub fn for_operation(&self) -> Self {
+        let mut operation = self.clone();
+        operation.secrets = keychain::OperationSecretStore::shared(self.secrets.clone());
+        operation
+    }
+
+    pub fn migration_pending(&self) -> Result<bool, String> {
+        let operation_lock = self.operation_lock()?;
+        let _guard = lock_repository(&operation_lock)?;
+        let entries = self.load()?.entries;
+        let legacy = input_value_index::load_with_provenance_from_storage_root(&self.storage_root)?;
+        Ok(legacy
+            .entries
+            .keys()
+            .chain(self.values.list()?.keys())
+            .any(|key| !entries.contains_key(key)))
+    }
+
     pub fn list(&self) -> Result<Vec<InputEntryView>, String> {
         let operation_lock = self.operation_lock()?;
         let _guard = lock_repository(&operation_lock)?;
@@ -346,11 +364,23 @@ impl InputEntryStore {
         legacy_index: LoadedInputValueIndex,
         preferred: &BTreeMap<String, InputEntryStorageKind>,
     ) -> Result<(), String> {
+        self.migrate_legacy_selected(legacy_index, preferred, None)
+    }
+
+    pub fn migrate_legacy_selected(
+        &self,
+        legacy_index: LoadedInputValueIndex,
+        preferred: &BTreeMap<String, InputEntryStorageKind>,
+        only_key: Option<&str>,
+    ) -> Result<(), String> {
         let operation_lock = self.operation_lock()?;
         let _guard = lock_repository(&operation_lock)?;
         let mut keys: BTreeSet<String> = self.values.list()?.into_keys().collect();
         keys.extend(legacy_index.entries.keys().cloned());
         for key in keys {
+            if only_key.is_some_and(|selected| selected != key) {
+                continue;
+            }
             if self.load()?.entries.contains_key(&key) {
                 continue;
             }

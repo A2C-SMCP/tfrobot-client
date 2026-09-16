@@ -1,4 +1,20 @@
 {
+  "permissions": {
+    "mcp": "Starting an MCP or signing in may request keychain access for its saved passwords or OAuth credentials. Denying access stops that operation. External tools may request additional permissions for their own features; allow only permissions you expect.",
+    "password": "Saving, changing or deleting a password variable may request system keychain access, including reading the previous value for recovery if saving fails. Denying access leaves the operation unsuccessful; other variables remain available.",
+
+    "title": "Credential access paused",
+    "description": "The system could not access a saved credential. Background attempts for this credential are paused. Allow another attempt, then repeat your original action. Other credentials remain available.",
+    "retry": "Retry credential access",
+    "ready": "Credential access is enabled. Repeat your connection, sign-in or variable action.",
+    "oauth": "MCP sign-in",
+    "input": "Saved password variable",
+    "connection": "Saved sign-in or connection credential",
+    "purpose": "Connecting or signing in may ask to read saved credentials from your system keychain. Denying access stops that action; other features remain available.",
+    "migration": "Older variables need to be imported. This may request keychain access to verify saved passwords. If you decline, existing variables remain available and you can retry here.",
+    "migrate": "Import older variables",
+    "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
+},
   "app": {
     "name": "TFRobot Client",
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",

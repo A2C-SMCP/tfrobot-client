@@ -1,12 +1,10 @@
 use crate::services::computer::{ComputerProfile, SdkContextConfig, SDK_CONTEXT_SCHEMA_VERSION};
 use crate::services::config::{normalize_manual_smcp_target, ConfigError, ConfigService};
 use crate::services::connection_targets::{
-    manual_target_keychain_id, GlobalManualSmcpTarget, GlobalManualTargetsConfig,
-    MANUAL_TARGETS_SCHEMA_VERSION,
+    GlobalManualSmcpTarget, GlobalManualTargetsConfig, MANUAL_TARGETS_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::services::input_value_store::InputValueStore;
-use crate::services::keychain::{KeychainError, SecretStore};
 use crate::services::sdk_config::{normalize_mcp_input_references, SdkConfigService};
 use crate::services::settings::{ManagerSessionConfig, ManagerSessionConfigError, SettingsService};
 use crate::services::storage::{write_json_atomically, AtomicJsonWriteError};
@@ -18,6 +16,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MIGRATION_VERSION: u32 = 1;
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_VERIFICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationOutcome {
@@ -32,8 +35,6 @@ pub enum MigrationError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     ManagerSession(#[from] ManagerSessionConfigError),
-    #[error(transparent)]
-    Keychain(#[from] KeychainError),
     #[error(transparent)]
     AtomicWrite(#[from] AtomicJsonWriteError),
     #[error("migration IO error: {0}")]
@@ -117,7 +118,6 @@ pub fn migrate_legacy_config(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
-    secret_store: &dyn SecretStore,
 ) -> Result<MigrationOutcome, MigrationError> {
     if config.migration_state_path().exists() {
         let marker_content = fs::read(config.migration_state_path())?;
@@ -145,29 +145,15 @@ pub fn migrate_legacy_config(
         return Ok(MigrationOutcome::NotNeeded);
     }
 
-    let plan = build_plan(config, sdk_config, settings, secret_store)?;
+    let plan = build_plan(config, sdk_config, settings)?;
     let file_snapshots = capture_destination_snapshots(config, settings, &plan)?;
 
     let mut progress = MigrationProgress::default();
-    let migration_result = apply_plan(
-        config,
-        sdk_config,
-        settings,
-        secret_store,
-        &plan,
-        &mut progress,
-    )
-    .and_then(|()| verify_plan(config, sdk_config, settings, secret_store, &plan))
-    .and_then(|()| write_migration_marker(config, false));
+    let migration_result = apply_plan(config, sdk_config, settings, &plan, &mut progress)
+        .and_then(|()| verify_plan(config, sdk_config, settings, &plan))
+        .and_then(|()| write_migration_marker(config, false));
     if let Err(error) = migration_result {
-        let rollback = rollback_plan(
-            config,
-            sdk_config,
-            secret_store,
-            &plan,
-            &progress,
-            &file_snapshots,
-        );
+        let rollback = rollback_plan(config, sdk_config, &plan, &progress, &file_snapshots);
         return match rollback {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(MigrationError::Rollback {
@@ -186,7 +172,6 @@ fn build_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
-    secret_store: &dyn SecretStore,
 ) -> Result<MigrationPlan, MigrationError> {
     let legacy_instances = config.load_legacy_computer_instances()?;
     let mut seen_instance_ids = HashSet::new();
@@ -294,11 +279,7 @@ fn build_plan(
     // with the legacy settings file but never revived into the environment-scoped auth schema.
     let manager_session = settings.load_global_manager_session()?;
 
-    // Manual target credentials already use stable target IDs. Reading them during
-    // preflight verifies keychain access without copying secrets into JSON.
-    for target in &manual_targets.manual_smcp_targets {
-        let _ = secret_store.get_secret(&manual_target_keychain_id(&target.id))?;
-    }
+    // Credentials retain their stable IDs; migrating metadata never needs secret access.
 
     Ok(MigrationPlan {
         profiles,
@@ -378,7 +359,6 @@ fn apply_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
-    _secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
     progress: &mut MigrationProgress,
 ) -> Result<(), MigrationError> {
@@ -403,9 +383,14 @@ fn verify_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
     settings: &SettingsService,
-    secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
 ) -> Result<(), MigrationError> {
+    #[cfg(test)]
+    if FAIL_VERIFICATION.with(|fail| fail.replace(false)) {
+        return Err(MigrationError::Verification(
+            "injected verification failure".to_string(),
+        ));
+    }
     if config.load_global_manual_targets()? != plan.manual_targets {
         return Err(MigrationError::Verification(
             "manual targets do not match the migration plan".to_string(),
@@ -426,9 +411,6 @@ fn verify_plan(
                 profile.id
             )));
         }
-    }
-    for target in &plan.manual_targets.manual_smcp_targets {
-        let _ = secret_store.get_secret(&manual_target_keychain_id(&target.id))?;
     }
     for sdk in &plan.sdk_configs {
         if sdk_config
@@ -451,7 +433,6 @@ fn verify_plan(
 fn rollback_plan(
     config: &ConfigService,
     sdk_config: &SdkConfigService,
-    _secret_store: &dyn SecretStore,
     plan: &MigrationPlan,
     progress: &MigrationProgress,
     snapshots: &[FileSnapshot],
@@ -587,33 +568,8 @@ mod tests {
     use crate::commands::inputs::InputDefinition;
     use crate::services::computer::{ComputerInstance, ComputerInstancesConfig};
     use crate::services::config::DirectoryRenameTestAction;
-    use crate::services::keychain::InMemorySecretStore;
     use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
     use tempfile::tempdir;
-
-    #[derive(Default)]
-    struct FailingVerificationReadSecretStore {
-        reads: std::sync::atomic::AtomicUsize,
-    }
-
-    impl SecretStore for FailingVerificationReadSecretStore {
-        fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), KeychainError> {
-            Ok(())
-        }
-
-        fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
-            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
-                return Err(KeychainError::Store(
-                    "injected verification read failure".to_string(),
-                ));
-            }
-            Ok(None)
-        }
-
-        fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
-            Ok(())
-        }
-    }
 
     fn install_verification_probe_target(config: &ConfigService) {
         config
@@ -656,10 +612,9 @@ mod tests {
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
 
         assert_eq!(
-            migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap(),
+            migrate_legacy_config(&config, &sdk, &settings).unwrap(),
             MigrationOutcome::Completed
         );
 
@@ -696,10 +651,9 @@ mod tests {
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
 
         assert_eq!(
-            migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap(),
+            migrate_legacy_config(&config, &sdk, &settings).unwrap(),
             MigrationOutcome::AlreadyCompleted
         );
 
@@ -735,9 +689,8 @@ mod tests {
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
 
-        let error = migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap_err();
+        let error = migrate_legacy_config(&config, &sdk, &settings).unwrap_err();
 
         assert!(matches!(error, MigrationError::Rollback { .. }));
         let instance_root = config.computer_instance_root("one").unwrap();
@@ -792,9 +745,8 @@ mod tests {
         let config = std::sync::Arc::new(config);
         let sdk = SdkConfigService::new(config.clone());
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
 
-        let error = migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap_err();
+        let error = migrate_legacy_config(&config, &sdk, &settings).unwrap_err();
 
         assert!(error.to_string().contains("destination SDK context"));
         assert_eq!(config.load_sdk_context("one").unwrap(), existing_context);
@@ -871,9 +823,9 @@ mod tests {
         sdk.inject_raw_restore_failure();
         install_verification_probe_target(&config);
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = FailingVerificationReadSecretStore::default();
+        FAIL_VERIFICATION.with(|fail| fail.set(true));
 
-        let error = migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap_err();
+        let error = migrate_legacy_config(&config, &sdk, &settings).unwrap_err();
 
         assert!(matches!(error, MigrationError::Rollback { .. }));
         assert!(error
@@ -941,9 +893,9 @@ mod tests {
         sdk.inject_raw_restore_failure_after_backup();
         install_verification_probe_target(&config);
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = FailingVerificationReadSecretStore::default();
+        FAIL_VERIFICATION.with(|fail| fail.set(true));
 
-        let error = migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap_err();
+        let error = migrate_legacy_config(&config, &sdk, &settings).unwrap_err();
 
         assert!(matches!(error, MigrationError::Rollback { .. }));
         let recovered = sdk.load_raw_project_config("one").unwrap();
@@ -1014,9 +966,8 @@ mod tests {
         };
         sdk.save("one", &raw_before).unwrap();
         let settings = SettingsService::new(directory.path().to_path_buf());
-        let secrets = InMemorySecretStore::default();
 
-        migrate_legacy_config(&config, &sdk, &settings, &secrets).unwrap();
+        migrate_legacy_config(&config, &sdk, &settings).unwrap();
 
         let raw_after = sdk.load_raw_project_config("one").unwrap();
         assert_eq!(raw_after.mcp_local, raw_before.mcp_local);

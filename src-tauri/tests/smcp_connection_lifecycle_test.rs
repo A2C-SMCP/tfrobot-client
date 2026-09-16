@@ -1450,6 +1450,63 @@ async fn profile_connect_requires_running_computer() {
 }
 
 #[tokio::test]
+async fn repeated_connected_request_does_not_read_credentials_again() {
+    use tfrobot_client_lib::services::keychain::{KeychainError, SecretStore};
+    #[derive(Default)]
+    struct ReadCounter(AtomicUsize);
+    impl SecretStore for ReadCounter {
+        fn get_secret(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+        fn set_secret(&self, _key: &str, _value: &str) -> Result<(), KeychainError> {
+            Ok(())
+        }
+        fn delete_secret(&self, _key: &str) -> Result<(), KeychainError> {
+            Ok(())
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = common::create_test_app_state(tmp.path());
+    let counter = Arc::new(ReadCounter::default());
+    state.secret_store = counter.clone();
+    let runtime = create_test_runtime(&state).await;
+    runtime.start().await.unwrap();
+    let (url, stats) = start_smcp_socket_server().await;
+    let target = state
+        .config
+        .save_manual_smcp_target(ManualSmcpTarget {
+            id: "repeat-target".into(),
+            name: "Repeat target".into(),
+            url,
+            namespace: "/smcp".into(),
+            office_id: "repeat-office".into(),
+            headers: HashMap::new(),
+        })
+        .unwrap();
+    connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        2,
+        "initial authentication and authoritative commit check"
+    );
+    connect_connection_target_core(&state, TEST_INSTANCE_ID, &target.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        2,
+        "already connected must not access the keychain"
+    );
+    assert_eq!(stats.connected(), 1);
+    stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn profile_connect_uses_computer_instance_name_as_connection_identity() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = common::create_test_app_state(tmp.path());

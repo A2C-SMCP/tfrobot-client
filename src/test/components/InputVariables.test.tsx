@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InputVariables } from '@/components/InputVariables';
@@ -22,7 +23,19 @@ const mockUseInputStore = vi.mocked(useInputStore);
 describe('InputVariables', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(invoke).mockResolvedValue(false);
     mockUseInputStore.mockReturnValue({ ...mockStore } as any);
+  });
+
+  it('imports legacy variables only after the user requests it', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => command === 'input_migration_pending');
+    render(<InputVariables instanceId="computer-a" />);
+    const button = await screen.findByRole('button', { name: 'Import older variables' });
+    expect(invoke).not.toHaveBeenCalledWith('migrate_input_entries', expect.anything());
+    fireEvent.click(button);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('migrate_input_entries', { instanceId: 'computer-a' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Import older variables' })).not.toBeInTheDocument());
+    expect(mockStore.fetchEntries).toHaveBeenCalledTimes(2);
   });
 
   it('loads only saved InputEntries and exposes add without clear-all', () => {

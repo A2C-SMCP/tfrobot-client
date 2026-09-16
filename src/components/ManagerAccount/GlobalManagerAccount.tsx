@@ -214,7 +214,7 @@ export function GlobalManagerAccount() {
   } else if (authenticatedPanel) {
     panelContent = authenticatedPanel;
   } else {
-    panelContent = <LoginForm embedded />;
+    panelContent = <Space direction="vertical"><Alert type="info" description={t('permissions.purpose')} /><LoginForm embedded /></Space>;
   }
 
   const triggerLabel = authenticated && context.account && context.organization
