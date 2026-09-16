@@ -1,3 +1,4 @@
+mod arguments;
 mod audit;
 mod catalog;
 mod dispatch;
@@ -707,7 +708,7 @@ impl ClientControlPlane {
                     tool: audit.tool,
                     parameters: audit.summary,
                     outcome: AuditOutcome::Failed,
-                    error: Some(mapped.message.clone()),
+                    error: Some(mapped.to_string()),
                     duration_ms: audit.started.elapsed().as_millis(),
                 });
                 Err(mapped)
@@ -770,7 +771,7 @@ impl ClientControlPlane {
             tool: audit.tool,
             parameters: audit.summary,
             outcome: AuditOutcome::Failed,
-            error: Some(error.message.clone()),
+            error: Some(error.to_string()),
             duration_ms: audit.started.elapsed().as_millis(),
         });
     }

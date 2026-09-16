@@ -14,13 +14,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-fn decode<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, ClientControlError> {
-    serde_json::from_value(value).map_err(|error| {
-        ClientControlError::new(
-            ClientControlErrorCode::InvalidArguments,
-            format!("invalid tool arguments: {error}"),
-        )
-    })
+fn decode<T: DeserializeOwned>(
+    value: serde_json::Value,
+    tool: ToolId,
+) -> Result<T, ClientControlError> {
+    super::arguments::decode(value, tool)
 }
 
 fn encode<T: serde::Serialize>(value: T) -> Result<serde_json::Value, ClientControlError> {
@@ -413,10 +411,10 @@ async fn dispatch_with_activity_context(
             &context,
             tool,
             None,
-            parameters,
+            super::arguments::audit_fields(tool, &parameters, &error),
             AuditCompletion {
                 outcome: AuditOutcome::Denied,
-                error: Some(error.message.clone()),
+                error: Some(error.to_string()),
                 started,
             },
         );
@@ -434,7 +432,7 @@ async fn dispatch_with_activity_context(
             parameters,
             AuditCompletion {
                 outcome: AuditOutcome::Denied,
-                error: Some(error.message.clone()),
+                error: Some(error.to_string()),
                 started,
             },
         );
@@ -450,22 +448,92 @@ async fn dispatch_with_activity_context(
         active: true,
     };
 
+    let result = execute(
+        plane,
+        &context,
+        tool,
+        &parameters,
+        started,
+        &mut pending_audit,
+    )
+    .await;
+
+    // Skill mutations already emitted their content-free terminal audit.
+    if !pending_audit.active {
+        return result;
+    }
+
+    match result {
+        Ok(value) => {
+            pending_audit.disarm();
+            audit(
+                plane,
+                &context,
+                tool,
+                target.as_deref(),
+                parameters,
+                AuditCompletion {
+                    outcome: AuditOutcome::Succeeded,
+                    error: None,
+                    started,
+                },
+            );
+            Ok(value)
+        }
+        Err(error) => {
+            pending_audit.disarm();
+            let parameters = if error.code == ClientControlErrorCode::InvalidArguments {
+                super::arguments::audit_fields(tool, &parameters, &error)
+            } else {
+                parameters
+            };
+            audit(
+                plane,
+                &context,
+                tool,
+                target.as_deref(),
+                parameters,
+                AuditCompletion {
+                    outcome: AuditOutcome::Failed,
+                    error: Some(error.to_string()),
+                    started,
+                },
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn execute(
+    plane: &Arc<ClientControlPlane>,
+    context: &InvocationContext,
+    tool: ToolId,
+    parameters: &serde_json::Value,
+    started: Instant,
+    pending_audit: &mut PendingAudit<'_>,
+) -> Result<serde_json::Value, ClientControlError> {
     // Skill package operations keep their own success/failure audit because their summaries must
     // contain only paths, encodings, sizes, and revisions—never file content.
     match tool {
         ToolId::SkillCreate => {
-            let args: SkillCreateArgs = decode(parameters)?;
+            let args: SkillCreateArgs = decode(parameters.clone(), tool)?;
             let result = plane
-                .skill_create_authorized(context, &args.computer_id, args.name, args.files, started)
+                .skill_create_authorized(
+                    context.clone(),
+                    &args.computer_id,
+                    args.name,
+                    args.files,
+                    started,
+                )
                 .await;
             pending_audit.disarm();
             return encode(result?);
         }
         ToolId::SkillUpdate => {
-            let args: SkillUpdateArgs = decode(parameters)?;
+            let args: SkillUpdateArgs = decode(parameters.clone(), tool)?;
             let result = plane
                 .skill_update_authorized(
-                    context,
+                    context.clone(),
                     &args.computer_id,
                     args.name,
                     args.changes,
@@ -477,10 +545,10 @@ async fn dispatch_with_activity_context(
             return encode(result?);
         }
         ToolId::SkillDelete => {
-            let args: SkillDeleteArgs = decode(parameters)?;
+            let args: SkillDeleteArgs = decode(parameters.clone(), tool)?;
             let result = plane
                 .skill_delete_authorized(
-                    context,
+                    context.clone(),
                     &args.computer_id,
                     args.name,
                     args.expected_revision,
@@ -509,20 +577,21 @@ async fn dispatch_with_activity_context(
             Err(error) => Err(error.to_string()),
         },
         ToolId::ComputerGetStatus => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             computer::get_computer_instance_status_core(&state, args.computer_id)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerCreate => {
-            let request: computer::CreateComputerInstanceRequest = decode(parameters.clone())?;
+            let request: computer::CreateComputerInstanceRequest =
+                decode(parameters.clone(), tool)?;
             computer::create_computer_instance_with_trigger(&state, request, "client_control")
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerRename => {
-            let args: ComputerNameArgs = decode(parameters.clone())?;
+            let args: ComputerNameArgs = decode(parameters.clone(), tool)?;
             computer::rename_computer_instance_with_trigger(
                 &state,
                 computer::RenameComputerInstanceRequest {
@@ -537,7 +606,7 @@ async fn dispatch_with_activity_context(
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDuplicate => {
-            let args: ComputerDuplicateArgs = decode(parameters.clone())?;
+            let args: ComputerDuplicateArgs = decode(parameters.clone(), tool)?;
             computer::duplicate_computer_instance_with_trigger(
                 &state,
                 computer::DuplicateComputerInstanceRequest {
@@ -554,7 +623,7 @@ async fn dispatch_with_activity_context(
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerDelete => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             computer::delete_computer_instance_with_trigger(
                 &state,
                 args.computer_id,
@@ -564,27 +633,27 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerStart => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             computer::start_computer_instance_core(None, &state, args.computer_id)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerStop => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             computer::stop_computer_instance_core(&state, args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerRestart => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             computer::restart_computer_instance_core(None, &state, args.computer_id)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerSetConnectionPolicy => {
-            let args: ConnectionPolicyArgs = decode(parameters.clone())?;
+            let args: ConnectionPolicyArgs = decode(parameters.clone(), tool)?;
             computer::update_computer_connection_policy_core(
                 &state,
                 computer::UpdateComputerConnectionPolicyRequest {
@@ -597,7 +666,7 @@ async fn dispatch_with_activity_context(
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ComputerSetSkillHome => {
-            let args: SkillHomeArgs = decode(parameters.clone())?;
+            let args: SkillHomeArgs = decode(parameters.clone(), tool)?;
             computer::update_computer_skill_home_core(
                 &state,
                 computer::UpdateComputerSkillHomeRequest {
@@ -611,13 +680,13 @@ async fn dispatch_with_activity_context(
         ToolId::ConnectionTargetList => connection::list_manual_smcp_targets_core(&state)
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())),
         ToolId::ConnectionTargetUpsert => {
-            let args: TargetUpsertArgs = decode(parameters.clone())?;
+            let args: TargetUpsertArgs = decode(parameters.clone(), tool)?;
             connection::save_manual_smcp_target_core(&state, args.target, args.api_key_action)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::ConnectionTargetDelete => {
-            let args: TargetIdArgs = decode(parameters.clone())?;
+            let args: TargetIdArgs = decode(parameters.clone(), tool)?;
             connection::delete_manual_smcp_target_core(&state, &args.target_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
@@ -629,13 +698,13 @@ async fn dispatch_with_activity_context(
             .map_err(|error| error.to_string())
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())),
         ToolId::ComputerConnectTarget => {
-            let args: ConnectTargetArgs = decode(parameters.clone())?;
+            let args: ConnectTargetArgs = decode(parameters.clone(), tool)?;
             connection::connect_connection_target_core(&state, &args.computer_id, &args.target_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerConnectRobot => {
-            let args: ConnectRobotArgs = decode(parameters.clone())?;
+            let args: ConnectRobotArgs = decode(parameters.clone(), tool)?;
             connection::manager_connect_smcp_core(
                 &state,
                 &args.computer_id,
@@ -647,38 +716,38 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerDisconnect => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             connection::disconnect_smcp_core(&state, &args.computer_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::ComputerGetConnectionStatus => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             connection::get_connection_status_core(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpServerList => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             super::mcp_list::list(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpConfigGetState => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             sdk_config::get_computer_config_state_for_client_control_core(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpServerUpsert => {
-            let args: McpUpsertArgs = decode(parameters.clone())?;
+            let args: McpUpsertArgs = decode(parameters.clone(), tool)?;
             sdk_config::upsert_computer_mcp_config_core(&state, &args.computer_id, args.server)
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpServerRemove => {
-            let args: BundleArgs = decode(parameters.clone())?;
+            let args: BundleArgs = decode(parameters.clone(), tool)?;
             sdk_config::remove_computer_mcp_by_bundle_id_core(
                 &state,
                 &args.computer_id,
@@ -688,73 +757,73 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpServerStart => {
-            let args: BundleArgs = decode(parameters.clone())?;
+            let args: BundleArgs = decode(parameters.clone(), tool)?;
             mcp::start_mcp_server_core(&state, &args.computer_id, &args.bundle_id)
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpServerStop => {
-            let args: BundleArgs = decode(parameters.clone())?;
+            let args: BundleArgs = decode(parameters.clone(), tool)?;
             mcp::stop_mcp_server_core(&state, &args.computer_id, &args.bundle_id)
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpServerStartAll => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             mcp::start_all_servers_core(&state, &args.computer_id)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpServerStopAll => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             mcp::stop_all_servers_core(&state, &args.computer_id)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::InputDefinitionList => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             inputs::list_inputs_core(&state, &args.computer_id)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::InputDefinitionGet => {
-            let args: InputIdArgs = decode(parameters.clone())?;
+            let args: InputIdArgs = decode(parameters.clone(), tool)?;
             inputs::get_input_core(&state, &args.computer_id, &args.input_id)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::InputDefinitionUpsert => {
-            let args: InputDefinitionArgs = decode(parameters.clone())?;
+            let args: InputDefinitionArgs = decode(parameters.clone(), tool)?;
             inputs::add_or_update_input_core(&state, &args.computer_id, args.definition)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::InputDefinitionRemove => {
-            let args: InputIdArgs = decode(parameters.clone())?;
+            let args: InputIdArgs = decode(parameters.clone(), tool)?;
             inputs::remove_input_core(&state, &args.computer_id, &args.input_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::InputValueList => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             inputs::list_input_values_for_control_core(&state, &args.computer_id)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::InputValueGetStatus => {
-            let args: InputIdArgs = decode(parameters.clone())?;
+            let args: InputIdArgs = decode(parameters.clone(), tool)?;
             inputs::get_input_value_core(&state, &args.computer_id, &args.input_id)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::InputValueSet => {
-            let args: InputValueArgs = decode(parameters.clone())?;
+            let args: InputValueArgs = decode(parameters.clone(), tool)?;
             inputs::set_input_value_core(&state, &args.computer_id, args.input_id, args.value)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::RuntimeInputValueSet => {
-            let args: InputValueArgs = decode(parameters.clone())?;
+            let args: InputValueArgs = decode(parameters.clone(), tool)?;
             inputs::set_runtime_input_value_core(
                 &state,
                 &args.computer_id,
@@ -765,31 +834,31 @@ async fn dispatch_with_activity_context(
             .map(|updated| serde_json::json!({"updated": updated}))
         }
         ToolId::InputValueRemove => {
-            let args: InputIdArgs = decode(parameters.clone())?;
+            let args: InputIdArgs = decode(parameters.clone(), tool)?;
             inputs::remove_input_value_core(&state, &args.computer_id, &args.input_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::InputValueClearAll => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             inputs::clear_input_values_core(&state, &args.computer_id)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::MarketplaceGetCapabilities => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             marketplace::get_marketplace_capabilities_core(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::MarketplaceGetGovernance => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             marketplace::get_marketplace_governance_core(&state, &args.computer_id)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::MarketplaceAdd => {
-            let args: MarketplaceWriteArgs = decode(parameters.clone())?;
+            let args: MarketplaceWriteArgs = decode(parameters.clone(), tool)?;
             marketplace::add_marketplace_core(
                 &state,
                 &args.computer_id,
@@ -804,7 +873,7 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::MarketplaceUpdate => {
-            let args: MarketplaceWriteArgs = decode(parameters.clone())?;
+            let args: MarketplaceWriteArgs = decode(parameters.clone(), tool)?;
             marketplace::update_marketplace_core(
                 &state,
                 &args.computer_id,
@@ -819,13 +888,13 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::MarketplaceRefresh => {
-            let args: MarketplaceNameArgs = decode(parameters.clone())?;
+            let args: MarketplaceNameArgs = decode(parameters.clone(), tool)?;
             marketplace::refresh_marketplace_core(&state, &args.computer_id, &args.marketplace)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::MarketplaceRemove => {
-            let args: MarketplaceNameArgs = decode(parameters.clone())?;
+            let args: MarketplaceNameArgs = decode(parameters.clone(), tool)?;
             marketplace::remove_marketplace_core(&state, &args.computer_id, &args.marketplace)
                 .await
                 .map(|_| serde_json::json!({"ok": true}))
@@ -834,7 +903,7 @@ async fn dispatch_with_activity_context(
         | ToolId::PluginEnable
         | ToolId::PluginDisable
         | ToolId::PluginUninstall => {
-            let args: PluginArgs = decode(parameters.clone())?;
+            let args: PluginArgs = decode(parameters.clone(), tool)?;
             let request = marketplace::PluginLifecycleRequest {
                 marketplace: args.marketplace,
                 plugin: args.plugin,
@@ -859,7 +928,7 @@ async fn dispatch_with_activity_context(
             .map(|_| serde_json::json!({"ok": true}))
         }
         ToolId::McpToolList => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             debug::get_available_tools_core(&state, &args.computer_id)
                 .await
                 .map(|mut tools| {
@@ -872,24 +941,24 @@ async fn dispatch_with_activity_context(
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpToolHistory => {
-            let args: ComputerIdArgs = decode(parameters.clone())?;
+            let args: ComputerIdArgs = decode(parameters.clone(), tool)?;
             debug::get_tool_history_core(&state, &args.computer_id)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::McpResourceList => {
-            let args: ResourceArgs = decode(parameters.clone())?;
+            let args: ResourceArgs = decode(parameters.clone(), tool)?;
             debug::get_debug_resources_core(&state, &args.computer_id, &args.bundle_id, args.cursor)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::DesktopList => {
-            let args: DesktopListArgs = decode(parameters.clone())?;
+            let args: DesktopListArgs = decode(parameters.clone(), tool)?;
             desktop::get_desktop_core(&state, &args.computer_id, args.uri.as_deref())
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
         }
         ToolId::DesktopRead => {
-            let args: DesktopReadArgs = decode(parameters.clone())?;
+            let args: DesktopReadArgs = decode(parameters.clone(), tool)?;
             desktop::get_window_detail_core(&state, &args.computer_id, &args.bundle_id, &args.uri)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
@@ -897,41 +966,8 @@ async fn dispatch_with_activity_context(
         ToolId::SkillCreate | ToolId::SkillUpdate | ToolId::SkillDelete => unreachable!(),
     };
 
-    match result {
-        Ok(value) => {
-            pending_audit.disarm();
-            audit(
-                plane,
-                &context,
-                tool,
-                target.as_deref(),
-                parameters,
-                AuditCompletion {
-                    outcome: AuditOutcome::Succeeded,
-                    error: None,
-                    started,
-                },
-            );
-            Ok(value)
-        }
-        Err(message) => {
-            pending_audit.disarm();
-            let error = operation_error(&context, tool, target.as_deref(), message);
-            audit(
-                plane,
-                &context,
-                tool,
-                target.as_deref(),
-                parameters,
-                AuditCompletion {
-                    outcome: AuditOutcome::Failed,
-                    error: Some(error.message.clone()),
-                    started,
-                },
-            );
-            Err(error)
-        }
-    }
+    result
+        .map_err(|message| operation_error(context, tool, pending_audit.target.as_deref(), message))
 }
 
 #[cfg(test)]
@@ -1008,3 +1044,7 @@ mod tests {
         assert!(!skill_update.to_string().contains("private replacement"));
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_tests.rs"]
+mod regression_tests;
