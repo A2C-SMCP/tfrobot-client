@@ -1856,7 +1856,8 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn mcp_server_display_name(&self, bundle_id: &BundleId) -> Option<ServerName> {
-        self.sdk_mcp_server_ownership()
+        // Resource reads also address built-in servers hidden from the management inventory.
+        self.sdk_mcp_server_runtime_ownership()
             .await
             .into_iter()
             .find(|entry| entry.bundle_id == bundle_id.as_str())
