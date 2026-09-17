@@ -4,6 +4,8 @@ import { ConfigProvider } from 'antd';
 import { Chat } from '../../src/components/Chat';
 import { useManagerStore, managerContextScope } from '../../src/stores/managerStore';
 import i18n from '../../src/i18n';
+import { verifyUpgrade } from './upgrade';
+Object.assign(window, { verifyUpgrade });
 void i18n.changeLanguage('en');
 
 // Only identity/session acquisition is synthetic. Chat, its factory, Socket.IO,

@@ -94,7 +94,42 @@ export function createClientChatFactory({
 
 export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
   const label = (key: string) => t(`chat.workspace.${key}`);
+  const errorCauses: Record<ChatError['code'], string> = {
+    'authentication': label('errorSummary.causes.authentication'),
+    'authorization': label('errorSummary.causes.authorization'),
+    'conflict': label('errorSummary.causes.conflict'),
+    'network': label('errorSummary.causes.network'),
+    'not-found': label('errorSummary.causes.not-found'),
+    'server': label('errorSummary.causes.server'),
+    'timeout': label('errorSummary.causes.timeout'),
+    'unknown': label('errorSummary.causes.unknown'),
+    'unsupported': label('errorSummary.causes.unsupported'),
+    'validation': label('errorSummary.causes.validation'),
+  };
+  const operations = ['sendText', 'sendMessage', 'interrupt', 'answerInteraction', 'uploadAttachment', 'loadConversation', 'loadHistory', 'subscribe', 'cacheStorage'];
   return {
+    formatChatError: (error) => {
+      // Only translated allowlisted fields enter the summary. Raw messages,
+      // details and arbitrary operation names remain outside the display path.
+      const operation = error.diagnostic?.operation ?? '';
+      const name = label(`errorSummary.operations.${operations.includes(operation) ? operation : 'unknown'}`);
+      const cause = errorCauses[error.code] ?? errorCauses.unknown;
+      const impact = label(error.diagnostic?.outcome === 'unknown'
+        ? 'errorSummary.unknownOutcome' : 'errorSummary.failed');
+      return `${name}: ${cause} ${impact}`;
+    },
+    composerEnterHint: label('composerEnterHint'),
+    composerCtrlEnterHint: label('composerCtrlEnterHint'),
+    diagnostics: label('diagnostics'),
+    copyDiagnostic: label('copyDiagnostic'),
+    diagnosticCopied: label('diagnosticCopied'),
+    diagnosticCopyFailed: label('diagnosticCopyFailed'),
+    diagnosticDetails: label('diagnosticDetails'),
+    noDiagnostics: label('noDiagnostics'),
+    activeFaults: label('activeFaults'),
+    signInAgain: label('signInAgain'),
+    recoveredComplete: label('recoveredComplete'),
+    recoveredBestEffort: label('recoveredBestEffort'),
     cacheSyncing: label('cacheSyncing'),
     cacheStale: label('cacheStale'),
     cacheSyncFailed: label('cacheSyncFailed'),
@@ -184,6 +219,14 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
     textSendingUnavailable: label('textSendingUnavailable'),
     timelineLabel: label('timelineLabel'),
     lifecycleStatus: {
+      'connecting': label('lifecycle.connecting'),
+      'joining': label('lifecycle.joining'),
+      'active': label('lifecycle.active'),
+      'reconnecting': label('lifecycle.reconnecting'),
+      'recovering': label('lifecycle.recovering'),
+      'auth-required': label('lifecycle.auth-required'),
+      'offline': label('lifecycle.offline'),
+      'subscription-failed': label('lifecycle.subscription-failed'),
       degraded: label('lifecycleDegraded'),
     },
   };

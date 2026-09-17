@@ -265,7 +265,7 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
         pendingConversationId={snapshot.pendingConversationId}
         selectedConversationId={snapshot.selectedConversationId}
       >
-        <ChatConversationView getDeadlineAt={getChatDeadlineAt} labels={labels}
+        <ChatConversationView sendShortcut="enter" getDeadlineAt={getChatDeadlineAt} labels={labels}
           eventDetailMode={active ? detailMode : 'split'} onEventDetailModeChange={setDetailMode} />
       </ChatUiShell>
       <Modal

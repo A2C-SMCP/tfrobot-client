@@ -2,12 +2,16 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 const directory = await mkdtemp(join(tmpdir(), 'chat-restoration-'));
 const observations = [];
+const shellReport = process.env.CHAT_UPGRADE_SHELL_REPORT
+  ? JSON.parse(await readFile(process.env.CHAT_UPGRADE_SHELL_REPORT, 'utf8')) : undefined;
+if (shellReport) assert.equal(shellReport.passed, true);
+const joins = [];
 const http = createServer((request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
   let data;
@@ -16,7 +20,10 @@ const http = createServer((request, response) => {
     const id = Number(path.match(/conversations\/(\d+)/)?.[1]);
     data = { messages: [{ msgId: `message-${id}`, conversationId: id, content: `History ${id}`,
       additionalKwargs: {}, attachments: null, createTimestamp: 1800000000000,
-      creator: { uid: 'agent', name: 'Agent', avatar: null }, role: 'assistant', msgType: 'text' }], events: [], cursor: null };
+      creator: { uid: 'agent', name: 'Agent', avatar: null }, role: 'assistant', msgType: 'text' }],
+      events: shellReport ? [{ eventId: `long-tool-${id}`, conversationId: String(id),
+        eventScene: 'Tool', status: 'success', createTimestamp: 10, transitionId: 'end',
+        content: { toolReturn: { origin: shellReport.shellOutput, meta: { success: true, done: true } } } }] : [], cursor: null };
   } else if (path.endsWith('/conversations')) data = { conversations: [42, 99].map(id => ({
     conversationId: id, title: `Conversation ${id}`, description: null, updateTimestamp: 1800000000000 - id,
   })), cursor: null };
@@ -25,7 +32,10 @@ const http = createServer((request, response) => {
   response.end(JSON.stringify({ code: 200, message: 'Success', data }));
 });
 const sockets = new Server(http, { transports: ['websocket'], cors: { origin: '*' } });
-sockets.of('/chat').on('connection', socket => socket.on('join_conversation', (_data, ack) => ack()));
+sockets.of('/chat').on('connection', socket => socket.on('join_conversation', (data, ack) => {
+  joins.push({ socket: socket.id, data });
+  ack();
+}));
 await new Promise(resolve => http.listen(18767, '127.0.0.1', resolve));
 let running;
 function launch(phase) {
@@ -66,6 +76,16 @@ function clickWhen(selector, text, mouseDown = false) {
 try {
   const first = launch('first');
   await first.wait(e => e.kind === 'render' && e.marker === 'History 42');
+  if (shellReport) {
+    const start = joins.length;
+    first.send(`window.verifyUpgrade(${JSON.stringify(shellReport.shellOutput)}).then(result => window.__TAURI_INTERNALS__.invoke('acceptance_event', {event: {kind: 'upgrade', ...result}})).catch(error => window.__TAURI_INTERNALS__.invoke('acceptance_event', {event: {kind: 'upgrade-error', message: String(error)}}));`);
+    const result = await first.wait(e => e.kind === 'upgrade' || e.kind === 'upgrade-error');
+    assert.equal(result.kind, 'upgrade', result.message);
+    const probeJoins = joins.slice(start);
+    assert.equal(probeJoins.length, 3);
+    assert.equal(new Set(probeJoins.map(join => join.socket)).size, 1, 'A/B/A must reuse one socket');
+    assert.equal(sockets.of('/chat').sockets.has(probeJoins[0].socket), false, 'dispose must release the socket');
+  }
   first.send(clickWhen('.ant-select-selector', '', true));
   first.send(clickWhen('.ant-select-item-option', 'Robot 43'));
   await first.wait(e => e.kind === 'saved' && e.employeeId === '43' && e.conversationId === '42');
