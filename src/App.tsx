@@ -1,3 +1,4 @@
+import { CredentialAccessNotice } from './components/CredentialAccessNotice';
 import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
 import {
   SettingOutlined,
@@ -39,6 +40,7 @@ function App() {
     applyContext,
     refreshContext,
     restoreSession,
+    identityLoading,
     handleAuthExpired,
   } = useManagerStore();
   const initializeRuntimeEvents = useRuntimeStore((state) => state.initialize);
@@ -247,6 +249,8 @@ function App() {
         </Sider>
         <Content className={styles.content}>
           <div className={styles.contentInner}>
+            <CredentialAccessNotice />
+            {identityLoading && <Alert type="info" description={t('permissions.purpose')} />}
             {runtimeEventsError && (
               <Alert
                 type="error"

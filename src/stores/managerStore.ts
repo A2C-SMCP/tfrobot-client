@@ -61,7 +61,7 @@ export type LoginResult =
   | { kind: 'account_selection_required'; accounts: AccountOption[] }
   | { kind: 'onboarding_required'; userId: string };
 
-export type ManagerEnvironment = 'staging' | 'beta' | 'prod';
+export type ManagerEnvironment = 'staging' | 'prod';
 export type ManagerAuthState =
   | 'signed_out'
   | 'account_selection_required'
@@ -120,6 +120,7 @@ export type ManagerError =
   | { kind: 'payment_required'; detail: { message: string; redirect_url?: string } }
   | { kind: 'not_found' }
   | { kind: 'not_found_or_no_permission' }
+  | { kind: 'chat_unavailable' }
   | { kind: 'other'; detail: { status: number; body: string } }
   | { kind: 'no_session' }
   | { kind: 'context_changed' }

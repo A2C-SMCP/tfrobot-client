@@ -13,7 +13,7 @@ import { useConnectionStore } from '@/stores/connectionStore';
 import i18n from '@/i18n';
 
 type ManagerStoreMock = {
-  environment: 'staging' | 'beta' | 'prod' | null;
+  environment: 'staging' | 'prod' | null;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
   onboardingUserId: string | null;
@@ -193,6 +193,14 @@ describe('ManagerAccount', () => {
   });
 
   describe('LoginForm', () => {
+    it.each([false, true])('offers only supported environments (embedded=%s)', (embedded) => {
+      render(<LoginForm embedded={embedded} />);
+      fireEvent.mouseDown(screen.getByRole('combobox'));
+      expect(screen.getAllByText('Staging').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Production').length).toBeGreaterThan(0);
+      expect(screen.queryByText('Beta')).not.toBeInTheDocument();
+    });
+
     it('renders the sign-in heading and environment hint', () => {
       render(<LoginForm />);
       expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();

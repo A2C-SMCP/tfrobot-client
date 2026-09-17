@@ -56,6 +56,27 @@ pub async fn chat_remember_robot(
 }
 
 #[tauri::command]
+pub async fn chat_get_recent_conversation(
+    state: State<'_, AppState>,
+    lease_id: String,
+) -> Result<Option<String>, ManagerError> {
+    state.chat_sessions.recent_conversation(&lease_id).await
+}
+
+#[tauri::command]
+pub async fn chat_remember_conversation(
+    state: State<'_, AppState>,
+    lease_id: String,
+    conversation_id: String,
+    revision: u64,
+) -> Result<(), ManagerError> {
+    state
+        .chat_sessions
+        .remember_conversation(&lease_id, &conversation_id, revision)
+        .await
+}
+
+#[tauri::command]
 pub async fn chat_get_session_token(
     state: State<'_, AppState>,
     lease_id: String,

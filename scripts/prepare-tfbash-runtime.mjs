@@ -7,8 +7,8 @@ import { spawn } from 'node:child_process';
 
 const PYTHON_VERSION = '3.12.14';
 const PYTHON_RELEASE = '20260825';
-const TFBASH_VERSION = '0.2.0';
-const RESOLUTION_CUTOFF = '2026-09-01T00:00:00Z';
+const TFBASH_VERSION = '0.2.1';
+const RESOLUTION_CUTOFF = '2026-09-17T00:00:00Z';
 
 const targets = {
   'aarch64-apple-darwin': {

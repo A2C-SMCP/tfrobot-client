@@ -1,0 +1,8 @@
+{
+  "productName": "Chat Restoration Acceptance",
+  "version": "0.1.0",
+  "identifier": "com.tfrobot.acceptance.restoration",
+  "build": { "frontendDist": "runner/web" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false, "icon": ["../../src-tauri/icons/32x32.png"] }
+}

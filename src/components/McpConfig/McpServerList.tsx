@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { Table, Button, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   AppstoreOutlined,
@@ -8,6 +9,12 @@ import {
 import { useTranslation } from 'react-i18next';
 import { ServerStatusBadge } from './ServerStatusBadge';
 import type { McpServerManagedBy, McpServerStatus } from '@/stores/mcpStore';
+
+const SOURCE_ORDER: Record<McpServerManagedBy['type'], number> = {
+  user: 0,
+  plugin: 1,
+  built_in: 2,
+};
 
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
@@ -39,6 +46,10 @@ export function McpServerList({
   onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
+  // Stable sorting preserves the backend's name/bundleId order within each source.
+  const orderedServers = useMemo(() => [...servers].sort(
+    (left, right) => SOURCE_ORDER[left.managedBy.type] - SOURCE_ORDER[right.managedBy.type],
+  ), [servers]);
 
   const handleStart = async (bundleId: string) => {
     await onStart?.(bundleId);
@@ -287,7 +298,7 @@ export function McpServerList({
 
   return (
     <Table
-      dataSource={servers}
+      dataSource={orderedServers}
       columns={columns}
       rowKey="bundleId"
       loading={loading}

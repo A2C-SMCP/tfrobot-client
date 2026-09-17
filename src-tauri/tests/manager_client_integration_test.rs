@@ -885,7 +885,7 @@ async fn context_account_selection_is_an_atomic_revisioned_transition() {
         test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
 
     coordinator
-        .login(ManagerEnvironment::Beta, "13800000000", "secret")
+        .login(ManagerEnvironment::Prod, "13800000000", "secret")
         .await
         .unwrap();
     let selecting = coordinator.snapshot().await;
@@ -907,7 +907,7 @@ async fn context_account_selection_is_an_atomic_revisioned_transition() {
     assert_eq!(authenticated.auth_state, ManagerAuthState::Authenticated);
     assert_eq!(
         authenticated.context_key.unwrap().environment,
-        ManagerEnvironment::Beta
+        ManagerEnvironment::Prod
     );
 }
 
@@ -2542,4 +2542,71 @@ async fn old_bridge_unauthorized_completion_cannot_clear_new_session() {
         coordinator.snapshot().await.auth_state,
         ManagerAuthState::Authenticated
     );
+}
+
+#[tokio::test]
+async fn retired_beta_restore_does_not_reuse_credentials_and_allows_fresh_login() {
+    for environment in [ManagerEnvironment::Staging, ManagerEnvironment::Prod] {
+        let (base, captured, _handle) = spawn_mock_manager(vec![
+            json_script(
+                "/auth/login-by-password",
+                "HTTP/1.1 200 OK",
+                envelope(single_account_login_data("old-beta-jwt")),
+            ),
+            json_script(
+                "/api/v1/auth/me",
+                "HTTP/1.1 200 OK",
+                envelope(current_user_data()),
+            ),
+            json_script(
+                "/auth/login-by-password",
+                "HTTP/1.1 200 OK",
+                envelope(single_account_login_data("fresh-jwt")),
+            ),
+            json_script(
+                "/api/v1/auth/me",
+                "HTTP/1.1 200 OK",
+                envelope(current_user_data()),
+            ),
+        ])
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+        let secrets = InMemorySecretStore::shared();
+        let old = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
+        old.login(environment, "client@example.com", "secret")
+            .await
+            .unwrap();
+        let path = settings.global_manager_session_path();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        metadata["session"]["environment"] = serde_json::json!("beta");
+        std::fs::write(path, metadata.to_string()).unwrap();
+        // The test origin even has an available old credential: retired metadata must
+        // stop restoration before touching the transport, regardless of credentials.
+        let upgraded = test_context_coordinator(base, settings.clone(), secrets);
+        assert!(upgraded.restore_session().await.unwrap().is_none());
+        assert_eq!(captured.lock().await.len(), 2);
+        let snapshot = upgraded.snapshot().await;
+        assert!(snapshot.context_key.is_none());
+        assert!(snapshot.environment.is_none());
+        upgraded
+            .login(environment, "client@example.com", "fresh-password")
+            .await
+            .unwrap();
+        assert_eq!(
+            upgraded.snapshot().await.auth_state,
+            ManagerAuthState::Authenticated
+        );
+        assert_eq!(
+            settings
+                .load_global_manager_session()
+                .unwrap()
+                .session
+                .unwrap()
+                .environment,
+            environment
+        );
+        assert_eq!(captured.lock().await.len(), 4);
+    }
 }

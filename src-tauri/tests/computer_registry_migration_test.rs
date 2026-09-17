@@ -208,7 +208,6 @@ async fn startup_atomically_migrates_legacy_registry_into_owned_destinations() {
             state.config.as_ref(),
             state.sdk_config.as_ref(),
             state.settings_service.as_ref(),
-            secrets.as_ref(),
         )
         .unwrap(),
         MigrationOutcome::AlreadyCompleted

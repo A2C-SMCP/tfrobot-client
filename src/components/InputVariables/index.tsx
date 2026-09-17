@@ -1,7 +1,8 @@
 import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
 import { useForgetNavigationState, useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { App, Alert, Button, Space, Table, Typography } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -28,6 +29,25 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
     upsertEntry,
     deleteEntry,
   } = useInputStore();
+  const [migrationPending, setMigrationPending] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  useEffect(() => {
+    let current = true;
+    setMigrationPending(false);
+    if (active) void invoke<boolean>('input_migration_pending', { instanceId })
+      .then((pending) => { if (current) setMigrationPending(Boolean(pending)); })
+      .catch((error) => { if (current) message.error(String(error)); });
+    return () => { current = false; };
+  }, [active, instanceId, message]);
+  const migrate = async () => {
+    const current = action();
+    setMigrating(true);
+    try {
+      await invoke('migrate_input_entries', { instanceId });
+      if (current()) { setMigrationPending(false); await fetchEntries(instanceId); }
+    } catch (error) { if (current()) message.error(String(error)); }
+    finally { setMigrating(false); }
+  };
   const [editorOpen, setEditorOpen] = useNavigationState('inputs.editorOpen', false);
   const [editing, setEditing] = useNavigationState<InputEntry | undefined>('inputs.editing', undefined);
   const forget = useForgetNavigationState();
@@ -118,6 +138,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           </Button>
           <Popconfirm
             title={t('inputs.entry.confirmDelete', { key: entry.key })}
+            description={entry.secret ? t('permissions.password') : undefined}
             onConfirm={() => handleDelete(entry.key)}
           >
             <Button
@@ -149,6 +170,9 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
         </Space>
       </div>
 
+      {migrationPending && <Alert type="info" showIcon description={t('permissions.migration')}
+        action={<Button loading={migrating} onClick={() => { void migrate(); }}>{t('permissions.migrate')}</Button>}
+        style={{ marginBottom: 16 }} />}
       {entriesError && (
         <Alert message={t('common.error')} description={entriesError} type="error" showIcon style={{ marginBottom: 16 }} />
       )}

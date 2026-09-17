@@ -10,6 +10,7 @@ use crate::services::observability::{
 use crate::services::sdk_config::is_writable_provenance;
 use crate::AppState;
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
+use a2c_smcp::smcp_computer::mcp_clients::model::BundleId;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{ComputerConfigSnapshot, ProvenanceScope};
 use a2c_smcp::smcp_computer::settings::SettingsValidationError;
@@ -571,7 +572,7 @@ fn referenced_input_ids(
     Ok(references)
 }
 
-/// Removes one SDK-owned MCP declaration without stopping or reloading runtime state.
+/// Removes a user MCP server from runtime and persistent configuration.
 #[tauri::command]
 pub async fn remove_computer_mcp_config(
     state: State<'_, AppState>,
@@ -586,45 +587,135 @@ pub async fn remove_computer_mcp_config_core(
     instance_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    remove_computer_mcp_core(state, instance_id, McpRemovalTarget::Name(name.trim())).await
+}
+
+/// Resolve bundle identity under the same operation lease as removal. Runtime-only user entries
+/// are accepted so that servers left behind by older clients can also be removed.
+pub async fn remove_computer_mcp_by_bundle_id_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), String> {
+    remove_computer_mcp_core(state, instance_id, McpRemovalTarget::Bundle(bundle_id)).await
+}
+
+enum McpRemovalTarget<'a> {
+    Name(&'a str),
+    Bundle(&'a BundleId),
+}
+
+async fn remove_computer_mcp_core(
+    state: &AppState,
+    instance_id: &str,
+    target: McpRemovalTarget<'_>,
+) -> Result<(), String> {
     let started = std::time::Instant::now();
-    let activity_server_name = name.trim().to_string();
+    let target_label = match target {
+        McpRemovalTarget::Name(name) => name.to_string(),
+        McpRemovalTarget::Bundle(id) => id.to_string(),
+    };
+    let mut activity_server_name = target_label.clone();
     let result = async {
         let _operation_guard = state.computer_registry.operation_lease(instance_id).await;
         let instance_id = require_instance(state, instance_id)?;
-        let name = name.trim();
-        if name.is_empty() {
+        if target_label.is_empty() {
             return Err("name is required".to_string());
         }
-        let previous_config = state
-            .sdk_config
-            .load(instance_id)
-            .mcp
-            .servers
-            .into_iter()
-            .find(|server| server.origin != ProvenanceScope::Plugin && server.name == name)
-            .map(|server| server.config);
-        let runtime = state.computer_registry.runtime(instance_id).await;
-        let _oauth_admission_guard = match (previous_config.as_ref(), runtime.as_ref()) {
-            (Some(_), Some(runtime)) => {
-                Some(runtime.block_oauth_admission_for_server_change().await)
-            }
-            _ => None,
-        };
-        if let Some(config) = previous_config.clone() {
-            clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config).await?;
+        if matches!(target, McpRemovalTarget::Bundle(id) if is_reserved_built_in_bundle_id(id.as_str())) {
+            return Err("reserved built-in providers are not user-manageable".to_string());
         }
-        let input_candidates = previous_config
-            .as_ref()
-            .map(referenced_input_ids)
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        state
-            .sdk_config
-            .remove_mcp_config_with_input_gc_atomically(instance_id, name, &input_candidates)
+        let (snapshot, validation) = state.sdk_config.load_with_validation(instance_id)
             .map_err(|error| error.to_string())?;
+        if !validation.is_valid() {
+            return Err("Cannot remove MCP server: configuration is invalid".to_string());
+        }
+        let matches_target = |config: &MCPServerConfig| match target {
+            McpRemovalTarget::Name(name) => config.name() == name,
+            McpRemovalTarget::Bundle(id) => resolve_bundle_id(config) == *id,
+        };
+        let declarations: Vec<_> = snapshot.mcp.servers.into_iter()
+            .filter(|server| server.origin != ProvenanceScope::Plugin && matches_target(&server.config)).collect();
+        if declarations.len() > 1 {
+            return Err(format!("Ambiguous MCP server identity: {target_label}"));
+        }
+        let declaration = declarations.into_iter().next();
+        if declaration.as_ref().is_some_and(|server| !is_writable_provenance(server.origin)) {
+            return Err(format!("MCP server '{target_label}' is not a writable user declaration"));
+        }
+        let runtime = state.computer_registry.runtime(instance_id).await;
+        let mut runtime_configs = match runtime.as_ref() {
+            Some(runtime) => runtime.sdk_mcp_server_configs().await,
+            None => Default::default(),
+        };
+        runtime_configs.retain(|_, config| {
+            matches_target(config) || declaration.as_ref().is_some_and(|server| server.name == config.name())
+        });
+        // A declaration edit may have changed the bundle ID since last start.
+        // Remove all runtime identities for that declaration, but never follow a bundle-addressed
+        // orphan to a newer declaration merely because its display name happens to match.
+        let mut ids: std::collections::BTreeSet<_> = runtime_configs.keys().cloned().collect();
+        if let Some(server) = &declaration {
+            activity_server_name = server.name.clone();
+            ids.insert(resolve_bundle_id(&server.config));
+        }
+        if ids.is_empty() {
+            return Err(format!("MCP server not found: {target_label}"));
+        }
+        let mut protected_plugin_ids = std::collections::BTreeSet::new();
+        for id in &ids {
+            if is_reserved_built_in_bundle_id(id.as_str()) {
+                return Err("reserved built-in providers are not user-manageable".to_string());
+            }
+            if let Some(runtime) = &runtime {
+                if runtime.plugin_mcp_server_owner(id).await.is_some()
+                    || runtime.has_tracked_plugin_mcp_server(id).await
+                {
+                    // Local configuration editing may remove a user fallback while a plugin
+                    // owns its runtime. The bundle-addressed remote operation targets runtime
+                    // identity and must reject that plugin instead.
+                    if matches!(target, McpRemovalTarget::Bundle(requested) if requested == id) || declaration.is_none() {
+                        return Err(format!("MCP server '{id}' is managed by a Marketplace plugin"));
+                    }
+                    protected_plugin_ids.insert(id.clone());
+                }
+            }
+        }
+        ids.retain(|id| !protected_plugin_ids.contains(id));
+        let _oauth_admission_guard = match runtime.as_ref() {
+            Some(runtime) => Some(runtime.block_oauth_admission_for_server_change().await),
+            None => None,
+        };
+        if let Some(server) = declaration.as_ref().filter(|server| {
+            !protected_plugin_ids.contains(&resolve_bundle_id(&server.config))
+        }) {
+            clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, server.config.clone()).await?;
+        }
+        // Preserve cleanup identities before an unmount can replace a terminal SDK handle.
+        // Runtime-only or edited declarations may refer to old OAuth resources absent on disk.
+        for (id, config) in &runtime_configs {
+            if !protected_plugin_ids.contains(id)
+                && declaration.as_ref().is_none_or(|server| {
+                    oauth_credential_identity_changed(config, &server.config)
+                })
+            {
+                clear_oauth_before_config_change(state, runtime.as_ref(), instance_id, config.clone()).await?;
+            }
+        }
+        if let Some(runtime) = &runtime {
+            for id in &ids {
+                runtime.remove_user_mcp_server_config(id).await.map_err(|error| {
+                    format!("MCP runtime removal failed; configuration was retained for retry: {error}")
+                })?;
+            }
+        }
+        if let Some(server) = &declaration {
+            let input_candidates = referenced_input_ids(&server.config)
+                .map_err(|error| error.to_string())?.into_iter().collect();
+            state.sdk_config.remove_mcp_config_with_input_gc_atomically(
+                instance_id, &server.name, &input_candidates,
+            ).map_err(|error| format!("MCP runtime was removed, but configuration removal failed; retry deletion: {error}"))?;
+        }
         Ok(())
     }
     .await;
@@ -679,6 +770,58 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn mcp_removal_persistence_failure_is_reported_and_retryable() {
+        use crate::services::{
+            computer::ComputerInstance, config::ConfigService, keychain::InMemorySecretStore,
+            observability::ObservabilityService, settings::SettingsService,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigService::new(temp.path().to_path_buf()).unwrap();
+        let instance = ComputerInstance::new("removal-failure", "Removal failure");
+        config.add_computer_instance(instance.clone()).unwrap();
+        let state = AppState::new_with_secret_store(
+            config,
+            ObservabilityService::new(temp.path()).unwrap(),
+            SettingsService::new(temp.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        let server: MCPServerConfig = serde_json::from_value(json!({
+            "type":"stdio", "name":"retryable", "bundle_id":"retryable",
+            "server_parameters":{"command":"unused", "args":[], "env":{}}
+        }))
+        .unwrap();
+        state
+            .sdk_config
+            .upsert_mcp_configs(&instance.id, &[server])
+            .unwrap();
+        state
+            .computer_registry
+            .upsert_runtime(instance.clone())
+            .await
+            .unwrap();
+        let runtime = state.computer_registry.runtime(&instance.id).await.unwrap();
+        let id = BundleId::try_from("retryable").unwrap();
+        assert!(runtime.sdk_mcp_server_ids().await.contains(&id));
+        state.sdk_config.inject_raw_restore_failure();
+        let error = remove_computer_mcp_by_bundle_id_core(&state, &instance.id, &id)
+            .await
+            .unwrap_err();
+        assert!(error.contains("configuration removal failed"), "{error}");
+        assert!(!runtime.sdk_mcp_server_ids().await.contains(&id));
+        assert!(state
+            .sdk_config
+            .load(&instance.id)
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == "retryable"));
+        remove_computer_mcp_by_bundle_id_core(&state, &instance.id, &id)
+            .await
+            .unwrap();
+        assert!(state.sdk_config.load(&instance.id).mcp.servers.is_empty());
+    }
 
     fn oauth_http_config(endpoint: Option<&str>, disabled: bool) -> MCPServerConfig {
         serde_json::from_value(json!({

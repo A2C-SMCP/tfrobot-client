@@ -380,6 +380,25 @@ async fn start_oauth_rejecting_mcp_server() -> String {
             };
             tokio::spawn(async move {
                 let service = service_fn(|request: hyper::Request<hyper::body::Incoming>| async {
+                    // This fixture supports JSON responses, not a standalone SSE stream.
+                    // Explicit HTTP lifecycle responses keep rmcp's background GET/DELETE
+                    // requests from being mistaken for JSON-RPC calls on a reused connection.
+                    if request.method() == hyper::Method::GET {
+                        return Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                                .body(Full::<Bytes>::from(Bytes::new()))
+                                .unwrap(),
+                        );
+                    }
+                    if request.method() == hyper::Method::DELETE {
+                        return Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::NO_CONTENT)
+                                .body(Full::<Bytes>::from(Bytes::new()))
+                                .unwrap(),
+                        );
+                    }
                     let body = request
                         .into_body()
                         .collect()
@@ -2937,7 +2956,7 @@ async fn test_start_all_servers_uses_sdk_computer_runtime() {
 }
 
 #[tokio::test]
-async fn test_remove_mcp_server_command_applies_to_runtime_after_restart() {
+async fn test_remove_mcp_server_command_removes_runtime_immediately() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
 
@@ -2967,10 +2986,14 @@ async fn test_remove_mcp_server_command_applies_to_runtime_after_restart() {
         .unwrap();
 
     assert!(configs.is_empty());
-    assert!(runtime
+    assert!(!runtime
         .synced_sdk_servers()
         .await
         .contains_key(&bundle_id("remove-me")));
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .is_empty());
     runtime.restart().await.unwrap();
     assert!(!runtime
         .sdk_mcp_server_ids()
@@ -8085,5 +8108,605 @@ async fn test_sdk_computer_stderr_flood_does_not_block() {
             "start_mcp_server timed out after {STDERR_FLOOD_TIMEOUT:?} — \
              stderr pipe is likely blocked during initialization (Issue #19)"
         ),
+    }
+}
+
+/// Issue #84: drive the actual remote dispatcher, persisted SDK configuration and HTTP MCP
+/// transport. Removing either a running or stopped server must retire its runtime identity.
+#[tokio::test]
+async fn mcp_removal_remote_http_lifecycle_is_consistent() {
+    use tfrobot_client_lib::services::client_control::{
+        InvocationContext, TargetScope, ToolId, ToolScope,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    state
+        .config
+        .add_computer_instance(ComputerInstance::new("controller", "Controller"))
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(state.config.get_computer_instance("controller").unwrap())
+        .await
+        .unwrap();
+    for id in ["controller", TEST_INSTANCE_ID] {
+        state
+            .client_control
+            .update_policy_local(
+                id,
+                RemoteControlPolicy {
+                    enabled: true,
+                    tool_scope: ToolScope::All,
+                    target_scope: TargetScope::All,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    let generation = runtime.runtime_snapshot().await.generation;
+    let url = start_oauth_rejecting_mcp_server().await;
+    let call = |tool, parameters| {
+        Box::pin(state.client_control.dispatch(
+            InvocationContext {
+                source_computer_id: "controller".into(),
+                request_id: "issue-84".into(),
+            },
+            tool,
+            parameters,
+        ))
+    };
+    // Keep a separate server stopped throughout both deletes.
+    for (id, stop_first) in [
+        ("unrelated", true),
+        ("stopped-probe", true),
+        ("running-probe", false),
+    ] {
+        call(
+            ToolId::McpServerUpsert,
+            serde_json::json!({
+                "computer_id": TEST_INSTANCE_ID,
+                "server": {"type":"http", "name":format!("Display {id}"), "bundle_id":id,
+                    "server_parameters":{"url":url, "headers":{"Authorization":"Bearer test"}}}
+            }),
+        )
+        .await
+        .unwrap();
+        let args = serde_json::json!({"computer_id":TEST_INSTANCE_ID, "bundle_id":id});
+        call(ToolId::McpServerStart, args.clone()).await.unwrap();
+        assert!(runtime
+            .mcp_server_runtime_statuses()
+            .await
+            .iter()
+            .any(|status| {
+                status.bundle_id.as_str() == id
+                    && status.is_started()
+                    && status.connection == MCPServerConnectionState::Connected
+            }));
+        if stop_first {
+            call(ToolId::McpServerStop, args.clone()).await.unwrap();
+        }
+        if id == "unrelated" {
+            continue;
+        }
+        call(ToolId::McpServerRemove, args.clone()).await.unwrap();
+        let list = call(
+            ToolId::McpServerList,
+            serde_json::json!({"computer_id":TEST_INSTANCE_ID}),
+        )
+        .await
+        .unwrap();
+        assert!(!list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["bundleId"] == id));
+        let config = call(
+            ToolId::McpConfigGetState,
+            serde_json::json!({"computer_id":TEST_INSTANCE_ID}),
+        )
+        .await
+        .unwrap();
+        assert!(!config.to_string().contains(id));
+        assert!(!runtime.sdk_mcp_server_ids().await.contains(&bundle_id(id)));
+        assert!(!runtime
+            .synced_sdk_servers()
+            .await
+            .contains_key(&bundle_id(id)));
+        assert!(!runtime
+            .mcp_start_diagnostics()
+            .await
+            .contains_key(&bundle_id(id)));
+        assert!(call(ToolId::McpServerStart, args.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+        assert!(call(ToolId::McpServerRemove, args)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+        assert!(runtime
+            .mcp_server_runtime_statuses()
+            .await
+            .iter()
+            .any(|status| { status.bundle_id.as_str() == "unrelated" && !status.is_started() }));
+    }
+    assert_eq!(runtime.runtime_snapshot().await.generation, generation);
+    runtime.try_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_removal_handles_unmounted_config_and_legacy_orphan_without_name_aliasing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    let old = echo_server_config_with_bundle_id("Shared name", "old-id");
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, &[old])
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("old-id"))
+        .await
+        .unwrap();
+    mcp::stop_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("old-id"))
+        .await
+        .unwrap();
+    // Simulate an older client deleting only the declaration, then a new identity with that name.
+    state
+        .sdk_config
+        .remove_mcp_config(TEST_INSTANCE_ID, "Shared name")
+        .unwrap();
+    let next = echo_server_config_with_bundle_id("Shared name", "new-id");
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, &[next])
+        .unwrap();
+    sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id("old-id"),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime
+        .sdk_mcp_server_ids()
+        .await
+        .contains(&bundle_id("old-id")));
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .iter()
+        .any(|s| resolve_bundle_id(&s.config).as_str() == "new-id"));
+    // This declaration has never been mounted; bundle-based deletion still works.
+    sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id("new-id"),
+    )
+    .await
+    .unwrap();
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .is_empty());
+    runtime.try_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_removal_retires_previous_runtime_bundle_after_config_edit() {
+    for by_bundle in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = create_mcp_test_app_state(tmp.path()).await;
+        let runtime = state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap();
+        runtime.start().await.unwrap();
+        state
+            .sdk_config
+            .upsert_mcp_configs(
+                TEST_INSTANCE_ID,
+                &[echo_server_config_with_bundle_id(
+                    "same-name",
+                    "before-edit",
+                )],
+            )
+            .unwrap();
+        mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("before-edit"))
+            .await
+            .unwrap();
+        state
+            .sdk_config
+            .upsert_mcp_configs(
+                TEST_INSTANCE_ID,
+                &[echo_server_config_with_bundle_id("same-name", "after-edit")],
+            )
+            .unwrap();
+        if by_bundle {
+            sdk_config::remove_computer_mcp_by_bundle_id_core(
+                &state,
+                TEST_INSTANCE_ID,
+                &bundle_id("after-edit"),
+            )
+            .await
+            .unwrap();
+        } else {
+            sdk_config::remove_computer_mcp_config_core(&state, TEST_INSTANCE_ID, "same-name")
+                .await
+                .unwrap();
+        }
+        assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .sdk_config
+            .load(TEST_INSTANCE_ID)
+            .mcp
+            .servers
+            .is_empty());
+        runtime.try_shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn mcp_removal_rejects_builtin_and_preserves_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    client_control::update_remote_control_policy_core(
+        &state,
+        UpdateRemoteControlPolicyRequest {
+            computer_id: TEST_INSTANCE_ID.into(),
+            policy: RemoteControlPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    let before = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(before
+        .iter()
+        .any(|row| row.bundle_id.as_str() == CLIENT_CONTROL_BUNDLE_ID));
+    let error = sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id(CLIENT_CONTROL_BUNDLE_ID),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("reserved built-in"), "{error}");
+    assert_eq!(
+        serde_json::to_value(
+            mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    runtime.try_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_removal_after_computer_shutdown_keeps_computer_stopped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_mcp_test_app_state(tmp.path()).await;
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    state
+        .sdk_config
+        .upsert_mcp_configs(
+            TEST_INSTANCE_ID,
+            &[echo_server_config_with_bundle_id(
+                "shutdown-delete",
+                "shutdown-delete",
+            )],
+        )
+        .unwrap();
+    mcp::start_mcp_server_core(&state, TEST_INSTANCE_ID, &bundle_id("shutdown-delete"))
+        .await
+        .unwrap();
+    runtime.try_shutdown().await.unwrap();
+    sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &bundle_id("shutdown-delete"),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime.is_running().await);
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(state
+        .sdk_config
+        .load(TEST_INSTANCE_ID)
+        .mcp
+        .servers
+        .is_empty());
+    runtime.try_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_removal_serializes_with_an_admitted_interactive_start() {
+    for cancel in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = Arc::new(create_mcp_test_app_state(tmp.path()).await);
+        let runtime = state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap();
+        runtime.start().await.unwrap();
+        inputs::add_or_update_input_core(
+            &state,
+            TEST_INSTANCE_ID,
+            inputs::InputDefinition::PromptString {
+                id: "delete-race-input".into(),
+                label: None,
+                description: None,
+                default: None,
+                password: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let mut config = serde_json::to_value(echo_server_config_with_bundle_id(
+            "delete-race",
+            "delete-race",
+        ))
+        .unwrap();
+        config["server_parameters"]["env"] =
+            serde_json::json!({"TOKEN":"${input:delete-race-input}"});
+        state
+            .sdk_config
+            .upsert_mcp_configs(TEST_INSTANCE_ID, &[serde_json::from_value(config).unwrap()])
+            .unwrap();
+        let bridge = state.computer_registry.runtime_input_bridge();
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        bridge.set_sink(Arc::new(RecordingRuntimeInputSink { sender }));
+        bridge.set_ready("removal-test", true);
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            mcp::start_mcp_server_interactive_core(
+                &start_state,
+                TEST_INSTANCE_ID,
+                &bundle_id("delete-race"),
+            )
+            .await
+        });
+        let request = timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let id = bundle_id("delete-race");
+        let removal =
+            sdk_config::remove_computer_mcp_by_bundle_id_core(&state, TEST_INSTANCE_ID, &id);
+        let completion = bridge.complete(
+            &request.request_id,
+            if cancel {
+                RuntimeInputCompletion::Cancelled
+            } else {
+                RuntimeInputCompletion::Confirmed {
+                    value: "test-value".into(),
+                }
+            },
+        );
+        let (removed, completed, started) = timeout(Duration::from_secs(10), async {
+            tokio::join!(removal, completion, start)
+        })
+        .await
+        .expect("deletion and admitted start must finish without deadlock");
+        removed.unwrap();
+        completed.unwrap();
+        let started = started.unwrap();
+        assert_eq!(started.is_err(), cancel);
+        assert!(!runtime.mcp_start_diagnostics().await.contains_key(&id));
+        assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .sdk_config
+            .load(TEST_INSTANCE_ID)
+            .mcp
+            .servers
+            .is_empty());
+        assert!(!runtime.sdk_mcp_server_ids().await.contains(&id));
+        runtime.try_shutdown().await.unwrap();
+    }
+}
+
+#[derive(Default)]
+struct RemovalSecretStore {
+    values: tfrobot_client_lib::services::keychain::InMemorySecretStore,
+    deleted: Mutex<Vec<String>>,
+    fail_delete: std::sync::atomic::AtomicBool,
+}
+
+impl SecretStore for RemovalSecretStore {
+    fn set_secret(&self, key: &str, value: &str) -> Result<(), KeychainError> {
+        self.values.set_secret(key, value)
+    }
+    fn get_secret(&self, key: &str) -> Result<Option<String>, KeychainError> {
+        self.values.get_secret(key)
+    }
+    fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(KeychainError::Store("delete unavailable".into()));
+        }
+        self.deleted.lock().unwrap().push(key.to_string());
+        self.values.delete_secret(key)
+    }
+}
+
+#[tokio::test]
+async fn mcp_removal_shutdown_oauth_orphan_cleanup_failure_preserves_retry_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(RemovalSecretStore::default());
+    secrets.fail_delete.store(true, Ordering::SeqCst);
+    let state = create_config_only_state_with_store(tmp.path(), secrets.clone());
+    let instance = ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME);
+    state
+        .config
+        .add_computer_instance(instance.clone())
+        .unwrap();
+    let config = oauth_http_server_config("orphan-oauth", None);
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, &[config])
+        .unwrap();
+    state
+        .computer_registry
+        .upsert_runtime(instance)
+        .await
+        .unwrap();
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.try_shutdown().await.unwrap();
+    state
+        .sdk_config
+        .remove_mcp_config(TEST_INSTANCE_ID, "orphan-oauth")
+        .unwrap();
+    let id = bundle_id("orphan-oauth");
+    assert!(runtime.sdk_mcp_server_ids().await.contains(&id));
+    let generation = runtime.runtime_snapshot().await.generation;
+    let result =
+        sdk_config::remove_computer_mcp_by_bundle_id_core(&state, TEST_INSTANCE_ID, &id).await;
+    assert!(
+        result.is_err(),
+        "OAuth credential deletion failed, but removal reported success"
+    );
+    assert_eq!(runtime.runtime_snapshot().await.generation, generation);
+    assert!(
+        runtime.sdk_mcp_server_ids().await.contains(&id),
+        "failed cleanup must retain the old credential identity for retry"
+    );
+    secrets.fail_delete.store(false, Ordering::SeqCst);
+    sdk_config::remove_computer_mcp_by_bundle_id_core(&state, TEST_INSTANCE_ID, &id)
+        .await
+        .unwrap();
+    assert!(!runtime.sdk_mcp_server_ids().await.contains(&id));
+    runtime.try_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_removal_shutdown_cleans_stored_credentials_for_old_and_current_resources() {
+    use tfrobot_client_lib::services::oauth_credential_store::clear_oauth_credentials_for_config;
+    for orphan in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(RemovalSecretStore::default());
+        let old = oauth_http_server_config("changed-oauth", Some("https://old.example.com/mcp"));
+        let next = oauth_http_server_config("changed-oauth", Some("https://new.example.com/mcp"));
+        let mut credential_keys = Vec::new();
+        // Obtain keys from the real SDK cleanup path, without duplicating its private key hash.
+        // The SDK deletes credential slots before the issuer index; seed the first credential
+        // slot with an opaque envelope, leaving discovery/index state absent.
+        for config in if orphan {
+            vec![old.clone()]
+        } else {
+            vec![old.clone(), next.clone()]
+        } {
+            secrets.deleted.lock().unwrap().clear();
+            clear_oauth_credentials_for_config(TEST_INSTANCE_ID, secrets.clone(), config)
+                .await
+                .unwrap();
+            let key = secrets.deleted.lock().unwrap()[0].clone();
+            secrets
+                .set_secret(&key, "stored-credential-envelope")
+                .unwrap();
+            credential_keys.push(key);
+        }
+        let state = create_config_only_state_with_store(tmp.path(), secrets.clone());
+        let instance = ComputerInstance::new(TEST_INSTANCE_ID, TEST_COMPUTER_NAME);
+        state
+            .config
+            .add_computer_instance(instance.clone())
+            .unwrap();
+        state
+            .sdk_config
+            .upsert_mcp_configs(TEST_INSTANCE_ID, &[old])
+            .unwrap();
+        state
+            .computer_registry
+            .upsert_runtime(instance)
+            .await
+            .unwrap();
+        let runtime = state
+            .computer_registry
+            .runtime(TEST_INSTANCE_ID)
+            .await
+            .unwrap();
+        runtime.try_shutdown().await.unwrap();
+        if orphan {
+            state
+                .sdk_config
+                .remove_mcp_config(TEST_INSTANCE_ID, "changed-oauth")
+                .unwrap();
+        } else {
+            state
+                .sdk_config
+                .upsert_mcp_configs(TEST_INSTANCE_ID, &[next])
+                .unwrap();
+        }
+        for key in &credential_keys {
+            assert!(secrets.get_secret(key).unwrap().is_some());
+        }
+        sdk_config::remove_computer_mcp_by_bundle_id_core(
+            &state,
+            TEST_INSTANCE_ID,
+            &bundle_id("changed-oauth"),
+        )
+        .await
+        .unwrap();
+        for key in &credential_keys {
+            assert!(
+                secrets.get_secret(key).unwrap().is_none(),
+                "deleted OAuth identity retained credentials"
+            );
+        }
+        assert!(state
+            .sdk_config
+            .load(TEST_INSTANCE_ID)
+            .mcp
+            .servers
+            .is_empty());
+        assert!(runtime.sdk_mcp_server_ids().await.is_empty());
+        runtime.try_shutdown().await.unwrap();
     }
 }

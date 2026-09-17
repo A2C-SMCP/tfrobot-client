@@ -44,7 +44,7 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     http = createServer((request, response) => {
       const path = new URL(request.url ?? '/', 'http://localhost').pathname;
       if (request.headers.authorization !== 'Bearer fixture-token') return envelope(response, null, 401);
-      if (request.method === 'POST') { posts++; return envelope(response, { task_id: 'fixture-run' }); }
+      if (request.method === 'POST') { posts++; return envelope(response, failure ? null : { task_id: 'fixture-run' }, failure || 200); }
       if (path.endsWith('/status')) return envelope(response, { working: false, task_id: null });
       if (path.endsWith('/messages')) {
         const id = Number(path.match(/conversations\/(\d+)/)?.[1]);
@@ -106,6 +106,39 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: `Conversation ${id}` }));
   }
 
+  it.each([
+    ['en', 'Server error.', 'Diagnostic details', 'Copy diagnostic', 'Diagnostic copied'],
+    ['zh', '服务器错误。', '诊断详情', '复制诊断信息', '诊断信息已复制'],
+  ])('renders safe error summaries and copies diagnostics in %s', async (language, cause, details, copy, copied) => {
+    expect((await load('42')).ok).toBe(true);
+    failure = 503;
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    try {
+      render(<ChatProvider client={client}><ChatConversationView
+        labels={chatUiLabels((key) => i18n.t(key, { lng: language }))} getDeadlineAt={deadlineAt} /></ChatProvider>);
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Diagnostic draft' } });
+      fireEvent.click(screen.getByRole('button', { name: language === 'zh' ? /发\s*送/ : 'Send' }));
+      expect(await screen.findByText((text) => text.includes(cause), {}, { timeout: 8000 })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: details }));
+      const dialog = await screen.findByRole('dialog', { name: details });
+      fireEvent.click(within(dialog).getByRole('button', { name: copy }));
+      await within(dialog).findByText(copied);
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const exported = writeText.mock.calls[0][0] as string;
+      expect(exported).toContain('503');
+      expect(exported).not.toContain('fixture-token');
+      expect(exported).not.toContain('Fixture failure');
+      writeText.mockRejectedValueOnce(new Error('clipboard denied'));
+      fireEvent.click(within(dialog).getByRole('button', { name: copy }));
+      await within(dialog).findByText(i18n.t('chat.workspace.diagnosticCopyFailed', { lng: language }));
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, 15_000);
+
   it('renders cached A in the actual compact workspace before server completion, then synchronizes', async () => {
     render(<ChatProvider client={client}><CompactChatWorkspace labels={chatUiLabels((key) => i18n.t(key))} /></ChatProvider>);
     await screen.findByText('History 42');
@@ -116,7 +149,8 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     await select(42);
     const response = await pendingResponse;
     await screen.findByText('History 42');
-    expect(screen.getByText('Showing cached conversation. Syncing latest updates…')).toBeInTheDocument();
+    // 0.8.2 delays progress notices by two seconds to avoid flashing on fast loads.
+    expect(await screen.findByText('Showing cached conversation. Syncing latest updates…', {}, { timeout: 4000 })).toBeInTheDocument();
     expect(client.getCacheState()).toMatchObject({ source: 'memory', status: 'syncing' });
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
     expect(screen.queryByRole('navigation', { name: 'Event navigation' })).not.toBeInTheDocument();
@@ -129,15 +163,14 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
   // Real HTTP/Socket.IO and multiple workspace renders need a coverage-run budget.
   }, 15_000);
 
-  it('dismisses a cache notice without changing authority and shows a new failure notice', async () => {
+  it('shows delayed cache status and a sync failure without changing send authority', async () => {
     await seed();
     render(<ChatProvider client={client}><ChatConversationView labels={chatUiLabels((key) => i18n.t(key))} getDeadlineAt={deadlineAt} /></ChatProvider>);
     const response = holdNext();
     let pending!: ReturnType<typeof load>;
     await act(async () => { pending = load('42'); await response; });
-    const notice = screen.getByText('Showing cached conversation. Syncing latest updates…').closest('[role="alert"]')!;
-    fireEvent.click(within(notice as HTMLElement).getByRole('button', { name: 'close' }));
-    expect(screen.queryByText('Showing cached conversation. Syncing latest updates…')).not.toBeInTheDocument();
+    const notice = await screen.findByText('Showing cached conversation. Syncing latest updates…', {}, { timeout: 4000 });
+    expect(notice).toHaveAttribute('role', 'status');
     expect(client.getCacheState().status).toBe('syncing');
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
     await act(async () => { envelope(await response, null, 503); await pending; });

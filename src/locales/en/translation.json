@@ -1,4 +1,20 @@
 {
+  "permissions": {
+    "mcp": "Starting an MCP or signing in may request keychain access for its saved passwords or OAuth credentials. Denying access stops that operation. External tools may request additional permissions for their own features; allow only permissions you expect.",
+    "password": "Saving, changing or deleting a password variable may request system keychain access, including reading the previous value for recovery if saving fails. Denying access leaves the operation unsuccessful; other variables remain available.",
+
+    "title": "Credential access paused",
+    "description": "The system could not access a saved credential. Background attempts for this credential are paused. Allow another attempt, then repeat your original action. Other credentials remain available.",
+    "retry": "Retry credential access",
+    "ready": "Credential access is enabled. Repeat your connection, sign-in or variable action.",
+    "oauth": "MCP sign-in",
+    "input": "Saved password variable",
+    "connection": "Saved sign-in or connection credential",
+    "purpose": "Connecting or signing in may ask to read saved credentials from your system keychain. Denying access stops that action; other features remain available.",
+    "migration": "Older variables need to be imported. This may request keychain access to verify saved passwords. If you decline, existing variables remain available and you can retry here.",
+    "migrate": "Import older variables",
+    "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
+},
   "app": {
     "name": "TFRobot Client",
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
@@ -41,6 +57,7 @@
     "title": "Robot List"
   },
   "chat": {
+    "restoreFailed": "Could not restore or save your last conversation. Retry, or choose a robot and conversation manually.",
     "title": "Chat",
     "context": "Organization: {{organization}}",
     "availableRobots": "{{count}} available",
@@ -120,7 +137,57 @@
       "sending": "Sending",
       "textSendingUnavailable": "Text sending is unavailable.",
       "timelineLabel": "Conversation timeline",
+      "lifecycle": {
+        "connecting": "Connecting…",
+        "joining": "Joining conversation…",
+        "active": "Connected",
+        "reconnecting": "Connection lost. Reconnecting…",
+        "recovering": "Reconnected. Recovering missed updates…",
+        "auth-required": "Sign in again to continue.",
+        "offline": "Chat is offline.",
+        "subscription-failed": "Live updates could not be started."
+      },
       "lifecycleDegraded": "Connected with best-effort history recovery; some transient updates may be missing.",
+      "composerEnterHint": "Enter or Ctrl+Enter to send · Shift+Enter for a new line",
+      "composerCtrlEnterHint": "Enter for a new line · Ctrl+Enter to send",
+      "errorSummary": {
+        "operations": {
+          "unknown": "Chat operation",
+          "sendText": "Send message",
+          "sendMessage": "Send attachments",
+          "interrupt": "Stop run",
+          "answerInteraction": "Submit answer",
+          "uploadAttachment": "Upload attachment",
+          "loadConversation": "Load conversation",
+          "loadHistory": "Load history",
+          "subscribe": "Subscribe to live updates",
+          "cacheStorage": "Save or restore cache"
+        },
+        "causes": {
+          "authentication": "Authentication failed.",
+          "authorization": "Access denied.",
+          "conflict": "The current state conflicts with this operation.",
+          "network": "Network request failed.",
+          "not-found": "The requested content was not found.",
+          "server": "Server error.",
+          "timeout": "The operation timed out.",
+          "unknown": "The cause was not provided.",
+          "unsupported": "This operation is not supported.",
+          "validation": "The input is invalid."
+        },
+        "failed": "The operation did not complete.",
+        "unknownOutcome": "Result unknown. Check conversation history before sending again."
+      },
+      "diagnostics": "Diagnostics",
+      "copyDiagnostic": "Copy diagnostic",
+      "diagnosticCopied": "Diagnostic copied",
+      "diagnosticCopyFailed": "Could not copy diagnostic. Try again.",
+      "diagnosticDetails": "Diagnostic details",
+      "noDiagnostics": "No diagnostics",
+      "activeFaults": "Active faults",
+      "signInAgain": "Sign in again",
+      "recoveredComplete": "Connection restored. Updates recovered.",
+      "recoveredBestEffort": "Connection restored. Some transient updates may be missing.",
       "cacheSyncing": "Showing cached conversation. Syncing latest updates…",
       "cacheStale": "Showing older cached content. Syncing latest updates…",
       "cacheSyncFailed": "Could not sync. Cached content may be out of date.",
@@ -799,7 +866,7 @@
       "updated": "Server saved; restart Runtime to apply changes",
       "enabled": "Server {{name}} saved as enabled; restart Runtime to apply it",
       "disabled": "Server {{name}} saved as disabled; restart Runtime to apply it",
-      "removed": "Server removed; restart Runtime to apply it",
+      "removed": "Server removed",
       "started": "Server {{name}} started",
       "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
@@ -1093,6 +1160,7 @@
       "forbidden": "You do not have permission to access this resource.",
       "payment_required": "Your account is suspended due to unpaid fees. Please renew your subscription.",
       "not_found": "The requested resource was not found.",
+      "chat_unavailable": "This Robot is currently unavailable for chat.",
       "not_found_or_no_permission": "This item is no longer visible to you or your access has changed.",
       "other": "Manager returned an unexpected response.",
       "no_session": "You are not signed in. Please sign in to the Manager first.",
@@ -1127,7 +1195,6 @@
       "environmentRequired": "Environment is required",
       "environments": {
         "staging": "Staging",
-        "beta": "Beta",
         "prod": "Production"
       },
       "identifier": "Phone or email",

@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["page.tsx", "upgrade.ts", "../../src/vite-env.d.ts"]
+}

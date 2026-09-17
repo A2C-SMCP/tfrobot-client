@@ -62,7 +62,15 @@ impl KeychainOAuthCredentialStore {
     }
 
     fn storage_key(&self, key: &OAuthCredentialKey) -> String {
-        oauth_credential_key(self.instance_id.as_ref(), &key.stable_id())
+        let storage_key = oauth_credential_key(self.instance_id.as_ref(), &key.stable_id());
+        self.store.describe(
+            &storage_key,
+            crate::services::keychain::CredentialContext {
+                computer_id: Some(self.instance_id.to_string()),
+                resource_id: key.bundle_id.to_string(),
+            },
+        );
+        storage_key
     }
 }
 

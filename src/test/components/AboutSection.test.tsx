@@ -38,6 +38,7 @@ describe('AboutSection update activity', () => {
     const view = render(tree(true));
     fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
     const confirm = await screen.findByRole('button', { name: 'OK' });
+    expect(screen.getByText(/macOS may ask for administrator authentication/)).toBeInTheDocument();
     view.rerender(tree(false));
     view.rerender(tree(true));
     await waitFor(() => expect(close).toHaveBeenCalledOnce());

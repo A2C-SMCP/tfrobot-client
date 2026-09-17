@@ -63,6 +63,7 @@ export function InputEntryEditor({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {(secret || entry?.secret) && <Alert type="info" showIcon description={t('permissions.password')} />}
       {error && <Alert type="error" showIcon message={error} />}
       <div>
         <Typography.Text>{t('inputs.entry.key')}</Typography.Text>
