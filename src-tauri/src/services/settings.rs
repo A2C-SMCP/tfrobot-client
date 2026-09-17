@@ -297,6 +297,16 @@ impl SettingsService {
             // and require one fresh login instead of reviving ambiguous credentials.
             return Ok(ManagerSessionConfig::default());
         }
+        // Retired environments are a storage migration only, never an IPC alias.
+        // Discard their restore hint before any credential lookup or network request.
+        if matches!(stored_version, Some(2 | 3))
+            && value
+                .pointer("/session/environment")
+                .and_then(serde_json::Value::as_str)
+                == Some("beta")
+        {
+            return Ok(ManagerSessionConfig::default());
+        }
         let mut config: ManagerSessionConfig = serde_json::from_value(value)?;
         if stored_version == Some(2) {
             // Schema v2 is not authenticated context: it has no organization identity. Preserve
@@ -437,7 +447,23 @@ impl SettingsService {
         if !path.exists() {
             return Ok(ChatPreferences::default());
         }
-        let mut preferences: ChatPreferences = serde_json::from_str(&fs::read_to_string(path)?)?;
+        let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        if matches!(
+            value
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(1 | 2)
+        ) {
+            if let Some(entries) = value
+                .get_mut("entries")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                entries.retain(|entry| {
+                    entry.get("environment").and_then(serde_json::Value::as_str) != Some("beta")
+                });
+            }
+        }
+        let mut preferences: ChatPreferences = serde_json::from_value(value)?;
         if preferences.schema_version != 1
             && preferences.schema_version != CHAT_PREFERENCES_SCHEMA_VERSION
         {
@@ -727,7 +753,7 @@ mod tests {
     #[test]
     fn recent_chat_employee_rejects_unsupported_or_corrupt_preferences() {
         let (svc, _tmp) = setup();
-        let context = chat_context(ManagerEnvironment::Beta, "account-a", "organization-1");
+        let context = chat_context(ManagerEnvironment::Prod, "account-a", "organization-1");
         std::fs::create_dir_all(svc.chat_preferences_path().parent().unwrap()).unwrap();
         std::fs::write(
             svc.chat_preferences_path(),
@@ -798,6 +824,58 @@ mod tests {
             svc.load_legacy_for_migration().unwrap_err(),
             ManagerSessionConfigError::Json(_)
         ));
+    }
+
+    #[test]
+    fn retired_beta_session_requires_fresh_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = SettingsService::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(svc.global_manager_session_path().parent().unwrap()).unwrap();
+        for version in [1, 2, 3] {
+            std::fs::write(
+                svc.global_manager_session_path(),
+                serde_json::json!({
+                    "schema_version": version, "session": {"environment": "beta"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                svc.load_global_manager_session().unwrap(),
+                ManagerSessionConfig::default()
+            );
+        }
+        std::fs::write(
+            svc.global_manager_session_path(),
+            r#"{"schema_version":4,"session":{"environment":"beta"}}"#,
+        )
+        .unwrap();
+        assert!(svc.load_global_manager_session().is_err());
+    }
+
+    #[test]
+    fn retired_beta_preferences_do_not_hide_supported_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = SettingsService::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(svc.chat_preferences_path().parent().unwrap()).unwrap();
+        for version in [1, 2] {
+            std::fs::write(svc.chat_preferences_path(), serde_json::json!({
+                "schema_version": version,
+                "entries": [
+                    {"environment":"beta","accountId":"a","organizationId":"org","employeeId":99},
+                    {"environment":"staging","accountId":"a","organizationId":"org","employeeId":42},
+                    {"environment":"prod","accountId":"a","organizationId":"org","employeeId":77}
+                ]
+            }).to_string()).unwrap();
+            let staging = chat_context(ManagerEnvironment::Staging, "a", "org");
+            let prod = chat_context(ManagerEnvironment::Prod, "a", "org");
+            assert_eq!(svc.load_recent_chat_employee(&staging).unwrap(), Some(42));
+            assert_eq!(svc.load_recent_chat_employee(&prod).unwrap(), Some(77));
+            svc.save_recent_chat_employee(&staging, 43).unwrap();
+            assert!(!std::fs::read_to_string(svc.chat_preferences_path())
+                .unwrap()
+                .contains("beta"));
+        }
     }
 
     #[test]

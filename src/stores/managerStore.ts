@@ -61,7 +61,7 @@ export type LoginResult =
   | { kind: 'account_selection_required'; accounts: AccountOption[] }
   | { kind: 'onboarding_required'; userId: string };
 
-export type ManagerEnvironment = 'staging' | 'beta' | 'prod';
+export type ManagerEnvironment = 'staging' | 'prod';
 export type ManagerAuthState =
   | 'signed_out'
   | 'account_selection_required'

@@ -1145,7 +1145,6 @@
       "environmentRequired": "Environment is required",
       "environments": {
         "staging": "Staging",
-        "beta": "Beta",
         "prod": "Production"
       },
       "identifier": "Phone or email",

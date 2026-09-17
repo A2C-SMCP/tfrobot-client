@@ -79,7 +79,7 @@ export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
             rules={[{ required: true, message: t('managerAccount.login.environmentRequired') }]}
           >
             <Select
-              options={(['staging', 'beta', 'prod'] as ManagerEnvironment[]).map((value) => ({
+              options={(['staging', 'prod'] as ManagerEnvironment[]).map((value) => ({
                 value,
                 label: t(`managerAccount.login.environments.${value}`),
               }))}

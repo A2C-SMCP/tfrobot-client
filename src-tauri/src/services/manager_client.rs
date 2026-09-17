@@ -1891,7 +1891,7 @@ mod tests {
     #[tokio::test]
     async fn restore_session_returns_none_without_persisted_jwt() {
         let c = test_manager_client();
-        let restored = c.restore_session(ManagerEnvironment::Beta).await.unwrap();
+        let restored = c.restore_session(ManagerEnvironment::Prod).await.unwrap();
         assert!(!restored);
         assert!(!c.has_session().await);
     }

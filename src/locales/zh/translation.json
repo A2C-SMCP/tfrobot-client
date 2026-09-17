@@ -1145,7 +1145,6 @@
       "environmentRequired": "请选择环境",
       "environments": {
         "staging": "Staging",
-        "beta": "Beta",
         "prod": "正式环境"
       },
       "identifier": "手机号或邮箱",
