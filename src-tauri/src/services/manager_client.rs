@@ -69,6 +69,10 @@ pub enum ManagerError {
     #[error("Not found or no permission (visibility revoked)")]
     NotFoundOrNoPermission,
 
+    /// Robot exists but its current state, type or chat identity cannot support chat.
+    #[error("Robot is unavailable for chat")]
+    ChatUnavailable,
+
     /// 其他 HTTP 非成功状态。
     #[error("HTTP {status}: {body}")]
     Other { status: u16, body: String },
@@ -620,14 +624,28 @@ impl ManagerClient {
         format!("{KEYCHAIN_KEY_PREFIX}{}", &hex[..16])
     }
 
+    fn credential_context(base_url: &str) -> keychain::CredentialContext {
+        let origin = url::Url::parse(base_url)
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or_default();
+        keychain::CredentialContext {
+            computer_id: None,
+            resource_id: format!("Manager ({origin})"),
+        }
+    }
+
     fn save_manager_jwt(&self, base_url: &str, token: &str) -> Result<(), ManagerError> {
         let key = Self::keychain_key(base_url);
+        self.secret_store
+            .describe(&key, Self::credential_context(base_url));
         self.secret_store.set_secret(&key, token)?;
         Ok(())
     }
 
     fn delete_manager_jwt(&self, base_url: &str) -> Result<(), ManagerError> {
         let key = Self::keychain_key(base_url);
+        self.secret_store
+            .describe(&key, Self::credential_context(base_url));
         self.secret_store.delete_secret(&key)?;
         Ok(())
     }
@@ -782,7 +800,9 @@ impl ManagerClient {
         // the restored generation became visible.
         let mut session = self.session.write().await;
         let key = Self::keychain_key(&normalized_base_url);
-        let Some(jwt) = self.secret_store.get_secret(&key)? else {
+        self.secret_store
+            .describe(&key, Self::credential_context(&normalized_base_url));
+        let Some(jwt) = keychain::read_secret_async(self.secret_store.clone(), key).await? else {
             return Ok(false);
         };
         if jwt.trim().is_empty() {
@@ -1871,7 +1891,7 @@ mod tests {
     #[tokio::test]
     async fn restore_session_returns_none_without_persisted_jwt() {
         let c = test_manager_client();
-        let restored = c.restore_session(ManagerEnvironment::Beta).await.unwrap();
+        let restored = c.restore_session(ManagerEnvironment::Prod).await.unwrap();
         assert!(!restored);
         assert!(!c.has_session().await);
     }

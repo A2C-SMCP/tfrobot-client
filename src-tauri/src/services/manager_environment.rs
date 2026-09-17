@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ManagerEnvironment {
     Staging,
-    Beta,
     Prod,
 }
 
@@ -16,14 +15,13 @@ impl ManagerEnvironment {
     pub const fn base_url(self) -> &'static str {
         match self {
             Self::Staging => "https://api-staging.turingfocus.cn",
-            Self::Beta => "https://api-beta.turingfocus.cn",
             Self::Prod => "https://api.turingfocus.cn",
         }
     }
 
     pub fn from_base_url(value: &str) -> Option<Self> {
         let normalized = value.trim().trim_end_matches('/');
-        [Self::Staging, Self::Beta, Self::Prod]
+        [Self::Staging, Self::Prod]
             .into_iter()
             .find(|environment| environment.base_url() == normalized)
     }
@@ -39,9 +37,10 @@ mod tests {
             ManagerEnvironment::Staging.base_url(),
             "https://api-staging.turingfocus.cn"
         );
+        assert!(serde_json::from_str::<ManagerEnvironment>(r#""beta""#).is_err());
         assert_eq!(
-            ManagerEnvironment::Beta.base_url(),
-            "https://api-beta.turingfocus.cn"
+            ManagerEnvironment::from_base_url("https://api-beta.turingfocus.cn"),
+            None
         );
         assert_eq!(
             ManagerEnvironment::Prod.base_url(),

@@ -15,6 +15,12 @@ fn chat_get_recent_robot() -> u32 {
 #[tauri::command]
 fn chat_remember_robot() {}
 #[tauri::command]
+fn chat_get_recent_conversation() -> Option<String> {
+    None
+}
+#[tauri::command]
+fn chat_remember_conversation() {}
+#[tauri::command]
 fn chat_close_session() {}
 #[tauri::command]
 fn chat_get_session_token() -> Value {
@@ -47,6 +53,8 @@ fn main() {
             chat_open_session,
             chat_get_recent_robot,
             chat_remember_robot,
+            chat_get_recent_conversation,
+            chat_remember_conversation,
             chat_close_session,
             chat_get_session_token,
             chat_http_request

@@ -315,6 +315,11 @@ async fn start_mcp_server_core_with_mode(
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     let started = std::time::Instant::now();
+    let permission_operation_id = uuid::Uuid::new_v4();
+    tracing::info!(target: "permission_diagnostics", event = "mcp.start_requested",
+        operation_id = %permission_operation_id, computer_id = %instance_id,
+        bundle_id = %bundle_id, client_pid = std::process::id(),
+        "MCP start requested; correlate this action with OS process evidence");
     let operation_guard = state.computer_registry.operation_lease(instance_id).await;
     log::info!(
         "Starting MCP server for instance {}: {}",
@@ -365,6 +370,12 @@ async fn start_mcp_server_core_with_mode(
         Ok::<_, RuntimeActionError>(server_name)
     }
     .await;
+
+    tracing::info!(target: "permission_diagnostics", event = "mcp.start_finished",
+        operation_id = %permission_operation_id, computer_id = %instance_id,
+        bundle_id = %bundle_id, client_pid = std::process::id(), succeeded = result.is_ok(),
+        duration_ms = started.elapsed().as_millis() as u64,
+        "MCP start finished");
 
     match &result {
         Ok(server_name) => {

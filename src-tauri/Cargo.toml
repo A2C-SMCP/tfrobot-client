@@ -70,6 +70,8 @@ futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+serde-value = "0.7"
+serde_path_to_error = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -88,7 +90,17 @@ tower = { version = "0.5", features = ["util"] }
 name = "benchmarks"
 harness = false
 
+[[example]]
+name = "chat_restoration_acceptance"
+required-features = ["chat-restoration-acceptance"]
+
+[[example]]
+name = "marketplace_ipc_acceptance"
+required-features = ["marketplace-ipc-acceptance"]
+
 [features]
+marketplace-ipc-acceptance = []
+chat-restoration-acceptance = []
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 

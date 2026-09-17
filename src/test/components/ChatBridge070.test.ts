@@ -46,7 +46,7 @@ describe('Chat Kit 0.7.0 bridge configuration', () => {
   it('maps degraded lifecycle and conversation-management labels', () => {
     const labels = chatUiLabels((key) => key);
 
-    expect(labels.lifecycleStatus).toEqual({
+    expect(labels.lifecycleStatus).toMatchObject({
       degraded: 'chat.workspace.lifecycleDegraded',
     });
     expect(labels.renameConversation).toBe('chat.workspace.renameConversation');

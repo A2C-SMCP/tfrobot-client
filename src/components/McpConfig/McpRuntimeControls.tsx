@@ -227,6 +227,7 @@ export function McpRuntimeControls({
         </Space>
       </div>
 
+      <Alert type="info" showIcon description={t('permissions.mcp')} style={{ marginBottom: 16 }} />
       {error && (
         <Alert
           message={t('common.error')}

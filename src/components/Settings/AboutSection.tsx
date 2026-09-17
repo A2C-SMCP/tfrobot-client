@@ -62,7 +62,7 @@ export function AboutSection() {
         const releaseOnce = () => { if (!released) { released = true; release(); } };
         const confirmation = modal.confirm({
           title: t('settings.updateAvailable'),
-          content: `${t('settings.newVersion')}: ${update.version}`,
+          content: `${t('settings.newVersion')}: ${update.version}. ${t('permissions.update')}`,
           onCancel: () => { releaseOnce(); pendingConfirmation.current = null; },
           onOk: async () => {
             if (!current() || started) return;

@@ -7,6 +7,7 @@ pub mod computer;
 pub mod computer_runtime;
 pub mod config_io;
 pub mod connection;
+pub mod credentials;
 pub mod dashboard;
 pub mod debug;
 pub mod desktop;

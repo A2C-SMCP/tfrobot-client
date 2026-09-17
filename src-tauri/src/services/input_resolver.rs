@@ -229,6 +229,7 @@ impl RuntimeInputResolver {
         }
         let entry = self
             .entries
+            .for_operation()
             .resolve_entry_state(definition.id(), InputEntryStorageKind::Value)
             .map_err(|error| resolver_failed(definition.id(), error))?;
         if let Some(entry) = entry {
@@ -282,6 +283,7 @@ impl RuntimeInputResolver {
     ) -> Result<Option<String>, InputResolutionError> {
         let entry = self
             .entries
+            .for_operation()
             .resolve_entry_state(definition.id(), InputEntryStorageKind::Secret)
             .map_err(|error| resolver_failed(definition.id(), error))?;
         if let Some(entry) = entry.filter(|entry| entry.storage_kind.is_secret()) {

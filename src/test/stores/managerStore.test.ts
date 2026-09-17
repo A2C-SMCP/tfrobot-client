@@ -78,7 +78,7 @@ function accountSelectionContext(revision: number): ManagerContextSnapshot {
   return {
     ...signedOutContext(revision),
     authState: 'account_selection_required',
-    environment: 'beta',
+    environment: 'prod',
   };
 }
 
@@ -183,7 +183,7 @@ describe('managerStore authoritative Context', () => {
       .mockResolvedValueOnce({ kind: 'account_selection_required', accounts } satisfies LoginResult)
       .mockResolvedValueOnce(accountSelectionContext(1));
 
-    await useManagerStore.getState().login('beta', 'user@example.com', 'secret');
+    await useManagerStore.getState().login('prod', 'user@example.com', 'secret');
     expect(useManagerStore.getState().pendingAccountSelection).toEqual(accounts);
 
     useManagerStore.getState().applyContext(authenticatedContext(2, 'account-b', 'organization-b'));

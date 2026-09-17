@@ -1022,6 +1022,9 @@ pub struct ComputerInstanceRuntime {
     connection_operation: Arc<RwLock<ClientConnectionOperationState>>,
     connection_authority_revision: Arc<AtomicU64>,
     lifecycle_lock: Arc<Mutex<()>>,
+    // SDK lifecycle locks end before client diagnostics are observed. These per-bundle leases
+    // extend the start boundary through observation without serializing unrelated MCP starts.
+    mcp_start_observation_locks: Arc<std::sync::Mutex<HashMap<BundleId, Weak<Mutex<()>>>>>,
     retired: Arc<AtomicBool>,
     active_operations: Arc<AtomicUsize>,
     activity_changed: Arc<Notify>,
@@ -1153,6 +1156,7 @@ impl ComputerInstanceRuntime {
             connection_operation: Arc::new(RwLock::new(ClientConnectionOperationState::default())),
             connection_authority_revision: Arc::new(AtomicU64::new(0)),
             lifecycle_lock: Arc::new(Mutex::new(())),
+            mcp_start_observation_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             retired: Arc::new(AtomicBool::new(false)),
             active_operations: Arc::new(AtomicUsize::new(0)),
             activity_changed: Arc::new(Notify::new()),
@@ -1201,6 +1205,7 @@ impl ComputerInstanceRuntime {
             connection_operation: self.connection_operation.clone(),
             connection_authority_revision: self.connection_authority_revision.clone(),
             lifecycle_lock: self.lifecycle_lock.clone(),
+            mcp_start_observation_locks: self.mcp_start_observation_locks.clone(),
             retired: self.retired.clone(),
             active_operations: self.active_operations.clone(),
             activity_changed: self.activity_changed.clone(),
@@ -1750,28 +1755,46 @@ impl ComputerInstanceRuntime {
         }
     }
 
+    /// Unmount only this user server. Persistence belongs to the command transaction; removal
+    /// must not reconcile or start the remaining inventory (including deliberately stopped MCPs).
     pub async fn remove_user_mcp_server_config(&self, bundle_id: &BundleId) -> Result<(), String> {
         let _guard = self.lifecycle_lock.lock().await;
-        let oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
+        let _start_guard = self.mcp_start_observation_lease(bundle_id).await;
         self.ensure_active()?;
-        self.clear_oauth_authorization_inner(bundle_id).await?;
-        let computer_running = self.is_running().await;
-        let server_started = self
-            .computer
-            .read()
-            .await
-            .get_server_runtime_statuses()
-            .await
-            .into_iter()
-            .any(|status| status.bundle_id == *bundle_id && status.is_started());
-        if server_started {
-            self.computer
-                .read()
-                .await
-                .stop_mcp_client(bundle_id)
-                .await
-                .map_err(|error| error.to_string())?;
+        if is_reserved_built_in_bundle_id(bundle_id.as_str()) {
+            return Err("reserved built-in providers are not user-manageable".to_string());
         }
+        if self
+            .plugin_mcp_server_owner_inner(bundle_id)
+            .await
+            .is_some()
+            || self.has_tracked_plugin_mcp_server(bundle_id).await
+        {
+            return Err(format!(
+                "MCP server '{bundle_id}' is managed by a Marketplace plugin"
+            ));
+        }
+        // Shutdown is terminal in the SDK. Rebuild a dormant handle before editing its
+        // declarations; no MCP is started and no SMCP connection is established.
+        if self.shutdown_completed.load(Ordering::Acquire) {
+            // The old handle is the only source of orphan/previous-resource OAuth identity.
+            if let Some(config) = self.sdk_mcp_server_config_map().await.remove(bundle_id) {
+                self.clear_oauth_for_server_config(config).await?;
+            }
+            Box::pin(self.replace_sdk_computer(
+                false,
+                "user MCP removal",
+                RuntimeMcpStartFailurePolicy::BestEffort,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
+        self.clear_oauth_authorization_inner(bundle_id).await?;
+        self.cancel_oauth_before_server_lifecycle_change(bundle_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        // SDK unmount serializes with in-flight starts and stops/removes the manager entry.
         self.computer
             .read()
             .await
@@ -1781,18 +1804,6 @@ impl ComputerInstanceRuntime {
         self.sdk_servers.write().await.remove(bundle_id);
         self.clear_mcp_start_diagnostic(bundle_id).await;
         self.clear_mcp_config_apply_diagnostic(bundle_id).await;
-        // The old SDK server no longer exists. Reconciliation hooks fence each subsequent
-        // server-local mount/unmount independently, so do not retain this non-reentrant guard
-        // while invoking them.
-        drop(oauth_server_guard);
-
-        self.reconcile_sdk_governance_inner()
-            .await
-            .map_err(|error| error.to_string())?;
-        if computer_running {
-            let failures = self.start_desired_mcp_servers_inner().await;
-            self.log_mcp_start_failures(&failures, "user MCP removal");
-        }
         Ok(())
     }
 
@@ -1845,7 +1856,8 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn mcp_server_display_name(&self, bundle_id: &BundleId) -> Option<ServerName> {
-        self.sdk_mcp_server_ownership()
+        // Resource reads also address built-in servers hidden from the management inventory.
+        self.sdk_mcp_server_runtime_ownership()
             .await
             .into_iter()
             .find(|entry| entry.bundle_id == bundle_id.as_str())
@@ -2047,6 +2059,12 @@ impl ComputerInstanceRuntime {
             starts,
             restarts,
         } = prepared;
+        // Stable acquisition order prevents overlapping batches from deadlocking.
+        let ids: std::collections::BTreeSet<_> = starts.iter().chain(restarts.iter()).collect();
+        let mut _start_guards = Vec::with_capacity(ids.len());
+        for id in ids {
+            _start_guards.push(self.mcp_start_observation_lease(id).await);
+        }
         let mut outcomes = HashMap::new();
         let computer = self.computer.read().await;
         let start_future = async {
@@ -2099,6 +2117,7 @@ impl ComputerInstanceRuntime {
         operation: &McpServerStartOperation,
     ) -> ComputerResult<()> {
         let bundle_id = operation.bundle_id();
+        let _start_guard = self.mcp_start_observation_lease(bundle_id).await;
         let computer = self.computer.read().await;
         let result = match operation {
             McpServerStartOperation::Start(_) => computer.start_mcp_client(bundle_id).await,
@@ -2188,9 +2207,42 @@ impl ComputerInstanceRuntime {
         }
     }
 
+    async fn mcp_start_observation_lease(&self, bundle_id: &BundleId) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .mcp_start_observation_locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(bundle_id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(bundle_id.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
     async fn record_mcp_start_diagnostic(&self, bundle_id: BundleId, message: String) {
         let operation = "start";
         let mut diagnostics = self.mcp_start_diagnostics.write().await;
+        // A prepared start can be overtaken by deletion before execution acquires its lease.
+        // Do not create diagnostics for that absent server. Holding the diagnostic write lock
+        // makes this check+insert atomic relative to removal's final diagnostic cleanup.
+        if !self
+            .computer
+            .read()
+            .await
+            .list_mcp_servers()
+            .await
+            .iter()
+            .any(|config| resolve_bundle_id(config) == bundle_id)
+        {
+            return;
+        }
         let diagnostic = RuntimeDiagnosticRecord::new(operation, message)
             .preserve_occurrence_from(diagnostics.get(&bundle_id));
         diagnostics.insert(bundle_id.clone(), diagnostic);
@@ -3802,6 +3854,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_removal_waits_for_delayed_failed_start_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ComputerInstanceRuntime::new(
+            instance("late-start", "Late start"),
+            temp.path().to_path_buf(),
+        );
+        runtime.start().await.unwrap();
+        let config = server_config("late-start-server");
+        let id = resolve_bundle_id(&config);
+        runtime
+            .computer
+            .read()
+            .await
+            .mount_server(config)
+            .await
+            .unwrap();
+        // Hold the same lease as execute_mcp_server_start_operation at its post-SDK boundary.
+        let observation_guard = runtime.mcp_start_observation_lease(&id).await;
+        let late_observation = async {
+            let result = runtime
+                .observe_mcp_server_start_result(
+                    &id,
+                    Err(ComputerError::ConnectionError(
+                        "delayed start failure".into(),
+                    )),
+                )
+                .await;
+            assert!(result.is_err());
+            drop(observation_guard);
+        };
+        let (removed, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(runtime.remove_user_mcp_server_config(&id), late_observation)
+        })
+        .await
+        .unwrap();
+        removed.unwrap();
+        assert!(!runtime.mcp_start_diagnostics().await.contains_key(&id));
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_removal_overtaking_prepared_start_does_not_recreate_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ComputerInstanceRuntime::new(
+            instance("prepared-start", "Prepared start"),
+            temp.path().to_path_buf(),
+        );
+        runtime.start().await.unwrap();
+        let config = server_config("prepared-start-server");
+        let id = resolve_bundle_id(&config);
+        let operation = runtime
+            .prepare_user_mcp_server_with_latest_config(UserMcpServerStartRequest {
+                config,
+                input_definitions: Vec::new(),
+                operation: McpServerStartOperation::Start(id.clone()),
+            })
+            .await
+            .unwrap();
+        runtime.remove_user_mcp_server_config(&id).await.unwrap();
+        assert!(runtime
+            .execute_prepared_user_mcp_server_start(operation)
+            .await
+            .is_err());
+        assert!(!runtime.sdk_mcp_server_ids().await.contains(&id));
+        assert!(!runtime.mcp_start_diagnostics().await.contains_key(&id));
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_plugin_server_unmount_preserves_tracking_for_retry() {
         let bundle_id = BundleId::try_from("plugin-mcp").unwrap();
         let sdk_servers = Arc::new(RwLock::new(HashMap::from([(
@@ -4290,6 +4411,13 @@ mod tests {
         );
         runtime.start().await.unwrap();
         let bundle_id = BundleId::try_from("server-a").unwrap();
+        runtime
+            .computer
+            .read()
+            .await
+            .mount_server(server_config("server-a"))
+            .await
+            .unwrap();
         runtime
             .sdk_servers
             .write()

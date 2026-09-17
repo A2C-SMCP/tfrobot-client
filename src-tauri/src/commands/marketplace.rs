@@ -70,7 +70,11 @@ pub struct MarketplaceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum MarketplaceSourceSummary {
     /// Sanitized URL returned by the SDK for presentation only.
     ///
@@ -134,7 +138,11 @@ pub struct UpdateMarketplaceRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum MarketplaceSource {
     RemoteGit { git_url: String },
     LocalGit { path: String },
@@ -1539,6 +1547,64 @@ mod tests {
     use crate::services::settings::SettingsService;
 
     const TEST_INSTANCE_ID: &str = "computer-a";
+
+    // Payloads match MarketplaceTab -> skillStore -> invoke, including nested enum fields.
+    #[test]
+    fn marketplace_ipc_requests_accept_frontend_sources() {
+        for source in [
+            serde_json::json!({"type": "remoteGit", "gitUrl": "https://example.com/market.git"}),
+            serde_json::json!({"type": "localGit", "path": "/tmp/market"}),
+        ] {
+            let payload = serde_json::json!({"name": "market", "source": source});
+            let add: AddMarketplaceRequest = serde_json::from_value(payload.clone()).unwrap();
+            let update: UpdateMarketplaceRequest = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(add.source, update.source);
+            assert_eq!(serde_json::to_value(add).unwrap(), payload);
+            assert_eq!(serde_json::to_value(update).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn marketplace_ipc_summary_uses_frontend_field_names() {
+        for (source, expected) in [
+            (
+                MarketplaceSourceSummary::RemoteGit {
+                    display_git_url: Some("https://example.com/market.git".into()),
+                },
+                serde_json::json!({"type": "remoteGit", "displayGitUrl": "https://example.com/market.git"}),
+            ),
+            (
+                MarketplaceSourceSummary::RemoteGit {
+                    display_git_url: None,
+                },
+                serde_json::json!({"type": "remoteGit", "displayGitUrl": null}),
+            ),
+            (
+                MarketplaceSourceSummary::LocalGit {
+                    path: "/tmp/market".into(),
+                },
+                serde_json::json!({"type": "localGit", "path": "/tmp/market"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&source).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<MarketplaceSourceSummary>(expected).unwrap(),
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn marketplace_ipc_requests_reject_missing_source_fields() {
+        for source in [
+            serde_json::json!({"type": "remoteGit"}),
+            serde_json::json!({"type": "localGit"}),
+        ] {
+            let payload = serde_json::json!({"name": "market", "source": source});
+            assert!(serde_json::from_value::<AddMarketplaceRequest>(payload.clone()).is_err());
+            assert!(serde_json::from_value::<UpdateMarketplaceRequest>(payload).is_err());
+        }
+    }
 
     fn audit_bundle_id() -> BundleId {
         BundleId::try_from("audit-mcp").unwrap()

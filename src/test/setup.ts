@@ -46,10 +46,10 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
 
 // Mock Tauri log plugin
 vi.mock('@tauri-apps/plugin-log', () => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
+  info: vi.fn().mockResolvedValue(undefined),
+  warn: vi.fn().mockResolvedValue(undefined),
+  error: vi.fn().mockResolvedValue(undefined),
+  debug: vi.fn().mockResolvedValue(undefined),
   attachConsole: vi.fn(() => Promise.resolve()),
 }));
 

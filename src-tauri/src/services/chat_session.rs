@@ -118,6 +118,7 @@ impl CachedToken {
 struct ChatLease {
     target: ResolvedChatTarget,
     selection_revision: u64,
+    conversation_revision: u64,
     token: Option<CachedToken>,
     cancelled: watch::Sender<bool>,
 }
@@ -191,7 +192,9 @@ impl ChatSessionService {
             Ok(employee_id) => Ok(employee_id),
             Err(error) => {
                 log::warn!("failed to load recent chat Robot preference: {error}");
-                Ok(None)
+                Err(ManagerError::InvalidResponse(
+                    "Chat preference could not be read".into(),
+                ))
             }
         }
     }
@@ -210,11 +213,10 @@ impl ChatSessionService {
             .list_digital_employees_for_generation(manager_generation)
             .await?;
         let employee = resolve_chat_employee(employees, employee_id)?;
-        let robot_account_id = employee.robot_account_id.clone().ok_or_else(|| {
-            ManagerError::InvalidResponse(format!(
-                "robotAccountId missing for chat employee {employee_id}"
-            ))
-        })?;
+        let robot_account_id = employee
+            .robot_account_id
+            .clone()
+            .ok_or(ManagerError::ChatUnavailable)?;
         let connection_info = manager
             .get_connection_info_for_generation(manager_generation, employee_id)
             .await?;
@@ -251,6 +253,7 @@ impl ChatSessionService {
         let committed_lease = Arc::new(Mutex::new(ChatLease {
             target,
             selection_revision,
+            conversation_revision: 0,
             token: Some(CachedToken::new(exchanged)),
             cancelled: watch::channel(false).0,
         }));
@@ -283,10 +286,100 @@ impl ChatSessionService {
         manager
             .commit_for_authenticated_generation(target_generation, || async move {
                 self.validate_active_lease(lease_id, &lease, &target_context, selection_revision)
-                    .await
+                    .await?;
+                self.save_recent_preference(target).await
             })
+            .await
+    }
+
+    pub async fn recent_conversation(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<String>, ManagerError> {
+        let lease = self.lease(lease_id).await?;
+        let (target, revision) = {
+            let current = lease.lock().await;
+            (current.target.clone(), current.selection_revision)
+        };
+        self.manager()?
+            .commit_for_authenticated_generation(target.manager_generation, || async {
+                self.validate_active_lease(lease_id, &lease, &target.context_key, revision)
+                    .await?;
+                self.settings
+                    .as_ref()
+                    .map(|settings| {
+                        settings
+                            .load_recent_chat_conversation(&target.context_key, target.employee_id)
+                            .map_err(|_| {
+                                ManagerError::InvalidResponse(
+                                    "Chat preference could not be read".into(),
+                                )
+                            })
+                    })
+                    .unwrap_or(Ok(None))
+            })
+            .await
+    }
+
+    pub async fn remember_conversation(
+        &self,
+        lease_id: &str,
+        conversation_id: &str,
+        revision: u64,
+    ) -> Result<(), ManagerError> {
+        if conversation_id.is_empty() || conversation_id.len() > 1024 {
+            return Err(ManagerError::InvalidResponse(
+                "Invalid conversation ID".into(),
+            ));
+        }
+        let lease = self.lease(lease_id).await?;
+        let (target, selection_revision) = {
+            let current = lease.lock().await;
+            (current.target.clone(), current.selection_revision)
+        };
+        let _write = self.preference_write.lock().await;
+        self.manager()?
+            .commit_for_authenticated_generation(target.manager_generation, || async {
+                self.commit_conversation_preference(
+                    lease_id,
+                    &lease,
+                    &target,
+                    selection_revision,
+                    conversation_id,
+                    revision,
+                )
+                .await
+            })
+            .await
+    }
+
+    async fn commit_conversation_preference(
+        &self,
+        lease_id: &str,
+        lease: &Arc<Mutex<ChatLease>>,
+        target: &ResolvedChatTarget,
+        selection_revision: u64,
+        conversation_id: &str,
+        revision: u64,
+    ) -> Result<(), ManagerError> {
+        self.validate_active_lease(lease_id, lease, &target.context_key, selection_revision)
             .await?;
-        self.save_recent_preference(target).await;
+        let mut current = lease.lock().await;
+        if revision < current.conversation_revision {
+            return Err(ManagerError::ContextChanged);
+        }
+        current.conversation_revision = revision;
+        if let Some(settings) = &self.settings {
+            settings
+                .save_recent_chat_conversation(
+                    &target.context_key,
+                    target.employee_id,
+                    conversation_id,
+                )
+                .map_err(|_| {
+                    ManagerError::InvalidResponse("Chat preference could not be saved".into())
+                })?;
+        }
         Ok(())
     }
 
@@ -316,24 +409,18 @@ impl ChatSessionService {
         Ok(())
     }
 
-    async fn save_recent_preference(&self, target: ResolvedChatTarget) {
+    async fn save_recent_preference(&self, target: ResolvedChatTarget) -> Result<(), ManagerError> {
         if let Some(settings) = self.settings.clone() {
-            let context = target.context_key;
-            let employee_id = target.employee_id;
-            match tokio::task::spawn_blocking(move || {
-                settings.save_recent_chat_employee(&context, employee_id)
+            tokio::task::spawn_blocking(move || {
+                settings.save_recent_chat_employee(&target.context_key, target.employee_id)
             })
             .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    log::warn!("failed to save recent chat Robot preference: {error}");
-                }
-                Err(error) => {
-                    log::warn!("failed to join recent chat Robot preference save: {error}");
-                }
-            }
+            .map_err(|_| ManagerError::InvalidResponse("Chat preference save task failed".into()))?
+            .map_err(|_| {
+                ManagerError::InvalidResponse("Chat preference could not be saved".into())
+            })?;
         }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -346,8 +433,7 @@ impl ChatSessionService {
         let _preference_write = self.preference_write.lock().await;
         self.validate_active_lease(lease_id, &lease, &target.context_key, selection_revision)
             .await?;
-        self.save_recent_preference(target).await;
-        Ok(())
+        self.save_recent_preference(target).await
     }
 
     async fn activate_selection(
@@ -673,18 +759,21 @@ fn resolve_chat_employee(
         .find(|employee| employee.id == employee_id)
         .ok_or(ManagerError::NotFoundOrNoPermission)?;
     if employee.status.as_deref().unwrap_or("running") != "running" {
-        return Err(ManagerError::InvalidResponse(format!(
-            "chat employee {employee_id} is not running"
-        )));
+        return Err(ManagerError::ChatUnavailable);
     }
     if employee
         .template_type
         .as_deref()
         .is_some_and(|template_type| template_type != "tfrserver")
     {
-        return Err(ManagerError::InvalidResponse(format!(
-            "chat employee {employee_id} does not expose the TFRobotServer chat API"
-        )));
+        return Err(ManagerError::ChatUnavailable);
+    }
+    if employee
+        .robot_account_id
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        return Err(ManagerError::ChatUnavailable);
     }
     Ok(employee)
 }
@@ -910,6 +999,7 @@ mod tests {
             Arc::new(Mutex::new(ChatLease {
                 target,
                 selection_revision,
+                conversation_revision: 0,
                 token: Some(CachedToken::new(ExchangedToken {
                     access_token: "short-chat-token".into(),
                     token_type: "Bearer".into(),
@@ -934,6 +1024,24 @@ mod tests {
             resolve_chat_employee(vec![employee(Some("running"), Some("tfropenclaw"))], 42)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unavailable_chat_robots_have_a_distinct_fallback_error() {
+        let mut missing_identity = employee(Some("running"), Some("tfrserver"));
+        missing_identity.robot_account_id = None;
+        for unavailable in [
+            employee(Some("stopped"), Some("tfrserver")),
+            employee(Some("running"), Some("tfropenclaw")),
+            missing_identity,
+        ] {
+            let error = resolve_chat_employee(vec![unavailable], 42).unwrap_err();
+            assert!(matches!(error, ManagerError::ChatUnavailable));
+            assert_eq!(
+                serde_json::to_value(error).unwrap(),
+                serde_json::json!({"kind":"chat_unavailable"})
+            );
+        }
     }
 
     #[test]
@@ -1048,6 +1156,54 @@ mod tests {
 
         assert!(service.lease("lease-a").await.is_err());
         assert!(service.lease("lease-b").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn conversation_preferences_reject_stale_writes_and_closed_leases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsService::new(tmp.path().to_path_buf()));
+        let service = ChatSessionService::new_with_settings(Weak::new(), settings.clone());
+        let context = context("account-a");
+        let target = test_target(
+            Url::parse("https://robot.example/").unwrap(),
+            context.clone(),
+        );
+        insert_test_lease(&service, "current", target.clone(), 10).await;
+        service
+            .activate_selection(context.clone(), 10, "current".into())
+            .await;
+        let lease = service.lease("current").await.unwrap();
+        service
+            .commit_conversation_preference("current", &lease, &target, 10, "latest", 20)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .commit_conversation_preference("current", &lease, &target, 10, "old", 19)
+                .await,
+            Err(ManagerError::ContextChanged)
+        ));
+        assert_eq!(
+            settings
+                .load_recent_chat_conversation(&context, target.employee_id)
+                .unwrap()
+                .as_deref(),
+            Some("latest")
+        );
+        service.close("current").await;
+        assert!(matches!(
+            service
+                .commit_conversation_preference("current", &lease, &target, 10, "closed", 21)
+                .await,
+            Err(ManagerError::ContextChanged)
+        ));
+        assert_eq!(
+            settings
+                .load_recent_chat_conversation(&context, target.employee_id)
+                .unwrap()
+                .as_deref(),
+            Some("latest")
+        );
     }
 
     #[tokio::test]

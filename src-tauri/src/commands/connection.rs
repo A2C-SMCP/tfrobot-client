@@ -186,6 +186,13 @@ pub async fn save_manual_smcp_target_core(
     let mut target = normalize_manual_smcp_target(target);
     target.id = stable_or_existing_manual_target_id(&target.id, &target);
     let credential_key = manual_target_keychain_id(&target.id);
+    state.secret_store.describe(
+        &credential_key,
+        crate::services::keychain::CredentialContext {
+            computer_id: None,
+            resource_id: target.name.clone(),
+        },
+    );
     let secret_update = match api_key_action.unwrap_or_default() {
         ManualSmcpApiKeyAction::Unchanged => None,
         ManualSmcpApiKeyAction::Set { value } if !value.trim().is_empty() => {
@@ -254,7 +261,18 @@ pub async fn delete_manual_smcp_target_core(
         }
     }
 
+    let target = state
+        .config
+        .get_manual_smcp_target(target_id)
+        .map_err(|error| error.to_string())?;
     let credential_key = manual_target_keychain_id(target_id);
+    state.secret_store.describe(
+        &credential_key,
+        crate::services::keychain::CredentialContext {
+            computer_id: None,
+            resource_id: target.name,
+        },
+    );
     let previous_secret = state
         .secret_store
         .get_secret(&credential_key)
@@ -444,10 +462,6 @@ async fn connect_connection_target_with_policy_inner_impl(
         .config
         .get_manual_smcp_target(target_id)
         .map_err(|e| e.to_string())?;
-    let api_key = state
-        .secret_store
-        .get_secret(&manual_target_keychain_id(&target.id))
-        .map_err(|e| e.to_string())?;
     let runtime = state
         .computer_registry
         .runtime(&instance_id)
@@ -461,6 +475,19 @@ async fn connect_connection_target_with_policy_inner_impl(
     ) {
         return Ok(());
     }
+    state.secret_store.describe(
+        &manual_target_keychain_id(&target.id),
+        crate::services::keychain::CredentialContext {
+            computer_id: None,
+            resource_id: target.name.clone(),
+        },
+    );
+    let api_key = crate::services::keychain::read_secret_async(
+        state.secret_store.clone(),
+        manual_target_keychain_id(&target.id),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let operation_token = begin_connect_operation_locked(
         &runtime,
         ClientConnectionOperationTarget {
@@ -648,10 +675,12 @@ async fn commit_manual_connection_target(
             expected_target.id
         ));
     }
-    let current_api_key = state
-        .secret_store
-        .get_secret(&manual_target_keychain_id(&expected_target.id))
-        .map_err(|error| error.to_string())?;
+    let current_api_key = crate::services::keychain::read_secret_async(
+        state.secret_store.clone(),
+        manual_target_keychain_id(&expected_target.id),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if current_api_key.as_deref() != expected_api_key {
         return Err(format!(
             "Manual SMCP target {} credentials changed while the connection was being established",

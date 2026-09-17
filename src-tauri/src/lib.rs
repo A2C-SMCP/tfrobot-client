@@ -168,7 +168,6 @@ impl AppState {
             config.as_ref(),
             sdk_config.as_ref(),
             settings_service.as_ref(),
-            secret_store.as_ref(),
         );
         match legacy_migration {
             Ok(MigrationOutcome::Completed) => {
@@ -478,6 +477,11 @@ pub fn run() {
             }
         }))
         .setup(|app| {
+            let credential_app = app.handle().clone();
+            services::keychain::set_access_listener(Arc::new(move || {
+                use tauri::Emitter;
+                let _ = credential_app.emit("credentials:access-changed", ());
+            }));
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -631,7 +635,11 @@ pub fn run() {
             commands::inputs::remove_input,
             commands::inputs::list_input_reference_issues,
             commands::inputs::list_input_values,
+            commands::credentials::list_paused_credentials,
+            commands::credentials::retry_credential_access,
             commands::inputs::list_input_entries,
+            commands::inputs::input_migration_pending,
+            commands::inputs::migrate_input_entries,
             commands::inputs::upsert_input_entry,
             commands::inputs::delete_input_entry,
             commands::inputs::get_input_value,
@@ -714,6 +722,8 @@ pub fn run() {
             commands::chat::chat_open_session,
             commands::chat::chat_get_recent_robot,
             commands::chat::chat_remember_robot,
+            commands::chat::chat_get_recent_conversation,
+            commands::chat::chat_remember_conversation,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,
             commands::chat::chat_http_request,

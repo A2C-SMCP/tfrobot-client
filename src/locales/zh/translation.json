@@ -1,4 +1,20 @@
 {
+  "permissions": {
+    "mcp": "启动 MCP 或登录时，可能请求钥匙串授权以访问其密码或 OAuth 凭据。拒绝授权会停止当前操作。外部工具也可能为自身功能请求额外权限，请仅允许符合预期用途的权限。",
+    "password": "保存、修改或删除密码变量可能请求系统钥匙串授权，包括读取旧值以便保存失败时恢复。拒绝授权会使当前操作失败，其他变量仍可使用。",
+
+    "title": "凭据访问已暂停",
+    "description": "系统未能访问一条已保存的凭据，已暂停该条目的后台尝试。允许再次访问后，请重新执行原操作；其他凭据仍可使用。",
+    "retry": "重试凭据访问",
+    "ready": "已允许再次访问，请重新执行连接、登录或变量操作。",
+    "oauth": "MCP 登录",
+    "input": "已保存的密码变量",
+    "connection": "已保存的登录或连接凭据",
+    "purpose": "连接或登录可能请求从系统钥匙串读取已保存的凭据。拒绝授权会停止当前操作，其他功能仍可使用。",
+    "migration": "旧变量需要导入，可能请求钥匙串授权以核验已保存的密码。拒绝后仍可使用现有变量，也可在此重试导入。",
+    "migrate": "导入旧变量",
+    "update": "安装更新将替换应用；如果应用所在位置需要更高权限，macOS 可能请求管理员认证。"
+},
   "app": {
     "name": "TFRobot 客户端",
     "runtimeEventsUnavailable": "运行时状态更新不可用",
@@ -41,6 +57,7 @@
     "title": "机器人列表"
   },
   "chat": {
+    "restoreFailed": "无法恢复或保存上次对话位置。请重试，或手动选择机器人和会话。",
     "title": "对话",
     "context": "当前组织：{{organization}}",
     "availableRobots": "{{count}} 个可用",
@@ -120,7 +137,57 @@
       "sending": "正在发送",
       "textSendingUnavailable": "当前无法发送文本消息。",
       "timelineLabel": "会话时间线",
+      "lifecycle": {
+        "connecting": "正在连接…",
+        "joining": "正在加入会话…",
+        "active": "已连接",
+        "reconnecting": "连接已断开，正在重新连接…",
+        "recovering": "已重新连接，正在恢复遗漏的更新…",
+        "auth-required": "请重新登录以继续。",
+        "offline": "聊天当前离线。",
+        "subscription-failed": "无法启动实时更新。"
+      },
       "lifecycleDegraded": "连接已恢复，但仅能尽力补回历史；部分瞬时更新可能缺失。",
+      "composerEnterHint": "Enter 或 Ctrl+Enter 发送 · Shift+Enter 换行",
+      "composerCtrlEnterHint": "Enter 换行 · Ctrl+Enter 发送",
+      "errorSummary": {
+        "operations": {
+          "unknown": "聊天操作",
+          "sendText": "发送消息",
+          "sendMessage": "发送附件",
+          "interrupt": "停止运行",
+          "answerInteraction": "提交回答",
+          "uploadAttachment": "上传附件",
+          "loadConversation": "加载会话",
+          "loadHistory": "加载历史",
+          "subscribe": "订阅实时更新",
+          "cacheStorage": "保存或恢复缓存"
+        },
+        "causes": {
+          "authentication": "身份验证失败。",
+          "authorization": "无权执行此操作。",
+          "conflict": "当前状态冲突。",
+          "network": "网络请求失败。",
+          "not-found": "请求的内容不存在。",
+          "server": "服务器错误。",
+          "timeout": "操作超时。",
+          "unknown": "未提供错误原因。",
+          "unsupported": "不支持此操作。",
+          "validation": "输入内容不符合要求。"
+        },
+        "failed": "操作未完成。",
+        "unknownOutcome": "结果未知，请先查看会话历史，再决定是否重新发送。"
+      },
+      "diagnostics": "诊断",
+      "copyDiagnostic": "复制诊断信息",
+      "diagnosticCopied": "诊断信息已复制",
+      "diagnosticCopyFailed": "复制失败，请重试",
+      "diagnosticDetails": "诊断详情",
+      "noDiagnostics": "暂无诊断记录",
+      "activeFaults": "当前故障",
+      "signInAgain": "重新登录",
+      "recoveredComplete": "连接已恢复，更新已同步",
+      "recoveredBestEffort": "连接已恢复，部分临时更新可能缺失",
       "cacheSyncing": "正在显示缓存会话，正在同步最新内容…",
       "cacheStale": "正在显示较早的缓存，正在同步最新内容…",
       "cacheSyncFailed": "同步失败，缓存内容可能不是最新版本。",
@@ -799,7 +866,7 @@
       "updated": "服务器已保存，重启 Runtime 后生效",
       "enabled": "服务器 {{name}} 已保存为启用，重启 Runtime 后生效",
       "disabled": "服务器 {{name}} 已保存为禁用，重启 Runtime 后生效",
-      "removed": "服务器已删除，重启 Runtime 后生效",
+      "removed": "服务器已删除",
       "started": "服务器 {{name}} 已启动",
       "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
@@ -1093,6 +1160,7 @@
       "forbidden": "当前账号没有访问该资源的权限。",
       "payment_required": "账号已欠费或被暂停，请前往续费页面。",
       "not_found": "未找到对应的资源。",
+      "chat_unavailable": "此机器人当前无法提供对话服务。",
       "not_found_or_no_permission": "该资源已不可见或你的访问权限已变更。",
       "other": "Manager 返回了意料之外的响应。",
       "no_session": "尚未登录 Manager，请先登录。",
@@ -1127,7 +1195,6 @@
       "environmentRequired": "请选择环境",
       "environments": {
         "staging": "Staging",
-        "beta": "Beta",
         "prod": "正式环境"
       },
       "identifier": "手机号或邮箱",

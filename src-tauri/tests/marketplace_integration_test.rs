@@ -1268,6 +1268,22 @@ async fn plugin_dependency_claims_bundle_only_while_enabled() {
         .await
         .unwrap();
 
+    let plugin_id = BundleId::try_from("audit-mcp").unwrap();
+    let removal_error =
+        sdk_config::remove_computer_mcp_by_bundle_id_core(&state, TEST_INSTANCE_ID, &plugin_id)
+            .await
+            .unwrap_err();
+    assert!(
+        removal_error.contains("Marketplace plugin"),
+        "{removal_error}"
+    );
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| server.bundle_id == plugin_id
+            && matches!(server.managed_by, McpServerManagedBy::Plugin { .. })));
+
     let add_error =
         mcp::add_mcp_server_core(&state, TEST_INSTANCE_ID, echo_server_config("audit-mcp"))
             .await
@@ -3109,4 +3125,149 @@ fn assert_no_client_governance_ledgers(state: &AppState) {
         !skill_home.join("marketplace").exists(),
         "tfrobot-client must not stage marketplace content without SDK lifecycle APIs"
     );
+}
+
+#[tokio::test]
+async fn client_control_mcp_list_keeps_same_name_plugin_and_user_connections_distinct() {
+    use a2c_smcp::smcp_computer::mcp_clients::model::MCPClientProtocol;
+    use tfrobot_client_lib::services::client_control::{
+        ClientControlBinding, ClientControlMcpClient, RemoteControlPolicy, TargetScope, ToolScope,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+    let plugin_config = serde_json::json!({
+        "type":"sse", "name":"audit-mcp", "bundle_id":"plugin-remote", "disabled":true,
+        "server_parameters": {"url":"https://plugin-user:plugin-password@example.com/sse",
+            "headers":{"Authorization":"plugin-secret", "X-Input":"${input:audit@acme/api_token}"}}
+    });
+    fs::write(
+        repo.join("plugins/audit/mcp-servers/audit-mcp.json"),
+        plugin_config.to_string(),
+    )
+    .unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-qm",
+            "remote fixture",
+        ],
+    );
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".into(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".into(),
+        plugin: "audit".into(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let user: MCPServerConfig = serde_json::from_value(serde_json::json!({
+        "type":"http", "name":"audit-mcp", "bundle_id":"user-remote",
+        "server_parameters":{"url":"https://user.example.com/mcp", "headers":{"X-User":"user-secret"}}
+    })).unwrap();
+    state
+        .sdk_config
+        .upsert_mcp_configs(TEST_INSTANCE_ID, &[user])
+        .unwrap();
+    let policy = RemoteControlPolicy {
+        enabled: true,
+        tool_scope: ToolScope::All,
+        target_scope: TargetScope::All,
+    };
+    state
+        .client_control
+        .update_policy_local(TEST_INSTANCE_ID, policy.clone())
+        .await
+        .unwrap();
+    let binding = ClientControlBinding::default();
+    binding.bind(&state.client_control);
+    let provider = ClientControlMcpClient::new(TEST_INSTANCE_ID, binding, policy, None);
+    let tools = provider.list_tools().await.unwrap();
+    let tools_json = serde_json::to_string(&tools).unwrap();
+    assert!(tools_json.contains("connection_config"));
+    let response = provider
+        .call_tool(
+            "mcp_server_list",
+            serde_json::json!({"computer_id":TEST_INSTANCE_ID}),
+        )
+        .await
+        .unwrap();
+    let encoded = serde_json::to_value(response).unwrap();
+    assert_ne!(encoded["isError"], true, "{encoded}");
+    let rows: serde_json::Value =
+        serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap()).unwrap();
+    let rows = rows.as_array().unwrap();
+    let plugin = rows
+        .iter()
+        .find(|r| r["bundleId"] == "plugin-remote")
+        .unwrap();
+    let user = rows
+        .iter()
+        .find(|r| r["bundleId"] == "user-remote")
+        .unwrap();
+    assert_eq!(plugin["managedBy"]["type"], "plugin");
+    assert_eq!(user["managedBy"]["type"], "user");
+    assert_eq!(plugin["connection_config"]["transport"], "sse");
+    assert_eq!(
+        plugin["connection_config"]["headers"]["X-Input"],
+        "${input:audit@acme/api_token}"
+    );
+    assert_eq!(
+        plugin["connection_config"]["headers"]["Authorization"],
+        "${REDACTED}"
+    );
+    assert_eq!(
+        user["connection_config"]["url"],
+        "https://user.example.com/mcp"
+    );
+    assert_eq!(
+        user["connection_config"]["headers"]["X-User"],
+        "${REDACTED}"
+    );
+    for secret in [
+        "plugin-user",
+        "plugin-password",
+        "plugin-secret",
+        "user-secret",
+    ] {
+        assert!(!encoded.to_string().contains(secret));
+    }
+    sdk_config::remove_computer_mcp_by_bundle_id_core(
+        &state,
+        TEST_INSTANCE_ID,
+        &BundleId::try_from("user-remote").unwrap(),
+    )
+    .await
+    .unwrap();
+    let remaining = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!remaining
+        .iter()
+        .any(|row| row.bundle_id.as_str() == "user-remote"));
+    assert!(remaining
+        .iter()
+        .any(|row| row.bundle_id.as_str() == "plugin-remote"
+            && matches!(row.managed_by, McpServerManagedBy::Plugin { .. })));
 }
