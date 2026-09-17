@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { info } from '@/utils/logger';
 import { createTauriChatFetch } from './chatTransport';
 export { createTauriChatFetch } from './chatTransport';
 import {
@@ -78,6 +79,14 @@ export function createClientChatFactory({
     messageCreatorProvider: () => messageCreator,
     fetch: createTauriChatFetch(descriptor.leaseId),
     onDiagnostic,
+    onLifecycleDiagnostic: (diagnostic) => {
+      // Chat Kit supplies sanitized lifecycle metadata, without credentials or payloads.
+      void info(`chat: lifecycle ${JSON.stringify({
+        leaseId: descriptor.leaseId,
+        employeeId: descriptor.employeeId,
+        ...diagnostic,
+      })}`).catch(() => undefined);
+    },
     onUnhandledError,
     getDisposeOptions: () => ({ deadlineAt: getChatDeadlineAt() }),
   });

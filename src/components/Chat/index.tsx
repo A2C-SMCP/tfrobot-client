@@ -44,7 +44,7 @@ import {
   type DigitalEmployeeBrief,
   type ManagerError,
 } from '@/stores/managerStore';
-import { warn } from '@/utils/logger';
+import { info, warn } from '@/utils/logger';
 import {
   chatUiLabels,
   createClientChatFactory,
@@ -121,12 +121,28 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
     descriptor,
     messageCreator: creator,
     onDiagnostic: (error: ChatError) => {
-      warn(`chat: diagnostic code=${error.code}`);
+      // Only select Chat Kit's sanitized error fields; never log raw exceptions or sessions.
+      void warn(`chat: diagnostic ${JSON.stringify({
+        leaseId: descriptor.leaseId,
+        employeeId: descriptor.employeeId,
+        conversationId: error.conversationId,
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+      })}`).catch(() => undefined);
     },
     onUnhandledError: () => {
       warn('chat: unhandled client callback error');
     },
   }), [creator, descriptor]);
+
+  useEffect(() => {
+    const context = { leaseId: descriptor.leaseId, employeeId: descriptor.employeeId };
+    void info(`chat: host-mounted ${JSON.stringify(context)}`).catch(() => undefined);
+    return () => {
+      void info(`chat: host-unmounted ${JSON.stringify(context)}`).catch(() => undefined);
+    };
+  }, [descriptor]);
 
   const [resourceError, setResourceError] = useState<string>();
   const resources = useMemo(() => createChatResourcePort(descriptor.leaseId, setResourceError), [descriptor.leaseId]);
