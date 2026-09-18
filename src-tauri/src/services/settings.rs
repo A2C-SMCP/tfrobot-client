@@ -76,6 +76,20 @@ pub struct AppSettings {
     /// User-configured PATH override. When set, takes priority over auto-detected PATH.
     #[serde(default)]
     pub custom_path: Option<String>,
+    /// Preferences that control background application update checks.
+    #[serde(default)]
+    pub updater: UpdatePreferences,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePreferences {
+    /// Unix epoch milliseconds of the last automatic check attempt.
+    #[serde(default)]
+    pub last_automatic_check_at: Option<i64>,
+    /// The version the user explicitly chose to install later.
+    #[serde(default)]
+    pub deferred_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +205,7 @@ impl Default for AppSettings {
             custom_runtime_paths: CustomRuntimePaths::default(),
             manager_session: None,
             custom_path: None,
+            updater: UpdatePreferences::default(),
         }
     }
 }
@@ -208,6 +223,7 @@ pub struct SettingsService {
     settings_file: PathBuf,
     client_computers_paths: ClientComputersPaths,
     chat_preferences_lock: Mutex<()>,
+    settings_lock: Mutex<()>,
 }
 
 impl SettingsService {
@@ -224,6 +240,7 @@ impl SettingsService {
             settings_file: app_data_dir.join("settings.json"),
             client_computers_paths,
             chat_preferences_lock: Mutex::new(()),
+            settings_lock: Mutex::new(()),
         }
     }
 
@@ -273,6 +290,69 @@ impl SettingsService {
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        self.save_unlocked(settings)
+    }
+
+    /// Save user-editable settings without allowing a stale UI snapshot to overwrite updater
+    /// state written by the startup checker or the About page.
+    pub fn save_user_settings(
+        &self,
+        requested: &AppSettings,
+    ) -> Result<AppSettings, std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let mut persisted = requested.clone();
+        persisted.updater = self.load().updater;
+        self.save_unlocked(&persisted)?;
+        Ok(persisted)
+    }
+
+    /// Atomically claim the next automatic update check for this installation.
+    ///
+    /// The timestamp is persisted before the network request starts so repeated launches during
+    /// an outage cannot turn startup into an implicit polling loop.
+    pub fn claim_automatic_update_check(
+        &self,
+        now_ms: i64,
+        interval_ms: i64,
+    ) -> Result<bool, std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let mut settings = self.load();
+        if settings
+            .updater
+            .last_automatic_check_at
+            .is_some_and(|last| now_ms.saturating_sub(last) < interval_ms)
+        {
+            return Ok(false);
+        }
+        settings.updater.last_automatic_check_at = Some(now_ms);
+        self.save_unlocked(&settings)?;
+        Ok(true)
+    }
+
+    pub fn set_deferred_update_version(
+        &self,
+        version: Option<String>,
+    ) -> Result<(), std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let mut settings = self.load();
+        settings.updater.deferred_version = version;
+        self.save_unlocked(&settings)
+    }
+
+    fn save_unlocked(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
         write_json_atomically(&self.settings_file, settings).map_err(std::io::Error::other)
     }
 
@@ -586,6 +666,50 @@ mod tests {
         assert_eq!(loaded.language, "zh");
         assert_eq!(loaded.activity_retention_days, 7);
         assert!(matches!(loaded.theme, ThemeMode::Dark));
+    }
+
+    #[test]
+    fn automatic_update_check_is_claimed_once_per_interval() {
+        let (svc, _tmp) = setup();
+        assert!(svc.claim_automatic_update_check(1_000, 86_400_000).unwrap());
+        assert!(!svc
+            .claim_automatic_update_check(1_000 + 86_400_000 - 1, 86_400_000)
+            .unwrap());
+        assert!(svc
+            .claim_automatic_update_check(1_000 + 86_400_000, 86_400_000)
+            .unwrap());
+        assert_eq!(svc.load().updater.last_automatic_check_at, Some(86_401_000));
+    }
+
+    #[test]
+    fn deferred_update_version_survives_settings_roundtrip() {
+        let (svc, _tmp) = setup();
+        svc.set_deferred_update_version(Some("0.3.0".to_string()))
+            .unwrap();
+        assert_eq!(
+            svc.load().updater.deferred_version.as_deref(),
+            Some("0.3.0")
+        );
+    }
+
+    #[test]
+    fn user_settings_save_preserves_newer_updater_state() {
+        let (svc, _tmp) = setup();
+        let mut current = svc.load();
+        current.updater.last_automatic_check_at = Some(1234);
+        current.updater.deferred_version = Some("0.3.0".to_string());
+        svc.save(&current).unwrap();
+
+        let mut stale = svc.load();
+        stale.updater.last_automatic_check_at = None;
+        stale.updater.deferred_version = None;
+        stale.language = "zh".to_string();
+        svc.save_user_settings(&stale).unwrap();
+
+        let persisted = svc.load();
+        assert_eq!(persisted.language, "zh");
+        assert_eq!(persisted.updater.last_automatic_check_at, Some(1234));
+        assert_eq!(persisted.updater.deferred_version.as_deref(), Some("0.3.0"));
     }
 
     #[test]

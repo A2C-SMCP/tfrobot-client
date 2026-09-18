@@ -1150,7 +1150,10 @@
     "checkUpdate": "Check for Updates",
     "updateAvailable": "Update Available",
     "newVersion": "New version",
-    "upToDate": "You are running the latest version"
+    "upToDate": "You are running the latest version",
+    "updateLater": "Later",
+    "updateCheckFailed": "Could not check for updates. You can try again later.",
+    "updateFailed": "The update could not be installed. Your current version is still available."
   },
   "manager": {
     "errors": {

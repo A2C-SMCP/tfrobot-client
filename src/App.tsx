@@ -24,6 +24,7 @@ import { initializeManagerTokenBridge } from './services/managerTokenBridge';
 import { initializeRuntimeInputBridge } from './services/runtimeInputBridge';
 import { RuntimeInputPrompt } from './components/InputVariables/RuntimeInputPrompt';
 import { useRuntimeInputStore } from './stores/runtimeInputStore';
+import { AutoUpdateCheck } from './components/ApplicationUpdate/AutoUpdateCheck';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -216,6 +217,7 @@ function App() {
 
   return (
     <Layout className={styles.layout}>
+      <AutoUpdateCheck />
       <Header className={styles.header}>
         <Title level={4} className={styles.title}>
           {t('app.name')}

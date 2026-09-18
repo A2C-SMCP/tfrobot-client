@@ -1150,7 +1150,10 @@
     "checkUpdate": "检查更新",
     "updateAvailable": "发现新版本",
     "newVersion": "新版本",
-    "upToDate": "当前已是最新版本"
+    "upToDate": "当前已是最新版本",
+    "updateLater": "稍后",
+    "updateCheckFailed": "暂时无法检查更新，你可以稍后重试。",
+    "updateFailed": "更新安装失败，当前版本仍可继续使用。"
   },
   "manager": {
     "errors": {

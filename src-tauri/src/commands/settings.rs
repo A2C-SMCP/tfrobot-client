@@ -1,7 +1,7 @@
 use crate::services::observability::{
     redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityRetention,
 };
-use crate::services::settings::AppSettings;
+use crate::services::settings::{AppSettings, UpdatePreferences};
 use crate::AppState;
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -9,6 +9,41 @@ use tauri::{Manager, State};
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.settings_service.load())
+}
+
+const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[tauri::command]
+pub async fn claim_automatic_update_check(state: State<'_, AppState>) -> Result<bool, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    state
+        .settings_service
+        .claim_automatic_update_check(now_ms, AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_update_preferences(
+    state: State<'_, AppState>,
+) -> Result<UpdatePreferences, String> {
+    Ok(state.settings_service.load().updater)
+}
+
+#[tauri::command]
+pub async fn set_deferred_update_version(
+    state: State<'_, AppState>,
+    version: Option<String>,
+) -> Result<(), String> {
+    if version
+        .as_ref()
+        .is_some_and(|value| value.len() > 128 || value.contains(['\r', '\n']))
+    {
+        return Err("invalid deferred update version".to_string());
+    }
+    state
+        .settings_service
+        .set_deferred_update_version(version)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -44,14 +79,16 @@ async fn update_settings_core(state: &AppState, mut settings: AppSettings) -> Re
     let correlation_id = uuid::Uuid::new_v4().to_string();
     settings.normalize();
     let previous = state.settings_service.load();
-    let changed_keys = changed_setting_keys(&previous, &settings);
+    let requested_changed_keys = changed_setting_keys(&previous, &settings);
+    let mut changed_keys = requested_changed_keys.clone();
     let result = async {
         // Persist first: retention cleanup is destructive and must never run for a setting that
         // could not be committed atomically.
-        state
+        let persisted_settings = state
             .settings_service
-            .save(&settings)
+            .save_user_settings(&settings)
             .map_err(|error| error.to_string())?;
+        changed_keys = changed_setting_keys(&previous, &persisted_settings);
         state.diagnostics.set_level(settings.diagnostic_log_level);
         let retention = ObservabilityRetention {
             activity_days: settings.activity_retention_days,
