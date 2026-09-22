@@ -372,8 +372,8 @@
       "deleteDescription": "This permanently deletes {{name}} and its saved configuration."
     },
     "portable": {
-      "exportConfig": "Export portable config",
-      "exportTitle": "Export portable Computer config",
+      "exportConfig": "Export Computer config",
+      "exportTitle": "Export Computer config",
       "exportAction": "Export",
       "chooseFile": "Choose configuration file",
       "importLabel": "Import from configuration file",
