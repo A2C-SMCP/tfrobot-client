@@ -22,6 +22,7 @@ import {
   type ComputerInstance,
 } from '@/stores/computerStore';
 import { useManagerStore } from '@/stores/managerStore';
+import { usePortableConfigStore } from '@/stores/portableConfigStore';
 import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
 import { permissionHelpRoute } from '@/components/Settings/permissions';
 import {
@@ -219,9 +220,11 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
     connectSelectedTarget,
     disconnectConnection,
   } = useComputerStore();
+  const { inspecting, inspectPackage } = usePortableConfigStore();
   const [view, setView] = useNavigationState<'list' | 'detail'>('computer.view', initialView);
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
+  const [importPath, setImportPath] = useState<string | null>(null);
   const [form] = Form.useForm<{
     name: string;
     description?: string;
@@ -244,6 +247,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
 
   const openCreateModal = () => {
     setTargetInstance(null);
+    setImportPath(null);
     setModalMode('create');
     form.setFieldsValue({ name: '', description: undefined });
   };
@@ -268,8 +272,28 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
   const closeModal = () => {
     setModalMode(null);
     setTargetInstance(null);
+    setImportPath(null);
     computerDraft.clearDraft();
     form.resetFields();
+  };
+
+  const chooseImportPackage = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const path = await open({
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+        multiple: false,
+      });
+      if (!path) return;
+      const inspection = await inspectPackage(path as string);
+      setImportPath(path as string);
+      form.setFieldsValue({
+        name: inspection.originalName,
+        description: inspection.description,
+      });
+    } catch (error) {
+      message.error(String(error));
+    }
   };
 
   const handleModalOk = async () => {
@@ -278,7 +302,11 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
     if (!current()) return;
     try {
       if (modalMode === 'create') {
-        await createInstance({ name: values.name, description: values.description });
+        await createInstance({
+          name: values.name,
+          description: values.description,
+          importPath: importPath ?? undefined,
+        });
         message.success(t('computer.messages.created'));
       } else if (modalMode === 'edit' && targetInstance) {
         await updateInstance(targetInstance.id, { name: values.name, description: values.description });
@@ -397,6 +425,22 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
         <Form.Item name="description" label={t('computer.form.description')}>
           <Input.TextArea rows={3} />
         </Form.Item>
+        {modalMode === 'create' && (
+          <Form.Item label={t('computer.portable.importLabel')}>
+            <Space direction="vertical" size={4}>
+              <Button loading={inspecting} onClick={() => void chooseImportPackage()}>
+                {t('computer.portable.chooseFile')}
+              </Button>
+              {importPath && (
+                <Text type="secondary">
+                  {t('computer.portable.importSelected', {
+                    name: importPath.split(/[\\/]/).pop(),
+                  })}
+                </Text>
+              )}
+            </Space>
+          </Form.Item>
+        )}
         {modalMode === 'duplicate' && (
           <>
             <Form.Item name="copyRobotBinding" label={t('computer.form.copyRobotBinding')} valuePropName="checked">
