@@ -371,6 +371,23 @@
       },
       "deleteDescription": "This permanently deletes {{name}} and its saved configuration."
     },
+    "portable": {
+      "exportConfig": "Export Computer config",
+      "exportTitle": "Export Computer config",
+      "exportAction": "Export",
+      "chooseFile": "Choose configuration file",
+      "importLabel": "Import from configuration file",
+      "importSelected": "Selected: {{name}}. The name and description above are prefilled and can be edited.",
+      "exportHint": "The portable package contains durable configuration only; secrets are never included. Plugins are exported as declarations, not their content.",
+      "exportSuccess": "Portable configuration exported.",
+      "operationFailed": "Operation failed.",
+      "groups": {
+        "basic_profile": "Basic profile",
+        "mcp_and_inputs": "MCP configuration and Input definitions",
+        "non_sensitive_input_values": "Non-sensitive Input values",
+        "skills_and_plugins": "Skills and plugins"
+      }
+    },
     "runtime": {
       "title": "Runtime",
       "statusTitle": "Runtime Status",

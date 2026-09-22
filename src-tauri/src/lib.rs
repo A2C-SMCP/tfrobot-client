@@ -684,6 +684,8 @@ pub fn run() {
             commands::config_io::detect_config_format,
             commands::config_io::import_config,
             commands::config_io::export_config,
+            commands::portable_config::export_computer_package,
+            commands::portable_config::inspect_computer_package,
             // Debug & tools
             commands::debug::get_available_tools,
             commands::debug::get_debug_resources,

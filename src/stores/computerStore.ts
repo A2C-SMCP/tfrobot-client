@@ -134,6 +134,8 @@ export interface ComputerFormValues {
   name: string;
   description?: string;
   mcpStartConcurrency?: number;
+  /** Optional portable package to adopt when creating the Computer. */
+  importPath?: string;
 }
 
 export type DuplicateSkillHomeMode = 'empty' | 'copy';
@@ -259,6 +261,7 @@ function normalizeFormValues(values: ComputerFormValues): ComputerFormValues {
   return {
     name,
     description: description || undefined,
+    ...(values.importPath ? { importPath: values.importPath } : {}),
     ...(values.mcpStartConcurrency === undefined
       ? {}
       : { mcpStartConcurrency: values.mcpStartConcurrency }),

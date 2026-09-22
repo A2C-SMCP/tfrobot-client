@@ -371,6 +371,23 @@
       },
       "deleteDescription": "此操作将永久删除 {{name}} 及其保存的配置。"
     },
+    "portable": {
+      "exportConfig": "导出 Computer 配置",
+      "exportTitle": "导出 Computer 配置",
+      "exportAction": "导出",
+      "chooseFile": "选择配置文件",
+      "importLabel": "从配置文件导入",
+      "importSelected": "已选择：{{name}}。上方名称与描述已预填，可修改。",
+      "exportHint": "便携包仅包含持久化配置，不含任何 secret；插件仅导出声明而非内容。",
+      "exportSuccess": "便携配置已导出。",
+      "operationFailed": "操作失败。",
+      "groups": {
+        "basic_profile": "基础配置",
+        "mcp_and_inputs": "MCP 配置与 Input 定义",
+        "non_sensitive_input_values": "非敏感 Input 值",
+        "skills_and_plugins": "Skill 与插件"
+      }
+    },
     "runtime": {
       "title": "运行时",
       "statusTitle": "运行时状态",
