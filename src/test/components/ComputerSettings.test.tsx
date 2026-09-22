@@ -119,7 +119,9 @@ describe('ComputerSettings', () => {
         },
       });
     });
-    expect(screen.getByText('Applies the next time this Computer starts.')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Applies the next time this Computer starts; changing it does not interrupt the running Computer.',
+    )).toBeInTheDocument();
   });
 
   it('renders persistent configuration sections including Built-in Tools', async () => {

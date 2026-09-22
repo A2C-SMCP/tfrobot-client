@@ -1,7 +1,7 @@
 {
   "permissions": {
     "mcp": "Starting an MCP or signing in may request keychain access for its saved passwords or OAuth credentials. Denying access stops that operation. External tools may request additional permissions for their own features; allow only permissions you expect.",
-    "password": "Saving, changing or deleting a password variable may request system keychain access, including reading the previous value for recovery if saving fails. Denying access leaves the operation unsuccessful; other variables remain available.",
+    "password": "Saving or deleting a password variable asks macOS for keychain access; denying it fails that operation.",
 
     "title": "Credential access paused",
     "description": "The system could not access a saved credential. Background attempts for this credential are paused. Allow another attempt, then repeat your original action. Other credentials remain available.",
@@ -11,7 +11,7 @@
     "input": "Saved password variable",
     "connection": "Saved sign-in or connection credential",
     "purpose": "Connecting or signing in may ask to read saved credentials from your system keychain. Denying access stops that action; other features remain available.",
-    "migration": "Older variables need to be imported. This may request keychain access to verify saved passwords. If you decline, existing variables remain available and you can retry here.",
+    "migration": "Older variables need importing; this may request keychain access to verify saved passwords. Declining keeps the existing variables usable.",
     "migrate": "Import older variables",
     "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
 },
@@ -39,7 +39,8 @@
     "success": "Success",
     "import": "Import",
     "export": "Export",
-    "confirm": "Confirm"
+    "confirm": "Confirm",
+    "dismissNotice": "Don't show again"
   },
   "nav": {
     "overview": "OVERVIEW",
@@ -551,8 +552,7 @@
       "nameRequired": "Name is required",
       "description": "Description",
       "mcpStartConcurrency": "MCP startup concurrency",
-      "mcpStartConcurrencyHint": "Applies the next time this Computer starts.",
-      "mcpStartConcurrencyRunningHint": "Changing this value does not interrupt the running Computer.",
+      "mcpStartConcurrencyHint": "Applies the next time this Computer starts; changing it does not interrupt the running Computer.",
       "copyRobotBinding": "Copy Robot binding",
       "connectionTarget": "Connection target",
       "useOriginalConnectionConfig": "Use original connection config",
@@ -582,7 +582,6 @@
     "openLocalRoot": "Open Local Root",
     "resourceUnavailable": "SKILL.md unavailable",
     "missingSkillMd": "The selected skill did not return a SKILL.md resource.",
-    "emptySkillMd": "SKILL.md has no preview content",
     "emptySkillMdDescription": "The resource was returned as text but its body is empty.",
     "nonTextSkillMd": "The resource is not returned as inline text.",
     "messages": {
@@ -701,6 +700,7 @@
     "servers": "MCP Servers",
     "configTitle": "MCP Configuration",
     "runtimeTitle": "MCP Runtime",
+    "runtimePermissionHint": "Keychain and permission details",
     "configRevision": "Config revision",
     "addServer": "Add Server",
     "editServer": "Edit Server",
@@ -723,7 +723,6 @@
     "ownershipUnavailableDescription": "Configuration changes remain disabled until authoritative ownership is loaded. Refresh to try again.",
     "ownershipUnavailableHint": "Configuration changes are disabled until authoritative MCP ownership is available.",
     "validation": {
-      "schemaOnlyTitle": "Schema validation only",
       "schemaOnlyDescription": "Validation checks the SDK-owned configuration structure. It does not check commands, paths, secrets, inputs, marketplaces, plugins, or MCP server runtime availability.",
       "valid": "The SDK configuration schema is valid.",
       "invalid": "The SDK configuration has {{count}} schema error(s)."
@@ -917,7 +916,8 @@
       "saveFailed": "The input could not be saved. Please try again.",
       "editFor": "Edit input {{key}}",
       "deleteFor": "Delete input {{key}}",
-      "confirmDelete": "Delete input {{key}} and its saved value?"
+      "confirmDelete": "Delete input {{key}} and its saved value?",
+      "confirmDeleteSecret": "The credential is removed from the system keychain. This cannot be undone."
     },
     "status": {
       "usingDefault": "Using default",

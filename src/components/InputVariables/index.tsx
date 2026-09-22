@@ -138,7 +138,7 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           </Button>
           <Popconfirm
             title={t('inputs.entry.confirmDelete', { key: entry.key })}
-            description={entry.secret ? t('permissions.password') : undefined}
+            description={entry.secret ? t('inputs.entry.confirmDeleteSecret') : undefined}
             onConfirm={() => handleDelete(entry.key)}
           >
             <Button

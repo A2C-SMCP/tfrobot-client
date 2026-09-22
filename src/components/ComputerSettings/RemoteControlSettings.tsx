@@ -3,7 +3,6 @@ import { useNavigationState } from '@/components/Navigation/navigationMemoryStat
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Alert,
   App,
   Button,
   Checkbox,
@@ -16,6 +15,8 @@ import {
   Typography,
 } from 'antd';
 import { useTranslation } from 'react-i18next';
+import { NoticeBar } from '@/components/common/NoticeBar';
+import { useNoticeLifecycle } from '@/components/common/useNoticeLifecycle';
 import {
   useComputerStore,
   type ComputerInstance,
@@ -44,6 +45,7 @@ interface RemoteControlSettingsProps {
 export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  const securityNotice = useNoticeLifecycle('remote-control-security');
   const active = usePageActive();
   const action = usePageAction(instance.id);
   const { instances, fetchInstances } = useComputerStore();
@@ -112,12 +114,18 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Alert
-        type="warning"
-        showIcon
-        message={t('computer.remoteControl.securityTitle')}
-        description={t('computer.remoteControl.securityDescription')}
-      />
+      {securityNotice.visible && (
+        <NoticeBar
+          tone="warning"
+          dismiss={{
+            label: t('common.dismissNotice'),
+            onClick: securityNotice.dismiss,
+          }}
+        >
+          <Text strong>{t('computer.remoteControl.securityTitle')}</Text>{' '}
+          <Text type="secondary">{t('computer.remoteControl.securityDescription')}</Text>
+        </NoticeBar>
+      )}
 
       <Space align="start">
         <Switch
@@ -202,11 +210,7 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
         )}
       </div>
 
-      <Alert
-        type="info"
-        showIcon
-        message={t('computer.remoteControl.selfProtection')}
-      />
+      <Text type="secondary">{t('computer.remoteControl.selfProtection')}</Text>
       <Button type="primary" loading={saving} onClick={() => void save()}>
         {t('common.save')}
       </Button>

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, App, Button, Space, Typography } from 'antd';
-import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Space, Tooltip, Typography } from 'antd';
+import {
+  InfoCircleOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import {
   useMcpStore,
@@ -199,7 +204,17 @@ export function McpRuntimeControls({
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{t('mcp.runtimeTitle')}</Title>
+        <Space size={4} align="center">
+          <Title level={4} style={{ margin: 0 }}>{t('mcp.runtimeTitle')}</Title>
+          <Tooltip title={t('permissions.mcp')}>
+            <Button
+              type="text"
+              size="small"
+              icon={<InfoCircleOutlined />}
+              aria-label={t('mcp.runtimePermissionHint')}
+            />
+          </Tooltip>
+        </Space>
         <Space>
           <Button
             icon={<ReloadOutlined />}
@@ -227,7 +242,6 @@ export function McpRuntimeControls({
         </Space>
       </div>
 
-      <Alert type="info" showIcon description={t('permissions.mcp')} style={{ marginBottom: 16 }} />
       {error && (
         <Alert
           message={t('common.error')}

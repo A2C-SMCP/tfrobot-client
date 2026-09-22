@@ -2,10 +2,6 @@
   width: 100%;
 }
 
-.formAlert {
-  margin-bottom: 16px;
-}
-
 .header {
   display: flex;
   justify-content: space-between;

@@ -21,6 +21,10 @@ fn default_tool_history_retention_days() -> u32 {
 
 pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
 const CHAT_PREFERENCES_SCHEMA_VERSION: u32 = 2;
+const UI_NOTICE_SCHEMA_VERSION: u32 = 1;
+/// Upper bound for persisted notice entries. The frontend only ever uses a fixed, small set of
+/// ids; the cap keeps a buggy caller from growing the user's settings file without bound.
+const MAX_UI_NOTICE_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +83,9 @@ pub struct AppSettings {
     /// Preferences that control background application update checks.
     #[serde(default)]
     pub updater: UpdatePreferences,
+    /// Machine-level UI notice dismissals and local usage counters.
+    #[serde(default, deserialize_with = "deserialize_ui_notices_lenient")]
+    pub ui_notices: UiNoticeState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -90,6 +97,95 @@ pub struct UpdatePreferences {
     /// The version the user explicitly chose to install later.
     #[serde(default)]
     pub deferred_version: Option<String>,
+}
+
+/// Local usage record for a single UI notice: when it was first shown, whether the user dismissed
+/// it permanently, and how often it was seen or opened from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiNoticeEntry {
+    #[serde(default)]
+    pub first_seen_at: Option<i64>,
+    #[serde(default)]
+    pub dismissed_at: Option<i64>,
+    #[serde(default)]
+    pub impressions: u32,
+    #[serde(default)]
+    pub help_clicks: u32,
+}
+
+/// Machine-level UI notice state stored inside `settings.json` next to `theme` and `language`.
+/// It is deliberately not account scoped: dismissing a system-permission notice applies to this
+/// installation, not to a Manager identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiNoticeState {
+    #[serde(default = "default_ui_notice_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub entries: std::collections::BTreeMap<String, UiNoticeEntry>,
+}
+
+fn default_ui_notice_schema_version() -> u32 {
+    UI_NOTICE_SCHEMA_VERSION
+}
+
+impl Default for UiNoticeState {
+    fn default() -> Self {
+        Self {
+            schema_version: UI_NOTICE_SCHEMA_VERSION,
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// Incremental update applied by the frontend. Counters are deltas because the store batches
+/// impressions in memory instead of writing settings on every render.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiNoticePatch {
+    /// Only ever sets the dismissal; there is no un-dismiss path.
+    #[serde(default)]
+    pub dismissed: bool,
+    #[serde(default)]
+    pub impressions_delta: u32,
+    #[serde(default)]
+    pub help_clicks_delta: u32,
+}
+
+/// `settings.json` is the user's primary configuration file and `load()` falls back to
+/// `AppSettings::default()` when any field fails to deserialize. A malformed notice payload must
+/// therefore never fail the document: salvage the well-formed entries and drop the rest.
+fn deserialize_ui_notices_lenient<'de, D>(deserializer: D) -> Result<UiNoticeState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Ok(value) = serde_json::Value::deserialize(deserializer) else {
+        return Ok(UiNoticeState::default());
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(UiNoticeState::default());
+    };
+    let schema_version = object
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(UI_NOTICE_SCHEMA_VERSION);
+    let mut entries = std::collections::BTreeMap::new();
+    if let Some(map) = object.get("entries").and_then(serde_json::Value::as_object) {
+        for (id, raw_entry) in map {
+            if entries.len() >= MAX_UI_NOTICE_ENTRIES {
+                break;
+            }
+            if let Ok(entry) = serde_json::from_value::<UiNoticeEntry>(raw_entry.clone()) {
+                entries.insert(id.clone(), entry);
+            }
+        }
+    }
+    Ok(UiNoticeState {
+        schema_version,
+        entries,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +302,7 @@ impl Default for AppSettings {
             manager_session: None,
             custom_path: None,
             updater: UpdatePreferences::default(),
+            ui_notices: UiNoticeState::default(),
         }
     }
 }
@@ -297,8 +394,9 @@ impl SettingsService {
         self.save_unlocked(settings)
     }
 
-    /// Save user-editable settings without allowing a stale UI snapshot to overwrite updater
-    /// state written by the startup checker or the About page.
+    /// Save user-editable settings without allowing a stale UI snapshot to overwrite `updater`
+    /// state written by the startup checker or the About page, or `ui_notices` state written by
+    /// the notice store.
     pub fn save_user_settings(
         &self,
         requested: &AppSettings,
@@ -307,8 +405,10 @@ impl SettingsService {
             .settings_lock
             .lock()
             .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let current = self.load();
         let mut persisted = requested.clone();
-        persisted.updater = self.load().updater;
+        persisted.updater = current.updater;
+        persisted.ui_notices = current.ui_notices;
         self.save_unlocked(&persisted)?;
         Ok(persisted)
     }
@@ -350,6 +450,62 @@ impl SettingsService {
         let mut settings = self.load();
         settings.updater.deferred_version = version;
         self.save_unlocked(&settings)
+    }
+
+    pub fn load_ui_notice_state(&self) -> UiNoticeState {
+        self.load().ui_notices
+    }
+
+    /// Test-only convenience over [`Self::record_ui_notice_events`] for single-notice cases.
+    #[cfg(test)]
+    pub fn record_ui_notice_event(
+        &self,
+        id: &str,
+        patch: UiNoticePatch,
+        now_ms: i64,
+    ) -> Result<UiNoticeState, std::io::Error> {
+        self.record_ui_notice_events(
+            &std::collections::BTreeMap::from([(id.to_string(), patch)]),
+            now_ms,
+        )
+    }
+
+    /// Merge notice patches under the settings lock so concurrent callers cannot overwrite each
+    /// other, and so notice writes never go through the full-document `update_settings` path.
+    ///
+    /// The frontend batches impressions in memory; taking the lock once for the whole batch keeps
+    /// that from turning into one `settings.json` rewrite per notice.
+    pub fn record_ui_notice_events(
+        &self,
+        updates: &std::collections::BTreeMap<String, UiNoticePatch>,
+        now_ms: i64,
+    ) -> Result<UiNoticeState, std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let mut settings = self.load();
+        let additions = updates
+            .keys()
+            .filter(|id| !settings.ui_notices.entries.contains_key(*id))
+            .count();
+        if settings.ui_notices.entries.len() + additions > MAX_UI_NOTICE_ENTRIES {
+            return Err(std::io::Error::other("too many UI notice entries"));
+        }
+        for (id, patch) in updates {
+            let entry = settings.ui_notices.entries.entry(id.clone()).or_default();
+            if entry.first_seen_at.is_none() {
+                entry.first_seen_at = Some(now_ms);
+            }
+            if patch.dismissed {
+                entry.dismissed_at.get_or_insert(now_ms);
+            }
+            entry.impressions = entry.impressions.saturating_add(patch.impressions_delta);
+            entry.help_clicks = entry.help_clicks.saturating_add(patch.help_clicks_delta);
+        }
+        let state = settings.ui_notices.clone();
+        self.save_unlocked(&settings)?;
+        Ok(state)
     }
 
     fn save_unlocked(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
@@ -690,6 +846,178 @@ mod tests {
             svc.load().updater.deferred_version.as_deref(),
             Some("0.3.0")
         );
+    }
+
+    #[test]
+    fn ui_notice_counters_accumulate_and_dismissal_sticks() {
+        let (svc, _tmp) = setup();
+        svc.record_ui_notice_event(
+            "mcp-runtime",
+            UiNoticePatch {
+                impressions_delta: 2,
+                ..UiNoticePatch::default()
+            },
+            1_000,
+        )
+        .unwrap();
+
+        let state = svc
+            .record_ui_notice_event(
+                "mcp-runtime",
+                UiNoticePatch {
+                    dismissed: true,
+                    impressions_delta: 3,
+                    help_clicks_delta: 1,
+                },
+                2_000,
+            )
+            .unwrap();
+        let entry = state.entries.get("mcp-runtime").unwrap();
+        assert_eq!(entry.first_seen_at, Some(1_000));
+        assert_eq!(entry.dismissed_at, Some(2_000));
+        assert_eq!(entry.impressions, 5);
+        assert_eq!(entry.help_clicks, 1);
+
+        let repeated = svc
+            .record_ui_notice_event(
+                "mcp-runtime",
+                UiNoticePatch {
+                    dismissed: true,
+                    ..UiNoticePatch::default()
+                },
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(
+            repeated.entries.get("mcp-runtime").unwrap().dismissed_at,
+            Some(2_000)
+        );
+    }
+
+    #[test]
+    fn user_settings_save_preserves_ui_notice_state() {
+        let (svc, _tmp) = setup();
+        svc.record_ui_notice_event(
+            "mcp-runtime",
+            UiNoticePatch {
+                dismissed: true,
+                ..UiNoticePatch::default()
+            },
+            1_000,
+        )
+        .unwrap();
+
+        // Simulate a Settings page that was rendered before the dismissal happened.
+        let mut stale = svc.load();
+        stale.ui_notices = UiNoticeState::default();
+        stale.language = "zh".to_string();
+        svc.save_user_settings(&stale).unwrap();
+
+        let loaded = svc.load();
+        assert!(loaded.ui_notices.entries.contains_key("mcp-runtime"));
+        assert_eq!(loaded.language, "zh");
+    }
+
+    #[test]
+    fn corrupt_ui_notices_field_does_not_reset_other_settings() {
+        let (svc, _tmp) = setup();
+        std::fs::write(
+            svc.legacy_settings_path(),
+            r#"{
+              "theme": "dark",
+              "language": "zh",
+              "custom_runtime_paths": {},
+              "ui_notices": "not-an-object"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = svc.load();
+        assert!(matches!(settings.theme, ThemeMode::Dark));
+        assert_eq!(settings.language, "zh");
+        assert_eq!(settings.ui_notices.schema_version, UI_NOTICE_SCHEMA_VERSION);
+        assert!(settings.ui_notices.entries.is_empty());
+    }
+
+    #[test]
+    fn corrupt_ui_notice_entries_are_dropped_individually() {
+        let (svc, _tmp) = setup();
+        std::fs::write(
+            svc.legacy_settings_path(),
+            r#"{
+              "theme": "dark",
+              "language": "zh",
+              "custom_runtime_paths": {},
+              "ui_notices": {
+                "schemaVersion": 1,
+                "entries": {
+                  "mcp-runtime": { "dismissedAt": 5, "impressions": 2 },
+                  "broken": 42
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = svc.load();
+        assert_eq!(settings.ui_notices.entries.len(), 1);
+        let entry = settings.ui_notices.entries.get("mcp-runtime").unwrap();
+        assert_eq!(entry.dismissed_at, Some(5));
+        assert_eq!(entry.impressions, 2);
+        assert_eq!(entry.first_seen_at, None);
+    }
+
+    #[test]
+    fn ui_notice_batch_write_merges_every_entry() {
+        let (svc, _tmp) = setup();
+        svc.record_ui_notice_events(
+            &std::collections::BTreeMap::from([
+                (
+                    "mcp-runtime".to_string(),
+                    UiNoticePatch {
+                        impressions_delta: 1,
+                        ..UiNoticePatch::default()
+                    },
+                ),
+                (
+                    "remote-control-security".to_string(),
+                    UiNoticePatch {
+                        dismissed: true,
+                        ..UiNoticePatch::default()
+                    },
+                ),
+            ]),
+            1_000,
+        )
+        .unwrap();
+
+        let state = svc.load_ui_notice_state();
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.entries["mcp-runtime"].impressions, 1);
+        assert_eq!(
+            state.entries["remote-control-security"].dismissed_at,
+            Some(1_000)
+        );
+        assert!(state
+            .entries
+            .values()
+            .all(|entry| entry.first_seen_at == Some(1_000)));
+    }
+
+    #[test]
+    fn ui_notice_entries_are_capped() {
+        let (svc, _tmp) = setup();
+        for index in 0..MAX_UI_NOTICE_ENTRIES {
+            svc.record_ui_notice_event(&format!("notice-{index}"), UiNoticePatch::default(), 1_000)
+                .unwrap();
+        }
+
+        assert!(svc
+            .record_ui_notice_event("notice-overflow", UiNoticePatch::default(), 1_000)
+            .is_err());
+        assert!(svc
+            .record_ui_notice_event("notice-0", UiNoticePatch::default(), 1_000)
+            .is_ok());
     }
 
     #[test]

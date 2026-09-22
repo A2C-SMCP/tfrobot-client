@@ -28,6 +28,7 @@ import {
 } from '@/stores/managerStore';
 import { AccountSelection } from './AccountSelection';
 import { LoginForm } from './LoginForm';
+import { OnboardingNotice } from './OnboardingNotice';
 import styles from './GlobalManagerAccount.module.css';
 
 const { Text } = Typography;
@@ -200,15 +201,7 @@ export function GlobalManagerAccount() {
   } else if (context.authState === 'onboarding_required') {
     panelContent = (
       <Space direction="vertical" size="middle" className={styles.section}>
-        <Alert
-          type="info"
-          showIcon
-          message={t('managerAccount.onboarding.title')}
-          description={t('managerAccount.onboarding.description')}
-        />
-        <Button loading={identityLoading} onClick={() => void handleLogout()} block>
-          {t('managerAccount.onboarding.back')}
-        </Button>
+        <OnboardingNotice loading={identityLoading} onBack={() => void handleLogout()} />
       </Space>
     );
   } else if (authenticatedPanel) {

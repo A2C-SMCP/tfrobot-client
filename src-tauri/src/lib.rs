@@ -706,6 +706,8 @@ pub fn run() {
             commands::settings::claim_automatic_update_check,
             commands::settings::get_update_preferences,
             commands::settings::set_deferred_update_version,
+            commands::settings::get_ui_notice_state,
+            commands::settings::update_ui_notice_state,
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
             commands::settings::get_detected_path,

@@ -18,6 +18,7 @@ import { NavigationPages } from './components/Navigation/NavigationPages';
 import { createNavigationStore, menuForRoute } from './stores/navigationStore';
 import { useStore } from 'zustand';
 import { useThemeStore } from './stores/themeStore';
+import { useUiNoticeStore } from './stores/uiNoticeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
 import { initializeManagerTokenBridge } from './services/managerTokenBridge';
@@ -80,6 +81,13 @@ function App() {
   useEffect(() => {
     initFromSettings();
   }, [initFromSettings]);
+
+  // Dismissible notices are read once for the whole app; individual panels must stay free of
+  // requests until the user acts on them.
+  const loadNoticeState = useUiNoticeStore((state) => state.fetch);
+  useEffect(() => {
+    void loadNoticeState();
+  }, [loadNoticeState]);
 
   useEffect(() => {
     let disposed = false;

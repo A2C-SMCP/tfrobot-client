@@ -419,14 +419,16 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           >
             {t('common.refresh')}
           </Button>
-          <Button
-            icon={<SafetyCertificateOutlined />}
-            aria-label={t('mcp.validateConfig')}
-            onClick={() => validateConfig(instanceId)}
-            loading={validating}
-          >
-            {t('mcp.validateConfig')}
-          </Button>
+          <Tooltip title={t('mcp.validation.schemaOnlyDescription')}>
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              aria-label={t('mcp.validateConfig')}
+              onClick={() => validateConfig(instanceId)}
+              loading={validating}
+            >
+              {t('mcp.validateConfig')}
+            </Button>
+          </Tooltip>
           <Button
             icon={<ImportOutlined />}
             aria-label={t('mcp.importConfig')}
@@ -453,14 +455,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           </Button>
         </Space>
       </div>
-
-      <Alert
-        message={t('mcp.validation.schemaOnlyTitle')}
-        description={t('mcp.validation.schemaOnlyDescription')}
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-      />
 
       {validation && (
         <Alert

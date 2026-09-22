@@ -11,6 +11,8 @@ import {
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { NoticeBar } from '@/components/common/NoticeBar';
+import { useNoticeLifecycle } from '@/components/common/useNoticeLifecycle';
 import {
   desktopWindowKey,
   type DesktopInstanceState,
@@ -39,6 +41,10 @@ export function DesktopResourcesTable({
   fetchWindowDetail,
 }: DesktopResourcesTableProps) {
   const { t } = useTranslation();
+  const enumerationNotice = useNoticeLifecycle(
+    'desktop-enumeration-unverified',
+    desktop.enumerationStatus === 'unverified' && desktop.windows.length > 0,
+  );
   const [expandedUris, setExpandedUris] = useNavigationState<Set<string>>('desktop.expanded', new Set());
 
   useEffect(() => {
@@ -122,14 +128,6 @@ export function DesktopResourcesTable({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      {desktop.enumerationStatus === 'unverified' && desktop.windows.length > 0 && (
-        <Alert
-          type="info"
-          showIcon
-          message={t('desktop.enumerationUnverified')}
-          description={t('desktop.enumerationUnverifiedDescription')}
-        />
-      )}
       <Table
         columns={columns}
         dataSource={desktop.windows}
@@ -211,6 +209,17 @@ export function DesktopResourcesTable({
           },
         }}
       />
+      {enumerationNotice.visible && (
+          <NoticeBar
+            dismiss={{
+              label: t('common.dismissNotice'),
+              onClick: enumerationNotice.dismiss,
+            }}
+          >
+            <Text strong>{t('desktop.enumerationUnverified')}</Text>{' '}
+            <Text type="secondary">{t('desktop.enumerationUnverifiedDescription')}</Text>
+          </NoticeBar>
+        )}
     </Space>
   );
 }
