@@ -77,6 +77,12 @@ function managerErrorText(t: Translator, error: ManagerError | null): string | n
   return error === null ? null : t(`manager.errors.${error.kind}`);
 }
 
+/**
+ * Attachment failures the user can recover from by retrying the attachment itself. Terminal codes
+ * (missing, too large, unsupported) already explain themselves and must not advertise a retry.
+ */
+const RETRYABLE_ATTACHMENT_ERRORS = new Set(['network', 'timeout', 'busy']);
+
 interface ActiveChatProps {
   descriptor: ChatSessionDescriptor;
   creator: { uid: string; name: string };
@@ -162,6 +168,9 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
     >
       {resourceError && <Alert type="error" showIcon closable
         message={t(`chat.resourceErrors.${resourceError}`, { defaultValue: t('chat.resourceErrors.network') })}
+        description={RETRYABLE_ATTACHMENT_ERRORS.has(resourceError)
+          ? t('chat.attachmentRetryHint')
+          : undefined}
         onClose={() => setResourceError(undefined)} />}
       <ChatResourceProvider port={resources} scope={descriptor.leaseId}>
         <CompactChatWorkspace labels={labels} leaseId={descriptor.leaseId} />
@@ -244,7 +253,7 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
 
   return (
     <>
-      {restoration.error && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+      {restoration.error && <Alert type="warning" showIcon message={t('chat.restorePositionFailed')}
         action={<Button onClick={restoration.retry}>{t('common.retry')}</Button>} />}
       <ChatUiShell
         compactNavigation={compactNavigation}
@@ -366,7 +375,7 @@ function ChatSessionHost({ creator, employeeId, onOpened, onUnavailable }: ChatS
   }
   if (!descriptor) return <div className={styles.centered}><Spin /></div>;
   return <>
-    {saveFailed && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+    {saveFailed && <Alert type="warning" showIcon message={t('chat.rememberRobotFailed')}
       action={<Button onClick={() => {
         void invoke('chat_remember_robot', { leaseId: descriptor.leaseId })
           .then(() => setSaveFailed(false)).catch(() => setSaveFailed(true));
@@ -552,7 +561,7 @@ export function Chat() {
         </div>
       </section>
 
-      {preferenceError && <Alert type="warning" showIcon message={t('chat.restoreFailed')}
+      {preferenceError && <Alert type="warning" showIcon message={t('chat.preferenceFailed')}
         action={<Button onClick={() => setPreferenceAttempt((value) => value + 1)}>{t('common.retry')}</Button>} />}
       {resourceError && (
         <Alert
@@ -560,6 +569,11 @@ export function Chat() {
           showIcon
           message={t('chat.robotListFailed')}
           description={managerErrorText(t, resourceError)}
+          action={(
+            <Button onClick={() => { void fetchEmployees().catch(() => undefined); }}>
+              {t('common.retry')}
+            </Button>
+          )}
         />
       )}
 

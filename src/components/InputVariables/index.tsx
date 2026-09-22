@@ -13,9 +13,11 @@ const { Title } = Typography;
 
 interface InputVariablesProps {
   instanceId: string;
+  /** Opens Settings → Permissions & security from the password keychain notice. */
+  onOpenPermissionHelp?: () => void;
 }
 
-export function InputVariables({ instanceId }: InputVariablesProps) {
+export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariablesProps) {
   const action = usePageAction(instanceId);
   const active = usePageActive();
   const { t } = useTranslation();
@@ -195,7 +197,12 @@ export function InputVariables({ instanceId }: InputVariablesProps) {
           destroyOnHidden
           width={440}
         >
-          <InputEntryEditor entry={editing} onSubmit={handleSubmit} onCancel={closeEditor} />
+          <InputEntryEditor
+            entry={editing}
+            onOpenPermissionHelp={onOpenPermissionHelp}
+            onSubmit={handleSubmit}
+            onCancel={closeEditor}
+          />
         </Modal>
       )}
     </div>

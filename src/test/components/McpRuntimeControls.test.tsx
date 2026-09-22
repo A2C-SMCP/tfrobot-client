@@ -1,7 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
+import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpRuntimeControls } from '@/components/McpConfig/McpRuntimeControls';
 import type { McpServerStatus } from '@/stores/mcpStore';
+import { useUiNoticeStore } from '@/stores/uiNoticeStore';
+import i18n from '@/i18n';
 
 const userServer: McpServerStatus = {
   bundleId: 'runtime-server-id',
@@ -43,6 +45,75 @@ describe('McpRuntimeControls', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockStore.servers = [userServer];
+    useUiNoticeStore.getState().reset();
+  });
+
+  describe('keychain notice', () => {
+    it('shows the explanation in full once and links to the permissions page', async () => {
+      useUiNoticeStore.setState({ loaded: true, entries: {} });
+      const onOpenPermissionHelp = vi.fn();
+
+      render(
+        <McpRuntimeControls
+          instanceId="computer-a"
+          capability={enabledCapability}
+          onOpenPermissionHelp={onOpenPermissionHelp}
+        />,
+      );
+
+      const notice = await screen.findByRole('note');
+      expect(notice).toHaveTextContent(i18n.t('permissions.mcp'));
+
+      fireEvent.click(within(notice).getByRole('button', { name: 'Permissions & security' }));
+
+      expect(onOpenPermissionHelp).toHaveBeenCalledTimes(1);
+      // Reading the help page is not a dismissal: the notice only goes away when the user says so.
+      expect(screen.getByRole('note')).toBeInTheDocument();
+    });
+
+    it('stays off after the user dismisses it, leaving the ⓘ as the way back in', async () => {
+      useUiNoticeStore.setState({ loaded: true, entries: {} });
+
+      render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+      const notice = await screen.findByRole('note');
+      fireEvent.click(within(notice).getByRole('button', { name: "Don't show again" }));
+
+      await waitFor(() => expect(screen.queryByRole('note')).not.toBeInTheDocument());
+      expect(useUiNoticeStore.getState().isDismissed('mcp-runtime-keychain')).toBe(true);
+      expect(
+        screen.getByRole('button', { name: 'Keychain and permission details' }),
+      ).toBeInTheDocument();
+    });
+
+    it('does not come back after a restart when it was dismissed before', () => {
+      useUiNoticeStore.setState({
+        loaded: true,
+        entries: {
+          'mcp-runtime-keychain': {
+            firstSeenAt: 1,
+            dismissedAt: 2,
+            impressions: 3,
+            helpClicks: 1,
+          },
+        },
+      });
+
+      render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+  });
+
+  it('offers a retry when the runtime status could not be loaded', () => {
+    (mockStore as { error: string | null }).error = 'runtime unreachable';
+
+    render(<McpRuntimeControls instanceId="computer-a" capability={enabledCapability} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(mockStore.fetchServers).toHaveBeenCalledTimes(2);
+    (mockStore as { error: string | null }).error = null;
   });
 
   it('loads runtime status and exposes only lifecycle actions', () => {

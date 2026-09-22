@@ -37,7 +37,12 @@ function managerErrorKey(error: ManagerError): string {
   return `manager.errors.${error.kind}`;
 }
 
-export function GlobalManagerAccount() {
+interface GlobalManagerAccountProps {
+  /** Opens Settings → Permissions & security, the authoritative copy for keychain prompts. */
+  onOpenPermissionHelp?: () => void;
+}
+
+export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAccountProps = {}) {
   const { t } = useTranslation();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -207,7 +212,26 @@ export function GlobalManagerAccount() {
   } else if (authenticatedPanel) {
     panelContent = authenticatedPanel;
   } else {
-    panelContent = <Space direction="vertical"><Alert type="info" description={t('permissions.purpose')} /><LoginForm embedded /></Space>;
+    // One line next to the form instead of a banner: the full explanation lives in
+    // Settings → Permissions & security, which this line links to.
+    panelContent = (
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <Space size={4} align="center" wrap>
+          <Text type="secondary">{t('managerAccount.login.credentialHint')}</Text>
+          {onOpenPermissionHelp && (
+            <Button
+              type="link"
+              size="small"
+              onClick={onOpenPermissionHelp}
+              style={{ padding: 0 }}
+            >
+              {t('common.permissionsHelp')}
+            </Button>
+          )}
+        </Space>
+        <LoginForm embedded />
+      </Space>
+    );
   }
 
   const triggerLabel = authenticated && context.account && context.organization

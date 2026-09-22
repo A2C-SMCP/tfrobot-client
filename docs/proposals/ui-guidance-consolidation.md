@@ -1,7 +1,7 @@
 # UI 提示收敛与分级方案（草案）
 
 来源：用户反馈「MCP 运行时」等页面的说明性提示反复出现、打扰用户。本文梳理全仓同类提示并给出系统性优化方案。
-状态：方案已确认。P0+P1 已实施，见文末"实施记录"；P2–P4 待做。
+状态：方案已确认。P0–P4 全部实施，见文末"实施记录"。
 
 ## 目标与范围
 
@@ -332,3 +332,89 @@ Settings 新增「权限与安全」tab，集中 `permissions.mcp`、`permission
 - 本切片尚未 commit / 推送 / 建 PR；`git status` 中 `ui_notices` 相关改动均为工作区改动。
 - 第二轮隔离复审未能获得可信结果：本会话中新拉起的只读子代理收不到任务内容，复用原审查子代理时其返回了与第一轮逐字相同的过期报告（引用行号对应旧代码）。已改为由实施方按磁盘实际代码逐条核对修复项并补测试，结论以本文件与仓库代码为准。
 - 区块级提示条的帮助入口（`help`）与 `recordHelpClick`、两个权限类 notice id 属 P2 预留，当前无调用者。
+
+## 实施记录（P2–P4）
+
+交付范围：P2（#104）、P3（#105）、P4（#106）。无 Rust 改动——P0 已落地的 `get_ui_notice_state` /
+`update_ui_notice_state` 足以承载本阶段的关闭状态与埋点。
+
+### 落地内容
+
+| 阶段 | 模块 | 文件 | 说明 |
+| --- | --- | --- | --- |
+| P2 | 提示生命周期 | `src/components/common/useNoticeLifecycle.ts` | 新增 `openHelp(onOpen)`：先记帮助点击再交给调用方跳转，`recordHelpClick` 首次有调用者 |
+| P2 | 路由 | `src/components/Settings/tabs.ts`、`src/components/Settings/permissions.ts` | Settings 支持 `settings:<tab>[:<anchor>]`；权限锚点常量与 `permissionHelpRoute` 单一来源 |
+| P2 | 权威入口 | `src/components/Settings/PermissionsSettings.tsx`、`src/components/Settings/index.tsx`、`src/components/Navigation/NavigationPages.tsx` | 新增「权限与安全」页，覆盖 `permissions.mcp/password/purpose/migration/update` 与凭据暂停恢复；每个条目带稳定锚点，锚点到达时滚动并短暂高亮 |
+| P2 | once | `src/components/McpConfig/McpRuntimeControls.tsx` | `mcp-runtime-keychain` 首次渲染完整提示条（完整文案 + 不再提示 + 权限页链接），关闭后仅保留标题旁 ⓘ，点击 ⓘ 一跳到达权限页 |
+| P2 | once | `src/components/InputVariables/InputEntryEditor.tsx` | `password-variable-keychain` 首次勾选 Secret 时完整展示，关闭后回落到字段级说明 |
+| P2 | once | `src/components/ComputerSettings/RemoteControlSettings.tsx` | 关闭安全提示后保留一条紧凑说明，满足「可永久关闭但可回查」 |
+| P2 | 去重 | `src/components/ManagerAccount/GlobalManagerAccount.tsx`、`src/App.tsx` | `permissions.purpose` 的常驻 info Alert 改为登录表单旁一行辅助文案 + 权限页链接 |
+| P2 | 埋点汇总 | `src/components/DebugPanel/NoticeStats.tsx`、`src/components/DebugPanel/index.tsx` | 调试面板新增只读「提示统计」tab：展示次数、是否关闭、帮助点击、关闭率、帮助点击率 |
+| P3 | 加载态 | `src/App.tsx`、`src/styles/App.module.css` | `identityLoading` 的裸蓝条改为局部 Spin 行（`role="status"`） |
+| P3 | 空态 | `src/components/DesktopResources/DesktopAvailability.tsx` | 无活跃 MCP 改为 `Empty` + 主按钮，保留标题/说明与「管理 MCP 服务器」入口 |
+| P3 | 状态 | `src/components/ComputerSettings/CommandLineToolSettings.tsx` | pending 的 info Alert 改为状态 Tag 旁说明 |
+| P4 | 文案 | `src/components/Chat/index.tsx`、`src/locales/{zh,en}/translation.json` | `chat.restoreFailed` 拆为 `restorePositionFailed` / `rememberRobotFailed` / `preferenceFailed`，旧 key 删除 |
+| P4 | 动作 | `src/components/Chat/index.tsx`、`src/components/McpConfig/McpRuntimeControls.tsx`、`src/components/ComputerSettings/CommandLineToolSettings.tsx` | Robot 列表失败、MCP 状态加载失败、命令行运行时资产/状态错误补重试动作；附件资源失败补「在所属消息中重试」说明 |
+
+### 导航链路
+
+提示到权限页的跳转沿用既有 `onNavigate` 透传模式，不引入新的全局导航机制：
+
+- MCP 运行时提示：`Computer`（拼 `permissionHelpRoute('mcp')`）→ `ComputerWorkbench` → `ComputerRuntime` → `McpRuntimeControls`。
+- 密码变量提示：`ComputerSettings`（拼 `permissionHelpRoute('password')`）→ `InputVariables` → `InputEntryEditor`。
+- 登录表单辅助文案：`App` 直接用自身导航 store 打开 `permissionHelpRoute('purpose')`。
+
+### P4 错误提示动作完整性审计
+
+口径：错误提示必须满足其一——(a) 自带动作按钮；(b) 就近存在可重复执行的原操作入口（同屏刷新/重试/提交按钮）；
+(c) 文案本身说明无需处理或已给出下一步。全仓扫描后，本轮在本次已触及的组件内补齐动作，其余按 (b)/(c) 判定，
+清单如下（`src/components/Chat/index.tsx:295` 为本轮新增后行号）：
+
+| 位置 | 判定 | 就近入口 / 说明 |
+| --- | --- | --- |
+| `Chat/index.tsx:295` | (b) | 新建会话弹窗内错误，同屏 Create 按钮即重试 |
+| `Computer/MarketplaceTab.tsx:458,461` | (b)(c) | 技能预览失败/不可用，重选技能即重新加载；文案说明原因 |
+| `Computer/MarketplaceTab.tsx:518` | (b) | 同屏顶部 Refresh |
+| `Computer/SkillsTab.tsx:117,120,150` | (b) | 同屏顶部 Refresh |
+| `CredentialAccessNotice.tsx:56` | (a) | 聚合提示内含逐条重试按钮 |
+| `DebugPanel/ResourceBrowser.tsx:151` | (b) | 同屏 Refresh |
+| `DebugPanel/ToolCallTest.tsx:127,131` | (b) | 同屏 Execute 按钮 |
+| `DesktopResources/DesktopResourcesTable.tsx:118` | (c) | 空态说明已给出重试/诊断路径 |
+| `DesktopResources/index.tsx:62` | (b)(c) | 降级说明 + 同屏重试/诊断入口 |
+| `InputVariables/InputEntryEditor.tsx:76` | (b) | 保存失败，同屏 Save 按钮即重试 |
+| `InputVariables/RuntimeInputPrompt.tsx:90` | (b) | 提交失败，同屏提交按钮即重试 |
+| `InputVariables/index.tsx:179` | (b) | 列表加载失败，同屏 Refresh |
+| `ManagerAccount/EmployeeList.tsx:253` | (c) | 离线说明，无用户可执行动作 |
+| `McpConfig/index.tsx:480` | (b) | 同屏 Refresh |
+| `RobotConnectionPanel/index.tsx:298` | (b) | 同屏 Refresh（`fetchEmployeesIfStale(0)`） |
+
+未逐条改动的理由：这些位置的可恢复入口本来就是「就近的原操作」，额外加一个按钮只是把同一个动作写两遍；
+真正缺入口的三处（Chat Robot 列表、MCP 运行时状态、命令行工具状态）本轮已补。若后续要求「每个错误提示都必须自带按钮」，
+应按本表逐项评审后单独实施。
+
+### 与原方案的偏差
+
+1. **`once` 提示在关闭后保留紧凑形态**，而不是完全消失：MCP 保留标题旁 ⓘ、密码变量保留字段级说明、远程控制保留一行摘要。
+   方案原文只要求「可永久关闭」，但 §3 同时要求「关闭后可回查」，两条一起看只能保留一个更轻的入口。
+2. **权限页锚点用 `settings:permissions:<anchor>` 路由段**，而不是 URL hash：应用内导航只有 `page:section[:target]` 语义，
+   沿用它可以复用现有 `NavigationPages` 的 revision 机制，第二次跳同一锚点也能生效。
+3. **提示统计放在 DebugPanel 第 4 个 tab**，数据源是应用外壳加载一次的 `uiNoticeStore`，不额外发请求。
+4. **P4 的动作补齐限定在本次已触及组件**，其余位置按「就近入口/自解释」判定并留下审计表（见上），避免把 15 个组件一次性卷进来。
+
+### 验证证据
+
+- 前端：`tsc --noEmit`、`eslint src`（0 error，6 条既有 warning）、`vite build` 通过。
+- 新增/更新测试：`NoticeStats.test.tsx`、`PermissionsSettings.test.tsx`（新），`NoticeBar.test.tsx`（帮助点击计数）、
+  `McpRuntimeControls.test.tsx`（首次完整展示 / 关闭后隐藏 / 重启仍关闭 / 帮助链接一跳 / 状态加载失败重试）、
+  `InputVariables.test.tsx`（首次 Secret 提示 + 关闭回落）、`Settings.test.tsx`（权限 tab 与 tab 导航）、
+  `DebugPanel.test.tsx`（提示统计 tab）、`ManagerAccount.test.tsx`（登录旁一行文案 + 权限页链接）、
+  `App.test.tsx`（会话恢复为局部加载态）、`Chat.test.tsx`（Robot 列表失败重试）。
+- 全量 `pnpm test`（655 项）：连续 4 次运行分别出现 3 / 2 / 2 / 1 项 5s 超时，且失败项每次不同
+  （Chat、ManagerAccount、RobotConnectionPanel、InputVariables），单独运行全部通过；同期基线（`686bc2c`）两次全量运行
+  分别为 0 与 1 项超时（`McpServerList`，本轮未改动文件），属既有的满负载抖动，非本次改动引入。
+- zh/en key 对等：脚本比对两份 locale 的 key 集合，无孤立 key；`chat.restoreFailed` 已删除。
+
+### 未完成事项
+
+- 本切片尚未 commit / 推送 / 建 PR；改动仍在工作区。
+- 全仓错误提示「每个都带按钮」的口径未采用（见审计表结论），如需强化需单独立项。

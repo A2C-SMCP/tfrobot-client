@@ -5,6 +5,11 @@ export interface NoticeLifecycle {
   /** False while the persisted state is still loading, and once the user has dismissed it. */
   visible: boolean;
   dismiss: () => void;
+  /**
+   * Records the help click before handing control back to the caller, so the counters stay honest
+   * without every caller having to remember the bookkeeping. Callers own the navigation itself.
+   */
+  openHelp: (onOpen: () => void) => void;
 }
 
 /**
@@ -23,6 +28,7 @@ export function useNoticeLifecycle(id: NoticeId, enabled = true): NoticeLifecycl
   const dismissedAt = useUiNoticeStore((state) => state.entries[id]?.dismissedAt ?? null);
   const dismissNotice = useUiNoticeStore((state) => state.dismiss);
   const recordImpression = useUiNoticeStore((state) => state.recordImpression);
+  const recordHelpClick = useUiNoticeStore((state) => state.recordHelpClick);
 
   // The store is loaded once by the app shell, not here: sections such as Desktop Resources
   // guarantee they issue no request before an explicit user action.
@@ -35,5 +41,10 @@ export function useNoticeLifecycle(id: NoticeId, enabled = true): NoticeLifecycl
     void dismissNotice(id);
   }, [dismissNotice, id]);
 
-  return { visible, dismiss };
+  const openHelp = useCallback((onOpen: () => void) => {
+    void recordHelpClick(id);
+    onOpen();
+  }, [id, recordHelpClick]);
+
+  return { visible, dismiss, openHelp };
 }

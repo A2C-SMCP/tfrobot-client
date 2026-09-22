@@ -17,6 +17,8 @@ import { Computer } from '@/components/Computer';
 import { ComputerSettings } from '@/components/ComputerSettings';
 import { RobotConnections } from '@/components/RobotConnections';
 import { Settings } from '@/components/Settings';
+import { toSettingsTab } from '@/components/Settings/tabs';
+import { parsePermissionAnchor } from '@/components/Settings/permissions';
 import { legacyComputerSettingsSection, parsePluginSettingsTarget, toComputerSettingsSection, toComputerWorkbenchSection } from '@/components/Computer/tabs';
 import { PageHost } from './PageHost';
 import { NavigationMemoryProvider, NavigationScope } from './NavigationMemory';
@@ -48,6 +50,10 @@ function ScopedPages({ navigation }: { navigation: Navigation }) {
   const [, rawSettingsSection] = (settingsRequest?.route ?? '').split(':');
   const targetPlugin = useMemo(() => parsePluginSettingsTarget((settingsRequest?.route ?? '').split(':').slice(2)), [settingsRequest]);
   const settingsSection = toComputerSettingsSection(rawSettingsSection);
+  const appSettingsRequest = requests.settings;
+  const [, rawSettingsTab, rawSettingsAnchor] = (appSettingsRequest?.route ?? '').split(':');
+  const settingsTab = toSettingsTab(rawSettingsTab);
+  const permissionAnchor = parsePermissionAnchor(rawSettingsAnchor);
 
   useEffect(() => {
     const ids = new Set(instances.map((instance) => instance.id));
@@ -99,7 +105,14 @@ function ScopedPages({ navigation }: { navigation: Navigation }) {
         </PageHost>
         <PageHost name="robot-connections" active={page === 'robot-connections'}><RobotConnections /></PageHost>
         <PageHost name="logs" active={page === 'logs'}><ActivityViewer /></PageHost>
-        <PageHost name="settings" active={page === 'settings'}><Settings /></PageHost>
+        <PageHost name="settings" active={page === 'settings'}>
+          <Settings
+            initialTab={settingsTab}
+            navigationRevision={appSettingsRequest?.revision ?? 0}
+            focusAnchor={permissionAnchor}
+            onNavigate={navigate}
+          />
+        </PageHost>
       </NavigationScope>
     </NavigationMemoryProvider>
   );

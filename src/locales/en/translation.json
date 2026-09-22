@@ -20,7 +20,8 @@
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
     "runtimeInputUnavailable": "Runtime Input prompts are unavailable",
     "retryRuntimeInput": "Retry prompts",
-    "retryRuntimeEvents": "Retry"
+    "retryRuntimeEvents": "Retry",
+    "restoringSession": "Restoring your session…"
   },
   "common": {
     "add": "Add",
@@ -40,7 +41,8 @@
     "import": "Import",
     "export": "Export",
     "confirm": "Confirm",
-    "dismissNotice": "Don't show again"
+    "dismissNotice": "Don't show again",
+    "permissionsHelp": "Permissions & security"
   },
   "nav": {
     "overview": "OVERVIEW",
@@ -58,7 +60,9 @@
     "title": "Robot List"
   },
   "chat": {
-    "restoreFailed": "Could not restore or save your last conversation. Retry, or choose a robot and conversation manually.",
+    "restorePositionFailed": "Could not restore or save the conversation you had open. Retry, or choose a robot and conversation manually.",
+    "rememberRobotFailed": "Could not save your most recently used robot. Retry, or choose a robot manually.",
+    "preferenceFailed": "Could not read your saved robot preference. Retry, or choose a robot manually.",
     "title": "Chat",
     "context": "Organization: {{organization}}",
     "availableRobots": "{{count}} available",
@@ -226,7 +230,8 @@
       "busy": "Too many attachment requests. Please retry after a download finishes.",
       "save": "The attachment could not be saved. Check the destination and available disk space.",
       "unsupported": "This file type cannot be opened automatically. Use Download to save it."
-    }
+    },
+    "attachmentRetryHint": "Retry the attachment from the message it belongs to."
   },
   "computer": {
     "title": "Computer",
@@ -307,6 +312,7 @@
       "enabledDescription": "Disabled by default. Changes rebuild this Computer's internal provider without creating an MCP declaration.",
       "securityTitle": "This grants client-level control",
       "securityDescription": "Enable only the tools and target Computers this Robot needs. Secret values remain write-only and all calls are audited.",
+      "securitySummary": "Robot control stays limited to the tools and Computers you allow, and every call is audited.",
       "toolScope": "Allowed tools",
       "allTools": "All 55 tools",
       "customTools": "Custom selection",
@@ -1070,8 +1076,24 @@
     "tabs": {
       "tools": "Tools",
       "resources": "Resources",
-      "history": "History"
+      "history": "History",
+      "notices": "Notice stats"
     },
+    "noticeColumns": {
+      "notice": "Notice",
+      "impressions": "Shown",
+      "dismissed": "Dismissed",
+      "helpClicks": "Help clicks",
+      "dismissRate": "Dismiss rate",
+      "helpRate": "Help click rate"
+    },
+    "notices": {
+      "mcp-runtime-keychain": "MCP runtime keychain access",
+      "password-variable-keychain": "Password variable keychain access",
+      "remote-control-security": "Remote control security",
+      "desktop-enumeration-unverified": "Desktop enumeration unverified"
+    },
+    "noticesLocalOnly": "Counted on this machine only; never written to the activity log.",
     "searchTools": "Search tools...",
     "allServers": "All Servers",
     "noTools": "No tools available",
@@ -1119,6 +1141,18 @@
     "appearance": "Appearance",
     "runtime": "Runtime",
     "data": "Data",
+    "permissions": "Permissions & security",
+    "permissionsPage": {
+      "intro": "macOS asks for authorisation at the points below — keychain access for saved credentials, or administrator authentication for an update. Declining only stops the action being attempted.",
+      "items": {
+        "mcp": "MCP runtime and sign-in",
+        "password": "Password variables",
+        "purpose": "Sign-in and connection credentials",
+        "migration": "Importing older variables",
+        "update": "Installing application updates",
+        "paused": "Repeating an action after access was paused"
+      }
+    },
     "about": "About",
     "theme": "Theme",
     "themeLight": "Light",
@@ -1193,6 +1227,7 @@
     "login": {
       "title": "Sign in to TFRSManager",
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
+      "credentialHint": "Signing in reads saved credentials from your system keychain. Declining stops this sign-in only.",
       "environment": "Environment",
       "environmentHint": "The client configures the Manager address for the selected environment.",
       "environmentRequired": "Environment is required",

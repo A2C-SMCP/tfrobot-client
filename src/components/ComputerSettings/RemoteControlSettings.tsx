@@ -136,6 +136,10 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
         <Space direction="vertical" size={0}>
           <Text strong>{t('computer.remoteControl.enabled')}</Text>
           <Text type="secondary">{t('computer.remoteControl.enabledDescription')}</Text>
+          {/* Dismissing the warning must not make the safety intent unrecoverable. */}
+          {!securityNotice.visible && (
+            <Text type="secondary">{t('computer.remoteControl.securitySummary')}</Text>
+          )}
         </Space>
       </Space>
 

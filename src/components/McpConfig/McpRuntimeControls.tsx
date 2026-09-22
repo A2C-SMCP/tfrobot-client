@@ -13,10 +13,12 @@ import {
   type McpServerManagedBy,
 } from '@/stores/mcpStore';
 import type { ComputerRuntimeActionCapability } from '@/stores/runtimeSnapshot';
+import { NoticeBar } from '@/components/common/NoticeBar';
+import { useNoticeLifecycle } from '@/components/common/useNoticeLifecycle';
 import { McpServerList } from './McpServerList';
 import { useMcpRuntimeActions, type McpRuntimeAction } from './useMcpRuntimeActions';
 
-const { Title } = Typography;
+const { Text, Title } = Typography;
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpRuntimeControlsProps {
@@ -25,6 +27,8 @@ interface McpRuntimeControlsProps {
   onStartRuntime?: () => void;
   onRestartRuntime?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
+  onOpenPermissionHelp?: () => void;
 }
 
 function runtimeSuccessMessage(action: McpRuntimeAction) {
@@ -44,9 +48,13 @@ export function McpRuntimeControls({
   onStartRuntime,
   onRestartRuntime,
   onOpenPlugin,
+  onOpenPermissionHelp,
 }: McpRuntimeControlsProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  // Explains why macOS asks for keychain access. Shown in full once, then only reachable from the
+  // ⓘ next to the title and from Settings → Permissions & security.
+  const keychainNotice = useNoticeLifecycle('mcp-runtime-keychain');
   const [batchFeedback, setBatchFeedback] = useState<{
     action: 'start' | 'stop';
     result: McpBatchOperationResult;
@@ -212,6 +220,9 @@ export function McpRuntimeControls({
               size="small"
               icon={<InfoCircleOutlined />}
               aria-label={t('mcp.runtimePermissionHint')}
+              onClick={onOpenPermissionHelp
+                ? () => keychainNotice.openHelp(onOpenPermissionHelp)
+                : undefined}
             />
           </Tooltip>
         </Space>
@@ -242,12 +253,39 @@ export function McpRuntimeControls({
         </Space>
       </div>
 
+      {keychainNotice.visible && (
+        <div style={{ marginBottom: 16 }}>
+          <NoticeBar
+            help={onOpenPermissionHelp && (
+              <Button
+                type="link"
+                size="small"
+                onClick={() => keychainNotice.openHelp(onOpenPermissionHelp)}
+              >
+                {t('common.permissionsHelp')}
+              </Button>
+            )}
+            dismiss={{
+              label: t('common.dismissNotice'),
+              onClick: keychainNotice.dismiss,
+            }}
+          >
+            <Text>{t('permissions.mcp')}</Text>
+          </NoticeBar>
+        </div>
+      )}
+
       {error && (
         <Alert
           message={t('common.error')}
           description={t('mcp.messages.statusLoadFailed')}
           type="error"
           showIcon
+          action={(
+            <Button size="small" onClick={() => fetchServers(instanceId)}>
+              {t('common.retry')}
+            </Button>
+          )}
           style={{ marginBottom: 16 }}
         />
       )}

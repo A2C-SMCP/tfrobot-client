@@ -23,6 +23,7 @@ import {
 } from '@/stores/computerStore';
 import { useManagerStore } from '@/stores/managerStore';
 import { isRuntimeInputCancelledError } from '@/utils/runtimeActionError';
+import { permissionHelpRoute } from '@/components/Settings/permissions';
 import {
   computerSettingsNavigationKey,
   type ComputerWorkbenchSection,
@@ -437,6 +438,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
               onConnect={() => { void handleConnect(selectedInstance); }}
               onDisconnect={() => { void handleDisconnect(selectedInstance); }}
               onOpenPlugin={(owner) => onNavigate?.(computerSettingsNavigationKey('plugins', owner))}
+              onOpenPermissionHelp={() => onNavigate?.(permissionHelpRoute('mcp'))}
             />
           </PageHost>
         </NavigationScope>

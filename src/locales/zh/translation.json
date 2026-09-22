@@ -20,7 +20,8 @@
     "runtimeEventsUnavailable": "运行时状态更新不可用",
     "runtimeInputUnavailable": "运行时输入提示暂不可用",
     "retryRuntimeInput": "重试输入提示",
-    "retryRuntimeEvents": "重试"
+    "retryRuntimeEvents": "重试",
+    "restoringSession": "正在恢复登录状态…"
   },
   "common": {
     "add": "添加",
@@ -40,7 +41,8 @@
     "import": "导入",
     "export": "导出",
     "confirm": "确认",
-    "dismissNotice": "不再提示"
+    "dismissNotice": "不再提示",
+    "permissionsHelp": "权限与安全"
   },
   "nav": {
     "overview": "概览",
@@ -58,7 +60,9 @@
     "title": "机器人列表"
   },
   "chat": {
-    "restoreFailed": "无法恢复或保存上次对话位置。请重试，或手动选择机器人和会话。",
+    "restorePositionFailed": "未能恢复或保存上次打开的对话位置。可重试，或手动选择机器人和会话。",
+    "rememberRobotFailed": "未能保存最近使用的 Robot。可重试，或直接选择 Robot。",
+    "preferenceFailed": "未能读取上次使用的 Robot 偏好。可重试，或直接选择 Robot。",
     "title": "对话",
     "context": "当前组织：{{organization}}",
     "availableRobots": "{{count}} 个可用",
@@ -226,7 +230,8 @@
       "busy": "附件请求过多，请在下载完成后重试。",
       "save": "无法保存附件，请检查保存位置和磁盘空间。",
       "unsupported": "此文件类型不支持自动打开，请使用下载保存文件。"
-    }
+    },
+    "attachmentRetryHint": "可在所属消息中重新加载该附件。"
   },
   "computer": {
     "title": "Computer",
@@ -307,6 +312,7 @@
       "enabledDescription": "默认关闭。保存后会重建当前 Computer 的内置 provider，不会创建 MCP 声明。",
       "securityTitle": "此功能会授予 Client 级控制能力",
       "securityDescription": "仅开放 Robot 必需的工具与目标 Computer。Secret 始终只写不回显，所有调用都会审计。",
+      "securitySummary": "Robot 控制始终限于你授权的工具与 Computer，所有调用都会记录。",
       "toolScope": "允许的工具",
       "allTools": "全部 55 个工具",
       "customTools": "自定义选择",
@@ -1070,8 +1076,24 @@
     "tabs": {
       "tools": "工具",
       "resources": "资源",
-      "history": "历史记录"
+      "history": "历史记录",
+      "notices": "提示统计"
     },
+    "noticeColumns": {
+      "notice": "提示",
+      "impressions": "展示次数",
+      "dismissed": "已关闭",
+      "helpClicks": "帮助点击",
+      "dismissRate": "关闭率",
+      "helpRate": "帮助点击率"
+    },
+    "notices": {
+      "mcp-runtime-keychain": "MCP 运行时钥匙串授权",
+      "password-variable-keychain": "密码变量钥匙串授权",
+      "remote-control-security": "远程控制安全说明",
+      "desktop-enumeration-unverified": "桌面资源枚举未校验"
+    },
+    "noticesLocalOnly": "仅统计本机提示状态，不写入活动日志。",
     "searchTools": "搜索工具...",
     "allServers": "所有服务器",
     "noTools": "暂无可用工具",
@@ -1119,6 +1141,18 @@
     "appearance": "外观",
     "runtime": "运行时",
     "data": "数据管理",
+    "permissions": "权限与安全",
+    "permissionsPage": {
+      "intro": "在下列操作中，macOS 会请求系统授权：读取已保存的凭据需要钥匙串授权，安装更新可能需要管理员认证。拒绝授权只会让当前操作失败。",
+      "items": {
+        "mcp": "MCP 运行时与登录",
+        "password": "密码变量",
+        "purpose": "登录与连接凭据",
+        "migration": "导入旧变量",
+        "update": "安装应用更新",
+        "paused": "授权被暂停后如何重试"
+      }
+    },
     "about": "关于",
     "theme": "主题",
     "themeLight": "浅色",
@@ -1193,6 +1227,7 @@
     "login": {
       "title": "登录 TFRSManager",
       "description": "登录后可挑选数字员工并自动填充 SMCP 连接。",
+      "credentialHint": "登录会读取系统钥匙串中已保存的凭据；拒绝授权只会停止本次登录。",
       "environment": "环境",
       "environmentHint": "Manager 地址由客户端根据环境自动配置。",
       "environmentRequired": "请选择环境",

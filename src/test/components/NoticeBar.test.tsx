@@ -28,6 +28,19 @@ function MountMany({ count, enabled }: { count: number; enabled: boolean }) {
   );
 }
 
+function NoticeWithHelp({ onOpen }: { onOpen: () => void }) {
+  const notice = useNoticeLifecycle('desktop-enumeration-unverified');
+  if (!notice.visible) return <span>hidden</span>;
+  return (
+    <NoticeBar
+      help={<button onClick={() => notice.openHelp(onOpen)}>Help</button>}
+      dismiss={{ label: 'Dismiss', onClick: notice.dismiss }}
+    >
+      Caveat
+    </NoticeBar>
+  );
+}
+
 describe('useNoticeLifecycle', () => {
   beforeEach(() => {
     useUiNoticeStore.getState().reset();
@@ -73,5 +86,21 @@ describe('useNoticeLifecycle', () => {
         'desktop-enumeration-unverified': expect.objectContaining({ dismissed: true }),
       },
     });
+  });
+
+  it('counts a help click and keeps the notice on screen when the user opens the help page', async () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    const onOpen = vi.fn();
+    render(<NoticeWithHelp onOpen={onOpen} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('note')).toBeInTheDocument();
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('update_ui_notice_state', {
+      updates: {
+        'desktop-enumeration-unverified': { impressionsDelta: 1, helpClicksDelta: 1 },
+      },
+    }));
   });
 });
