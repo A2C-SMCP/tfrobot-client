@@ -416,5 +416,6 @@ Settings 新增「权限与安全」tab，集中 `permissions.mcp`、`permission
 
 ### 未完成事项
 
-- 本切片尚未 commit / 推送 / 建 PR；改动仍在工作区。
+- 本切片已交付：`debde32`（P2–P4）随本分支推送，PR 见
+  https://github.com/A2C-SMCP/tfrobot-client/pull/107 （base `dev-0.2.6`，已合入 `#100` 以消除 locale 与 Computer 组件的重叠）。
 - 全仓错误提示「每个都带按钮」的口径未采用（见审计表结论），如需强化需单独立项。
