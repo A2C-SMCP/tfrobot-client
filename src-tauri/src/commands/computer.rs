@@ -1697,7 +1697,7 @@ fn validate_connection_target_reference(
     }
 }
 
-async fn status_from_instance(
+pub(crate) async fn status_from_instance(
     instance: &ComputerInstance,
     runtime: &crate::services::computer::ComputerInstanceRuntime,
 ) -> ComputerInstanceStatus {
@@ -1731,7 +1731,7 @@ async fn status_from_instance(
     }
 }
 
-fn normalize_name(name: &str) -> Result<String, String> {
+pub(crate) fn normalize_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Computer instance name cannot be empty".to_string());
@@ -1750,7 +1750,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
-fn generate_instance_id() -> ComputerInstanceId {
+pub(crate) fn generate_instance_id() -> ComputerInstanceId {
     format!("computer-{}", uuid::Uuid::new_v4())
 }
 
@@ -1901,7 +1901,7 @@ fn load_hydrated_computer_instance(
         .map_err(|error| error.to_string())
 }
 
-async fn rollback_failed_computer_creation(
+pub(crate) async fn rollback_failed_computer_creation(
     state: &AppState,
     instance_id: &str,
     storage_root: &Path,

@@ -9,12 +9,15 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  ExportOutlined,
+  ImportOutlined,
   MoreOutlined,
   RetweetOutlined,
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ComputerInstance } from '@/stores/computerStore';
+import { ComputerPortableConfig } from './ComputerPortableConfig';
 
 const { Text } = Typography;
 
@@ -33,8 +36,16 @@ export function ComputerWorkbenchMoreActions({
 }: ComputerWorkbenchMoreActionsProps) {
   const { t } = useTranslation();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const active = usePageActive();
-  useEffect(() => { if (!active) setDeleteOpen(false); }, [active]);
+  useEffect(() => {
+    if (!active) {
+      setDeleteOpen(false);
+      setExportOpen(false);
+      setImportOpen(false);
+    }
+  }, [active]);
 
   const handleDelete = async () => {
     await onDelete();
@@ -61,6 +72,17 @@ export function ComputerWorkbenchMoreActions({
     },
     { type: 'divider' },
     {
+      key: 'export',
+      icon: <ExportOutlined />,
+      label: t('computer.portable.exportConfig'),
+    },
+    {
+      key: 'import',
+      icon: <ImportOutlined />,
+      label: t('computer.portable.importConfig'),
+    },
+    { type: 'divider' },
+    {
       key: 'delete',
       icon: <DeleteOutlined />,
       danger: true,
@@ -72,6 +94,12 @@ export function ComputerWorkbenchMoreActions({
     switch (key) {
       case 'restart':
         onRestart();
+        break;
+      case 'export':
+        setExportOpen(true);
+        break;
+      case 'import':
+        setImportOpen(true);
         break;
       case 'delete':
         setDeleteOpen(true);
@@ -98,6 +126,13 @@ export function ComputerWorkbenchMoreActions({
       >
         <Text>{t('computer.workbench.deleteDescription', { name: instance.name })}</Text>
       </Modal>
+      <ComputerPortableConfig
+        instance={instance}
+        exportOpen={exportOpen}
+        importOpen={importOpen}
+        onCloseExport={() => setExportOpen(false)}
+        onCloseImport={() => setImportOpen(false)}
+      />
     </>
   );
 }
