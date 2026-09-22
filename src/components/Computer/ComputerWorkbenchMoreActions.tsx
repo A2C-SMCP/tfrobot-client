@@ -10,7 +10,6 @@ import {
 import {
   DeleteOutlined,
   ExportOutlined,
-  ImportOutlined,
   MoreOutlined,
   RetweetOutlined,
 } from '@ant-design/icons';
@@ -37,13 +36,11 @@ export function ComputerWorkbenchMoreActions({
   const { t } = useTranslation();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const active = usePageActive();
   useEffect(() => {
     if (!active) {
       setDeleteOpen(false);
       setExportOpen(false);
-      setImportOpen(false);
     }
   }, [active]);
 
@@ -76,11 +73,6 @@ export function ComputerWorkbenchMoreActions({
       icon: <ExportOutlined />,
       label: t('computer.portable.exportConfig'),
     },
-    {
-      key: 'import',
-      icon: <ImportOutlined />,
-      label: t('computer.portable.importConfig'),
-    },
     { type: 'divider' },
     {
       key: 'delete',
@@ -97,9 +89,6 @@ export function ComputerWorkbenchMoreActions({
         break;
       case 'export':
         setExportOpen(true);
-        break;
-      case 'import':
-        setImportOpen(true);
         break;
       case 'delete':
         setDeleteOpen(true);
@@ -129,9 +118,7 @@ export function ComputerWorkbenchMoreActions({
       <ComputerPortableConfig
         instance={instance}
         exportOpen={exportOpen}
-        importOpen={importOpen}
         onCloseExport={() => setExportOpen(false)}
-        onCloseImport={() => setImportOpen(false)}
       />
     </>
   );

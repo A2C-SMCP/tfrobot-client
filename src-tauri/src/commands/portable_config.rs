@@ -1,12 +1,8 @@
-use crate::commands::computer::{
-    generate_instance_id, normalize_name, status_from_instance, ComputerInstanceStatus,
-};
 use crate::commands::inputs::InputDefinition;
-use crate::services::computer::{ComputerInstance, ComputerProfile};
 use crate::services::input_value_store::InputValueStore;
 use crate::services::portable_config::{
-    parse_package, preview_package, validate_package_for_import, PackageGroup, PackageManifest,
-    PackagePreview, PortableComputerPackage, PortableMarketplaceDeclaration, PortableProfile,
+    parse_package, validate_package_for_import, ComputerPackageInspection, PackageGroup,
+    PackageManifest, PortableComputerPackage, PortableMarketplaceDeclaration, PortableProfile,
     PortableSdkConfig, PortableSkills, A2C_SMCP_SDK_VERSION, PORTABLE_PACKAGE_FORMAT_VERSION,
     PORTABLE_SDK_SCHEMA_VERSION,
 };
@@ -93,142 +89,138 @@ pub async fn export_computer_package_core(
     Ok(())
 }
 
-/// Parses a package and returns an immutable import preview. No write is performed.
+/// Parses and validates a package, returning the metadata used to prefill the
+/// create-Computer form. No write is performed and no runtime dependency is probed.
 #[tauri::command]
-pub async fn preview_computer_package_import(
+pub async fn inspect_computer_package(
     state: State<'_, AppState>,
     path: String,
-) -> Result<PackagePreview, String> {
-    preview_computer_package_import_core(&state, &path).await
+) -> Result<ComputerPackageInspection, String> {
+    inspect_computer_package_core(&state, &path).await
 }
 
-pub async fn preview_computer_package_import_core(
+pub async fn inspect_computer_package_core(
     state: &AppState,
     path: &str,
-) -> Result<PackagePreview, String> {
-    let package = read_package(path)?;
-    validate_package_for_import(&package).map_err(|error| error.to_string())?;
-    let existing_names = collect_existing_names(state).await;
-    Ok(preview_package(&package, &existing_names))
+) -> Result<ComputerPackageInspection, String> {
+    let package = read_and_validate_package(state, path)?;
+    Ok(ComputerPackageInspection::from_package(&package))
 }
 
-/// Commits an import: creates a new Computer with a fresh id and restores the
-/// selected durable configuration transactionally.
-#[tauri::command]
-pub async fn commit_computer_package_import(
-    state: State<'_, AppState>,
-    path: String,
-    final_name: String,
-) -> Result<ComputerInstanceStatus, String> {
-    commit_computer_package_import_core(&state, &path, &final_name).await
-}
-
-pub async fn commit_computer_package_import_core(
+/// Parses a package and applies every validation gate before any write: package
+/// structure/version plus schema-only structural validation of the SDK config.
+pub(crate) fn read_and_validate_package(
     state: &AppState,
     path: &str,
-    final_name: &str,
-) -> Result<ComputerInstanceStatus, String> {
-    let package = read_package(path)?;
-    validate_package_for_import(&package).map_err(|error| error.to_string())?;
-
-    let final_name = normalize_name(final_name)?;
-    let existing_names = collect_existing_names(state).await;
-    if existing_names
-        .iter()
-        .any(|name| name.trim().eq_ignore_ascii_case(&final_name))
-    {
-        return Err(format!(
-            "Computer name '{final_name}' conflicts with an existing Computer"
-        ));
-    }
-
-    let id = generate_instance_id();
-    let profile = package
-        .profile
-        .as_ref()
-        .map(|profile| {
-            let mut profile = profile.to_computer_profile(id.clone());
-            profile.name = final_name.clone();
-            profile
-        })
-        .unwrap_or_else(|| ComputerProfile::new(id.clone(), final_name.clone()));
-    let instance = ComputerInstance::from(profile);
-    let destination_storage_root = state.config.computer_instance_storage_root(&instance.id);
-
-    let result = async {
-        state
-            .config
-            .add_computer_instance(instance.clone())
-            .map_err(|error| error.to_string())?;
-
-        if let Some(sdk_config) = package.sdk_config.as_ref() {
-            if let Err(error) = restore_complete_sdk_config(state, &instance.id, sdk_config) {
-                return Err(
-                    rollback_import(state, &instance.id, &destination_storage_root, error).await,
-                );
-            }
-        }
-        if let Some(values) = package.input_values.as_ref() {
-            if let Err(error) = write_input_values(state, &instance.id, values) {
-                return Err(
-                    rollback_import(state, &instance.id, &destination_storage_root, error).await,
-                );
-            }
-        }
-        if let Some(skills) = package.skills.as_ref() {
-            if let Err(error) = write_skill_home_user_files(state, &instance.id, &skills.user_files)
-            {
-                return Err(
-                    rollback_import(state, &instance.id, &destination_storage_root, error).await,
-                );
-            }
-        }
-
-        let runtime = match state
-            .computer_registry
-            .upsert_runtime(instance.clone())
-            .await
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                return Err(
-                    rollback_import(state, &instance.id, &destination_storage_root, error).await,
-                )
-            }
-        };
-
-        // Declaration + best-effort materialization via the existing SDK command paths.
-        if let Some(skills) = package.skills.as_ref() {
-            let pending = rebuild_marketplaces_and_plugins(state, &instance.id, skills).await;
-            if !pending.is_empty() {
-                log::warn!(
-                    "Imported Computer '{}' has plugins pending install: {}",
-                    instance.id,
-                    pending.join(", ")
-                );
-            }
-        }
-
-        Ok(status_from_instance(&instance, &runtime).await)
-    }
-    .await;
-    result
-}
-
-fn read_package(path: &str) -> Result<PortableComputerPackage, String> {
+) -> Result<PortableComputerPackage, String> {
     let path = require_non_empty("path", path)?;
     let bytes = std::fs::read(path).map_err(|error| format!("Failed to read {path}: {error}"))?;
-    parse_package(&bytes).map_err(|error| error.to_string())
+    let package = parse_package(&bytes).map_err(|error| error.to_string())?;
+    validate_package_for_import(&package).map_err(|error| error.to_string())?;
+    if let Some(sdk_config) = package.sdk_config.as_ref() {
+        validate_portable_sdk_config(state, sdk_config)?;
+    }
+    Ok(package)
 }
 
-async fn collect_existing_names(state: &AppState) -> std::collections::HashSet<String> {
-    state
-        .computer_registry
-        .list_runtimes()
-        .await
-        .into_iter()
-        .map(|runtime| runtime.instance.name.clone())
-        .collect()
+/// Applies the durable, non-runtime parts of a package to a freshly created
+/// instance (SDK config, non-sensitive input values, Skill Home user files).
+pub(crate) async fn apply_portable_package_config(
+    state: &AppState,
+    instance_id: &str,
+    package: &PortableComputerPackage,
+) -> Result<(), String> {
+    if let Some(sdk_config) = package.sdk_config.as_ref() {
+        restore_complete_sdk_config(state, instance_id, sdk_config)?;
+    }
+    if let Some(values) = package.input_values.as_ref() {
+        write_input_values(state, instance_id, values)?;
+    }
+    if let Some(skills) = package.skills.as_ref() {
+        write_skill_home_user_files(state, instance_id, &skills.user_files)?;
+    }
+    Ok(())
+}
+
+/// Rebuilds Marketplace/plugin declarations through the existing SDK command paths
+/// and materializes them best-effort. Safe to call once the runtime is published.
+pub(crate) async fn rebuild_portable_plugins(
+    state: &AppState,
+    instance_id: &str,
+    package: &PortableComputerPackage,
+) {
+    if let Some(skills) = package.skills.as_ref() {
+        let pending = rebuild_marketplaces_and_plugins(state, instance_id, skills).await;
+        if !pending.is_empty() {
+            log::warn!(
+                "Imported Computer '{}' has plugins pending install: {}",
+                instance_id,
+                pending.join(", ")
+            );
+        }
+    }
+}
+
+/// Schema-only structural validation of the package's SDK configuration. It never
+/// resolves inputs/secrets and never probes commands, paths or reachability.
+fn validate_portable_sdk_config(state: &AppState, sdk: &PortableSdkConfig) -> Result<(), String> {
+    let project_doc = ProjectConfigDoc {
+        settings: sdk.settings.clone(),
+        settings_local: sdk.settings_local.clone(),
+        mcp: sdk.mcp.clone(),
+        mcp_local: sdk.mcp_local.clone(),
+    };
+    let report = state.sdk_config.validate(&project_doc);
+    if !report.is_valid() {
+        let details = report
+            .errors
+            .iter()
+            .map(|error| {
+                format!(
+                    "{}:{}: {}",
+                    error.source_path.as_deref().unwrap_or("package config"),
+                    error.field,
+                    error.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "Portable package contains an invalid SDK configuration: {details}"
+        ));
+    }
+    if let Some(mcp) = sdk.user_mcp.as_ref() {
+        validate_mcp_map_structure(mcp, "user mcp")?;
+    }
+    Ok(())
+}
+
+/// Structural check for a user-scope mcp map: every server must decode as an MCP
+/// server declaration. Inputs are validated by the SDK schema pass above.
+fn validate_mcp_map_structure(mcp: &Map<String, Value>, label: &str) -> Result<(), String> {
+    let Some(servers) = mcp.get("servers") else {
+        return Ok(());
+    };
+    let servers = servers
+        .as_object()
+        .ok_or_else(|| format!("Portable package {label} 'servers' must be an object"))?;
+    for (name, body) in servers {
+        let mut body = body
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("Portable package {label} server '{name}' must be an object"))?;
+        body.entry("name".to_string())
+            .or_insert_with(|| Value::String(name.clone()));
+        serde_json::from_value::<a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig>(
+            Value::Object(body),
+        )
+        .map_err(|error| {
+            format!(
+                "Portable package {label} server '{name}' is not a valid MCP declaration: {error}"
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn restore_complete_sdk_config(
@@ -366,22 +358,6 @@ fn marketplace_source_url(source: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
-}
-
-async fn rollback_import(
-    state: &AppState,
-    instance_id: &str,
-    storage_root: &Path,
-    primary_error: String,
-) -> String {
-    crate::commands::computer::rollback_failed_computer_creation(
-        state,
-        instance_id,
-        storage_root,
-        "import portable configuration",
-        primary_error,
-    )
-    .await
 }
 
 fn normalize_groups(groups: Option<Vec<PackageGroup>>) -> Vec<PackageGroup> {

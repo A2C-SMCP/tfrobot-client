@@ -206,108 +206,30 @@ pub struct SectionPreview {
     pub message: Option<String>,
 }
 
-/// Immutable preview produced before any write. The caller must present the
-/// marketplace/plugin list and obtain explicit confirmation before committing.
+/// Lightweight result of inspecting a package before it is adopted by the create flow.
+///
+/// It contains only client-facing metadata used to prefill the create form; it does
+/// not resolve name conflicts and never probes runtime dependencies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PackagePreview {
+pub struct ComputerPackageInspection {
     pub original_name: String,
-    pub final_name: String,
-    pub name_conflict: bool,
+    pub description: Option<String>,
     pub format_version: u32,
-    pub version_compatible: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version_message: Option<String>,
-    pub sections: Vec<SectionPreview>,
-    pub marketplaces: Vec<PortableMarketplaceDeclaration>,
-    pub installed_plugins: Vec<String>,
+    pub groups: Vec<PackageGroup>,
 }
 
-/// Produces a name that does not collide (case-insensitively) with any existing name.
-///
-/// Returns `(final_name, conflicted)`. A conflict is resolved with a numeric suffix;
-/// the original name is otherwise returned trimmed.
-pub fn resolve_name_conflict(
-    original: &str,
-    existing_names: &std::collections::HashSet<String>,
-) -> (String, bool) {
-    let base = original.trim().to_string();
-    if base.is_empty() {
-        return ("Computer".to_string(), false);
-    }
-    if !existing_names
-        .iter()
-        .any(|name| name.trim().eq_ignore_ascii_case(&base))
-    {
-        return (base, false);
-    }
-    for suffix in 2..1_000_000 {
-        let candidate = format!("{base} ({suffix})");
-        if !existing_names
-            .iter()
-            .any(|name| name.trim().eq_ignore_ascii_case(&candidate))
-        {
-            return (candidate, true);
+impl ComputerPackageInspection {
+    pub fn from_package(package: &PortableComputerPackage) -> Self {
+        Self {
+            original_name: package.manifest.source_computer_name.clone(),
+            description: package
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.description.clone()),
+            format_version: package.format_version,
+            groups: package.groups.clone(),
         }
-    }
-    (
-        format!(
-            "{base} ({})",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ),
-        true,
-    )
-}
-
-/// Computes the import preview from a parsed package without probing any runtime
-/// dependency, path, MCP server or Marketplace reachability.
-pub fn preview_package(
-    package: &PortableComputerPackage,
-    existing_names: &std::collections::HashSet<String>,
-) -> PackagePreview {
-    let (final_name, name_conflict) =
-        resolve_name_conflict(&package.manifest.source_computer_name, existing_names);
-    let (version_compatible, version_message) = version_compatibility(package);
-    let sections = PackageGroup::ALL
-        .iter()
-        .map(|group| preview_section(*group, package))
-        .collect::<Vec<_>>();
-
-    PackagePreview {
-        original_name: package.manifest.source_computer_name.clone(),
-        final_name,
-        name_conflict,
-        format_version: package.format_version,
-        version_compatible,
-        version_message,
-        sections,
-        marketplaces: package
-            .skills
-            .as_ref()
-            .map(|skills| skills.marketplaces.clone())
-            .unwrap_or_default(),
-        installed_plugins: package
-            .skills
-            .as_ref()
-            .map(|skills| skills.installed_plugins.clone())
-            .unwrap_or_default(),
-    }
-}
-
-fn version_compatibility(package: &PortableComputerPackage) -> (bool, Option<String>) {
-    if SUPPORTED_PACKAGE_FORMAT_VERSIONS.contains(&package.format_version) {
-        (true, None)
-    } else {
-        (
-            false,
-            Some(format!(
-                "unsupported package format version {}",
-                package.format_version
-            )),
-        )
     }
 }
 
@@ -521,36 +443,24 @@ mod tests {
     }
 
     #[test]
-    fn name_conflict_is_case_insensitive_and_generates_a_suffix() {
-        let existing = std::collections::HashSet::from(["Alpha".to_string()]);
-        let (name, conflict) = resolve_name_conflict(" alpha ", &existing);
-        assert!(conflict);
-        assert_eq!(name, "alpha (2)");
-
-        let (name, conflict) = resolve_name_conflict("Beta", &existing);
-        assert!(!conflict);
-        assert_eq!(name, "Beta");
-    }
-
-    #[test]
-    fn preview_reports_missing_and_incompatible_sections() {
+    fn inspection_surfaces_original_name_description_and_groups() {
         let mut package = minimal_package();
-        package.groups = vec![PackageGroup::BasicProfile];
-        package.profile = None;
-        let preview = preview_package(&package, &std::collections::HashSet::new());
-        assert!(preview.version_compatible);
-        let basic = preview
-            .sections
-            .iter()
-            .find(|section| section.group == PackageGroup::BasicProfile)
-            .unwrap();
-        assert_eq!(basic.status, SectionStatus::Incompatible);
-        let mcp = preview
-            .sections
-            .iter()
-            .find(|section| section.group == PackageGroup::McpAndInputs)
-            .unwrap();
-        assert_eq!(mcp.status, SectionStatus::Missing);
+        package.groups = vec![PackageGroup::BasicProfile, PackageGroup::McpAndInputs];
+        package.profile = Some(PortableProfile {
+            name: "One".into(),
+            description: Some("source".into()),
+            connection_policy: ComputerProfileConnectionPolicy::default(),
+            remote_control: RemoteControlPolicy::default(),
+            command_line: CommandLineToolPolicy::default(),
+            mcp_start_concurrency: 3,
+        });
+        let inspection = ComputerPackageInspection::from_package(&package);
+        assert_eq!(inspection.original_name, "One");
+        assert_eq!(inspection.description.as_deref(), Some("source"));
+        assert_eq!(
+            inspection.groups,
+            vec![PackageGroup::BasicProfile, PackageGroup::McpAndInputs]
+        );
     }
 
     #[test]

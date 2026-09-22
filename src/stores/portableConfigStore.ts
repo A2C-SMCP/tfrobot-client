@@ -14,57 +14,27 @@ export const ALL_PORTABLE_CONFIG_GROUPS: PortableConfigGroup[] = [
   'skills_and_plugins',
 ];
 
-export type PortableSectionStatus =
-  | 'compatible'
-  | 'migratable'
-  | 'incompatible'
-  | 'conflict'
-  | 'missing';
-
-export interface PortableMarketplaceDeclaration {
-  name: string;
-  source: unknown;
-  commitSha?: string;
-}
-
-export interface PortableSectionPreview {
-  group: PortableConfigGroup;
-  status: PortableSectionStatus;
-  message?: string;
-}
-
-export interface PortablePackagePreview {
+export interface PortablePackageInspection {
   originalName: string;
-  finalName: string;
-  nameConflict: boolean;
+  description?: string;
   formatVersion: number;
-  versionCompatible: boolean;
-  versionMessage?: string;
-  sections: PortableSectionPreview[];
-  marketplaces: PortableMarketplaceDeclaration[];
-  installedPlugins: string[];
+  groups: PortableConfigGroup[];
 }
 
-export interface PortableImportResult {
-  id: string;
-  name: string;
-}
+export type PortableInspection = PortablePackageInspection;
 
 interface PortableConfigState {
   exporting: boolean;
-  previewing: boolean;
-  committing: boolean;
+  inspecting: boolean;
   error: string | null;
   exportPackage: (instanceId: string, path: string, groups: PortableConfigGroup[]) => Promise<void>;
-  previewImport: (path: string) => Promise<PortablePackagePreview>;
-  commitImport: (path: string, finalName: string) => Promise<PortableImportResult>;
+  inspectPackage: (path: string) => Promise<PortablePackageInspection>;
   reset: () => void;
 }
 
 const initialState = {
   exporting: false,
-  previewing: false,
-  committing: false,
+  inspecting: false,
   error: null as string | null,
 };
 
@@ -87,30 +57,15 @@ export const usePortableConfigStore = create<PortableConfigState>((set) => ({
     }
   },
 
-  previewImport: async (path) => {
-    set({ previewing: true, error: null });
+  inspectPackage: async (path) => {
+    set({ inspecting: true, error: null });
     try {
-      return await invoke<PortablePackagePreview>('preview_computer_package_import', { path });
+      return await invoke<PortablePackageInspection>('inspect_computer_package', { path });
     } catch (error) {
       set({ error: String(error) });
       throw error;
     } finally {
-      set({ previewing: false });
-    }
-  },
-
-  commitImport: async (path, finalName) => {
-    set({ committing: true, error: null });
-    try {
-      return await invoke<PortableImportResult>('commit_computer_package_import', {
-        path,
-        finalName,
-      });
-    } catch (error) {
-      set({ error: String(error) });
-      throw error;
-    } finally {
-      set({ committing: false });
+      set({ inspecting: false });
     }
   },
 

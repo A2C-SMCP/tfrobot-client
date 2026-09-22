@@ -69,6 +69,9 @@ pub struct ComputerInstanceStatus {
 pub struct CreateComputerInstanceRequest {
     pub name: String,
     pub description: Option<String>,
+    /// Optional portable configuration package to adopt when creating the Computer.
+    #[serde(default)]
+    pub import_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,20 +195,34 @@ pub(crate) async fn create_computer_instance_with_trigger(
             return result;
         }
     };
-    let instance = ComputerInstance {
-        id: generate_instance_id(),
-        name,
-        description: normalize_optional_text(request.description),
-        mcp_servers: Vec::new(),
-        inputs: Vec::new(),
-        input_values: Default::default(),
-        local_skills_root: None,
-        connection_policy: ComputerConnectionPolicy::default(),
-        remote_control: RemoteControlPolicy::default(),
-        command_line: CommandLineToolPolicy::default(),
-        mcp_start_concurrency: crate::services::computer::DEFAULT_MCP_START_CONCURRENCY,
-        robot_binding: None,
+    let package = match request
+        .import_path
+        .as_deref()
+        .map(|path| crate::commands::portable_config::read_and_validate_package(state, path))
+        .transpose()
+    {
+        Ok(package) => package,
+        Err(error) => {
+            let result = Err(error);
+            record_computer_profile_activity(
+                state, None, "create", trigger, started, None, &result,
+            )
+            .await;
+            return result;
+        }
     };
+    let id = generate_instance_id();
+    let description = normalize_optional_text(request.description);
+    let mut profile = package
+        .as_ref()
+        .and_then(|package| package.profile.as_ref())
+        .map(|profile| profile.to_computer_profile(id.clone()))
+        .unwrap_or_else(|| {
+            crate::services::computer::ComputerProfile::new(id.clone(), name.clone())
+        });
+    profile.name = name;
+    profile.description = description;
+    let instance = ComputerInstance::from(profile);
 
     let computer_id = instance.id.clone();
     let result = async {
@@ -214,6 +231,24 @@ pub(crate) async fn create_computer_instance_with_trigger(
             .add_computer_instance(instance.clone())
             .map_err(|error| error.to_string())?;
         let instance_storage_root = state.config.computer_instance_storage_root(&instance.id);
+        if let Some(package) = package.as_ref() {
+            if let Err(error) = crate::commands::portable_config::apply_portable_package_config(
+                state,
+                &instance.id,
+                package,
+            )
+            .await
+            {
+                return Err(rollback_failed_computer_creation(
+                    state,
+                    &instance.id,
+                    &instance_storage_root,
+                    "create",
+                    error,
+                )
+                .await);
+            }
+        }
         let instance = match load_hydrated_computer_instance(state, &instance.id) {
             Ok(instance) => instance,
             Err(error) => {
@@ -244,6 +279,14 @@ pub(crate) async fn create_computer_instance_with_trigger(
                 .await)
             }
         };
+        if let Some(package) = package.as_ref() {
+            crate::commands::portable_config::rebuild_portable_plugins(
+                state,
+                &instance.id,
+                package,
+            )
+            .await;
+        }
 
         Ok(status_from_instance(&instance, &runtime).await)
     }
@@ -2119,6 +2162,7 @@ mod tests {
             CreateComputerInstanceRequest {
                 name: "Remote Computer".to_string(),
                 description: None,
+                import_path: None,
             },
             "client_control",
         )
@@ -2194,6 +2238,7 @@ mod tests {
             CreateComputerInstanceRequest {
                 name: "   ".to_string(),
                 description: Some("token=must-not-be-recorded".to_string()),
+                import_path: None,
             },
             "user",
         )

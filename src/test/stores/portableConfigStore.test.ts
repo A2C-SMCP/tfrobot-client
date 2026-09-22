@@ -27,40 +27,22 @@ describe('portableConfigStore', () => {
     });
   });
 
-  it('previews an import package', async () => {
-    const preview = {
+  it('inspects a package to prefill the create form', async () => {
+    const inspection = {
       originalName: 'One',
-      finalName: 'One (2)',
-      nameConflict: true,
+      description: 'source',
       formatVersion: 1,
-      versionCompatible: true,
-      sections: [],
-      marketplaces: [],
-      installedPlugins: [],
+      groups: ['basic_profile'] as const,
     };
-    mockedInvoke.mockResolvedValueOnce(preview);
+    mockedInvoke.mockResolvedValueOnce(inspection);
 
     const result = await usePortableConfigStore
       .getState()
-      .previewImport('/tmp/package.json');
+      .inspectPackage('/tmp/package.json');
 
-    expect(mockedInvoke).toHaveBeenCalledWith('preview_computer_package_import', {
+    expect(mockedInvoke).toHaveBeenCalledWith('inspect_computer_package', {
       path: '/tmp/package.json',
     });
-    expect(result).toEqual(preview);
-  });
-
-  it('commits an import with the final name', async () => {
-    mockedInvoke.mockResolvedValueOnce({ id: 'computer-new', name: 'Two' });
-
-    const result = await usePortableConfigStore
-      .getState()
-      .commitImport('/tmp/package.json', 'Two');
-
-    expect(mockedInvoke).toHaveBeenCalledWith('commit_computer_package_import', {
-      path: '/tmp/package.json',
-      finalName: 'Two',
-    });
-    expect(result).toEqual({ id: 'computer-new', name: 'Two' });
+    expect(result).toEqual(inspection);
   });
 });

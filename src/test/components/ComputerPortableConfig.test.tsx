@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '../helpers/render';
+import { fireEvent, render, screen, waitFor } from '../helpers/render';
 import { ComputerPortableConfig } from '@/components/Computer/ComputerPortableConfig';
 import type { ComputerInstance } from '@/stores/computerStore';
 import { usePortableConfigStore } from '@/stores/portableConfigStore';
@@ -47,58 +47,46 @@ describe('ComputerPortableConfig', () => {
       <ComputerPortableConfig
         instance={instance()}
         exportOpen
-        importOpen={false}
         onCloseExport={() => {}}
-        onCloseImport={() => {}}
       />,
     );
 
-    const groupLabels = [
+    for (const label of [
       /basic profile/i,
       /mcp configuration and input definitions/i,
       /non-sensitive input values/i,
       /skills and plugins/i,
-    ];
-    for (const label of groupLabels) {
-      const checkbox = screen.getByRole('checkbox', {
-        name: label,
-      });
-      expect(checkbox).toBeChecked();
+    ]) {
+      expect(screen.getByRole('checkbox', { name: label })).toBeChecked();
     }
   });
 
-  it('previews an import package and lists marketplace sources', async () => {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const mockedOpen = vi.mocked(open);
-    mockedOpen.mockResolvedValueOnce('/tmp/package.json');
-    mockedInvoke.mockResolvedValueOnce({
-      originalName: 'Remote',
-      finalName: 'Remote',
-      nameConflict: false,
-      formatVersion: 1,
-      versionCompatible: true,
-      sections: [],
-      marketplaces: [{ name: 'acme', source: { type: 'git', url: 'https://git.example/acme' } }],
-      installedPlugins: ['audit@acme'],
-    });
+  it('exports the selected groups through the store', async () => {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    vi.mocked(save).mockResolvedValueOnce('/tmp/out.json');
+    mockedInvoke.mockResolvedValueOnce(undefined);
 
     render(
       <ComputerPortableConfig
         instance={instance()}
-        exportOpen={false}
-        importOpen
+        exportOpen
         onCloseExport={() => {}}
-        onCloseImport={() => {}}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Choose configuration file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
 
-    expect(await screen.findByText('Remote')).toBeTruthy();
-    expect(await screen.findByText(/https:\/\/git\.example\/acme/)).toBeTruthy();
-    expect(await screen.findByText('audit@acme')).toBeTruthy();
-    expect(
-      await screen.findByText(/This package declares external Marketplace sources and plugins/),
-    ).toBeTruthy();
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('export_computer_package', {
+        instanceId: 'computer-a',
+        path: '/tmp/out.json',
+        groups: [
+          'basic_profile',
+          'mcp_and_inputs',
+          'non_sensitive_input_values',
+          'skills_and_plugins',
+        ],
+      }),
+    );
   });
 });
