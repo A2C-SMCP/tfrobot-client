@@ -52,6 +52,14 @@
   min-width: 0;
 }
 
+/* Local loading state for session restore: a bare info banner would read as a notice. */
+.identityLoading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
 @media (max-width: 900px) {
   .header {
     padding: 0 12px;

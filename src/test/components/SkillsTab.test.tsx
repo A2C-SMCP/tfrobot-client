@@ -154,7 +154,9 @@ describe('SkillsTab', () => {
 
     fireEvent.click(await screen.findByText('empty-helper'));
 
-    expect(await screen.findByText('SKILL.md has no preview content')).toBeInTheDocument();
+    expect(await screen.findByText(
+      'The resource was returned as text but its body is empty.',
+    )).toBeInTheDocument();
   });
 
   it('renders structured backend resource errors with a readable message', async () => {

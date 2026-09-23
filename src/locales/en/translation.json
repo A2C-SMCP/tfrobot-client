@@ -1,7 +1,7 @@
 {
   "permissions": {
     "mcp": "Starting an MCP or signing in may request keychain access for its saved passwords or OAuth credentials. Denying access stops that operation. External tools may request additional permissions for their own features; allow only permissions you expect.",
-    "password": "Saving, changing or deleting a password variable may request system keychain access, including reading the previous value for recovery if saving fails. Denying access leaves the operation unsuccessful; other variables remain available.",
+    "password": "Saving or deleting a password variable asks macOS for keychain access; denying it fails that operation.",
 
     "title": "Credential access paused",
     "description": "The system could not access a saved credential. Background attempts for this credential are paused. Allow another attempt, then repeat your original action. Other credentials remain available.",
@@ -11,7 +11,7 @@
     "input": "Saved password variable",
     "connection": "Saved sign-in or connection credential",
     "purpose": "Connecting or signing in may ask to read saved credentials from your system keychain. Denying access stops that action; other features remain available.",
-    "migration": "Older variables need to be imported. This may request keychain access to verify saved passwords. If you decline, existing variables remain available and you can retry here.",
+    "migration": "Older variables need importing; this may request keychain access to verify saved passwords. Declining keeps the existing variables usable.",
     "migrate": "Import older variables",
     "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
 },
@@ -20,7 +20,8 @@
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
     "runtimeInputUnavailable": "Runtime Input prompts are unavailable",
     "retryRuntimeInput": "Retry prompts",
-    "retryRuntimeEvents": "Retry"
+    "retryRuntimeEvents": "Retry",
+    "restoringSession": "Restoring your session…"
   },
   "common": {
     "add": "Add",
@@ -39,7 +40,9 @@
     "success": "Success",
     "import": "Import",
     "export": "Export",
-    "confirm": "Confirm"
+    "confirm": "Confirm",
+    "dismissNotice": "Don't show again",
+    "permissionsHelp": "Permissions & security"
   },
   "nav": {
     "overview": "OVERVIEW",
@@ -57,7 +60,9 @@
     "title": "Robot List"
   },
   "chat": {
-    "restoreFailed": "Could not restore or save your last conversation. Retry, or choose a robot and conversation manually.",
+    "restorePositionFailed": "Could not restore or save the conversation you had open. Retry, or choose a robot and conversation manually.",
+    "rememberRobotFailed": "Could not save your most recently used robot. Retry, or choose a robot manually.",
+    "preferenceFailed": "Could not read your saved robot preference. Retry, or choose a robot manually.",
     "title": "Chat",
     "context": "Organization: {{organization}}",
     "availableRobots": "{{count}} available",
@@ -225,7 +230,8 @@
       "busy": "Too many attachment requests. Please retry after a download finishes.",
       "save": "The attachment could not be saved. Check the destination and available disk space.",
       "unsupported": "This file type cannot be opened automatically. Use Download to save it."
-    }
+    },
+    "attachmentRetryHint": "Retry the attachment from the message it belongs to."
   },
   "computer": {
     "title": "Computer",
@@ -306,6 +312,7 @@
       "enabledDescription": "Disabled by default. Changes rebuild this Computer's internal provider without creating an MCP declaration.",
       "securityTitle": "This grants client-level control",
       "securityDescription": "Enable only the tools and target Computers this Robot needs. Secret values remain write-only and all calls are audited.",
+      "securitySummary": "Robot control stays limited to the tools and Computers you allow, and every call is audited.",
       "toolScope": "Allowed tools",
       "allTools": "All 55 tools",
       "customTools": "Custom selection",
@@ -568,8 +575,7 @@
       "nameRequired": "Name is required",
       "description": "Description",
       "mcpStartConcurrency": "MCP startup concurrency",
-      "mcpStartConcurrencyHint": "Applies the next time this Computer starts.",
-      "mcpStartConcurrencyRunningHint": "Changing this value does not interrupt the running Computer.",
+      "mcpStartConcurrencyHint": "Applies the next time this Computer starts; changing it does not interrupt the running Computer.",
       "copyRobotBinding": "Copy Robot binding",
       "connectionTarget": "Connection target",
       "useOriginalConnectionConfig": "Use original connection config",
@@ -599,7 +605,6 @@
     "openLocalRoot": "Open Local Root",
     "resourceUnavailable": "SKILL.md unavailable",
     "missingSkillMd": "The selected skill did not return a SKILL.md resource.",
-    "emptySkillMd": "SKILL.md has no preview content",
     "emptySkillMdDescription": "The resource was returned as text but its body is empty.",
     "nonTextSkillMd": "The resource is not returned as inline text.",
     "messages": {
@@ -718,6 +723,7 @@
     "servers": "MCP Servers",
     "configTitle": "MCP Configuration",
     "runtimeTitle": "MCP Runtime",
+    "runtimePermissionHint": "Keychain and permission details",
     "configRevision": "Config revision",
     "addServer": "Add Server",
     "editServer": "Edit Server",
@@ -740,7 +746,6 @@
     "ownershipUnavailableDescription": "Configuration changes remain disabled until authoritative ownership is loaded. Refresh to try again.",
     "ownershipUnavailableHint": "Configuration changes are disabled until authoritative MCP ownership is available.",
     "validation": {
-      "schemaOnlyTitle": "Schema validation only",
       "schemaOnlyDescription": "Validation checks the SDK-owned configuration structure. It does not check commands, paths, secrets, inputs, marketplaces, plugins, or MCP server runtime availability.",
       "valid": "The SDK configuration schema is valid.",
       "invalid": "The SDK configuration has {{count}} schema error(s)."
@@ -934,7 +939,8 @@
       "saveFailed": "The input could not be saved. Please try again.",
       "editFor": "Edit input {{key}}",
       "deleteFor": "Delete input {{key}}",
-      "confirmDelete": "Delete input {{key}} and its saved value?"
+      "confirmDelete": "Delete input {{key}} and its saved value?",
+      "confirmDeleteSecret": "The credential is removed from the system keychain. This cannot be undone."
     },
     "status": {
       "usingDefault": "Using default",
@@ -1087,8 +1093,24 @@
     "tabs": {
       "tools": "Tools",
       "resources": "Resources",
-      "history": "History"
+      "history": "History",
+      "notices": "Notice stats"
     },
+    "noticeColumns": {
+      "notice": "Notice",
+      "impressions": "Shown",
+      "dismissed": "Dismissed",
+      "helpClicks": "Help clicks",
+      "dismissRate": "Dismiss rate",
+      "helpRate": "Help click rate"
+    },
+    "notices": {
+      "mcp-runtime-keychain": "MCP runtime keychain access",
+      "password-variable-keychain": "Password variable keychain access",
+      "remote-control-security": "Remote control security",
+      "desktop-enumeration-unverified": "Desktop enumeration unverified"
+    },
+    "noticesLocalOnly": "Counted on this machine only; never written to the activity log.",
     "searchTools": "Search tools...",
     "allServers": "All Servers",
     "noTools": "No tools available",
@@ -1136,6 +1158,18 @@
     "appearance": "Appearance",
     "runtime": "Runtime",
     "data": "Data",
+    "permissions": "Permissions & security",
+    "permissionsPage": {
+      "intro": "macOS asks for authorisation at the points below — keychain access for saved credentials, or administrator authentication for an update. Declining only stops the action being attempted.",
+      "items": {
+        "mcp": "MCP runtime and sign-in",
+        "password": "Password variables",
+        "purpose": "Sign-in and connection credentials",
+        "migration": "Importing older variables",
+        "update": "Installing application updates",
+        "paused": "Repeating an action after access was paused"
+      }
+    },
     "about": "About",
     "theme": "Theme",
     "themeLight": "Light",
@@ -1210,6 +1244,7 @@
     "login": {
       "title": "Sign in to TFRSManager",
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
+      "credentialHint": "Signing in reads saved credentials from your system keychain. Declining stops this sign-in only.",
       "environment": "Environment",
       "environmentHint": "The client configures the Manager address for the selected environment.",
       "environmentRequired": "Environment is required",

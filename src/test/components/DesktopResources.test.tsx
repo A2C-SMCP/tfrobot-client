@@ -8,6 +8,7 @@ import {
   type DesktopInstanceState,
   type DesktopWindow,
 } from '@/stores/desktopStore';
+import { useUiNoticeStore } from '@/stores/uiNoticeStore';
 import { runtimeSnapshot } from '../helpers/store';
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 
@@ -75,6 +76,9 @@ function firstRowExpandButton(): Element {
 describe('DesktopResources', () => {
   beforeEach(() => {
     useDesktopStore.getState().reset();
+    // The app shell loads notice state once at startup; these tests render the section alone.
+    useUiNoticeStore.getState().reset();
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
     mockedInvoke.mockReset();
   });
 

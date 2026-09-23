@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, App, Button, Space, Typography } from 'antd';
-import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Space, Tooltip, Typography } from 'antd';
+import {
+  InfoCircleOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import {
   useMcpStore,
@@ -8,10 +13,12 @@ import {
   type McpServerManagedBy,
 } from '@/stores/mcpStore';
 import type { ComputerRuntimeActionCapability } from '@/stores/runtimeSnapshot';
+import { NoticeBar } from '@/components/common/NoticeBar';
+import { useNoticeLifecycle } from '@/components/common/useNoticeLifecycle';
 import { McpServerList } from './McpServerList';
 import { useMcpRuntimeActions, type McpRuntimeAction } from './useMcpRuntimeActions';
 
-const { Title } = Typography;
+const { Text, Title } = Typography;
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpRuntimeControlsProps {
@@ -20,6 +27,8 @@ interface McpRuntimeControlsProps {
   onStartRuntime?: () => void;
   onRestartRuntime?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
+  onOpenPermissionHelp?: () => void;
 }
 
 function runtimeSuccessMessage(action: McpRuntimeAction) {
@@ -39,9 +48,13 @@ export function McpRuntimeControls({
   onStartRuntime,
   onRestartRuntime,
   onOpenPlugin,
+  onOpenPermissionHelp,
 }: McpRuntimeControlsProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  // Explains why macOS asks for keychain access. Shown in full once, then only reachable from the
+  // ⓘ next to the title and from Settings → Permissions & security.
+  const keychainNotice = useNoticeLifecycle('mcp-runtime-keychain');
   const [batchFeedback, setBatchFeedback] = useState<{
     action: 'start' | 'stop';
     result: McpBatchOperationResult;
@@ -199,7 +212,20 @@ export function McpRuntimeControls({
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{t('mcp.runtimeTitle')}</Title>
+        <Space size={4} align="center">
+          <Title level={4} style={{ margin: 0 }}>{t('mcp.runtimeTitle')}</Title>
+          <Tooltip title={t('permissions.mcp')}>
+            <Button
+              type="text"
+              size="small"
+              icon={<InfoCircleOutlined />}
+              aria-label={t('mcp.runtimePermissionHint')}
+              onClick={onOpenPermissionHelp
+                ? () => keychainNotice.openHelp(onOpenPermissionHelp)
+                : undefined}
+            />
+          </Tooltip>
+        </Space>
         <Space>
           <Button
             icon={<ReloadOutlined />}
@@ -227,13 +253,39 @@ export function McpRuntimeControls({
         </Space>
       </div>
 
-      <Alert type="info" showIcon description={t('permissions.mcp')} style={{ marginBottom: 16 }} />
+      {keychainNotice.visible && (
+        <div style={{ marginBottom: 16 }}>
+          <NoticeBar
+            help={onOpenPermissionHelp && (
+              <Button
+                type="link"
+                size="small"
+                onClick={() => keychainNotice.openHelp(onOpenPermissionHelp)}
+              >
+                {t('common.permissionsHelp')}
+              </Button>
+            )}
+            dismiss={{
+              label: t('common.dismissNotice'),
+              onClick: keychainNotice.dismiss,
+            }}
+          >
+            <Text>{t('permissions.mcp')}</Text>
+          </NoticeBar>
+        </div>
+      )}
+
       {error && (
         <Alert
           message={t('common.error')}
           description={t('mcp.messages.statusLoadFailed')}
           type="error"
           showIcon
+          action={(
+            <Button size="small" onClick={() => fetchServers(instanceId)}>
+              {t('common.retry')}
+            </Button>
+          )}
           style={{ marginBottom: 16 }}
         />
       )}

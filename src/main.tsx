@@ -3,11 +3,14 @@ import ReactDOM from 'react-dom/client';
 import { App as AntdApp, theme as antTheme, ConfigProvider } from 'antd';
 import App from './App';
 import { useThemeStore } from './stores/themeStore';
+import { installUiNoticeFlushHooks } from './stores/uiNoticeStore';
 import { initLogger } from './utils/logger';
 import './i18n';
 import './styles/index.css';
 
 initLogger().catch(console.error);
+// Batched notice impressions are written when the window is hidden or torn down.
+installUiNoticeFlushHooks();
 
 function Root() {
   const resolved = useThemeStore((s) => s.resolved);

@@ -1,5 +1,5 @@
 import { CredentialAccessNotice } from './components/CredentialAccessNotice';
-import { Alert, Layout, Menu, Typography, Button, Space } from 'antd';
+import { Alert, Layout, Menu, Typography, Button, Space, Spin } from 'antd';
 import {
   SettingOutlined,
   FileTextOutlined,
@@ -18,16 +18,18 @@ import { NavigationPages } from './components/Navigation/NavigationPages';
 import { createNavigationStore, menuForRoute } from './stores/navigationStore';
 import { useStore } from 'zustand';
 import { useThemeStore } from './stores/themeStore';
+import { useUiNoticeStore } from './stores/uiNoticeStore';
 import { useManagerStore, type ManagerContextSnapshot } from './stores/managerStore';
 import { useRuntimeStore } from './stores/runtimeStore';
 import { initializeManagerTokenBridge } from './services/managerTokenBridge';
 import { initializeRuntimeInputBridge } from './services/runtimeInputBridge';
 import { RuntimeInputPrompt } from './components/InputVariables/RuntimeInputPrompt';
+import { permissionHelpRoute } from './components/Settings/permissions';
 import { useRuntimeInputStore } from './stores/runtimeInputStore';
 import { AutoUpdateCheck } from './components/ApplicationUpdate/AutoUpdateCheck';
 
 const { Header, Sider, Content } = Layout;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 const AUTH_EXPIRED_EVENT = 'manager:auth-expired';
 const CONTEXT_CHANGED_EVENT = 'manager:context-changed';
 
@@ -80,6 +82,13 @@ function App() {
   useEffect(() => {
     initFromSettings();
   }, [initFromSettings]);
+
+  // Dismissible notices are read once for the whole app; individual panels must stay free of
+  // requests until the user acts on them.
+  const loadNoticeState = useUiNoticeStore((state) => state.fetch);
+  useEffect(() => {
+    void loadNoticeState();
+  }, [loadNoticeState]);
 
   useEffect(() => {
     let disposed = false;
@@ -223,7 +232,9 @@ function App() {
           {t('app.name')}
         </Title>
         <Space className={styles.headerActions} size="small">
-          <GlobalManagerAccount />
+          <GlobalManagerAccount
+            onOpenPermissionHelp={() => navigation.getState().navigate(permissionHelpRoute('purpose'))}
+          />
           <Button
             type="text"
             className={styles.headerBtn}
@@ -252,7 +263,12 @@ function App() {
         <Content className={styles.content}>
           <div className={styles.contentInner}>
             <CredentialAccessNotice />
-            {identityLoading && <Alert type="info" description={t('permissions.purpose')} />}
+            {identityLoading && (
+              <div className={styles.identityLoading} role="status" aria-live="polite">
+                <Spin size="small" />
+                <Text type="secondary">{t('app.restoringSession')}</Text>
+              </div>
+            )}
             {runtimeEventsError && (
               <Alert
                 type="error"

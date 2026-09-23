@@ -1,7 +1,7 @@
 {
   "permissions": {
     "mcp": "启动 MCP 或登录时，可能请求钥匙串授权以访问其密码或 OAuth 凭据。拒绝授权会停止当前操作。外部工具也可能为自身功能请求额外权限，请仅允许符合预期用途的权限。",
-    "password": "保存、修改或删除密码变量可能请求系统钥匙串授权，包括读取旧值以便保存失败时恢复。拒绝授权会使当前操作失败，其他变量仍可使用。",
+    "password": "保存或删除密码变量时，macOS 会请求钥匙串授权；拒绝会使当前操作失败。",
 
     "title": "凭据访问已暂停",
     "description": "系统未能访问一条已保存的凭据，已暂停该条目的后台尝试。允许再次访问后，请重新执行原操作；其他凭据仍可使用。",
@@ -11,7 +11,7 @@
     "input": "已保存的密码变量",
     "connection": "已保存的登录或连接凭据",
     "purpose": "连接或登录可能请求从系统钥匙串读取已保存的凭据。拒绝授权会停止当前操作，其他功能仍可使用。",
-    "migration": "旧变量需要导入，可能请求钥匙串授权以核验已保存的密码。拒绝后仍可使用现有变量，也可在此重试导入。",
+    "migration": "旧变量需要导入，可能请求钥匙串授权核验已保存的密码；拒绝后仍可使用现有变量。",
     "migrate": "导入旧变量",
     "update": "安装更新将替换应用；如果应用所在位置需要更高权限，macOS 可能请求管理员认证。"
 },
@@ -20,7 +20,8 @@
     "runtimeEventsUnavailable": "运行时状态更新不可用",
     "runtimeInputUnavailable": "运行时输入提示暂不可用",
     "retryRuntimeInput": "重试输入提示",
-    "retryRuntimeEvents": "重试"
+    "retryRuntimeEvents": "重试",
+    "restoringSession": "正在恢复登录状态…"
   },
   "common": {
     "add": "添加",
@@ -39,7 +40,9 @@
     "success": "成功",
     "import": "导入",
     "export": "导出",
-    "confirm": "确认"
+    "confirm": "确认",
+    "dismissNotice": "不再提示",
+    "permissionsHelp": "权限与安全"
   },
   "nav": {
     "overview": "概览",
@@ -57,7 +60,9 @@
     "title": "机器人列表"
   },
   "chat": {
-    "restoreFailed": "无法恢复或保存上次对话位置。请重试，或手动选择机器人和会话。",
+    "restorePositionFailed": "未能恢复或保存上次打开的对话位置。可重试，或手动选择机器人和会话。",
+    "rememberRobotFailed": "未能保存最近使用的 Robot。可重试，或直接选择 Robot。",
+    "preferenceFailed": "未能读取上次使用的 Robot 偏好。可重试，或直接选择 Robot。",
     "title": "对话",
     "context": "当前组织：{{organization}}",
     "availableRobots": "{{count}} 个可用",
@@ -225,7 +230,8 @@
       "busy": "附件请求过多，请在下载完成后重试。",
       "save": "无法保存附件，请检查保存位置和磁盘空间。",
       "unsupported": "此文件类型不支持自动打开，请使用下载保存文件。"
-    }
+    },
+    "attachmentRetryHint": "可在所属消息中重新加载该附件。"
   },
   "computer": {
     "title": "Computer",
@@ -306,6 +312,7 @@
       "enabledDescription": "默认关闭。保存后会重建当前 Computer 的内置 provider，不会创建 MCP 声明。",
       "securityTitle": "此功能会授予 Client 级控制能力",
       "securityDescription": "仅开放 Robot 必需的工具与目标 Computer。Secret 始终只写不回显，所有调用都会审计。",
+      "securitySummary": "Robot 控制始终限于你授权的工具与 Computer，所有调用都会记录。",
       "toolScope": "允许的工具",
       "allTools": "全部 55 个工具",
       "customTools": "自定义选择",
@@ -568,8 +575,7 @@
       "nameRequired": "名称不能为空",
       "description": "描述",
       "mcpStartConcurrency": "MCP 启动并发数",
-      "mcpStartConcurrencyHint": "保存后将在此 Computer 下次启动时生效。",
-      "mcpStartConcurrencyRunningHint": "修改该值不会中断当前正在运行的 Computer。",
+      "mcpStartConcurrencyHint": "保存后在此 Computer 下次启动时生效；修改不会中断当前运行中的 Computer。",
       "copyRobotBinding": "复制 Robot 绑定",
       "connectionTarget": "连接目标",
       "useOriginalConnectionConfig": "使用原 Computer 连接配置",
@@ -599,7 +605,6 @@
     "openLocalRoot": "打开本地目录",
     "resourceUnavailable": "SKILL.md 不可用",
     "missingSkillMd": "所选 skill 未返回 SKILL.md 资源。",
-    "emptySkillMd": "SKILL.md 没有可预览内容",
     "emptySkillMdDescription": "资源以文本返回，但正文为空。",
     "nonTextSkillMd": "资源未以内联文本返回。",
     "messages": {
@@ -718,6 +723,7 @@
     "servers": "MCP 服务器",
     "configTitle": "MCP 配置",
     "runtimeTitle": "MCP 运行时",
+    "runtimePermissionHint": "钥匙串与权限说明",
     "configRevision": "配置修订",
     "addServer": "添加服务器",
     "editServer": "编辑服务器",
@@ -740,7 +746,6 @@
     "ownershipUnavailableDescription": "在权威归属加载成功前，配置变更保持禁用。请刷新后重试。",
     "ownershipUnavailableHint": "在权威 MCP 归属可用前，配置变更保持禁用。",
     "validation": {
-      "schemaOnlyTitle": "仅校验配置 Schema",
       "schemaOnlyDescription": "校验只检查 SDK-owned 配置结构，不检查命令、路径、secret、input、marketplace、plugin 或 MCP server 的运行可用性。",
       "valid": "SDK 配置 Schema 有效。",
       "invalid": "SDK 配置存在 {{count}} 个 Schema 错误。"
@@ -934,7 +939,8 @@
       "saveFailed": "无法保存输入项，请重试。",
       "editFor": "编辑输入项 {{key}}",
       "deleteFor": "删除输入项 {{key}}",
-      "confirmDelete": "确定要删除输入项 {{key}} 及其已保存值吗？"
+      "confirmDelete": "确定要删除输入项 {{key}} 及其已保存值吗？",
+      "confirmDeleteSecret": "将从系统钥匙串删除该凭据，此操作无法撤销。"
     },
     "status": {
       "usingDefault": "使用默认值",
@@ -1087,8 +1093,24 @@
     "tabs": {
       "tools": "工具",
       "resources": "资源",
-      "history": "历史记录"
+      "history": "历史记录",
+      "notices": "提示统计"
     },
+    "noticeColumns": {
+      "notice": "提示",
+      "impressions": "展示次数",
+      "dismissed": "已关闭",
+      "helpClicks": "帮助点击",
+      "dismissRate": "关闭率",
+      "helpRate": "帮助点击率"
+    },
+    "notices": {
+      "mcp-runtime-keychain": "MCP 运行时钥匙串授权",
+      "password-variable-keychain": "密码变量钥匙串授权",
+      "remote-control-security": "远程控制安全说明",
+      "desktop-enumeration-unverified": "桌面资源枚举未校验"
+    },
+    "noticesLocalOnly": "仅统计本机提示状态，不写入活动日志。",
     "searchTools": "搜索工具...",
     "allServers": "所有服务器",
     "noTools": "暂无可用工具",
@@ -1136,6 +1158,18 @@
     "appearance": "外观",
     "runtime": "运行时",
     "data": "数据管理",
+    "permissions": "权限与安全",
+    "permissionsPage": {
+      "intro": "在下列操作中，macOS 会请求系统授权：读取已保存的凭据需要钥匙串授权，安装更新可能需要管理员认证。拒绝授权只会让当前操作失败。",
+      "items": {
+        "mcp": "MCP 运行时与登录",
+        "password": "密码变量",
+        "purpose": "登录与连接凭据",
+        "migration": "导入旧变量",
+        "update": "安装应用更新",
+        "paused": "授权被暂停后如何重试"
+      }
+    },
     "about": "关于",
     "theme": "主题",
     "themeLight": "浅色",
@@ -1210,6 +1244,7 @@
     "login": {
       "title": "登录 TFRSManager",
       "description": "登录后可挑选数字员工并自动填充 SMCP 连接。",
+      "credentialHint": "登录会读取系统钥匙串中已保存的凭据；拒绝授权只会停止本次登录。",
       "environment": "环境",
       "environmentHint": "Manager 地址由客户端根据环境自动配置。",
       "environmentRequired": "请选择环境",

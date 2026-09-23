@@ -9,9 +9,10 @@ const { Paragraph, Title } = Typography;
 
 interface BuiltInToolsSettingsProps {
   instance: ComputerInstance;
+  onOpenRuntime?: () => void;
 }
 
-export function BuiltInToolsSettings({ instance }: BuiltInToolsSettingsProps) {
+export function BuiltInToolsSettings({ instance, onOpenRuntime }: BuiltInToolsSettingsProps) {
   const { t } = useTranslation();
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -39,7 +40,7 @@ export function BuiltInToolsSettings({ instance }: BuiltInToolsSettingsProps) {
               {t('computer.builtInTools.commandLine.description')}
             </Paragraph>
           </div>
-          <CommandLineToolSettings computerId={instance.id} />
+          <CommandLineToolSettings computerId={instance.id} onOpenRuntime={onOpenRuntime} />
         </Space>
       </Card>
     </Space>

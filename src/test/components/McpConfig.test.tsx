@@ -125,14 +125,16 @@ describe('McpConfig', () => {
     expect(mockMcpStore.fetchServers).toHaveBeenCalledWith(instanceId);
   });
 
-  it('keeps configuration CRUD, import/export, and schema validation out of runtime controls', () => {
+  it('keeps configuration CRUD, import/export, and schema validation out of runtime controls', async () => {
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('MCP Configuration')).toBeInTheDocument();
     expect(screen.getByText('Add Server')).toBeInTheDocument();
     expect(screen.getByText('Import Config')).toBeInTheDocument();
     expect(screen.getByText('Export Config')).toBeInTheDocument();
     expect(screen.getByText('Validate Schema')).toBeInTheDocument();
-    expect(screen.getByText(/does not check commands, paths, secrets/)).toBeInTheDocument();
+    // The schema-only caveat sits on the Validate button instead of occupying the page.
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Validate Schema' }));
+    expect(await screen.findByText(/does not check commands, paths, secrets/)).toBeInTheDocument();
     expect(screen.queryByText('Start All')).not.toBeInTheDocument();
     expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
   });
