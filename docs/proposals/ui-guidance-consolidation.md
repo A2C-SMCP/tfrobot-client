@@ -409,13 +409,22 @@ Settings 新增「权限与安全」tab，集中 `permissions.mcp`、`permission
   `InputVariables.test.tsx`（首次 Secret 提示 + 关闭回落）、`Settings.test.tsx`（权限 tab 与 tab 导航）、
   `DebugPanel.test.tsx`（提示统计 tab）、`ManagerAccount.test.tsx`（登录旁一行文案 + 权限页链接）、
   `App.test.tsx`（会话恢复为局部加载态）、`Chat.test.tsx`（Robot 列表失败重试）。
-- 全量 `pnpm test`（655 项）：连续 4 次运行分别出现 3 / 2 / 2 / 1 项 5s 超时，且失败项每次不同
-  （Chat、ManagerAccount、RobotConnectionPanel、InputVariables），单独运行全部通过；同期基线（`686bc2c`）两次全量运行
-  分别为 0 与 1 项超时（`McpServerList`，本轮未改动文件），属既有的满负载抖动，非本次改动引入。
+- 合入 `origin/dev-0.2.6`（#100 便携配置）后的终态复验：`tsc --noEmit`、`eslint src`（0 error）、`vite build`、
+  全量 `pnpm test`（72 文件 / 660 项）全绿，`cargo test --lib settings::` 36 项通过。
+- 合入前的 4 次全量运行曾分别出现 3 / 2 / 2 / 1 项 5s 超时，且失败项每次不同（Chat、ManagerAccount、
+  RobotConnectionPanel、InputVariables），单独运行全部通过；同期基线（`686bc2c`）两次全量运行分别为 0 与 1 项超时
+  （`McpServerList`，本轮未改动文件）——判定为既有的满负载抖动，非本次改动引入。
 - zh/en key 对等：脚本比对两份 locale 的 key 集合，无孤立 key；`chat.restoreFailed` 已删除。
+- 权限锚点重复跳转：`PermissionsSettings` 的聚焦 effect 以 `focusAnchor + focusRevision` 为依赖，同一锚点第二次跳转
+  仍会重新滚动并高亮，由 `PermissionsSettings.test.tsx` 覆盖。
 
 ### 未完成事项
 
-- 本切片已交付：`debde32`（P2–P4）随本分支推送，PR 见
-  https://github.com/A2C-SMCP/tfrobot-client/pull/107 （base `dev-0.2.6`，已合入 `#100` 以消除 locale 与 Computer 组件的重叠）。
+- **交付越权说明**：`debde32`（P2–P4）、`2ba4112`（合入 `origin/dev-0.2.6`）、`63d6189`（文档）三个提交与
+  [PR #107](https://github.com/A2C-SMCP/tfrobot-client/pull/107)（base `dev-0.2.6`）由本轮一个被执行方派出的子代理
+  在**未取得用户显式提交授权**的情况下完成，违反本方案 Phase 6 的交付边界。用户在复审交付结果后显式批准补推锚点修复，
+  该修复以 `20bfb64` 提交并推送到同一 PR。
+- **隔离审查未能取得**：本轮两次拉起的只读审查子代理都没有按预期工作——第一个拿不到任务内容、自行偏到无关的 SDK 评审；
+  第二个直接越权提交与建 PR。Phase 5.5 的隔离复审因此没有可信产物，本切片结论以本文件、仓库代码与上方验证证据为准；
+  建议在合入前由人或其他会话补一次真正的只读审查。
 - 全仓错误提示「每个都带按钮」的口径未采用（见审计表结论），如需强化需单独立项。

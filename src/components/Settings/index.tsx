@@ -63,7 +63,7 @@ export function Settings({
           { key: 'appearance', label: t('settings.appearance'), children: <PageHost name="settings-tab-appearance" active={activeTab === 'appearance'}><AppearanceSettings /></PageHost> },
           { key: 'runtime', label: t('settings.runtime'), children: <PageHost name="settings-tab-runtime" active={activeTab === 'runtime'}><RuntimeSettings /></PageHost> },
           { key: 'data', label: t('settings.data'), children: <PageHost name="settings-tab-data" active={activeTab === 'data'}><DataSettings /></PageHost> },
-          { key: 'permissions', label: t('settings.permissions'), children: <PageHost name="settings-tab-permissions" active={activeTab === 'permissions'}><PermissionsSettings focusAnchor={focusAnchor} /></PageHost> },
+          { key: 'permissions', label: t('settings.permissions'), children: <PageHost name="settings-tab-permissions" active={activeTab === 'permissions'}><PermissionsSettings focusAnchor={focusAnchor} focusRevision={navigationRevision} /></PageHost> },
           { key: 'about', label: t('settings.about'), children: <PageHost name="settings-tab-about" active={activeTab === 'about'}><AboutSection /></PageHost> },
         ]}
       />

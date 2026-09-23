@@ -25,13 +25,21 @@ const ANCHOR_BODY_KEYS: Record<PermissionAnchor, string> = {
 interface PermissionsSettingsProps {
   /** Anchor a notice asked to open; the page scrolls to it and marks it briefly. */
   focusAnchor?: PermissionAnchor | null;
+  /**
+   * Bumped by the navigation store on every hop. Opening the same anchor twice must focus it again,
+   * so the effect keys on the revision as well as the anchor itself.
+   */
+  focusRevision?: number;
 }
 
 /**
  * The single authoritative place for system-permission copy. Dismissible notices point at these
  * anchors, so a user who turned a notice off can still read the full explanation afterwards.
  */
-export function PermissionsSettings({ focusAnchor = null }: PermissionsSettingsProps) {
+export function PermissionsSettings({
+  focusAnchor = null,
+  focusRevision = 0,
+}: PermissionsSettingsProps) {
   const { t } = useTranslation();
   const { token } = theme.useToken();
   const [highlight, setHighlight] = useState<PermissionAnchor | null>(null);
@@ -45,7 +53,7 @@ export function PermissionsSettings({ focusAnchor = null }: PermissionsSettingsP
     setHighlight(focusAnchor);
     const timer = window.setTimeout(() => setHighlight(null), HIGHLIGHT_DURATION_MS);
     return () => window.clearTimeout(timer);
-  }, [focusAnchor]);
+  }, [focusAnchor, focusRevision]);
 
   return (
     <div ref={rootRef}>

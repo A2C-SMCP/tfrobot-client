@@ -25,4 +25,15 @@ describe('PermissionsSettings', () => {
     expect(document.getElementById('permissions-password')).toHaveAttribute('data-focused', 'true');
     expect(document.getElementById('permissions-mcp')).not.toHaveAttribute('data-focused');
   });
+
+  it('focuses the anchor again when a notice hops to the same topic twice', () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    const view = render(<PermissionsSettings focusAnchor="mcp" focusRevision={1} />);
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    view.rerender(<PermissionsSettings focusAnchor="mcp" focusRevision={2} />);
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+  });
 });
