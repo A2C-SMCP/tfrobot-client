@@ -71,8 +71,14 @@ test('does not inherit another Computer settings scroll on a first visit', async
   await menu(page, 'Computer').click();
   await page.getByRole('button', { name: 'Computer A', exact: true }).click();
   await page.getByRole('button', { name: 'Open Computer settings', exact: true }).click();
-  await page.evaluate(() => window.scrollTo(0, 300));
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(300);
+  await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toBeVisible();
+  // The form height changes as guidance is consolidated. Exercise scroll isolation
+  // with a reachable nonzero offset instead of assuming a particular page height.
+  const scrollTarget = await page.evaluate(() =>
+    Math.floor((document.documentElement.scrollHeight - window.innerHeight) / 2));
+  expect(scrollTarget).toBeGreaterThan(0);
+  await page.evaluate((target) => window.scrollTo(0, target), scrollTarget);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTarget);
   for (const name of ['Back to Computer', 'Back to Computers', 'Second Computer', 'Open Computer settings']) {
     await page.getByRole('button', { name, exact: true }).evaluate((node: HTMLElement) => node.click());
   }
