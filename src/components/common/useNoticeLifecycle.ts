@@ -1,4 +1,5 @@
-import { useCallback, useEffect } from 'react';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useCallback, useEffect, useRef } from 'react';
 import { useUiNoticeStore, type NoticeId } from '@/stores/uiNoticeStore';
 
 export interface NoticeLifecycle {
@@ -24,6 +25,8 @@ export interface NoticeLifecycle {
  * notice the user never saw, or the persisted counters stop meaning anything.
  */
 export function useNoticeLifecycle(id: NoticeId, enabled = true): NoticeLifecycle {
+  const active = usePageActive();
+  const lastShown = useRef<NoticeId | null>(null);
   const loaded = useUiNoticeStore((state) => state.loaded);
   const dismissedAt = useUiNoticeStore((state) => state.entries[id]?.dismissedAt ?? null);
   const dismissNotice = useUiNoticeStore((state) => state.dismiss);
@@ -32,9 +35,10 @@ export function useNoticeLifecycle(id: NoticeId, enabled = true): NoticeLifecycl
 
   // The store is loaded once by the app shell, not here: sections such as Desktop Resources
   // guarantee they issue no request before an explicit user action.
-  const visible = enabled && loaded && !dismissedAt;
+  const visible = active && enabled && loaded && !dismissedAt;
   useEffect(() => {
-    if (visible) recordImpression(id);
+    if (visible && lastShown.current !== id) recordImpression(id);
+    lastShown.current = visible ? id : null;
   }, [visible, id, recordImpression]);
 
   const dismiss = useCallback(() => {

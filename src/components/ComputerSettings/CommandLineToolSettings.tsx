@@ -21,13 +21,14 @@ interface CommandLineToolState {
 
 interface CommandLineToolSettingsProps {
   computerId: string;
+  onOpenRuntime?: () => void;
 }
 
 const isWorkspaceLocked = (runtimeState: RuntimeState) => (
   runtimeState === 'starting' || runtimeState === 'running'
 );
 
-export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsProps) {
+export function CommandLineToolSettings({ computerId, onOpenRuntime }: CommandLineToolSettingsProps) {
   const action = usePageAction(computerId);
   const { message } = App.useApp();
   const pageActive = usePageActive();
@@ -155,7 +156,7 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
           description={state.error}
           action={(
             <Button size="small" onClick={() => { void load(); }}>
-              {t('common.retry')}
+              {t('common.refresh')}
             </Button>
           )}
         />
@@ -166,9 +167,16 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
           showIcon
           message={state.error}
           action={(
-            <Button size="small" onClick={() => { void load(); }}>
-              {t('common.retry')}
-            </Button>
+            <Space>
+              <Button size="small" loading={loading} onClick={() => { void load(); }}>
+                {t('common.refresh')}
+              </Button>
+              {onOpenRuntime && (
+                <Button size="small" onClick={onOpenRuntime}>
+                  {t('computer.workbench.sections.runtime')}
+                </Button>
+              )}
+            </Space>
           )}
         />
       )}

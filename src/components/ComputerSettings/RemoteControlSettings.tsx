@@ -45,7 +45,6 @@ interface RemoteControlSettingsProps {
 export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
-  const securityNotice = useNoticeLifecycle('remote-control-security');
   const active = usePageActive();
   const action = usePageAction(instance.id);
   const { instances, fetchInstances } = useComputerStore();
@@ -59,6 +58,7 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const securityNotice = useNoticeLifecycle('remote-control-security', !(loading && !loaded));
 
   useEffect(() => {
     if (!active) return;

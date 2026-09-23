@@ -1,4 +1,4 @@
-import { render, screen, within } from '../helpers/render';
+import { act, render, screen, within } from '../helpers/render';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { NoticeStats } from '@/components/DebugPanel/NoticeStats';
 import { useUiNoticeStore } from '@/stores/uiNoticeStore';
@@ -6,6 +6,14 @@ import { useUiNoticeStore } from '@/stores/uiNoticeStore';
 describe('NoticeStats', () => {
   beforeEach(() => {
     useUiNoticeStore.getState().reset();
+  });
+
+  it('shows buffered impressions immediately without requiring a disk flush', () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    render(<NoticeStats />);
+    act(() => useUiNoticeStore.getState().recordImpression('mcp-runtime-keychain'));
+    const row = screen.getByText('MCP runtime keychain access').closest('tr')!;
+    expect(within(row).getByText('1')).toBeInTheDocument();
   });
 
   it('lists every notice even before any of them has been shown', () => {

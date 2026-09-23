@@ -46,6 +46,24 @@ describe('RemoteControlSettings', () => {
     });
   });
 
+  it('does not count a notice while loading or when loading finishes off screen', async () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    let finish!: (value: unknown) => void;
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((command, args) => command === 'get_remote_control_policy'
+      ? new Promise((resolve) => { finish = resolve; }) : original(command, args));
+    const tree = (active: boolean) => <PageHost name="remote" active={active}><RemoteControlSettings instance={instance} /></PageHost>;
+    const view = render(tree(true));
+    expect(useUiNoticeStore.getState().entries['remote-control-security']).toBeUndefined();
+    view.rerender(tree(false));
+    await act(async () => finish(instance.remoteControl));
+    expect(useUiNoticeStore.getState().entries['remote-control-security']).toBeUndefined();
+    vi.mocked(invoke).mockImplementation(original);
+    view.rerender(tree(true));
+    await screen.findByRole('note');
+    expect(useUiNoticeStore.getState().entries['remote-control-security'].impressions).toBe(1);
+  });
+
   it('does not refresh or show a completion message after the page loses ownership', async () => {
     let finish!: (policy: unknown) => void;
     const original = vi.mocked(invoke).getMockImplementation()!;

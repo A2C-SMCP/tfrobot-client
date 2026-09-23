@@ -1,3 +1,5 @@
+import { StrictMode } from 'react';
+import { PageHost } from '@/components/Navigation/PageHost';
 import { fireEvent } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { NoticeBar } from '@/components/common/NoticeBar';
@@ -46,6 +48,27 @@ describe('useNoticeLifecycle', () => {
     useUiNoticeStore.getState().reset();
     mockedInvoke.mockReset();
     mockedInvoke.mockResolvedValue({ schemaVersion: 1, entries: {} });
+  });
+
+  it('counts actual visits and ignores eligibility changes while a retained page is hidden', () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    const tree = (active: boolean, enabled: boolean) => (
+      <PageHost name="notice" active={active}><Notice enabled={enabled} /></PageHost>
+    );
+    const view = render(tree(true, true));
+    const count = () => useUiNoticeStore.getState().entries['desktop-enumeration-unverified']?.impressions ?? 0;
+    expect(count()).toBe(1);
+    view.rerender(tree(false, false));
+    view.rerender(tree(false, true));
+    expect(count()).toBe(1);
+    view.rerender(tree(true, true));
+    expect(count()).toBe(2);
+  });
+
+  it('counts a single display when StrictMode replays effects', () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    render(<StrictMode><Notice enabled /></StrictMode>);
+    expect(useUiNoticeStore.getState().entries['desktop-enumeration-unverified'].impressions).toBe(1);
   });
 
   it('does not count an impression for a notice the caller is not showing', () => {

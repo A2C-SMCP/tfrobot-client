@@ -77,20 +77,27 @@ function restorePending(updates: Record<string, UiNoticePatch>) {
   }
 }
 
-/**
- * Server state owns the counters, but a dismissal the user already confirmed locally must survive
- * a response that was computed before it — otherwise a notice the user turned off reappears.
- */
+/** Counters only increase. The UI includes buffered and in-flight events already, so an
+ * older server response must neither erase them nor add them a second time. */
 function mergeServerEntries(
   incoming: Record<string, UiNoticeEntry>,
   local: Record<string, UiNoticeEntry>,
 ): Record<string, UiNoticeEntry> {
   const merged = { ...incoming };
   for (const [id, entry] of Object.entries(local)) {
-    if (!entry.dismissedAt || merged[id]?.dismissedAt) continue;
-    merged[id] = { ...(merged[id] ?? entry), dismissedAt: entry.dismissedAt };
+    const server = incoming[id];
+    merged[id] = {
+      firstSeenAt: server?.firstSeenAt ?? entry.firstSeenAt,
+      dismissedAt: server?.dismissedAt ?? entry.dismissedAt,
+      impressions: Math.max(server?.impressions ?? 0, entry.impressions),
+      helpClicks: Math.max(server?.helpClicks ?? 0, entry.helpClicks),
+    };
   }
   return merged;
+}
+
+function emptyEntry(): UiNoticeEntry {
+  return { firstSeenAt: Date.now(), dismissedAt: null, impressions: 0, helpClicks: 0 };
 }
 
 interface UiNoticeStoreState {
@@ -124,7 +131,7 @@ export const useUiNoticeStore = create<UiNoticeStoreState>((set, get) => ({
   fetch: async () => {
     try {
       const state = await invoke<UiNoticeState>('get_ui_notice_state');
-      set({ entries: state?.entries ?? {}, loaded: true, error: null });
+      set({ entries: mergeServerEntries(state?.entries ?? {}, get().entries), loaded: true, error: null });
     } catch (reason) {
       // Fail open: with no state nothing looks dismissed, so a notice is shown rather than
       // silently dropped because the read failed.
@@ -135,6 +142,7 @@ export const useUiNoticeStore = create<UiNoticeStoreState>((set, get) => ({
   isDismissed: (id) => Boolean(get().entries[id]?.dismissedAt),
 
   dismiss: async (id) => {
+    if (get().isDismissed(id)) return;
     const previous = get().entries;
     const patch = takePending(id);
     set({
@@ -155,7 +163,13 @@ export const useUiNoticeStore = create<UiNoticeStoreState>((set, get) => ({
       set({ entries: mergeServerEntries(state?.entries ?? {}, get().entries), error: null });
     } catch (reason) {
       restorePending({ [id]: patch });
-      set({ entries: previous, error: String(reason) });
+      set((current) => ({
+        entries: {
+          ...current.entries,
+          [id]: { ...current.entries[id], dismissedAt: previous[id]?.dismissedAt ?? null },
+        },
+        error: String(reason),
+      }));
     }
   },
 
@@ -163,6 +177,10 @@ export const useUiNoticeStore = create<UiNoticeStoreState>((set, get) => ({
     const counters = pending.get(id) ?? { impressions: 0, helpClicks: 0 };
     counters.impressions += 1;
     pending.set(id, counters);
+    set((current) => {
+      const entry = current.entries[id] ?? emptyEntry();
+      return { entries: { ...current.entries, [id]: { ...entry, impressions: entry.impressions + 1 } } };
+    });
     if (pendingTotal() >= IMPRESSION_FLUSH_THRESHOLD) void get().flushPending();
   },
 
@@ -170,6 +188,10 @@ export const useUiNoticeStore = create<UiNoticeStoreState>((set, get) => ({
     const counters = pending.get(id) ?? { impressions: 0, helpClicks: 0 };
     counters.helpClicks += 1;
     pending.set(id, counters);
+    set((current) => {
+      const entry = current.entries[id] ?? emptyEntry();
+      return { entries: { ...current.entries, [id]: { ...entry, helpClicks: entry.helpClicks + 1 } } };
+    });
     await get().flushPending();
   },
 

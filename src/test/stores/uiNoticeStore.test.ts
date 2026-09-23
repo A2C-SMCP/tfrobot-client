@@ -164,3 +164,79 @@ describe('uiNoticeStore', () => {
     expect(useUiNoticeStore.getState().isDismissed('remote-control-security')).toBe(true);
   });
 });
+
+describe('notice event concurrency', () => {
+  beforeEach(() => {
+    useUiNoticeStore.getState().reset();
+    mockedInvoke.mockReset();
+  });
+
+  it('rolls back only the failed dismissal while retaining another successful dismissal', async () => {
+    let failFirst!: (reason: Error) => void;
+    mockedInvoke.mockImplementationOnce(() => new Promise((_, reject) => { failFirst = reject; }));
+    const store = useUiNoticeStore.getState();
+    const first = store.dismiss('mcp-runtime-keychain');
+    mockedInvoke.mockResolvedValueOnce({ entries: {
+      'remote-control-security': { firstSeenAt: 1, dismissedAt: 2, impressions: 0, helpClicks: 0 },
+    } });
+    await store.dismiss('remote-control-security');
+    failFirst(new Error('write failed'));
+    await first;
+    expect(store.isDismissed('mcp-runtime-keychain')).toBe(false);
+    expect(store.isDismissed('remote-control-security')).toBe(true);
+  });
+
+  it('keeps buffered and in-flight counts visible without double counting on acknowledgement', async () => {
+    let finish!: (value: unknown) => void;
+    mockedInvoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const store = useUiNoticeStore.getState();
+    store.recordImpression('mcp-runtime-keychain');
+    const flush = store.flushPending();
+    store.recordImpression('mcp-runtime-keychain');
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(2);
+    finish({ entries: { 'mcp-runtime-keychain': {
+      firstSeenAt: 1, dismissedAt: null, impressions: 1, helpClicks: 0,
+    } } });
+    await flush;
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(2);
+    mockedInvoke.mockResolvedValueOnce({ entries: { 'mcp-runtime-keychain': {
+      firstSeenAt: 1, dismissedAt: null, impressions: 2, helpClicks: 0,
+    } } });
+    await store.flushPending();
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(2);
+    expect(mockedInvoke).toHaveBeenLastCalledWith('update_ui_notice_state', {
+      updates: { 'mcp-runtime-keychain': { impressionsDelta: 1, helpClicksDelta: 0 } },
+    });
+  });
+
+  it('does not regress counts when the older of two write responses arrives last', async () => {
+    let finishFirst!: (value: unknown) => void;
+    mockedInvoke.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    const store = useUiNoticeStore.getState();
+    store.recordImpression('mcp-runtime-keychain');
+    const first = store.flushPending();
+    store.recordImpression('mcp-runtime-keychain');
+    mockedInvoke.mockResolvedValueOnce({ entries: { 'mcp-runtime-keychain': {
+      firstSeenAt: 1, dismissedAt: null, impressions: 2, helpClicks: 0,
+    } } });
+    await store.flushPending();
+    finishFirst({ entries: { 'mcp-runtime-keychain': {
+      firstSeenAt: 1, dismissedAt: null, impressions: 1, helpClicks: 0,
+    } } });
+    await first;
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(2);
+  });
+
+  it('retains visible counts when a write fails and retries without incrementing them again', async () => {
+    const store = useUiNoticeStore.getState();
+    store.recordImpression('mcp-runtime-keychain');
+    mockedInvoke.mockRejectedValueOnce(new Error('disk busy'));
+    await store.flushPending();
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(1);
+    mockedInvoke.mockResolvedValueOnce({ entries: { 'mcp-runtime-keychain': {
+      firstSeenAt: 1, dismissedAt: null, impressions: 1, helpClicks: 0,
+    } } });
+    await store.flushPending();
+    expect(useUiNoticeStore.getState().entries['mcp-runtime-keychain'].impressions).toBe(1);
+  });
+});

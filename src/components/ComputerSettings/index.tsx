@@ -156,7 +156,7 @@ function ComputerSettingsContent({
           />
         );
       case 'built-in-tools':
-        return <BuiltInToolsSettings instance={selectedInstance} />;
+        return <BuiltInToolsSettings instance={selectedInstance} onOpenRuntime={() => onNavigate?.('computer-detail:runtime')} />;
       default:
         return null;
     }
