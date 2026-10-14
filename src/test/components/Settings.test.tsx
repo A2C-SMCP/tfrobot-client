@@ -1,4 +1,4 @@
-import { render, screen } from '../helpers/render';
+import { fireEvent, render, screen } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Settings } from '@/components/Settings';
 
@@ -49,6 +49,9 @@ vi.mock('@/components/Settings/DataSettings', () => ({
 vi.mock('@/components/Settings/AboutSection', () => ({
   AboutSection: () => <div data-testid="about-section">AboutSection</div>,
 }));
+vi.mock('@/components/Settings/PermissionsSettings', () => ({
+  PermissionsSettings: () => <div data-testid="permissions-settings">PermissionsSettings</div>,
+}));
 
 describe('Settings', () => {
   beforeEach(() => {
@@ -65,11 +68,22 @@ describe('Settings', () => {
     expect(screen.getByText('Appearance')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByText('Data')).toBeInTheDocument();
+    expect(screen.getByText('Permissions & security')).toBeInTheDocument();
     expect(screen.getByText('About')).toBeInTheDocument();
   });
 
   it('renders AppearanceSettings as default tab', () => {
     render(<Settings />);
     expect(screen.getByTestId('appearance-settings')).toBeInTheDocument();
+  });
+
+  it('opens the tab a notice asked for, and reports tab changes as navigation', () => {
+    const onNavigate = vi.fn();
+    render(<Settings initialTab="permissions" onNavigate={onNavigate} />);
+
+    expect(screen.getByTestId('permissions-settings')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Runtime'));
+    expect(onNavigate).toHaveBeenCalledWith('settings:runtime');
   });
 });

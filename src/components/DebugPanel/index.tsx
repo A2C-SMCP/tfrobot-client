@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { ToolBrowser } from './ToolBrowser';
 import { CallHistory } from './CallHistory';
 import { ResourceBrowser } from './ResourceBrowser';
+import { NoticeStats } from './NoticeStats';
 
 interface DebugPanelProps {
   instanceId: string;
@@ -29,6 +30,11 @@ export function DebugPanel({ instanceId }: DebugPanelProps) {
       key: 'history',
       label: t('debug.tabs.history'),
       children: <PageHost name="debug-tab-history" active={tab === 'history'}><CallHistory instanceId={instanceId} /></PageHost>,
+    },
+    {
+      key: 'notices',
+      label: t('debug.tabs.notices'),
+      children: <PageHost name="debug-tab-notices" active={tab === 'notices'}><NoticeStats /></PageHost>,
     },
   ];
 

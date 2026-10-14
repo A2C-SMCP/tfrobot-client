@@ -1,8 +1,10 @@
 import { PageActivity } from '@/components/Navigation/PageActivity';
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { invoke } from '@tauri-apps/api/core';
-import { check } from '@tauri-apps/plugin-updater';
 import { AboutSection } from '@/components/Settings/AboutSection';
+import * as applicationUpdater from '@/services/applicationUpdater';
+
+const checkForApplicationUpdate = vi.spyOn(applicationUpdater, 'checkForApplicationUpdate');
 
 vi.mock('@/stores/settingsStore', () => ({
   useSettingsStore: () => ({
@@ -15,8 +17,8 @@ describe('AboutSection update activity', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('releases a late update result without opening a confirmation after leaving About', async () => {
-    let finish!: (value: Awaited<ReturnType<typeof check>>) => void;
-    vi.mocked(check).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    let finish!: (value: Awaited<ReturnType<typeof applicationUpdater.checkForApplicationUpdate>>) => void;
+    checkForApplicationUpdate.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const close = vi.fn().mockResolvedValue(undefined);
     const install = vi.fn();
     const tree = (active: boolean) => <PageActivity active={active}><AboutSection /></PageActivity>;
@@ -33,7 +35,7 @@ describe('AboutSection update activity', () => {
   it('dismisses an unconfirmed update when switching an internal Settings tab', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const install = vi.fn();
-    vi.mocked(check).mockResolvedValueOnce({ version: '0.3.0', close, downloadAndInstall: install } as never);
+    checkForApplicationUpdate.mockResolvedValueOnce({ version: '0.3.0', close, downloadAndInstall: install } as never);
     const tree = (active: boolean) => <PageActivity active={active}><AboutSection /></PageActivity>;
     const view = render(tree(true));
     fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
@@ -48,7 +50,7 @@ describe('AboutSection update activity', () => {
   });
 
   it('records update check failures without exposing them as successful checks', async () => {
-    vi.mocked(check).mockRejectedValueOnce(new Error('network unavailable'));
+    checkForApplicationUpdate.mockRejectedValueOnce(new Error('network unavailable'));
 
     render(<AboutSection />);
     fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
@@ -65,7 +67,7 @@ describe('AboutSection update activity', () => {
 
   it('records one correlated start and success around installation', async () => {
     const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
-    vi.mocked(check).mockResolvedValueOnce({
+    checkForApplicationUpdate.mockResolvedValueOnce({
       version: '0.3.0',
       downloadAndInstall,
       close: vi.fn().mockResolvedValue(undefined),
@@ -94,7 +96,7 @@ describe('AboutSection update activity', () => {
 
   it('records an installation failure with the same correlation id', async () => {
     const downloadAndInstall = vi.fn().mockRejectedValue(new Error('token=private-update-token'));
-    vi.mocked(check).mockResolvedValueOnce({
+    checkForApplicationUpdate.mockResolvedValueOnce({
       version: '0.3.0',
       downloadAndInstall,
       close: vi.fn().mockResolvedValue(undefined),

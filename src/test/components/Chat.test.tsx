@@ -150,7 +150,7 @@ describe('Chat', () => {
       return undefined;
     });
     render(<Chat />);
-    await screen.findByText(/Could not restore or save/);
+    await screen.findByText(/Could not read your saved robot preference/);
     expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'chat_open_session')).toBe(false);
     readFails = false;
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
@@ -158,6 +158,17 @@ describe('Chat', () => {
     const opens = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_open_session');
     expect(opens).toHaveLength(1);
     expect(opens[0][1]).toMatchObject({ employeeId: 43 });
+  });
+
+  it('offers a retry when the robot list itself could not be loaded', async () => {
+    setAuthenticatedEmployees([]);
+    currentEmployeeResource().error = { kind: 'network_error', detail: 'offline' };
+
+    render(<Chat />);
+
+    expect(await screen.findByText('Unable to load Robots')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(managerStoreMock.fetchEmployees).toHaveBeenCalled());
   });
 
   it.each(['not_found_or_no_permission', 'chat_unavailable'])('falls back when a previously listed robot is unavailable at open time (%s)', async (kind) => {

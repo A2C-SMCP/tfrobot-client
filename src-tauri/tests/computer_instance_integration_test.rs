@@ -125,6 +125,7 @@ async fn create_computer_with_input(state: &AppState, name: &str) -> String {
         CreateComputerInstanceRequest {
             name: name.to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -155,6 +156,7 @@ async fn command_core_creates_renames_lists_and_deletes_instance() {
         CreateComputerInstanceRequest {
             name: "  Second Computer  ".to_string(),
             description: Some("  Test description  ".to_string()),
+            import_path: None,
         },
     )
     .await
@@ -300,6 +302,7 @@ async fn created_instances_use_uuid_based_ids() {
         CreateComputerInstanceRequest {
             name: "First".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -309,6 +312,7 @@ async fn created_instances_use_uuid_based_ids() {
         CreateComputerInstanceRequest {
             name: "Second".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -332,6 +336,7 @@ async fn create_does_not_require_keychain_reads() {
         CreateComputerInstanceRequest {
             name: "Created Without Keychain Reads".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -438,6 +443,7 @@ async fn one_computer_transaction_does_not_block_another_computer_or_its_own_sta
         CreateComputerInstanceRequest {
             name: "Computer A".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -447,6 +453,7 @@ async fn one_computer_transaction_does_not_block_another_computer_or_its_own_sta
         CreateComputerInstanceRequest {
             name: "Computer B".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -547,6 +554,7 @@ async fn mcp_mutations_wait_for_the_same_computer_transaction() {
         CreateComputerInstanceRequest {
             name: "Serialized MCP".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -583,6 +591,7 @@ async fn delete_waits_for_sdk_config_mutation_and_leaves_no_orphan_storage() {
         CreateComputerInstanceRequest {
             name: "Config Delete Race".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -687,6 +696,7 @@ async fn cancelled_connect_request_does_not_cancel_token_cleanup() {
         CreateComputerInstanceRequest {
             name: "Cancellation Connection".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -835,6 +845,7 @@ async fn policy_connect_rejects_a_target_replaced_before_transaction_prepare() {
         CreateComputerInstanceRequest {
             name: "Policy Race".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -886,6 +897,7 @@ async fn duplicate_copies_configuration_without_runtime_state() {
         CreateComputerInstanceRequest {
             name: "Source".to_string(),
             description: Some("Source description".to_string()),
+            import_path: None,
         },
     )
     .await
@@ -1082,6 +1094,7 @@ async fn cancelled_duplicate_request_still_finishes_runtime_publication() {
         CreateComputerInstanceRequest {
             name: "Cancellation Source".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1161,6 +1174,7 @@ async fn duplicate_uses_own_skill_home_and_can_copy_source_contents() {
         CreateComputerInstanceRequest {
             name: "Source".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1245,6 +1259,7 @@ async fn duplicate_copy_failure_cleans_destination_and_returns_error() {
         CreateComputerInstanceRequest {
             name: "Source".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1314,6 +1329,7 @@ async fn duplicate_copy_is_safe_when_custom_root_contains_target_storage() {
         CreateComputerInstanceRequest {
             name: "Source".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1367,6 +1383,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         CreateComputerInstanceRequest {
             name: "One".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1376,6 +1393,7 @@ async fn start_stop_and_delete_running_instance_are_instance_scoped() {
         CreateComputerInstanceRequest {
             name: "Two".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1425,6 +1443,7 @@ async fn delete_closes_activity_admission_before_shutting_down_runtime() {
         CreateComputerInstanceRequest {
             name: "Busy".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1485,6 +1504,7 @@ async fn failed_delete_preserves_the_authoritative_runtime_incarnation() {
         CreateComputerInstanceRequest {
             name: "Rollback".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1535,6 +1555,7 @@ async fn status_reads_do_not_hot_update_inputs_and_start_loads_sdk_storage() {
         CreateComputerInstanceRequest {
             name: "Computer".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1674,6 +1695,7 @@ async fn mcp_configs_inputs_and_values_are_isolated_per_computer() {
         CreateComputerInstanceRequest {
             name: "Second".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await
@@ -1780,6 +1802,7 @@ async fn blank_names_are_rejected_and_default_named_instance_is_not_special() {
         CreateComputerInstanceRequest {
             name: "   ".to_string(),
             description: None,
+            import_path: None,
         },
     )
     .await

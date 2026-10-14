@@ -1,32 +1,16 @@
 import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import { App, Descriptions, Space, Button } from 'antd';
+import { App, Descriptions, Space, Button, Typography } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-shell';
-import { check } from '@tauri-apps/plugin-updater';
-import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { warn as logWarn } from '@/utils/logger';
-
-type UpdateActivity = 'check_failed' | 'install_started' | 'install_succeeded' | 'install_failed';
-
-async function recordUpdateActivity(
-  activity: UpdateActivity,
-  targetVersion: string | null,
-  correlationId: string,
-  error: string | null = null,
-) {
-  try {
-    await invoke('record_application_update_activity', {
-      activity,
-      targetVersion,
-      correlationId,
-      error,
-    });
-  } catch (auditError) {
-    void logWarn(`Failed to persist application update activity: ${String(auditError)}`);
-  }
-}
+import {
+  checkForApplicationUpdate,
+  closeUpdate,
+  createUpdateCorrelationId,
+  recordUpdateActivity,
+} from '@/services/applicationUpdater';
+import { presentUpdatePrompt } from '@/components/ApplicationUpdate/updatePrompt';
 
 export function AboutSection() {
   const { t } = useTranslation();
@@ -51,43 +35,40 @@ export function AboutSection() {
     const current = () => pageCurrent() && sequence === checkSequence.current;
     pendingConfirmation.current?.();
     pendingConfirmation.current = null;
-    const correlationId = crypto.randomUUID();
+    const correlationId = createUpdateCorrelationId();
     try {
-      const update = await check();
+      const update = await checkForApplicationUpdate();
       if (update) {
-        const release = () => { void update.close().catch((error) => logWarn(String(error))); };
-        if (!current()) { release(); return; }
-        let started = false;
-        let released = false;
-        const releaseOnce = () => { if (!released) { released = true; release(); } };
-        const confirmation = modal.confirm({
+        if (!current()) { await closeUpdate(update); return; }
+        const confirmation = presentUpdatePrompt({
+          update,
+          modal,
           title: t('settings.updateAvailable'),
-          content: `${t('settings.newVersion')}: ${update.version}. ${t('permissions.update')}`,
-          onCancel: () => { releaseOnce(); pendingConfirmation.current = null; },
-          onOk: async () => {
-            if (!current() || started) return;
-            started = true;
-            pendingConfirmation.current = null;
-            await recordUpdateActivity('install_started', update.version, correlationId);
-            try {
-              await update.downloadAndInstall();
-            } catch (error) {
-              await recordUpdateActivity('install_failed', update.version, correlationId, String(error));
-              if (current()) message.error(String(error));
-              releaseOnce();
-              return;
-            }
-            await recordUpdateActivity('install_succeeded', update.version, correlationId);
-            releaseOnce();
+          content: (
+            <Space direction="vertical" size="small">
+              <Typography.Text>{`${t('settings.newVersion')}: ${update.version}`}</Typography.Text>
+              <Typography.Text>{t('permissions.update')}</Typography.Text>
+              {update.body && (
+                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                  {update.body}
+                </Typography.Paragraph>
+              )}
+            </Space>
+          ),
+          cancelText: t('settings.updateLater'),
+          trigger: 'manual',
+          isActive: current,
+          onInstallError: () => {
+            if (current()) message.error(t('settings.updateFailed'));
           },
         });
-        pendingConfirmation.current = () => { confirmation.destroy(); if (!started) releaseOnce(); };
+        pendingConfirmation.current = confirmation.destroy;
       } else if (current()) {
         message.info(t('settings.upToDate'));
       }
     } catch (e) {
-      await recordUpdateActivity('check_failed', null, correlationId, String(e));
-      if (current()) message.error(String(e));
+      await recordUpdateActivity('check_failed', null, correlationId, 'manual', String(e));
+      if (current()) message.error(t('settings.updateCheckFailed'));
     }
   };
 

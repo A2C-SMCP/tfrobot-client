@@ -28,6 +28,7 @@ import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
 import { McpConfig } from '@/components/McpConfig';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import { useComputerStore } from '@/stores/computerStore';
+import { permissionHelpRoute } from '@/components/Settings/permissions';
 import {
   computerSettingsNavigationKey,
   toComputerSettingsSection,
@@ -141,7 +142,12 @@ function ComputerSettingsContent({
           />
         );
       case 'inputs':
-        return <InputVariables instanceId={selectedInstance.id} />;
+        return (
+          <InputVariables
+            instanceId={selectedInstance.id}
+            onOpenPermissionHelp={() => onNavigate?.(permissionHelpRoute('password'))}
+          />
+        );
       case 'connection':
         return (
           <RobotConnectionPanel
@@ -150,7 +156,7 @@ function ComputerSettingsContent({
           />
         );
       case 'built-in-tools':
-        return <BuiltInToolsSettings instance={selectedInstance} />;
+        return <BuiltInToolsSettings instance={selectedInstance} onOpenRuntime={() => onNavigate?.('computer-detail:runtime')} />;
       default:
         return null;
     }

@@ -763,14 +763,6 @@ export function MarketplaceTab({
         destroyOnHidden
       >
         <Form name={`marketplace-${instanceId}`} form={marketplaceForm} onValuesChange={(_, values) => marketplaceDraft.onValuesChange(values)} layout="vertical">
-          {editingMarketplaceLocked && (
-            <Alert
-              type="warning"
-              showIcon
-              message={t('marketplace.form.sourceLocked')}
-              className={styles.formAlert}
-            />
-          )}
           <Form.Item
             name="name"
             label={t('marketplace.form.name')}
@@ -781,6 +773,9 @@ export function MarketplaceTab({
           <Form.Item
             name={['source', 'type']}
             label={t('marketplace.form.sourceType')}
+            extra={editingMarketplaceLocked
+              ? <Typography.Text type="warning">{t('marketplace.form.sourceLocked')}</Typography.Text>
+              : undefined}
           >
             <Radio.Group
               aria-label={t('marketplace.form.sourceType')}

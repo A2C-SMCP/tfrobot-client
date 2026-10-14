@@ -1,7 +1,7 @@
 use crate::services::observability::{
     redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityRetention,
 };
-use crate::services::settings::AppSettings;
+use crate::services::settings::{AppSettings, UiNoticePatch, UiNoticeState, UpdatePreferences};
 use crate::AppState;
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -9,6 +9,82 @@ use tauri::{Manager, State};
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.settings_service.load())
+}
+
+const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[tauri::command]
+pub async fn claim_automatic_update_check(state: State<'_, AppState>) -> Result<bool, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    state
+        .settings_service
+        .claim_automatic_update_check(now_ms, AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_update_preferences(
+    state: State<'_, AppState>,
+) -> Result<UpdatePreferences, String> {
+    Ok(state.settings_service.load().updater)
+}
+
+#[tauri::command]
+pub async fn set_deferred_update_version(
+    state: State<'_, AppState>,
+    version: Option<String>,
+) -> Result<(), String> {
+    if version
+        .as_ref()
+        .is_some_and(|value| value.len() > 128 || value.contains(['\r', '\n']))
+    {
+        return Err("invalid deferred update version".to_string());
+    }
+    state
+        .settings_service
+        .set_deferred_update_version(version)
+        .map_err(|error| error.to_string())
+}
+
+/// Notice ids come from the frontend's fixed `NoticeId` union. Reject anything else so a typo or a
+/// bug cannot grow `settings.json` with junk keys.
+fn validate_ui_notice_id(id: &str) -> Result<(), String> {
+    let valid = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err("invalid UI notice id".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_ui_notice_state(state: State<'_, AppState>) -> Result<UiNoticeState, String> {
+    Ok(state.settings_service.load_ui_notice_state())
+}
+
+/// Narrow write path for notice state. It deliberately bypasses `update_settings`: that command
+/// replaces the whole document and records an `application_settings` activity entry, which would
+/// put a UX interaction into the user-visible audit journal.
+///
+/// Updates are batched by id because the store accumulates impressions in memory; validating every
+/// id before touching settings keeps a rejected batch from applying partially.
+#[tauri::command]
+pub async fn update_ui_notice_state(
+    state: State<'_, AppState>,
+    updates: std::collections::BTreeMap<String, UiNoticePatch>,
+) -> Result<UiNoticeState, String> {
+    for id in updates.keys() {
+        validate_ui_notice_id(id)?;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    state
+        .settings_service
+        .record_ui_notice_events(&updates, now_ms)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -44,14 +120,16 @@ async fn update_settings_core(state: &AppState, mut settings: AppSettings) -> Re
     let correlation_id = uuid::Uuid::new_v4().to_string();
     settings.normalize();
     let previous = state.settings_service.load();
-    let changed_keys = changed_setting_keys(&previous, &settings);
+    let requested_changed_keys = changed_setting_keys(&previous, &settings);
+    let mut changed_keys = requested_changed_keys.clone();
     let result = async {
         // Persist first: retention cleanup is destructive and must never run for a setting that
         // could not be committed atomically.
-        state
+        let persisted_settings = state
             .settings_service
-            .save(&settings)
+            .save_user_settings(&settings)
             .map_err(|error| error.to_string())?;
+        changed_keys = changed_setting_keys(&previous, &persisted_settings);
         state.diagnostics.set_level(settings.diagnostic_log_level);
         let retention = ObservabilityRetention {
             activity_days: settings.activity_retention_days,
@@ -208,6 +286,47 @@ mod tests {
     fn changed_setting_keys_ignores_unchanged_settings() {
         let settings = AppSettings::default();
         assert!(changed_setting_keys(&settings, &settings).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_ui_notice_snapshot_does_not_produce_settings_activity() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new_with_secret_store(
+            ConfigService::new(dir.path().to_path_buf()).unwrap(),
+            ObservabilityService::new(dir.path()).unwrap(),
+            SettingsService::new(dir.path().to_path_buf()),
+            InMemorySecretStore::shared(),
+        );
+        state
+            .settings_service
+            .record_ui_notice_event(
+                "mcp-runtime",
+                UiNoticePatch {
+                    dismissed: true,
+                    ..UiNoticePatch::default()
+                },
+                1_000,
+            )
+            .unwrap();
+
+        // A Settings page rendered before the dismissal still holds a snapshot without it.
+        let mut stale = state.settings_service.load();
+        stale.ui_notices = UiNoticeState::default();
+        update_settings_core(&state, stale).await.unwrap();
+
+        let activity = state
+            .observability
+            .query_activity(&ActivityQuery {
+                scope: ActivityScopeFilter::ClientOnly,
+                ..ActivityQuery::default()
+            })
+            .unwrap();
+        assert_eq!(activity.total, 0);
+        assert!(state
+            .settings_service
+            .load_ui_notice_state()
+            .entries
+            .contains_key("mcp-runtime"));
     }
 
     #[tokio::test]

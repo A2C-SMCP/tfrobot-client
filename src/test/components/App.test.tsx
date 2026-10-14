@@ -15,6 +15,7 @@ const managerStoreMock = vi.hoisted(() => ({
     permissions: [] as string[],
   },
   restoreAttempted: false,
+  identityLoading: false,
   applyContext: vi.fn(),
   refreshContext: vi.fn(),
   restoreSession: vi.fn().mockResolvedValue(null),
@@ -56,6 +57,7 @@ vi.mock('@/stores/managerStore', () => {
   const current = () => ({
     context: managerStoreMock.context,
     restoreAttempted: managerStoreMock.restoreAttempted,
+    identityLoading: managerStoreMock.identityLoading,
     applyContext: managerStoreMock.applyContext,
     refreshContext: managerStoreMock.refreshContext,
     restoreSession: managerStoreMock.restoreSession,
@@ -168,6 +170,7 @@ describe('App', () => {
       permissions: [],
     };
     managerStoreMock.restoreAttempted = false;
+    managerStoreMock.identityLoading = false;
     managerStoreMock.refreshContext.mockImplementation(async () => managerStoreMock.context);
     runtimeStoreMock.error = null;
     runtimeStoreMock.initialize.mockResolvedValue(undefined);
@@ -185,6 +188,14 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(runtimeStoreMock.recover).toHaveBeenCalledOnce());
+  });
+
+  it('shows session restore as a local loading state instead of an info banner', async () => {
+    managerStoreMock.identityLoading = true;
+    render(<App />);
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Restoring your session…');
+    expect(screen.queryByText(/Connecting or signing in may ask/)).not.toBeInTheDocument();
   });
 
   it('keeps runtime events available when Runtime Input initialization fails and retries it', async () => {

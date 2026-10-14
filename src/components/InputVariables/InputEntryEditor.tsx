@@ -2,6 +2,8 @@ import { useNavigationState } from '@/components/Navigation/navigationMemoryStat
 import { useState } from 'react';
 import { Alert, Button, Select, Space, Switch, Typography } from 'antd';
 import { Input } from '@/components/common/Input';
+import { NoticeBar } from '@/components/common/NoticeBar';
+import { useNoticeLifecycle } from '@/components/common/useNoticeLifecycle';
 import { useTranslation } from 'react-i18next';
 import type { InputDefinition, InputEntry } from '@/stores/inputStore';
 
@@ -14,6 +16,8 @@ interface InputEntryEditorProps {
   lockSecret?: boolean;
   showSecretControl?: boolean;
   requireValue?: boolean;
+  /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
+  onOpenPermissionHelp?: () => void;
   onSubmit: (key: string, value: string | undefined, secret: boolean) => Promise<void>;
   onCancel: () => void;
 }
@@ -27,6 +31,7 @@ export function InputEntryEditor({
   lockSecret = false,
   showSecretControl = true,
   requireValue = false,
+  onOpenPermissionHelp,
   onSubmit,
   onCancel,
 }: InputEntryEditorProps) {
@@ -43,6 +48,11 @@ export function InputEntryEditor({
   const [secret, setSecret] = useNavigationState(`input.${fixedKey ?? entry?.key ?? 'new'}.secret`, entry?.secret ?? initialSecret);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const storesSecret = secret || Boolean(entry?.secret);
+  // Saving a secret is what triggers the macOS keychain prompt, so the explanation is shown in
+  // full the first time that control is in play and stays available from Permissions & security.
+  const keychainNotice = useNoticeLifecycle('password-variable-keychain', storesSecret);
 
   const validKey = key.length > 0 && key.trim() === key;
   const validValue = definition?.type !== 'PickString'
@@ -63,8 +73,26 @@ export function InputEntryEditor({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      {(secret || entry?.secret) && <Alert type="info" showIcon description={t('permissions.password')} />}
       {error && <Alert type="error" showIcon message={error} />}
+      {keychainNotice.visible && (
+        <NoticeBar
+          help={onOpenPermissionHelp && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => keychainNotice.openHelp(onOpenPermissionHelp)}
+            >
+              {t('common.permissionsHelp')}
+            </Button>
+          )}
+          dismiss={{
+            label: t('common.dismissNotice'),
+            onClick: keychainNotice.dismiss,
+          }}
+        >
+          <Typography.Text>{t('permissions.password')}</Typography.Text>
+        </NoticeBar>
+      )}
       <div>
         <Typography.Text>{t('inputs.entry.key')}</Typography.Text>
         <Input
@@ -122,6 +150,9 @@ export function InputEntryEditor({
           <Space direction="vertical" size={0}>
             <Typography.Text>{t('inputs.entry.storeAsSecret')}</Typography.Text>
             <Typography.Text type="secondary">{t('inputs.entry.secretHelp')}</Typography.Text>
+            {storesSecret && !keychainNotice.visible && (
+              <Typography.Text type="secondary">{t('permissions.password')}</Typography.Text>
+            )}
           </Space>
         </Space>
       )}
