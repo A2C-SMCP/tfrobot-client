@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { useNavigationForm } from '@/components/Navigation/navigationMemoryState';
 import { usePageAction } from '@/components/Navigation/pageActivityState';
-import { Alert, App, Button, Form, Input, InputNumber, Space } from 'antd';
+import { App, Button, Form, Input, InputNumber, Space } from 'antd';
 import { useTranslation } from 'react-i18next';
 import {
   useComputerStore,
@@ -84,7 +84,6 @@ export function GeneralSettings({ instance }: GeneralSettingsProps) {
       >
         <InputNumber min={1} max={64} precision={0} />
       </Form.Item>
-      <Alert type="info" showIcon message={t('computer.form.mcpStartConcurrencyRunningHint')} />
       <Space>
         <Button type="primary" htmlType="submit" loading={loading}>
           {t('common.save')}

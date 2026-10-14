@@ -19,6 +19,7 @@ import {
   RobotOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import { NoticeBar } from '@/components/common/NoticeBar';
 import {
   useComputerStore,
   type ComputerConnectionTarget,
@@ -216,12 +217,8 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert
-        type="info"
-        showIcon
-        message={t('computer.connectionActions.readOnlyTitle')}
-        description={t('computer.connectionActions.readOnlyDescription')}
-        action={
+      <NoticeBar
+        action={(
           <Button
             size="small"
             icon={<ExportOutlined />}
@@ -229,8 +226,11 @@ export function RobotConnectionPanel({ instanceId, onNavigate }: RobotConnection
           >
             {t('computer.connectionActions.openRobotConnections')}
           </Button>
-        }
-      />
+        )}
+      >
+        <Text strong>{t('computer.connectionActions.readOnlyTitle')}</Text>{' '}
+        <Text type="secondary">{t('computer.connectionActions.readOnlyDescription')}</Text>
+      </NoticeBar>
 
       <Card size="small" title={t('computer.connectionActions.targetTitle')}>
         <Space direction="vertical" size={12} style={{ width: '100%' }}>

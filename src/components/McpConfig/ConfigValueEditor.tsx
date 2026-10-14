@@ -3,7 +3,7 @@ import { usePageActive } from '@/components/Navigation/pageActivityState';
 import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Alert, AutoComplete, Button, Form, Select, Space, Switch } from 'antd';
+import { Alert, AutoComplete, Button, Form, Select, Space, Switch, Typography } from 'antd';
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/common/Input';
@@ -280,18 +280,22 @@ export function ConfigValueEditor({
         </Form.Item>
 
         {type === 'Constant' ? (
-          <>
-            <Form.Item name="value" label={t('mcp.form.constantValue')}>
-              <Input.TextArea rows={3} />
-            </Form.Item>
-            <Alert type="warning" showIcon message={t('mcp.form.constantHint')} />
-          </>
+          <Form.Item
+            name="value"
+            label={t('mcp.form.constantValue')}
+            extra={<Typography.Text type="warning">{t('mcp.form.constantHint')}</Typography.Text>}
+          >
+            <Input.TextArea rows={3} />
+          </Form.Item>
         ) : (
           <>
             <Form.Item
               name="id"
               label={t('inputs.form.id')}
               rules={[{ required: true, whitespace: true, message: t('inputs.form.idRequired') }]}
+              extra={matchingInput
+                ? t('mcp.form.sharedInputHint', { id: matchingInput.id })
+                : undefined}
             >
               <AutoComplete
                 options={inputs.map((input) => ({ value: input.id }))}
@@ -300,14 +304,6 @@ export function ConfigValueEditor({
                 placeholder={t('mcp.form.inputIdPlaceholder')}
               />
             </Form.Item>
-            {matchingInput && (
-              <Alert
-                type="info"
-                showIcon
-                message={t('mcp.form.sharedInputHint', { id: matchingInput.id })}
-                style={{ marginBottom: 16 }}
-              />
-            )}
             <Form.Item name="description" label={t('inputs.form.description')}>
               <Input />
             </Form.Item>

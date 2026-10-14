@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
+import type { UpdatePreferences } from '@/services/applicationUpdater';
 
 export interface RuntimeInfo {
   name: string;
@@ -30,6 +31,7 @@ export interface AppSettings {
     accountName: string;
   } | null;
   custom_path?: string | null;
+  updater?: UpdatePreferences;
 }
 
 export interface AppInfo {

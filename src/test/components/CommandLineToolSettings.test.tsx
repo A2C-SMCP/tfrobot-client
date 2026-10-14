@@ -35,6 +35,19 @@ describe('CommandLineToolSettings', () => {
     });
   });
 
+  it('separates a status refresh from navigation to runtime recovery', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ...disabledState, runtimeState: 'error', error: 'connection failed', policy: { enabled: true },
+    });
+    const onOpenRuntime = vi.fn();
+    render(<CommandLineToolSettings computerId="computer-a" onOpenRuntime={onOpenRuntime} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Runtime workbench' }));
+    expect(onOpenRuntime).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
   it('persists the single feature switch and exposes pending start', async () => {
     render(<CommandLineToolSettings computerId="computer-a" />);
     fireEvent.click(await screen.findByRole('switch', { name: 'Enable command line tool' }));

@@ -684,6 +684,8 @@ pub fn run() {
             commands::config_io::detect_config_format,
             commands::config_io::import_config,
             commands::config_io::export_config,
+            commands::portable_config::export_computer_package,
+            commands::portable_config::inspect_computer_package,
             // Debug & tools
             commands::debug::get_available_tools,
             commands::debug::get_debug_resources,
@@ -703,6 +705,11 @@ pub fn run() {
             // Settings
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::settings::claim_automatic_update_check,
+            commands::settings::get_update_preferences,
+            commands::settings::set_deferred_update_version,
+            commands::settings::get_ui_notice_state,
+            commands::settings::update_ui_notice_state,
             commands::settings::detect_runtimes,
             commands::settings::get_app_info,
             commands::settings::get_detected_path,

@@ -12,6 +12,9 @@ vi.mock('@/components/DebugPanel/CallHistory', () => ({
 vi.mock('@/components/DebugPanel/ResourceBrowser', () => ({
   ResourceBrowser: () => <div data-testid="resource-browser">ResourceBrowser</div>,
 }));
+vi.mock('@/components/DebugPanel/NoticeStats', () => ({
+  NoticeStats: () => <div data-testid="notice-stats">NoticeStats</div>,
+}));
 
 describe('DebugPanel', () => {
   beforeEach(() => {
@@ -23,6 +26,7 @@ describe('DebugPanel', () => {
     expect(screen.getByText('Tools')).toBeInTheDocument();
     expect(screen.getByText('Resources')).toBeInTheDocument();
     expect(screen.getByText('History')).toBeInTheDocument();
+    expect(screen.getByText('Notice stats')).toBeInTheDocument();
   });
 
   it('renders ToolBrowser as default active tab', () => {

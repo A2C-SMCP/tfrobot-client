@@ -92,6 +92,25 @@ describe('ComputerSettings', () => {
     });
   });
 
+  it('routes built-in tool failures to the existing runtime workbench', async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'list_computer_instances') return [computerResponse];
+      if (command === 'get_client_control_catalog') return [];
+      if (command === 'get_remote_control_policy') return {
+        enabled: false, tool_scope: { mode: 'all' }, target_scope: { mode: 'self_only' },
+      };
+      if (command === 'get_command_line_tool_state') return {
+        policy: { enabled: true }, effectiveWorkspace: '/workspace',
+        runtimeState: 'error', assetsAvailable: true, error: 'connection failed',
+      };
+      return null;
+    });
+    const onNavigate = vi.fn();
+    render(<ComputerSettings initialSection="built-in-tools" onNavigate={onNavigate} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Runtime workbench' }));
+    expect(onNavigate).toHaveBeenCalledWith('computer-detail:runtime');
+  });
+
   it('saves MCP startup concurrency with the other general settings', async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === 'list_computer_instances') return [computerResponse];
@@ -119,7 +138,9 @@ describe('ComputerSettings', () => {
         },
       });
     });
-    expect(screen.getByText('Applies the next time this Computer starts.')).toBeInTheDocument();
+    expect(screen.getByText(
+      'Applies the next time this Computer starts; changing it does not interrupt the running Computer.',
+    )).toBeInTheDocument();
   });
 
   it('renders persistent configuration sections including Built-in Tools', async () => {

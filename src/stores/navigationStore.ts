@@ -1,7 +1,8 @@
 import { createStore } from 'zustand/vanilla';
 
 export function menuForRoute(route: string): string {
-  return route.startsWith('computer') ? 'computer' : route;
+  const page = route.split(':')[0];
+  return page.startsWith('computer') ? 'computer' : page;
 }
 
 interface NavigationState {

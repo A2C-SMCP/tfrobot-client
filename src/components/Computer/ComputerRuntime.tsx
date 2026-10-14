@@ -27,6 +27,8 @@ interface ComputerRuntimeProps {
   onDisconnect: () => void;
   onViewLogs: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  /** Opens Settings → Permissions & security from the keychain notice. */
+  onOpenPermissionHelp?: () => void;
 }
 
 export function ComputerRuntime({
@@ -39,6 +41,7 @@ export function ComputerRuntime({
   onDisconnect,
   onViewLogs,
   onOpenPlugin,
+  onOpenPermissionHelp,
 }: ComputerRuntimeProps) {
   const { t } = useTranslation();
   const runtime = instance.runtime;
@@ -90,6 +93,7 @@ export function ComputerRuntime({
           onStartRuntime={onStartStop}
           onRestartRuntime={onRestart}
           onOpenPlugin={onOpenPlugin}
+          onOpenPermissionHelp={onOpenPermissionHelp}
         />
       </Card>
     </Space>

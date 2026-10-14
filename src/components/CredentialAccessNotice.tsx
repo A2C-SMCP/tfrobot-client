@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, App, Space } from 'antd';
+import { Alert, Button, App, Space, Typography } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
@@ -43,12 +43,40 @@ export function CredentialAccessNotice() {
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(null); }
   };
+  const describe = (entry: PausedCredential) => [
+    t(`permissions.${entry.purpose}`),
+    entry.context
+      ? [entry.context.computerId, entry.context.resourceId].filter(Boolean).join(' / ')
+      : null,
+  ].filter(Boolean).join(' — ');
+
   return <Space direction="vertical" style={{ width: '100%' }}>
     {error && <Alert type="error" message={error} action={<Button onClick={() => setAttempt((value) => value + 1)}>{t('common.refresh')}</Button>} />}
-    {paused.map((entry) => <Alert key={entry.id} type="warning" showIcon
-      message={`${t('permissions.title')}: ${t(`permissions.${entry.purpose}`)}${entry.context ? ` — ${[entry.context.computerId, entry.context.resourceId].filter(Boolean).join(' / ')}` : ''}`}
-      description={t('permissions.description')}
-      action={<Button loading={busy === entry.id} disabled={busy !== null}
-        onClick={() => { void retry(entry.id); }}>{t('permissions.retry')}</Button>} />)}
+    {paused.length > 0 && (
+      <Alert
+        type="warning"
+        showIcon
+        message={t('permissions.title')}
+        description={(
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Typography.Text type="secondary">{t('permissions.description')}</Typography.Text>
+            {paused.map((entry) => (
+              <Space key={entry.id} size={8} wrap>
+                <Typography.Text>{describe(entry)}</Typography.Text>
+                <Button
+                  size="small"
+                  loading={busy === entry.id}
+                  disabled={busy !== null}
+                  aria-label={`${t('permissions.retry')}: ${describe(entry)}`}
+                  onClick={() => { void retry(entry.id); }}
+                >
+                  {t('permissions.retry')}
+                </Button>
+              </Space>
+            ))}
+          </Space>
+        )}
+      />
+    )}
   </Space>;
 }

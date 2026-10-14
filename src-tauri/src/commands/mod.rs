@@ -16,6 +16,7 @@ pub mod inputs;
 pub mod manager;
 pub mod marketplace;
 pub mod mcp;
+pub mod portable_config;
 pub mod runtime_error;
 pub mod runtime_input;
 pub mod runtime_sync;

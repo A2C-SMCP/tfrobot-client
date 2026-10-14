@@ -15,6 +15,13 @@ pub enum ApplicationUpdateActivity {
     InstallFailed,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationUpdateTrigger {
+    Automatic,
+    Manual,
+}
+
 #[tauri::command]
 pub async fn get_activity(
     state: State<'_, AppState>,
@@ -138,10 +145,18 @@ pub async fn record_application_update_activity(
     activity: ApplicationUpdateActivity,
     target_version: Option<String>,
     correlation_id: String,
+    trigger: ApplicationUpdateTrigger,
     error: Option<String>,
 ) -> Result<(), String> {
-    record_application_update_activity_core(&state, activity, target_version, correlation_id, error)
-        .await
+    record_application_update_activity_core(
+        &state,
+        activity,
+        target_version,
+        correlation_id,
+        trigger,
+        error,
+    )
+    .await
 }
 
 pub async fn record_application_update_activity_core(
@@ -149,6 +164,7 @@ pub async fn record_application_update_activity_core(
     activity: ApplicationUpdateActivity,
     target_version: Option<String>,
     correlation_id: String,
+    trigger: ApplicationUpdateTrigger,
     error: Option<String>,
 ) -> Result<(), String> {
     if correlation_id.trim().is_empty() || correlation_id.len() > 128 {
@@ -196,7 +212,10 @@ pub async fn record_application_update_activity_core(
     );
     draft.fields = Some(serde_json::json!({
         "app_version": env!("CARGO_PKG_VERSION"),
-        "trigger": "user",
+        "trigger": match trigger {
+            ApplicationUpdateTrigger::Automatic => "automatic",
+            ApplicationUpdateTrigger::Manual => "manual",
+        },
         "target_version": target_version,
         "error": error.as_deref().map(redact_text),
     }));
@@ -229,6 +248,7 @@ mod tests {
             ApplicationUpdateActivity::InstallFailed,
             Some("0.3.0".to_string()),
             "update-1".to_string(),
+            ApplicationUpdateTrigger::Manual,
             Some("token=super-secret".to_string()),
         )
         .await
@@ -261,6 +281,7 @@ mod tests {
             ApplicationUpdateActivity::InstallStarted,
             Some("0.3.0\nforged".to_string()),
             "update-1".to_string(),
+            ApplicationUpdateTrigger::Manual,
             None,
         )
         .await

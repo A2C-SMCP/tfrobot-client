@@ -2,16 +2,14 @@ import { managerSessionFromContext, useManagerStore } from '@/stores/managerStor
 import { LoginForm } from './LoginForm';
 import { AccountSelection } from './AccountSelection';
 import { EmployeeList } from './EmployeeList';
-import { Alert, Button, Card, Space } from 'antd';
-import { ArrowLeftOutlined } from '@ant-design/icons';
-import { useTranslation } from 'react-i18next';
+import { OnboardingNotice } from './OnboardingNotice';
+import { Card, Space } from 'antd';
 
 interface ManagerAccountProps {
   instanceId?: string;
 }
 
 export function ManagerAccount({ instanceId }: ManagerAccountProps) {
-  const { t } = useTranslation();
   const {
     context,
     pendingAccountSelection,
@@ -26,15 +24,7 @@ export function ManagerAccount({ instanceId }: ManagerAccountProps) {
     return (
       <Card>
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <Alert
-            type="info"
-            showIcon
-            message={t('managerAccount.onboarding.title')}
-            description={t('managerAccount.onboarding.description')}
-          />
-          <Button icon={<ArrowLeftOutlined />} onClick={() => void logout()} block>
-            {t('managerAccount.onboarding.back')}
-          </Button>
+          <OnboardingNotice withBackIcon onBack={() => void logout()} />
         </Space>
       </Card>
     );

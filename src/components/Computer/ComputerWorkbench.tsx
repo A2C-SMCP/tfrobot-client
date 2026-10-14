@@ -33,6 +33,7 @@ interface ComputerWorkbenchProps {
   onConnect: () => void;
   onDisconnect: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
+  onOpenPermissionHelp?: () => void;
 }
 
 export function ComputerWorkbench({
@@ -48,6 +49,7 @@ export function ComputerWorkbench({
   onConnect,
   onDisconnect,
   onOpenPlugin,
+  onOpenPermissionHelp,
 }: ComputerWorkbenchProps) {
   const { t } = useTranslation();
   const currentManagerContext = useManagerStore((state) => state.context.contextKey);
@@ -92,6 +94,7 @@ export function ComputerWorkbench({
             onDisconnect={onDisconnect}
             onViewLogs={() => openSection('logs')}
             onOpenPlugin={onOpenPlugin}
+            onOpenPermissionHelp={onOpenPermissionHelp}
           />
         </section>
 

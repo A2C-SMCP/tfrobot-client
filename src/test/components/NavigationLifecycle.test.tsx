@@ -5,9 +5,20 @@ import { PageHost } from '@/components/Navigation/PageHost';
 import { PageModal, PagePopconfirm } from '@/components/Navigation/PageOverlays';
 import { NavigationMemoryProvider, NavigationScope } from '@/components/Navigation/NavigationMemory';
 import { useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { createNavigationStore, NavigationMemory } from '@/stores/navigationStore';
+import { createNavigationStore, menuForRoute, NavigationMemory } from '@/stores/navigationStore';
 
 describe('navigation ownership', () => {
+  it('maps settings tabs and help anchors to the settings menu and restores the destination', () => {
+    const store = createNavigationStore();
+    for (const route of ['settings:runtime', 'settings:permissions:password']) {
+      store.getState().navigate(route);
+      expect(menuForRoute(store.getState().route)).toBe('settings');
+      store.getState().openMenu('chat');
+      store.getState().openMenu('settings');
+      expect(store.getState().route).toBe(route);
+    }
+  });
+
   it('restores menu destinations and distinguishes repeated explicit navigation', () => {
     const store = createNavigationStore();
     store.getState().navigate('computer-settings:inputs');

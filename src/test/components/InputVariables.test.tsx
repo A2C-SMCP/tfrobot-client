@@ -1,7 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InputVariables } from '@/components/InputVariables';
+import { useUiNoticeStore } from '@/stores/uiNoticeStore';
+import i18n from '@/i18n';
 
 const mockStore = {
   entries: [],
@@ -25,6 +27,7 @@ describe('InputVariables', () => {
     vi.clearAllMocks();
     vi.mocked(invoke).mockResolvedValue(false);
     mockUseInputStore.mockReturnValue({ ...mockStore } as any);
+    useUiNoticeStore.getState().reset();
   });
 
   it('imports legacy variables only after the user requests it', async () => {
@@ -127,6 +130,26 @@ describe('InputVariables', () => {
         true,
       );
     });
+  });
+
+  it('explains the keychain prompt in full the first time a secret is stored', async () => {
+    useUiNoticeStore.setState({ loaded: true, entries: {} });
+    const onOpenPermissionHelp = vi.fn();
+
+    render(<InputVariables instanceId="computer-a" onOpenPermissionHelp={onOpenPermissionHelp} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Save as secret' }));
+
+    const notice = await screen.findByRole('note');
+    expect(notice).toHaveTextContent(i18n.t('permissions.password'));
+    fireEvent.click(within(notice).getByRole('button', { name: 'Permissions & security' }));
+    expect(onOpenPermissionHelp).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(screen.getByRole('note')).getByRole('button', { name: "Don't show again" }));
+    await waitFor(() => expect(screen.queryByRole('note')).not.toBeInTheDocument());
+    expect(useUiNoticeStore.getState().isDismissed('password-variable-keychain')).toBe(true);
+    // The field itself keeps its one-line explanation after the bar is gone.
+    expect(screen.getByText(i18n.t('permissions.password'))).toBeInTheDocument();
   });
 
   it('does not expose storage implementation errors when saving an entry fails', async () => {

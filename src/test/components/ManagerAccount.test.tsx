@@ -260,6 +260,22 @@ describe('ManagerAccount', () => {
       await waitFor(() => expect(trigger).toHaveFocus());
     });
 
+    it('keeps the keychain explanation to one line next to the form, linked to the permissions page', async () => {
+      const onOpenPermissionHelp = vi.fn();
+      render(<GlobalManagerAccount onOpenPermissionHelp={onOpenPermissionHelp} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
+      await screen.findByRole('dialog', { name: 'Manager Account' });
+
+      expect(
+        screen.getByText(/Signing in reads saved credentials from your system keychain/),
+      ).toBeInTheDocument();
+      // One hop to the authoritative copy instead of a duplicated banner.
+      expect(screen.queryByText(i18n.t('permissions.purpose'))).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Permissions & security' }));
+      expect(onOpenPermissionHelp).toHaveBeenCalledTimes(1);
+    });
+
     it('shows current Context and switches only through the store transaction action', async () => {
       const accounts: ManagerAccountSummary[] = [
         {

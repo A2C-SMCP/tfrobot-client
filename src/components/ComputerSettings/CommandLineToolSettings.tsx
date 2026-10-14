@@ -21,13 +21,14 @@ interface CommandLineToolState {
 
 interface CommandLineToolSettingsProps {
   computerId: string;
+  onOpenRuntime?: () => void;
 }
 
 const isWorkspaceLocked = (runtimeState: RuntimeState) => (
   runtimeState === 'starting' || runtimeState === 'running'
 );
 
-export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsProps) {
+export function CommandLineToolSettings({ computerId, onOpenRuntime }: CommandLineToolSettingsProps) {
   const action = usePageAction(computerId);
   const { message } = App.useApp();
   const pageActive = usePageActive();
@@ -137,9 +138,14 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
             </Text>
           </Space>
         </Space>
-        <Tag color={statusColor[state.runtimeState]}>
-          {t(`computer.builtInTools.commandLine.status.${state.runtimeState}`)}
-        </Tag>
+        <Space align="center" size={8} wrap style={{ justifyContent: 'flex-end' }}>
+          {state.runtimeState === 'pending' && (
+            <Text type="secondary">{t('computer.builtInTools.commandLine.pendingDescription')}</Text>
+          )}
+          <Tag color={statusColor[state.runtimeState]}>
+            {t(`computer.builtInTools.commandLine.status.${state.runtimeState}`)}
+          </Tag>
+        </Space>
       </Space>
 
       {!state.assetsAvailable && (
@@ -148,17 +154,31 @@ export function CommandLineToolSettings({ computerId }: CommandLineToolSettingsP
           showIcon
           message={t('computer.builtInTools.commandLine.assetsUnavailable')}
           description={state.error}
-        />
-      )}
-      {state.runtimeState === 'pending' && (
-        <Alert
-          type="info"
-          showIcon
-          message={t('computer.builtInTools.commandLine.pendingDescription')}
+          action={(
+            <Button size="small" onClick={() => { void load(); }}>
+              {t('common.refresh')}
+            </Button>
+          )}
         />
       )}
       {state.runtimeState === 'error' && state.assetsAvailable && state.error && (
-        <Alert type="error" showIcon message={state.error} />
+        <Alert
+          type="error"
+          showIcon
+          message={state.error}
+          action={(
+            <Space>
+              <Button size="small" loading={loading} onClick={() => { void load(); }}>
+                {t('common.refresh')}
+              </Button>
+              {onOpenRuntime && (
+                <Button size="small" onClick={onOpenRuntime}>
+                  {t('computer.workbench.sections.runtime')}
+                </Button>
+              )}
+            </Space>
+          )}
+        />
       )}
 
       <Space direction="vertical" size={4} style={{ width: '100%' }}>

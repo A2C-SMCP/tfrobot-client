@@ -121,11 +121,11 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
     }
     if (!selectedSkill.body) {
       return (
-        <Alert
-          type="warning"
-          showIcon
-          message={t('skills.emptySkillMd')}
-          description={selectedSkill.isText ? t('skills.emptySkillMdDescription') : t('skills.nonTextSkillMd')}
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={selectedSkill.isText
+            ? t('skills.emptySkillMdDescription')
+            : t('skills.nonTextSkillMd')}
         />
       );
     }
