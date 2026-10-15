@@ -11,12 +11,17 @@ test('default page is Chat', async ({ page }) => {
   await expect(page.getByText('Sign in to Manager to chat with an available Robot.')).toBeVisible();
 });
 
-test('sidebar shows all navigation groups', async ({ page }) => {
+test('sidebar has no group captions and keeps Settings above the bottom account entry', async ({ page }) => {
   const sidebar = page.locator('.ant-layout-sider');
-  await expect(sidebar.getByText('OVERVIEW')).toBeVisible();
-  await expect(sidebar.getByText('CONNECTION LAYER')).toBeVisible();
-  await expect(sidebar.getByText('DEVELOPMENT')).toBeVisible();
-  await expect(sidebar.getByText('SYSTEM')).toBeVisible();
+  for (const caption of ['OVERVIEW', 'CONNECTION LAYER', 'DEVELOPMENT', 'SYSTEM']) {
+    await expect(sidebar.getByText(caption, { exact: true })).toHaveCount(0);
+  }
+  const activity = await sidebar.getByText('Activity', { exact: true }).boundingBox();
+  const settings = await sidebar.getByText('Settings', { exact: true }).boundingBox();
+  const account = await sidebar.locator('button[aria-haspopup="dialog"]').boundingBox();
+  expect(settings!.y).toBeGreaterThan(activity!.y + activity!.height);
+  expect(settings!.y + settings!.height).toBeLessThanOrEqual(account!.y);
+  expect(account!.y + account!.height).toBeGreaterThan(page.viewportSize()!.height - 40);
 });
 
 test('sidebar shows all menu items', async ({ page }) => {

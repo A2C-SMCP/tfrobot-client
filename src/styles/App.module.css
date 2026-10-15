@@ -7,6 +7,7 @@
   position: sticky;
   top: 0;
   height: 100dvh;
+  overflow-anchor: none;
   border-inline-end: 1px solid var(--ant-color-border-secondary);
 }
 
@@ -52,12 +53,6 @@
   border-inline-end: 0 !important;
 }
 
-.menu :global(.ant-menu-item-group-title) {
-  padding: 18px 10px 7px;
-  font-size: 11px;
-  font-weight: 500;
-}
-
 .menu :global(.ant-menu-item) {
   width: 100%;
   margin: 2px 0;
@@ -73,8 +68,16 @@
   color: inherit;
 }
 
-.account {
+.sidebarFooter {
+  flex: 0 0 auto;
   margin-top: auto;
+}
+
+.settingsMenu {
+  padding-bottom: 10px;
+}
+
+.account {
   padding: 14px 10px;
   border-top: 1px solid var(--ant-color-border-secondary);
 }
@@ -170,18 +173,8 @@
     overflow: visible;
     padding-bottom: 10px;
   }
-  .menu :global(.ant-menu-item-group) {
-    flex: 1 1 auto;
-  }
-  .menu :global(.ant-menu-item-group-list) {
-    display: flex;
-    flex-wrap: wrap;
-  }
   .menu :global(.ant-menu-item) {
     width: auto;
-  }
-  .menu :global(.ant-menu-item-group-title) {
-    padding-top: 10px;
   }
   .account {
     padding: 6px 10px;
