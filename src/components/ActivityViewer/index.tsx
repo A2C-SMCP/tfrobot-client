@@ -22,10 +22,10 @@ const { Title } = Typography;
 const LEVEL_COLORS = { debug: 'default', info: 'blue', warn: 'orange', error: 'red' };
 const OUTCOME_COLORS = { succeeded: 'green', failed: 'red', unknown: 'default' };
 const TIME_PRESETS = [
-  { label: '1h', hours: 1 },
-  { label: '6h', hours: 6 },
-  { label: '24h', hours: 24 },
-  { label: '7d', hours: 168 },
+  { hours: 1 },
+  { hours: 6 },
+  { hours: 24 },
+  { hours: 168, days: 7 },
 ];
 interface ActivityViewerProps {
   instanceId?: string;
@@ -43,6 +43,7 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
     ...ACTIVITY_CATEGORIES,
     ...items.map((item) => item.category),
   ])];
+  const categoryLabel = (category: string) => t(`logs.categories.${category}`, { defaultValue: category });
 
   useEffect(() => {
     if (active) void fetchActivity();
@@ -84,18 +85,18 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         <Tag color={LEVEL_COLORS[level]}>{level.toUpperCase()}</Tag>
       ),
     },
-    { title: t('logs.category'), dataIndex: 'category', width: 110 },
+    { title: t('logs.category'), dataIndex: 'category', width: 110, render: categoryLabel },
     {
       title: t('logs.outcome'), dataIndex: 'outcome', width: 110,
       render: (outcome: ActivityEvent['outcome']) => (
-        <Tag color={OUTCOME_COLORS[outcome]}>{outcome.toUpperCase()}</Tag>
+        <Tag color={OUTCOME_COLORS[outcome]}>{t(`logs.outcomes.${outcome}`)}</Tag>
       ),
     },
     {
-      title: 'Scope', dataIndex: 'scope', width: 160,
-      render: (scope: ActivityEvent['scope']) => scope.kind === 'client' ? 'Client' : scope.computer_id,
+      title: t('logs.scope'), dataIndex: 'scope', width: 160,
+      render: (scope: ActivityEvent['scope']) => scope.kind === 'client' ? t('logs.client') : scope.computer_id,
     },
-    { title: 'Operation', dataIndex: 'operation', width: 140 },
+    { title: t('logs.operation'), dataIndex: 'operation', width: 140 },
     { title: t('logs.message'), dataIndex: 'message' },
   ];
 
@@ -112,9 +113,9 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
     <div>
       <Title level={4}>{t('logs.title')}</Title>
       <Space wrap style={{ marginBottom: 16 }}>
-        {TIME_PRESETS.map(({ label, hours }) => (
-          <Button key={label} size="small" onClick={() => void setQueryAndFetch({ start_time: dayjs().subtract(hours, 'hour').toISOString(), end_time: undefined, offset: 0 })}>
-            {label}
+        {TIME_PRESETS.map(({ hours, days }) => (
+          <Button key={hours} size="small" onClick={() => void setQueryAndFetch({ start_time: dayjs().subtract(hours, 'hour').toISOString(), end_time: undefined, offset: 0 })}>
+            {days ? t('logs.pastDays', { count: days }) : t('logs.pastHours', { count: hours })}
           </Button>
         ))}
         <Button size="small" onClick={() => void setQueryAndFetch({ start_time: undefined, end_time: undefined, offset: 0 })}>
@@ -131,23 +132,23 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         />
         <Select
           mode="multiple"
-          aria-label="Activity category"
+          aria-label={t('logs.categoryLabel')}
           placeholder={t('logs.filterCategory')}
           style={{ minWidth: 150 }}
           allowClear
           value={query.categories}
           onChange={(categories) => void setQueryAndFetch({ categories: categories.length ? categories : undefined, offset: 0 })}
-          options={categoryOptions.map((category) => ({ label: category, value: category }))}
+          options={categoryOptions.map((category) => ({ label: categoryLabel(category), value: category }))}
         />
         {!instanceId && (
           <Select
-            aria-label="Activity scope"
+            aria-label={t('logs.filterScope')}
             style={{ minWidth: 200 }}
             value={scopeValue}
             onChange={changeScope}
             options={[
-              { label: 'All activity', value: 'all' },
-              { label: 'Client only', value: 'client' },
+              { label: t('logs.allScopes'), value: 'all' },
+              { label: t('logs.clientOnly'), value: 'client' },
               ...instances.map((instance) => ({ label: instance.name, value: instance.id })),
             ]}
           />

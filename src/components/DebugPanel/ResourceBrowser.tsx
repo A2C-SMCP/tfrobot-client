@@ -145,7 +145,7 @@ export function ResourceBrowser({ instanceId }: ResourceBrowserProps) {
           >
             {t('common.refresh')}
           </Button>
-          <Text type="secondary">Computer: {instanceId}</Text>
+          <Text type="secondary">{t('computer.title')}: {instanceId}</Text>
         </Space>
         {error && (
           <Alert

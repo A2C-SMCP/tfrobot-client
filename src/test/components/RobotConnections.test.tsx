@@ -31,7 +31,7 @@ describe('RobotConnections', () => {
   it('guides signed-out users to the global account entry without owning login', () => {
     render(<RobotConnections />);
 
-    expect(screen.getByText(/Sign in from the global Manager Account entry/)).toBeInTheDocument();
+    expect(screen.getByText(/Use the account entry at the bottom of the sidebar/)).toBeInTheDocument();
     expect(screen.queryByTestId('employee-list')).not.toBeInTheDocument();
     expect(screen.queryByRole('tab')).not.toBeInTheDocument();
   });
@@ -41,7 +41,7 @@ describe('RobotConnections', () => {
     try {
       render(<RobotConnections />);
 
-      expect(screen.getByText('机器人列表')).toBeInTheDocument();
+      expect(screen.getByText('数字员工')).toBeInTheDocument();
       expect(screen.queryByText(/Manage Robot connection resources/)).not.toBeInTheDocument();
     } finally {
       await i18n.changeLanguage('en');

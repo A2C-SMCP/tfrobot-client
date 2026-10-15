@@ -34,8 +34,8 @@ describe('ActivityViewer', () => {
       offset: 0,
       scope: { kind: 'all' },
     } }));
-    expect(screen.getByText('Activity')).toBeInTheDocument();
-    expect(screen.getAllByLabelText('Activity scope').length).toBeGreaterThan(0);
+    expect(screen.getByText('Logs')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Log scope').length).toBeGreaterThan(0);
   });
 
   it('refreshes on return without resetting filters or pagination', async () => {
@@ -76,7 +76,7 @@ describe('ActivityViewer', () => {
     await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('get_activity', { query:
       expect.objectContaining({ scope: { kind: 'computer', computer_id: 'computer-a' } }) },
     ));
-    expect(screen.queryAllByLabelText('Activity scope')).toHaveLength(0);
+    expect(screen.queryAllByLabelText('Log scope')).toHaveLength(0);
   });
 
   it('renders structured scope, outcome, and operation columns', () => {
@@ -156,7 +156,7 @@ describe('ActivityViewer', () => {
   it('applies a selected Computer category to the activity query', async () => {
     render(<ActivityViewer instanceId="computer-a" />);
 
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Activity category' }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Log category' }));
     fireEvent.click(await screen.findByText('runtime'));
 
     await waitFor(() => expect(activityViewStore('computer-a').getState().query.categories).toEqual(['runtime']));

@@ -42,12 +42,12 @@ test('restores Computer settings, tab drafts and the selected instance after men
   expect(saves).toBe(0);
 });
 
-test('restores an unsubmitted Activity search after visiting other menus', async ({ page }) => {
-  await menu(page, 'Activity').click();
-  const search = page.getByPlaceholder('Search keyword');
+test('restores an unsubmitted Logs search after visiting other menus', async ({ page }) => {
+  await menu(page, 'Logs').click();
+  const search = page.getByPlaceholder('Search logs…');
   await search.fill('unfinished query');
   await menu(page, 'Computer').click();
-  await menu(page, 'Activity').click();
+  await menu(page, 'Logs').click();
   await expect(search).toHaveValue('unfinished query');
 });
 

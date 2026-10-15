@@ -16,7 +16,7 @@ test('sidebar has no group captions and keeps Settings above the bottom account 
   for (const caption of ['OVERVIEW', 'CONNECTION LAYER', 'DEVELOPMENT', 'SYSTEM']) {
     await expect(sidebar.getByText(caption, { exact: true })).toHaveCount(0);
   }
-  const activity = await sidebar.getByText('Activity', { exact: true }).boundingBox();
+  const activity = await sidebar.getByText('Logs', { exact: true }).boundingBox();
   const settings = await sidebar.getByText('Settings', { exact: true }).boundingBox();
   const account = await sidebar.locator('button[aria-haspopup="dialog"]').boundingBox();
   expect(settings!.y).toBeGreaterThan(activity!.y + activity!.height);

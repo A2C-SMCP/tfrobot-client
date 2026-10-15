@@ -214,7 +214,7 @@ describe('Computer', () => {
     expect(screen.getByLabelText('Desktop Resources')).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Workbench sections' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /collapsed Debug Panel/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /collapsed Activity/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /collapsed Logs/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-a');
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-a');
