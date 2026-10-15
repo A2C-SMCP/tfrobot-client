@@ -311,10 +311,10 @@ describe('ManagerAccount', () => {
       });
 
       render(<GlobalManagerAccount />);
-      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Organization, client_uat/i }));
       await screen.findByRole('dialog', { name: 'Manager Account' });
       expect(screen.getByText('Staging')).toBeInTheDocument();
-      expect(screen.getByText('client_uat')).toBeInTheDocument();
+      expect(screen.getAllByText('client_uat')[0]).toBeInTheDocument();
       expect(fetchAccounts).toHaveBeenCalledOnce();
 
       fireEvent.click(screen.getByRole('button', { name: /Other Account/i }));
@@ -334,7 +334,7 @@ describe('ManagerAccount', () => {
       });
 
       render(<GlobalManagerAccount />);
-      fireEvent.click(screen.getByRole('button', { name: /Organization, User/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Organization, client_uat/i }));
       await screen.findByRole('dialog', { name: 'Manager Account' });
 
       expect(screen.queryByRole('button', { name: /Sign in again/i })).not.toBeInTheDocument();
