@@ -118,8 +118,10 @@ vi.mock('@/components/ActivityViewer', () => ({
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
     instance,
+    children,
     onOpenPlugin,
   }: {
+    children?: React.ReactNode;
     instance: { id: string };
     onOpenPlugin?: (owner: {
       type: 'plugin';
@@ -141,6 +143,7 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
       >
         Open Plugin from Runtime
       </button>
+      {children}
     </div>
   ),
 }));
@@ -209,8 +212,9 @@ describe('Computer', () => {
     expect(screen.queryByText('Overview')).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Desktop Resources')).toBeInTheDocument();
-    expect(screen.getByText('Debug Panel')).toBeInTheDocument();
-    expect(screen.getByText('Activity')).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Workbench sections' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /collapsed Debug Panel/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /collapsed Logs/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-a');
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-a');

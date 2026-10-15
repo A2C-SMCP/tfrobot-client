@@ -1,4 +1,5 @@
 import { useRef } from 'react';
+import formStyles from '@/components/common/GroupedForm.module.css';
 import { useNavigationForm } from '@/components/Navigation/navigationMemoryState';
 import { usePageAction } from '@/components/Navigation/pageActivityState';
 import { App, Button, Form, Input, InputNumber, Space } from 'antd';
@@ -48,6 +49,7 @@ export function GeneralSettings({ instance }: GeneralSettingsProps) {
 
   return (
     <Form
+      className={formStyles.form}
       name={`computer-general-${instance.id}`}
       form={form}
       onValuesChange={draft.onValuesChange}
@@ -84,7 +86,7 @@ export function GeneralSettings({ instance }: GeneralSettingsProps) {
       >
         <InputNumber min={1} max={64} precision={0} />
       </Form.Item>
-      <Space>
+      <Space className={formStyles.actions}>
         <Button type="primary" htmlType="submit" loading={loading}>
           {t('common.save')}
         </Button>

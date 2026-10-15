@@ -68,7 +68,7 @@ export function CallHistory({ instanceId }: CallHistoryProps) {
         <Button icon={<ReloadOutlined />} onClick={() => fetchHistory(instanceId)} loading={historyLoading}>
           {t('common.refresh')}
         </Button>
-        <Text type="secondary">Computer: {instanceId}</Text>
+        <Text type="secondary">{t('computer.title')}: {instanceId}</Text>
       </Space>
 
       {history.length === 0 && !historyLoading ? (

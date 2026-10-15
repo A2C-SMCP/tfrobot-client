@@ -1,0 +1,214 @@
+.listHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 16px 0 24px;
+}
+
+.collectionList {
+  overflow: hidden;
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 12px;
+  background: var(--ant-color-bg-container);
+  box-shadow: 0 2px 7px #00000008;
+}
+
+.computerCard {
+  min-width: 0;
+}
+
+.collectionList .computerCard {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.collectionList .computerCard + .computerCard {
+  border-top: 1px solid var(--ant-color-border-secondary);
+}
+
+.cardBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 185px 240px;
+  align-items: center;
+  gap: 22px;
+  padding: 24px 22px !important;
+}
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.deviceIcon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 48px;
+  height: 48px;
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 11px;
+  background: var(--ant-color-fill-alter);
+  color: var(--ant-color-text-secondary);
+  font-size: 27px;
+}
+
+.identityText {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.name {
+  height: auto;
+  max-width: 100%;
+  padding: 0;
+  color: var(--ant-color-text);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  white-space: normal;
+  text-align: start;
+}
+
+.description {
+  font-size: 12px;
+}
+
+.identifier {
+  margin-top: 5px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  letter-spacing: -0.3px;
+  overflow-wrap: anywhere;
+}
+
+.metadata {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.metadata :global(.ant-tag) {
+  margin-inline-end: 0;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
+  gap: 6px;
+}
+
+.actions :global(.ant-btn) {
+  grid-column: span 2;
+  height: 28px;
+  padding: 4px 5px;
+  font-size: 11px;
+  color: var(--ant-color-text-secondary);
+}
+
+.actions > :nth-child(-n + 2) {
+  grid-column: span 3;
+}
+
+.actions :global(.ant-btn-dangerous) {
+  color: var(--ant-color-error);
+}
+
+.actions :global(.ant-btn:disabled) {
+  color: var(--ant-color-text-disabled);
+}
+
+.actions .runtimeAction {
+  background: var(--ant-color-primary-bg);
+  color: var(--ant-color-primary);
+}
+
+.actions .runtimeAction:global(.ant-btn-dangerous) {
+  background: var(--ant-color-error-bg);
+  color: var(--ant-color-error);
+}
+
+.collectionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.collectionGrid .computerCard {
+  box-shadow: 0 2px 7px #00000008;
+}
+
+.collectionGrid .cardBody {
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  align-content: start;
+  gap: 20px;
+}
+
+.collectionGrid .deviceIcon {
+  color: var(--ant-color-primary);
+  background: var(--ant-color-primary-bg);
+  border-color: transparent;
+}
+
+.collectionGrid .metadata {
+  padding-inline-start: 64px;
+}
+
+.collectionGrid .actions {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: auto;
+  gap: 6px;
+}
+
+.collectionGrid .actions .runtimeAction {
+  margin-inline-end: auto;
+}
+
+@media (max-width: 1180px) {
+  .cardBody {
+    grid-template-columns: minmax(0, 1fr) 180px;
+    gap: 18px;
+  }
+  .collectionList .actions {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    padding-inline-start: 64px;
+  }
+  .collectionList .actions .runtimeAction {
+    margin-inline-end: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .collectionGrid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .cardBody {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 20px 16px !important;
+    gap: 16px;
+  }
+  .metadata {
+    padding-inline-start: 64px;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .collectionList .actions {
+    padding-inline-start: 0;
+  }
+}

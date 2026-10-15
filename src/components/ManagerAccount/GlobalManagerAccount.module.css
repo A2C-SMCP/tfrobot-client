@@ -1,18 +1,22 @@
 .trigger {
-  color: rgba(255, 255, 255, 0.85) !important;
+  color: var(--ant-color-text) !important;
   display: inline-flex;
   align-items: center;
-  max-width: min(320px, 38vw);
+  width: 100%;
+  height: auto;
+  min-height: 40px;
+  justify-content: flex-start;
+  padding: 6px 8px;
   min-width: 0;
 }
 
 .trigger:hover,
 .trigger:focus-visible {
-  color: #fff !important;
+  color: var(--ant-color-primary) !important;
 }
 
 .trigger:focus-visible {
-  outline: 2px solid #91caff;
+  outline: 2px solid var(--ant-color-primary);
   outline-offset: 2px;
 }
 
@@ -97,7 +101,7 @@
 }
 
 .organizationName {
-  color: rgba(0, 0, 0, 0.45);
+  color: var(--ant-color-text-secondary);
   font-size: 12px;
 }
 
@@ -119,16 +123,4 @@
 
 .error {
   margin-bottom: 12px;
-}
-
-@media (max-width: 720px) {
-  .trigger {
-    max-width: 44px;
-    padding-inline: 8px !important;
-  }
-
-  .triggerText,
-  .chevron {
-    display: none;
-  }
 }

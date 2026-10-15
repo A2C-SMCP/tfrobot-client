@@ -164,7 +164,7 @@ describe('Dashboard', () => {
       fetchDashboard: mockFetchDashboard,
     } as any);
     render(<Dashboard onNavigate={mockOnNavigate} />);
-    expect(screen.getByText('No recent activity')).toBeInTheDocument();
+    expect(screen.getByText('No recent logs')).toBeInTheDocument();
   });
 
   it('opens a selected Computer overview from the shortcut list', () => {

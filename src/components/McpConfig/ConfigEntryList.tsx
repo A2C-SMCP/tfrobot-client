@@ -25,14 +25,14 @@ function entryType(entry: ConfigEntryFormValue | undefined): string {
   return entry.value.definition?.type ?? 'Unresolved';
 }
 
-function entrySummary(entry: ConfigEntryFormValue | undefined, unresolved: string): string {
+function entrySummary(entry: ConfigEntryFormValue | undefined, unresolved: string, secret: string): string {
   if (!entry) return '';
   if (entry.value.type === 'Constant') return entry.value.value;
   if (!entry.value.definition) return unresolved;
   const definition = entry.value.definition;
   if (definition.type === 'PickString') return `${definition.id} · ${definition.options.length}`;
   if (definition.type === 'Command') return `${definition.id} · ${definition.command}`;
-  return definition.password ? `${definition.id} · Secret` : definition.id;
+  return definition.password ? `${definition.id} · ${secret}` : definition.id;
 }
 
 export function ConfigEntryList({ name, instanceId, inputs, addLabel, draftPrefix, onEntriesChange }: ConfigEntryListProps) {
@@ -49,6 +49,7 @@ export function ConfigEntryList({ name, instanceId, inputs, addLabel, draftPrefi
             {fields.map((field) => {
               const entry = entries[field.name];
               const type = entryType(entry);
+              const summary = entrySummary(entry, t('mcp.form.unresolvedInput'), t('inputs.secretMode'));
               return (
                 <div
                   key={field.key}
@@ -64,14 +65,14 @@ export function ConfigEntryList({ name, instanceId, inputs, addLabel, draftPrefi
                 >
                   <Typography.Text ellipsis title={entry?.key}>{entry?.key}</Typography.Text>
                   <Tag color={type === 'Constant' ? 'default' : type === 'Unresolved' ? 'red' : 'blue'}>
-                    {type}
+                    {t(`mcp.form.valueTypes.${type}`)}
                   </Tag>
                   <Typography.Text
                     type="secondary"
                     ellipsis
-                    title={entrySummary(entry, t('mcp.form.unresolvedInput'))}
+                    title={summary}
                   >
-                    {entrySummary(entry, t('mcp.form.unresolvedInput'))}
+                    {summary}
                   </Typography.Text>
                   <Space size={2}>
                     <Button
