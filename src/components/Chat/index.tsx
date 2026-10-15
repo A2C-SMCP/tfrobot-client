@@ -256,6 +256,7 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
       {restoration.error && <Alert type="warning" showIcon message={t('chat.restorePositionFailed')}
         action={<Button onClick={restoration.retry}>{t('common.retry')}</Button>} />}
       <ChatUiShell
+        styles={{ root: { border: 0, borderRadius: 0 } }}
         compactNavigation={compactNavigation}
         contentState={contentState}
         conversationListError={
@@ -274,7 +275,7 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
         pendingConversationId={snapshot.pendingConversationId}
         selectedConversationId={snapshot.selectedConversationId}
       >
-        <ChatConversationView sendShortcut="enter" getDeadlineAt={getChatDeadlineAt} labels={labels}
+        <ChatConversationView className={styles.conversation} defaultEventDetailSplitRatio={0.64} sendShortcut="enter" getDeadlineAt={getChatDeadlineAt} labels={labels}
           eventDetailMode={active ? detailMode : 'split'} onEventDetailModeChange={setDetailMode} />
       </ChatUiShell>
       <Modal

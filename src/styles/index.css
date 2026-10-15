@@ -34,3 +34,148 @@ input::-webkit-contacts-auto-fill-button,
 input::-webkit-credentials-auto-fill-button {
   display: none !important;
 }
+
+/* Desktop surfaces share the same tokens as Ant Design, including its portal dialogs. */
+
+.client-app {
+  background: var(--ant-color-bg-layout);
+  color: var(--ant-color-text);
+  min-height: 100dvh;
+}
+
+.client-app h3.ant-typography,
+.client-app h4.ant-typography {
+  letter-spacing: -0.7px;
+}
+
+.client-app .ant-card {
+  box-shadow: 0 2px 6px #00000008;
+}
+
+.client-app .ant-card-head {
+  border-bottom: 0;
+}
+
+.client-app .ant-card-head-title {
+  font-weight: 600;
+}
+
+.client-app .ant-tag {
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.client-app .ant-tag-default {
+  background: var(--ant-color-fill-alter);
+  border-color: transparent;
+  color: var(--ant-color-text-secondary);
+}
+
+.client-app .ant-statistic-content {
+  font-weight: 500;
+  letter-spacing: -0.5px;
+}
+
+.client-app .ant-typography {
+  overflow-wrap: anywhere;
+}
+
+.client-app .ant-table-content {
+  overflow-x: auto;
+}
+
+.client-app .ant-table-cell {
+  overflow-wrap: anywhere;
+}
+
+.client-app .ant-table-thead > tr > th {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.client-app .ant-table-tbody > tr > td {
+  font-size: 12px;
+}
+
+.client-app .ant-alert {
+  border-radius: 9px;
+}
+
+.client-app .ant-alert-message {
+  font-size: 13px;
+}
+
+.client-app .ant-alert-description {
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.client-app .ant-empty-description {
+  font-size: 12px;
+}
+
+.client-app .ant-collapse {
+  border-radius: 11px;
+}
+
+.client-app .ant-collapse-header {
+  font-weight: 500;
+}
+
+.client-app .ant-tabs > .ant-tabs-nav::before {
+  border-bottom: 0;
+}
+
+.client-app .ant-tabs-nav-list {
+  gap: 3px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--ant-color-fill-alter);
+}
+
+.client-app .ant-tabs-tab {
+  margin: 0 !important;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.client-app .ant-tabs-tab-active {
+  background: var(--ant-color-bg-container);
+  box-shadow: 0 1px 3px #00000010;
+}
+
+.client-app .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--ant-color-text) !important;
+}
+
+.client-app .ant-tabs-ink-bar {
+  display: none;
+}
+
+.ant-modal .ant-modal-content {
+  border: 1px solid var(--ant-color-border-secondary);
+}
+
+.ant-modal .ant-modal-title {
+  letter-spacing: -0.4px;
+}
+
+@media (pointer: coarse) {
+  .client-app .ant-btn,
+  .client-app .ant-menu-item,
+  .client-app .ant-segmented-item-label {
+    min-height: 44px;
+  }
+  .client-app input,
+  .client-app textarea {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .client-app *, .ant-modal *, .ant-popover * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

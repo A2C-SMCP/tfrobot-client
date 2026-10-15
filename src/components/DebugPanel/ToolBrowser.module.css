@@ -1,0 +1,53 @@
+.browser {
+  display: grid;
+  grid-template-columns: minmax(220px, 32%) minmax(0, 1fr);
+  gap: 18px;
+  height: clamp(360px, 55dvh, 620px);
+  min-width: 0;
+}
+
+.listPane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tool {
+  padding: 8px 12px !important;
+  cursor: pointer;
+}
+
+.selected {
+  background: var(--ant-color-primary-bg);
+  border-radius: 6px;
+}
+
+.schema {
+  background: var(--ant-color-fill-alter);
+  padding: 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .browser {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .listPane {
+    max-height: 360px;
+  }
+  .detail {
+    min-height: 180px;
+    max-height: 520px;
+  }
+}

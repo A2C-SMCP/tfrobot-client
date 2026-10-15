@@ -249,7 +249,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
       open={open}
       onOpenChange={updateOpen}
       trigger="click"
-      placement="bottomRight"
+      placement="topLeft"
       destroyTooltipOnHide
       content={(
         <div

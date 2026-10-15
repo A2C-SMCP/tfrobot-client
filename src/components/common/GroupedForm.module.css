@@ -1,0 +1,67 @@
+.form {
+  overflow: hidden;
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 12px;
+  background: var(--ant-color-bg-container);
+  box-shadow: 0 1px 3px #00000008;
+}
+
+.form > :global(.ant-form-item) {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: start;
+  margin: 0;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
+}
+
+.form > :global(.ant-form-item:last-child) {
+  border-bottom: 0;
+}
+
+.form > :global(.ant-form-item > .ant-form-item-row) {
+  display: contents;
+}
+
+.form :global(.ant-form-item-label) {
+  padding: 4px 16px 0 0;
+  text-align: start;
+  white-space: normal;
+}
+
+.form :global(.ant-form-item-label > label) {
+  height: auto;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.form :global(.ant-form-item-control) {
+  min-width: 0;
+}
+
+.form :global(.ant-form-item-extra) {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.actions {
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  background: var(--ant-color-fill-alter);
+}
+
+@media (max-width: 760px) {
+  .form > :global(.ant-form-item) {
+    display: block;
+    padding: 16px;
+  }
+  .form > :global(.ant-form-item > .ant-form-item-row) {
+    display: block;
+  }
+  .form :global(.ant-form-item-label) {
+    padding: 0 0 8px;
+  }
+}

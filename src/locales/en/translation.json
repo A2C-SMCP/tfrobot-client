@@ -16,6 +16,7 @@
     "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
 },
   "app": {
+    "workspace": "Workspace",
     "name": "TFRobot Client",
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
     "runtimeInputUnavailable": "Runtime Input prompts are unavailable",
@@ -234,6 +235,7 @@
     "attachmentRetryHint": "Retry the attachment from the message it belongs to."
   },
   "computer": {
+    "views": {"label": "Computer view", "list": "List", "grid": "Icons"},
     "title": "Computer",
     "create": "Create Computer",
     "empty": "No Computer instances",
@@ -368,6 +370,7 @@
         "copyId": "Copy ID"
       },
       "sections": {
+        "navigation": "Workbench sections",
         "runtime": "Runtime workbench",
         "skills": "Active Skills and Tools",
         "resources": "Desktop Resources",

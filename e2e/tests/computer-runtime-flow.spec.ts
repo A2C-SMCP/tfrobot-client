@@ -60,8 +60,8 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByText('View logs', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Copy ID', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Edit identity', { exact: true })).toHaveCount(0);
-    await expect(page.getByText('Delete', { exact: true })).toBeVisible();
-    await page.getByText('Delete', { exact: true }).click();
+    await expect(page.getByRole('menuitem', { name: /Delete$/ })).toBeVisible();
+    await page.getByRole('menuitem', { name: /Delete$/ }).click();
     await expect(page.getByRole('dialog', { name: 'Delete this Computer?' })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel' }).click();
 
@@ -92,10 +92,10 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Import Config' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).not.toBeVisible();
 
-    await page.getByText('Debug Panel', { exact: true }).click();
+    await page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Debug Panel', exact: true }).click();
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Search tools...')).toBeVisible();
-    await page.getByRole('button', { name: /Activity$/ }).click();
+    await page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Activity', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
   });
 
@@ -267,7 +267,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.keyboard.press('Enter');
     await expect(page.getByRole('heading', { name: 'Keyboard Helper' })).toBeVisible();
 
-    const debugPanel = page.getByRole('button', { name: /Debug Panel/ });
+    const debugPanel = page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Debug Panel', exact: true });
     await debugPanel.focus();
     await debugPanel.press('Enter');
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();

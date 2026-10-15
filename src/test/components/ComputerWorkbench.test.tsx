@@ -7,8 +7,10 @@ import { runtimeSnapshot } from '../helpers/store';
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
     instance,
+    children,
     connection,
   }: {
+    children?: React.ReactNode;
     instance: ComputerInstance;
     connection: ResolvedComputerConnection;
   }) => (
@@ -18,6 +20,7 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
       data-operation-target={connection.operationTarget?.target_id ?? ''}
     >
       {instance.id}
+      {children}
     </div>
   ),
 }));

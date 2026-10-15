@@ -16,6 +16,7 @@
     "update": "安装更新将替换应用；如果应用所在位置需要更高权限，macOS 可能请求管理员认证。"
 },
   "app": {
+    "workspace": "工作空间",
     "name": "TFRobot 客户端",
     "runtimeEventsUnavailable": "运行时状态更新不可用",
     "runtimeInputUnavailable": "运行时输入提示暂不可用",
@@ -234,6 +235,7 @@
     "attachmentRetryHint": "可在所属消息中重新加载该附件。"
   },
   "computer": {
+    "views": {"label": "计算机视图", "list": "列表", "grid": "图标"},
     "title": "Computer",
     "create": "创建 Computer",
     "empty": "暂无 Computer 实例",
@@ -368,6 +370,7 @@
         "copyId": "复制 ID"
       },
       "sections": {
+        "navigation": "工作台分区",
         "runtime": "Runtime 工作台",
         "skills": "当前 Skills 与 Tools",
         "resources": "桌面资源",
