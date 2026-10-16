@@ -61,7 +61,13 @@ export type LoginResult =
   | { kind: 'account_selection_required'; accounts: AccountOption[] }
   | { kind: 'onboarding_required'; userId: string };
 
-export type ManagerEnvironment = 'staging' | 'prod';
+export type ManagerEnvironment = 'test' | 'staging' | 'prod';
+
+export interface ManagerEnvironmentPolicy {
+  buildMode: 'development' | 'production';
+  allowedEnvironments: ManagerEnvironment[];
+  defaultEnvironment: ManagerEnvironment;
+}
 export type ManagerAuthState =
   | 'signed_out'
   | 'account_selection_required'
@@ -125,6 +131,7 @@ export type ManagerError =
   | { kind: 'no_session' }
   | { kind: 'context_changed' }
   | { kind: 'missing_base_url' }
+  | { kind: 'environment_not_allowed' }
   | { kind: 'invalid_response'; detail: string }
   | { kind: 'keychain_error'; detail: string }
   | { kind: 'token_exchange'; detail: { error: string; description?: string } }

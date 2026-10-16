@@ -781,57 +781,36 @@ fn resolve_chat_employee(
 fn resolve_chat_endpoints(
     connection_info: &ConnectionInfoResponse,
 ) -> Result<ResolvedChatEndpoints, ManagerError> {
-    let mut transport_base = Url::parse(connection_info.socket_base_url.trim()).map_err(|_| {
-        ManagerError::InvalidResponse("connection-info returned an invalid socketBaseURL".into())
-    })?;
-    if !transport_base.username().is_empty() || transport_base.password().is_some() {
-        return Err(ManagerError::InvalidResponse(
-            "connection-info endpoint must not contain URL credentials".into(),
-        ));
-    }
-    match transport_base.scheme() {
-        "http" | "https" => {}
-        "ws" => transport_base.set_scheme("http").map_err(|_| {
-            ManagerError::InvalidResponse("connection-info returned an invalid URL scheme".into())
-        })?,
-        "wss" => transport_base.set_scheme("https").map_err(|_| {
-            ManagerError::InvalidResponse("connection-info returned an invalid URL scheme".into())
-        })?,
-        _ => {
-            return Err(ManagerError::InvalidResponse(
-                "connection-info endpoint must use HTTP(S) or WS(S)".into(),
-            ))
-        }
-    }
-    transport_base.set_query(None);
-    transport_base.set_fragment(None);
+    let endpoints = connection_info.resolve_endpoints()?;
+    let transport_base = endpoints.socket_url;
 
     let robot_type =
         required_frontend_route_id(connection_info.robot_type.as_deref(), "robotType")?;
     let namespace = required_frontend_route_id(connection_info.namespace.as_deref(), "namespace")?;
     let robot_id = required_frontend_route_id(connection_info.rid.as_deref(), "rid")?;
-    let instance_prefix = format!("/c/{robot_type}/{namespace}/{robot_id}");
+    let modern = endpoints.robot_path_prefix.is_some();
+    let instance_prefix = endpoints
+        .robot_path_prefix
+        .unwrap_or_else(|| format!("/c/{robot_type}/{namespace}/{robot_id}"));
 
     let mut http_base = transport_base.clone();
     http_base.set_path(&format!("{instance_prefix}/api/"));
 
+    let socket_path = if modern {
+        transport_base.path().to_string()
+    } else {
+        // Legacy Front BFFs used a namespace-bearing prefix around the transport path.
+        // Keep that contract only for old Manager responses; v2 already includes its prefix.
+        let legacy_path = connection_info
+            .sio_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .unwrap_or("/socket.io");
+        format!("{instance_prefix}{legacy_path}")
+    };
     let mut socket_namespace = transport_base;
     socket_namespace.set_path("/chat");
-    socket_namespace.set_query(None);
-    socket_namespace.set_fragment(None);
-    let socket_transport_path = connection_info
-        .sio_path
-        .as_deref()
-        .filter(|path| !path.trim().is_empty())
-        .unwrap_or("/socket.io")
-        .trim()
-        .to_string();
-    if !socket_transport_path.starts_with('/') || socket_transport_path.contains("..") {
-        return Err(ManagerError::InvalidResponse(
-            "connection-info returned an invalid Socket.IO path".into(),
-        ));
-    }
-    let socket_path = format!("{instance_prefix}{socket_transport_path}");
     Ok(ResolvedChatEndpoints {
         http_base_url: http_base,
         socket_namespace_url: socket_namespace.to_string(),
@@ -1071,6 +1050,28 @@ mod tests {
         );
         assert_eq!(endpoints.frontend_namespace, "tenant-acme");
         assert_eq!(endpoints.frontend_robot_id, "rid-42");
+    }
+
+    #[test]
+    fn chat_v2_uses_the_advertised_robot_path_without_namespace_or_duplicate_prefix() {
+        let info: ConnectionInfoResponse = serde_json::from_value(serde_json::json!({
+            "socketBaseURL": "https://robot.example.com",
+            "sioPath": "/c/tfrobot/robot-42/socket.io/",
+            "namespace": "tenant-acme",
+            "rid": "robot-42",
+            "robotType": "tfrobot"
+        }))
+        .unwrap();
+        let endpoints = resolve_chat_endpoints(&info).unwrap();
+        assert_eq!(
+            endpoints.http_base_url.as_str(),
+            "https://robot.example.com/c/tfrobot/robot-42/api/"
+        );
+        assert_eq!(endpoints.socket_path, "/c/tfrobot/robot-42/socket.io/");
+        assert_eq!(
+            endpoints.socket_namespace_url,
+            "https://robot.example.com/chat"
+        );
     }
 
     #[test]

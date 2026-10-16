@@ -1275,7 +1275,8 @@
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
-      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly."
+      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly.",
+      "environment_not_allowed": "This build does not support that environment. Sign in to Production."
     }
   },
   "managerAccount": {
@@ -1302,7 +1303,8 @@
       "environmentRequired": "Environment is required",
       "environments": {
         "staging": "Staging",
-        "prod": "Production"
+        "prod": "Production (including Beta)",
+        "test": "Test"
       },
       "identifier": "Phone or email",
       "identifierRequired": "Phone or email is required",
@@ -1310,7 +1312,9 @@
       "passwordRequired": "Password is required",
       "submit": "Sign In",
       "logout": "Sign Out",
-      "logoutSuccess": "Signed out successfully"
+      "logoutSuccess": "Signed out successfully",
+      "productionOnly": "Distributed builds connect to Production only.",
+      "environmentPolicyFailed": "Could not load the environment policy. Please retry."
     },
     "accountSelection": {
       "title": "Choose an account",

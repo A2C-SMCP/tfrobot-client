@@ -533,8 +533,8 @@ impl SettingsService {
             // and require one fresh login instead of reviving ambiguous credentials.
             return Ok(ManagerSessionConfig::default());
         }
-        // Retired environments are a storage migration only, never an IPC alias.
-        // Discard their restore hint before any credential lookup or network request.
+        // Historical Beta was a separate credential scope. Discard its restore hint before
+        // deserialization: the new beta -> prod request alias must not revive those credentials.
         if matches!(stored_version, Some(2 | 3))
             && value
                 .pointer("/session/environment")

@@ -561,6 +561,320 @@ async fn current_user_returns_complete_redacted_context_identity() {
 }
 
 #[tokio::test]
+async fn manager_v2_and_legacy_routes_complete_real_smcp_join_and_chat_http() {
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+    use socketioxide::extract::{AckSender, SocketRef, TryData};
+    use socketioxide::SocketIo;
+    use std::convert::Infallible;
+    use tfrobot_client_lib::commands::computer::stop_computer_instance_core;
+    use tfrobot_client_lib::commands::connection::manager_connect_smcp_core;
+    use tfrobot_client_lib::services::chat_session::ChatSessionService;
+    use tfrobot_client_lib::services::computer::ComputerInstance;
+    use tfrobot_client_lib::services::config::ConfigService;
+    use tfrobot_client_lib::services::observability::ObservabilityService;
+    use tfrobot_client_lib::AppState;
+    use tower::{service_fn, Layer};
+
+    for advertised_path in [
+        Some("/c/tfrobot/rid-42/socket.io/"),
+        Some("/socket.io/"),
+        None,
+    ] {
+        let socket_path = advertised_path.unwrap_or("/socket.io/");
+        let modern = socket_path.starts_with("/c/");
+        let api_path = if modern {
+            "/c/tfrobot/rid-42/api/v1/chat/conversations"
+        } else {
+            "/c/tfrobot/tenant-fixture/rid-42/api/v1/chat/conversations"
+        };
+        let (layer, io) = SocketIo::builder()
+            .req_path(socket_path.trim_end_matches('/').to_string())
+            .build_layer();
+        let (joined_tx, mut joined_rx) = tokio::sync::mpsc::unbounded_channel();
+        io.ns(
+            "/smcp",
+            move |socket: SocketRef, TryData(auth): TryData<serde_json::Value>| {
+                assert_eq!(auth.unwrap()["token"], "fixture-short-token");
+                let joined_tx = joined_tx.clone();
+                socket.on("server:join_office", move |ack: AckSender| async move {
+                    joined_tx.send(()).unwrap();
+                    ack.send(&(true, Option::<String>::None)).unwrap();
+                });
+            },
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket_base = format!("http://{}", listener.local_addr().unwrap());
+        let fallback = service_fn(
+            move |request: hyper::Request<hyper::body::Incoming>| async move {
+                let is_chat = request.uri().path() == api_path;
+                if is_chat {
+                    let cookie = request.headers().get("cookie").unwrap().to_str().unwrap();
+                    assert!(cookie.contains("tfUserToken=fixture-short-token"));
+                }
+                Ok::<_, Infallible>(
+                    hyper::Response::builder()
+                        .status(if is_chat { 200 } else { 404 })
+                        .header("content-type", "application/json")
+                        .body(Full::<Bytes>::from(if is_chat {
+                            r#"{"code":200,"data":{"items":[]}}"#
+                        } else {
+                            r#"{"error":"wrong robot route"}"#
+                        }))
+                        .unwrap(),
+                )
+            },
+        );
+        let service = layer.layer(fallback);
+        let robot_server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service = service.clone();
+                tokio::spawn(async move {
+                    let service = hyper_util::service::TowerToHyperService::new(service);
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        let mut info = serde_json::json!({
+            "socketBaseURL": socket_base,
+            "namespace": "tenant-fixture", "rid": "rid-42", "robotType": "tfrobot",
+            "routingHeaders": {"X-TF-Namespace":"tenant-fixture","X-TF-RobotId":"rid-42","X-TF-RobotType":"tfrobot"}
+        });
+        if let Some(path) = advertised_path {
+            info["sioPath"] = serde_json::json!(path);
+        }
+        let (manager_base, _, manager_server) = spawn_mock_manager(vec![
+            json_script("/auth/login-by-password", "HTTP/1.1 200 OK", envelope(single_account_login_data("fixture-user-jwt"))),
+            json_script("/api/v1/auth/me", "HTTP/1.1 200 OK", envelope(current_user_data())),
+            json_script("/connection-info", "HTTP/1.1 200 OK", envelope(info)),
+            json_script("/api/v1/digital-employees", "HTTP/1.1 200 OK", envelope(serde_json::json!({
+                "total":1,"page":1,"pageSize":20,"items":[{"id":42,"name":"Robot fixture","status":"running","templateType":"tfrserver","robotAccountId":"org-fixture:robot-42","robotId":"rid-42","namespace":"tenant-fixture"}]
+            }))),
+        ]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let settings = SettingsService::new(directory.path().to_path_buf());
+        let secrets = InMemorySecretStore::shared();
+        let mut state = AppState::new_with_secret_store(
+            ConfigService::new(directory.path().to_path_buf()).unwrap(),
+            ObservabilityService::new(directory.path()).unwrap(),
+            settings,
+            secrets.clone(),
+        );
+        state.manager_context = Arc::new(test_context_coordinator(
+            manager_base,
+            state.settings_service.clone(),
+            secrets,
+        ));
+        state.chat_sessions = Arc::new(ChatSessionService::new(Arc::downgrade(
+            &state.manager_context,
+        )));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .manager_context
+            .set_token_bridge_sink(Arc::new(ChannelTokenBridge { sender }))
+            .await;
+        state
+            .manager_context
+            .set_token_bridge_ready("route-fixture", true)
+            .await;
+        let weak = Arc::downgrade(&state.manager_context);
+        let token_bridge = tokio::spawn(async move {
+            while let Some(request) = receiver.recv().await {
+                let Some(manager) = weak.upgrade() else {
+                    break;
+                };
+                manager
+                    .complete_token_bridge_request(
+                        &request.request_id,
+                        request.generation,
+                        ManagerTokenBridgeCompletion::Success {
+                            access_token: "fixture-short-token".into(),
+                            token_type: "Bearer".into(),
+                            expires_in: 300,
+                            scope: request.scope.clone(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        state
+            .manager_context
+            .login(
+                ManagerEnvironment::Test,
+                "fixture@example.com",
+                "fixture-password",
+            )
+            .await
+            .unwrap();
+        state
+            .config
+            .add_computer_instance(ComputerInstance::new("route-computer", "Local Computer"))
+            .unwrap();
+        let runtime = state
+            .computer_registry
+            .upsert_runtime(
+                state
+                    .config
+                    .get_computer_instance("route-computer")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        runtime.start().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            manager_connect_smcp_core(&state, "route-computer", 42, None),
+        )
+        .await
+        .unwrap()
+        .expect("Manager route must complete a real Socket.IO connection and office join");
+        tokio::time::timeout(Duration::from_secs(2), joined_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = runtime.connection_state_snapshot().await.unwrap();
+        assert!(connection.url.ends_with(socket_path));
+        assert_eq!(connection.office_id, "rid-42");
+        let descriptor = state.chat_sessions.open(42, 1).await.unwrap();
+        let response = state
+            .chat_sessions
+            .proxy(
+                &descriptor.lease_id,
+                &format!("{}v1/chat/conversations", descriptor.http_base_url),
+                "GET",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["code"],
+            200
+        );
+        if modern {
+            assert_eq!(descriptor.socket_path, socket_path);
+        }
+        state.chat_sessions.close(&descriptor.lease_id).await;
+        stop_computer_instance_core(&state, "route-computer".into())
+            .await
+            .unwrap();
+        token_bridge.abort();
+        manager_server.abort();
+        robot_server.abort();
+    }
+}
+
+#[tokio::test]
+async fn manager_environments_share_local_computers_across_login_restore_and_logout() {
+    use tfrobot_client_lib::services::computer::ComputerInstance;
+    use tfrobot_client_lib::services::config::ConfigService;
+    use tfrobot_client_lib::services::keychain::input_secret_key;
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = ConfigService::new(directory.path().to_path_buf()).unwrap();
+    let mut computer = ComputerInstance::new("shared-computer", "Local Computer");
+    let skills_root = directory.path().join("shared-local-skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    computer.local_skills_root = Some(skills_root.clone());
+    config.add_computer_instance(computer).unwrap();
+    let profile_paths = [
+        config.computer_profile_path("shared-computer").unwrap(),
+        config.computer_inputs_path("shared-computer").unwrap(),
+        config.sdk_context_path("shared-computer").unwrap(),
+    ];
+    let original_files: Vec<_> = profile_paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let secrets = InMemorySecretStore::shared();
+    let computer_secret = input_secret_key("shared-computer", "fixture-secret");
+    secrets
+        .set_secret(&computer_secret, "local-fixture-value")
+        .unwrap();
+
+    for environment in [
+        ManagerEnvironment::Test,
+        ManagerEnvironment::Staging,
+        ManagerEnvironment::Prod,
+    ] {
+        let (base, captured, _handle) = spawn_mock_manager(vec![
+            json_script(
+                "/auth/login-by-password",
+                "HTTP/1.1 200 OK",
+                envelope(single_account_login_data("jwt-environment-fixture")),
+            ),
+            json_script(
+                "/api/v1/auth/me",
+                "HTTP/1.1 200 OK",
+                envelope(current_user_data()),
+            ),
+        ])
+        .await;
+        let first = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
+        first
+            .login(environment, "client@example.com", "fixture-password")
+            .await
+            .unwrap();
+        assert_eq!(
+            first.snapshot().await.context_key.unwrap().environment,
+            environment
+        );
+        assert_eq!(
+            settings
+                .load_global_manager_session()
+                .unwrap()
+                .session
+                .unwrap()
+                .environment,
+            environment
+        );
+        let restarted = test_context_coordinator(base, settings.clone(), secrets.clone());
+        let restored = restarted.restore_session().await.unwrap().unwrap();
+        assert_eq!(restored.environment, environment);
+        assert_eq!(restored.user.account_id, "16");
+        assert_eq!(restarted.snapshot().await.organization.unwrap().id, "9");
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].request_line.contains("/auth/login-by-password"));
+        assert!(requests[1..]
+            .iter()
+            .all(|request| request.request_line.contains("/api/v1/auth/me")));
+        drop(requests);
+        restarted.logout().await.unwrap();
+        assert!(settings
+            .load_global_manager_session()
+            .unwrap()
+            .session
+            .is_none());
+        assert_eq!(
+            restarted.snapshot().await.auth_state,
+            ManagerAuthState::SignedOut
+        );
+
+        // Reopen the real on-disk repository after each environment transition and restart.
+        let reopened = ConfigService::new(directory.path().to_path_buf()).unwrap();
+        let computers = reopened.load_computer_instances().unwrap();
+        assert_eq!(computers.instances.len(), 1);
+        let computer = reopened.get_computer_instance("shared-computer").unwrap();
+        assert_eq!(computer.name, "Local Computer");
+        assert_eq!(computer.local_skills_root.as_ref(), Some(&skills_root));
+        assert_eq!(
+            secrets.get_secret(&computer_secret).unwrap().as_deref(),
+            Some("local-fixture-value")
+        );
+        for (path, original) in profile_paths.iter().zip(&original_files) {
+            assert_eq!(&std::fs::read(path).unwrap(), original);
+        }
+    }
+}
+
+#[tokio::test]
 async fn context_login_persists_complete_server_identity_and_logout_clears_it() {
     let (base, _, _handle) = spawn_mock_manager(vec![
         json_script(

@@ -18,6 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use url::Url;
 
 use crate::services::keychain::{self, SecretStore, SystemSecretStore};
 use crate::services::manager_environment::ManagerEnvironment;
@@ -101,6 +102,9 @@ pub enum ManagerError {
     /// 内部调用未提供 Manager 地址。生产命令必须由环境枚举映射出地址。
     #[error("Manager base URL was not resolved from an environment")]
     MissingBaseUrl,
+
+    #[error("This build does not allow the selected Manager environment")]
+    EnvironmentNotAllowed,
 
     /// 服务器返回的 body 无法反序列化为预期 DTO。
     #[error("Invalid Manager response: {0}")]
@@ -420,7 +424,7 @@ pub struct DigitalEmployeeBrief {
 }
 
 /// connection-info 响应 data 体（`GET /api/v1/digital-employees/{id}/connection-info`）。
-/// 字段与 TFRM-18 / UAT guide §5.5 对齐；`routingHeaders` 是客户端注入 smcp-computer 的权威契约。
+/// TFRM-609 的寻址依据是 `socketBaseURL` + `sioPath`；保留 `routingHeaders` 兼容旧网关。
 ///
 /// TFRC-20（C2）退役连接面内嵌令牌：不再消费 `accessToken` / `expiresAt`——连接面鉴权唯一走
 /// token-exchange 换发的短 JWT（注入 Socket.IO auth dict 字段 `token`，TFRC-11/C1）。M6（TFRM-161）
@@ -448,6 +452,105 @@ pub struct ConnectionInfoResponse {
     /// 不要自组装 header 名。连接面鉴权不再走此处（TFRC-20：凭据走 Socket.IO auth dict）。
     #[serde(default, deserialize_with = "deserialize_routing_headers")]
     pub routing_headers: HashMap<String, String>,
+}
+
+/// Shared address resolution for native Computer and browser-owned chat transports.
+pub(crate) struct ResolvedManagerEndpoints {
+    pub socket_url: Url,
+    /// Present for the complete Robot v2 path advertised by Manager. Never insert namespace.
+    pub robot_path_prefix: Option<String>,
+}
+
+impl ConnectionInfoResponse {
+    pub(crate) fn resolve_endpoints(&self) -> Result<ResolvedManagerEndpoints, ManagerError> {
+        let mut socket_url = Url::parse(self.socket_base_url.trim()).map_err(|_| {
+            ManagerError::InvalidResponse(
+                "connection-info returned an invalid socketBaseURL".into(),
+            )
+        })?;
+        if !socket_url.username().is_empty() || socket_url.password().is_some() {
+            return Err(ManagerError::InvalidResponse(
+                "connection-info endpoint must not contain URL credentials".into(),
+            ));
+        }
+        let scheme = match socket_url.scheme() {
+            "http" | "ws" => "http",
+            "https" | "wss" => "https",
+            _ => {
+                return Err(ManagerError::InvalidResponse(
+                    "connection-info endpoint must use HTTP(S) or WS(S)".into(),
+                ))
+            }
+        };
+        socket_url.set_scheme(scheme).map_err(|_| {
+            ManagerError::InvalidResponse("connection-info returned an invalid URL scheme".into())
+        })?;
+        socket_url.set_query(None);
+        socket_url.set_fragment(None);
+        if let Some(path) = self
+            .sio_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            if !path.starts_with('/')
+                || path.starts_with("//")
+                || path.contains("..")
+                || path
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\\' | '?' | '#'))
+            {
+                return Err(ManagerError::InvalidResponse(
+                    "connection-info returned an invalid Socket.IO path".into(),
+                ));
+            }
+            socket_url.set_path(path);
+            // URL parsing must not silently normalize an encoded traversal into another route.
+            if socket_url.path() != path {
+                return Err(ManagerError::InvalidResponse(
+                    "connection-info returned a noncanonical Socket.IO path".into(),
+                ));
+            }
+        } else if socket_url.path() == "/" {
+            // Legacy Manager responses omitted sioPath and relied on the SDK's default.
+            socket_url.set_path("/socket.io/");
+        }
+        let robot_path_prefix = if socket_url.path().starts_with("/c/") {
+            let prefix = socket_url
+                .path()
+                .trim_end_matches('/')
+                .strip_suffix("/socket.io")
+                .ok_or_else(|| {
+                    ManagerError::InvalidResponse(
+                        "connection-info returned an invalid Robot Socket.IO path".into(),
+                    )
+                })?;
+            let parts: Vec<_> = prefix.split('/').collect();
+            if parts.len() != 4
+                || !matches!(parts[2], "tfrobot" | "openclaw")
+                || parts[3].is_empty()
+                || !parts[3]
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                || self.rid.as_deref().is_some_and(|rid| rid != parts[3])
+                || self
+                    .robot_type
+                    .as_deref()
+                    .is_some_and(|kind| kind != parts[2])
+            {
+                return Err(ManagerError::InvalidResponse(
+                    "connection-info Robot path does not match its identity".into(),
+                ));
+            }
+            Some(prefix.to_string())
+        } else {
+            None
+        };
+        Ok(ResolvedManagerEndpoints {
+            socket_url,
+            robot_path_prefix,
+        })
+    }
 }
 
 fn deserialize_routing_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -1713,6 +1816,92 @@ mod tests {
         let (msg, url) = parse_payment_required("");
         assert_eq!(msg, "Payment required");
         assert!(url.is_none());
+    }
+
+    #[test]
+    fn manager_endpoints_preserve_advertised_paths_and_legacy_defaults() {
+        for (base, path, expected) in [
+            (
+                "https://robot.example.com",
+                None,
+                "https://robot.example.com/socket.io/",
+            ),
+            (
+                "https://robot.example.com",
+                Some(" "),
+                "https://robot.example.com/socket.io/",
+            ),
+            (
+                "https://robot.example.com/old/socket.io/",
+                None,
+                "https://robot.example.com/old/socket.io/",
+            ),
+            (
+                "wss://robot.example.com/proxy?ignored=1#fragment",
+                Some(" /c/tfrobot/robot-42/socket.io/ "),
+                "https://robot.example.com/c/tfrobot/robot-42/socket.io/",
+            ),
+            (
+                "ws://localhost:8080",
+                Some("/socket.io/"),
+                "http://localhost:8080/socket.io/",
+            ),
+        ] {
+            let info: ConnectionInfoResponse = serde_json::from_value(serde_json::json!({
+                "socketBaseURL": base, "sioPath": path, "rid": "robot-42", "robotType": "tfrobot"
+            }))
+            .unwrap();
+            assert_eq!(
+                info.resolve_endpoints().unwrap().socket_url.as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn manager_endpoints_reject_invalid_paths_and_identity_mismatches() {
+        for path in [
+            "https://other.example.com/socket.io/",
+            "//other.example.com/socket.io/",
+            "socket.io/",
+            "/../socket.io/",
+            "/proxy/%2e%2e/socket.io/",
+            "/socket.io/?token=secret",
+            "/socket.io/#fragment",
+            "/sock\net.io/",
+            "/proxy\\socket.io/",
+            "/c/tfrobot/wrong-robot/socket.io/",
+            "/c/openclaw/robot-42/socket.io/",
+            "/c/tfrobot/tenant/robot-42/socket.io/",
+            "/c/tfrobot/robot-42/api/",
+        ] {
+            let info: ConnectionInfoResponse = serde_json::from_value(serde_json::json!({
+                "socketBaseURL": "https://robot.example.com", "sioPath": path,
+                "rid": "robot-42", "robotType": "tfrobot"
+            }))
+            .unwrap();
+            assert!(
+                matches!(
+                    info.resolve_endpoints(),
+                    Err(ManagerError::InvalidResponse(_))
+                ),
+                "accepted {path:?}"
+            );
+        }
+        for base in [
+            "",
+            "not-a-url",
+            "file:///socket.io/",
+            "ftp://robot.example.com",
+            "https://user:password@robot.example.com",
+        ] {
+            let info: ConnectionInfoResponse =
+                serde_json::from_value(serde_json::json!({"socketBaseURL":base})).unwrap();
+            assert!(matches!(
+                info.resolve_endpoints(),
+                Err(ManagerError::InvalidResponse(_))
+            ));
+        }
     }
 
     #[test]

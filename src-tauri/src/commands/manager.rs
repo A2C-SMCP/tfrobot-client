@@ -23,7 +23,7 @@ use crate::services::manager_context::{
     ManagerContextSnapshot, RestoredManagerSession, MANAGER_AUTH_EXPIRED_EVENT,
     MANAGER_CONTEXT_CHANGED_EVENT,
 };
-use crate::services::manager_environment::ManagerEnvironment;
+use crate::services::manager_environment::{ManagerEnvironment, ManagerEnvironmentPolicy};
 use crate::services::manager_token_bridge::{
     ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
     ManagerTokenHttpResponse,
@@ -384,6 +384,11 @@ pub async fn manager_login(
     password: String,
 ) -> Result<LoginResult, ManagerError> {
     manager_login_core(&state, environment, identifier, password).await
+}
+
+#[tauri::command]
+pub fn get_manager_environment_policy(state: State<'_, AppState>) -> ManagerEnvironmentPolicy {
+    state.manager_context.environment_policy()
 }
 
 async fn manager_login_core(
