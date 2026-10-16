@@ -1080,7 +1080,7 @@
     "contentType": "Content Type",
     "unknownContentType": "Unknown",
     "noWindows": "No desktop resources are currently exposed",
-    "notLoaded": "Resources are loaded only when you request them.",
+    "notLoaded": "Desktop resources have not loaded. Refresh to try again.",
     "windowContent": "Window Content",
     "noContent": "No content available",
     "clickToLoadDetail": "Click to load details",

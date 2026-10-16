@@ -1,12 +1,12 @@
-import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useEffect } from 'react';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
 import {
   Alert,
   Button,
-  Collapse,
+  Card,
   Space,
 } from 'antd';
-import { DesktopOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import {
   desktopRuntimeKey,
@@ -21,7 +21,6 @@ import { DesktopResourcesTable } from './DesktopResourcesTable';
 interface DesktopResourcesProps {
   instanceId: string;
   runtime: ComputerRuntimeSnapshot;
-  initiallyExpanded?: boolean;
   onStartRuntime?: () => void;
   onOpenMcp?: () => void;
 }
@@ -29,11 +28,11 @@ interface DesktopResourcesProps {
 export function DesktopResources({
   instanceId,
   runtime,
-  initiallyExpanded = false,
   onStartRuntime,
   onOpenMcp,
 }: DesktopResourcesProps) {
   const { t } = useTranslation();
+  const pageActive = usePageActive();
   const runtimeKey = desktopRuntimeKey(runtime);
   const desktop = useDesktopStore(
     (state) => selectDesktopInstance(state, instanceId, runtimeKey),
@@ -41,9 +40,6 @@ export function DesktopResources({
   const bindRuntime = useDesktopStore((state) => state.bindRuntime);
   const fetchDesktop = useDesktopStore((state) => state.fetchDesktop);
   const fetchWindowDetail = useDesktopStore((state) => state.fetchWindowDetail);
-  const [activePanels, setActivePanels] = useNavigationState<string[]>('desktop.panels',
-    initiallyExpanded ? ['desktop-resources'] : [],
-  );
   const canLoad = canEnumerateDesktopResources(runtime);
 
   useEffect(() => {
@@ -51,10 +47,12 @@ export function DesktopResources({
   }, [bindRuntime, instanceId, runtimeKey]);
 
   useEffect(() => {
-    if (initiallyExpanded) {
-      setActivePanels(['desktop-resources']);
+    if (!pageActive || !canLoad) return;
+    const current = selectDesktopInstance(useDesktopStore.getState(), instanceId, runtimeKey);
+    if (!current.loaded && !current.loading && !current.error) {
+      void fetchDesktop(instanceId, runtimeKey);
     }
-  }, [initiallyExpanded, setActivePanels]);
+  }, [pageActive, canLoad, fetchDesktop, instanceId, runtimeKey]);
 
   const content = (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -75,18 +73,6 @@ export function DesktopResources({
         />
       ) : (
         <>
-          <Space>
-            <Button
-              type={desktop.loaded ? 'default' : 'primary'}
-              icon={desktop.loaded ? <ReloadOutlined /> : <DesktopOutlined />}
-              aria-label={desktop.loaded ? t('common.refresh') : t('desktop.loadResources')}
-              onClick={() => { void fetchDesktop(instanceId, runtimeKey); }}
-              loading={desktop.loading}
-            >
-              {desktop.loaded ? t('common.refresh') : t('desktop.loadResources')}
-            </Button>
-          </Space>
-
           {desktop.error && (
             <Alert
               message={t('desktop.enumerationFailed')}
@@ -116,16 +102,21 @@ export function DesktopResources({
   );
 
   return (
-    <Collapse
-      activeKey={activePanels}
-      onChange={(keys) => setActivePanels(Array.isArray(keys) ? keys : [keys])}
-      items={[
-        {
-          key: 'desktop-resources',
-          label: t('desktop.title'),
-          children: content,
-        },
-      ]}
-    />
+    <Card
+      title={t('desktop.title')}
+      extra={(
+        <Button
+          icon={<ReloadOutlined />}
+          aria-label={t('common.refresh')}
+          disabled={!canLoad}
+          onClick={() => { void fetchDesktop(instanceId, runtimeKey); }}
+          loading={desktop.loading}
+        >
+          {t('common.refresh')}
+        </Button>
+      )}
+    >
+      {content}
+    </Card>
   );
 }

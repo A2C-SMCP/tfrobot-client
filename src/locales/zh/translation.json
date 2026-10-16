@@ -1080,7 +1080,7 @@
     "contentType": "内容类型",
     "unknownContentType": "未知",
     "noWindows": "当前没有 MCP 服务器提供桌面资源",
-    "notLoaded": "仅在你主动请求时加载资源。",
+    "notLoaded": "桌面资源尚未加载，请点击刷新重试。",
     "windowContent": "窗口内容",
     "noContent": "无可用内容",
     "clickToLoadDetail": "点击加载详情",

@@ -58,8 +58,6 @@ export function ComputerWorkbench({
     ?? EMPTY_RUNTIME_EVENTS;
   const {
     sectionRefs,
-    diagnosticPanels,
-    changeDiagnosticPanels,
     openSection,
   } = useComputerWorkbenchSections(initialSection, navigationRevision);
 
@@ -129,7 +127,6 @@ export function ComputerWorkbench({
           <DesktopResources
             instanceId={instance.id}
             runtime={instance.runtime}
-            initiallyExpanded={initialSection === 'resources'}
             onStartRuntime={onStartStop}
             onOpenMcp={() => openSection('top')}
           />
@@ -139,10 +136,8 @@ export function ComputerWorkbench({
           instanceId={instance.id}
           runtime={instance.runtime}
           recentEvents={recentEvents}
-          activePanels={diagnosticPanels}
           debugRef={sectionRefs.debug}
           logsRef={sectionRefs.logs}
-          onPanelsChange={changeDiagnosticPanels}
         />
       </main>
     </div>
