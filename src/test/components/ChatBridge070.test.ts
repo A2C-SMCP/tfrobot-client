@@ -33,6 +33,7 @@ describe('Chat Kit 0.7.0 bridge configuration', () => {
   it('passes the bounded current-server profile to Chat Kit', () => {
     createClientChatFactory({
       descriptor,
+      platformId: 17,
       messageCreator: { uid: 'account-1', name: 'Alice' },
       onDiagnostic: vi.fn(),
       onUnhandledError: vi.fn(),
@@ -40,6 +41,8 @@ describe('Chat Kit 0.7.0 bridge configuration', () => {
 
     expect(chatKitMock.createFactory).toHaveBeenCalledWith(expect.objectContaining({
       serverProfile: CURRENT_SERVER_PROFILE,
+      platformId: 17,
+      conversationContract: 'json-v2',
     }));
   });
 

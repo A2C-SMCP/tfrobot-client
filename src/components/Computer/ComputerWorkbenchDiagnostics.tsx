@@ -1,5 +1,4 @@
-import { PageActivity } from '@/components/Navigation/PageActivity';
-import { Collapse } from 'antd';
+import { Card } from 'antd';
 import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { DebugPanel } from '@/components/DebugPanel';
@@ -13,20 +12,16 @@ interface ComputerWorkbenchDiagnosticsProps {
   instanceId: string;
   runtime: ComputerRuntimeSnapshot;
   recentEvents: ComputerRuntimeEventRecord[];
-  activePanels: string[];
   debugRef: RefObject<HTMLDivElement>;
   logsRef: RefObject<HTMLDivElement>;
-  onPanelsChange: (keys: string | string[]) => void;
 }
 
 export function ComputerWorkbenchDiagnostics({
   instanceId,
   runtime,
   recentEvents,
-  activePanels,
   debugRef,
   logsRef,
-  onPanelsChange,
 }: ComputerWorkbenchDiagnosticsProps) {
   const { t } = useTranslation();
 
@@ -35,30 +30,16 @@ export function ComputerWorkbenchDiagnostics({
       className={`${styles.section} ${styles.diagnostics}`}
       aria-label={t('computer.workbench.sections.diagnostics')}
     >
-      <Collapse
-        activeKey={activePanels}
-        onChange={onPanelsChange}
-        items={[
-          {
-            key: 'debug',
-            label: t('nav.debugPanel'),
-            children: (
-              <div ref={debugRef} tabIndex={-1}>
-                <PageActivity active={activePanels.includes('debug')}><DebugPanel instanceId={instanceId} /></PageActivity>
-              </div>
-            ),
-          },
-          {
-            key: 'logs',
-            label: t('logs.title'),
-            children: (
-              <div ref={logsRef} tabIndex={-1}>
-                <PageActivity active={activePanels.includes('logs')}><ActivityViewer instanceId={instanceId} /></PageActivity>
-              </div>
-            ),
-          },
-        ]}
-      />
+      <section ref={debugRef} tabIndex={-1} className={styles.section} aria-label={t('nav.debugPanel')}>
+        <Card title={t('nav.debugPanel')} className={`${styles.sectionCard} ${styles.diagnosticCard}`}>
+          <DebugPanel instanceId={instanceId} />
+        </Card>
+      </section>
+      <section ref={logsRef} tabIndex={-1} className={styles.section} aria-label={t('logs.title')}>
+        <Card className={`${styles.sectionCard} ${styles.diagnosticCard}`}>
+          <ActivityViewer instanceId={instanceId} />
+        </Card>
+      </section>
       <RuntimeDiagnostics runtime={runtime} recentEvents={recentEvents} />
     </section>
   );

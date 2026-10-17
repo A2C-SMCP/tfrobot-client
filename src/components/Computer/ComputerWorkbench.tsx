@@ -1,4 +1,4 @@
-import { Card } from 'antd';
+import { Button, Card } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { DesktopResources } from '@/components/DesktopResources';
 import type { ComputerInstance } from '@/stores/computerStore';
@@ -58,8 +58,6 @@ export function ComputerWorkbench({
     ?? EMPTY_RUNTIME_EVENTS;
   const {
     sectionRefs,
-    diagnosticPanels,
-    changeDiagnosticPanels,
     openSection,
   } = useComputerWorkbenchSections(initialSection, navigationRevision);
 
@@ -78,6 +76,17 @@ export function ComputerWorkbench({
         onDisconnect={onDisconnect}
       />
 
+      <nav className={styles.sectionNavigation} aria-label={t('computer.workbench.sections.navigation')}>
+        {([
+          ['top', t('computer.workbench.sections.runtime')],
+          ['skills', t('skills.title')],
+          ['resources', t('computer.workbench.sections.resources')],
+          ['debug', t('nav.debugPanel')],
+          ['logs', t('logs.title')],
+        ] as const).map(([section, label]) => (
+          <Button type="text" key={section} onClick={() => openSection(section)}>{label}</Button>
+        ))}
+      </nav>
       <main>
         <section
           className={styles.section}
@@ -95,18 +104,18 @@ export function ComputerWorkbench({
             onViewLogs={() => openSection('logs')}
             onOpenPlugin={onOpenPlugin}
             onOpenPermissionHelp={onOpenPermissionHelp}
-          />
-        </section>
-
-        <section
-          ref={sectionRefs.skills}
-          className={styles.section}
-          tabIndex={-1}
-          aria-label={t('computer.workbench.sections.skills')}
-        >
-          <Card className={styles.sectionCard}>
-            <SkillsTab instanceId={instance.id} />
-          </Card>
+          >
+            <section
+              ref={sectionRefs.skills}
+              className={styles.skillsPane}
+              tabIndex={-1}
+              aria-label={t('computer.workbench.sections.skills')}
+            >
+              <Card className={styles.sectionCard}>
+                <SkillsTab instanceId={instance.id} />
+              </Card>
+            </section>
+          </ComputerRuntime>
         </section>
 
         <section
@@ -118,7 +127,6 @@ export function ComputerWorkbench({
           <DesktopResources
             instanceId={instance.id}
             runtime={instance.runtime}
-            initiallyExpanded={initialSection === 'resources'}
             onStartRuntime={onStartStop}
             onOpenMcp={() => openSection('top')}
           />
@@ -128,10 +136,8 @@ export function ComputerWorkbench({
           instanceId={instance.id}
           runtime={instance.runtime}
           recentEvents={recentEvents}
-          activePanels={diagnosticPanels}
           debugRef={sectionRefs.debug}
           logsRef={sectionRefs.logs}
-          onPanelsChange={changeDiagnosticPanels}
         />
       </main>
     </div>

@@ -211,7 +211,7 @@ export function McpRuntimeControls({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Space size={4} align="center">
           <Title level={4} style={{ margin: 0 }}>{t('mcp.runtimeTitle')}</Title>
           <Tooltip title={t('permissions.mcp')}>
@@ -226,7 +226,7 @@ export function McpRuntimeControls({
             />
           </Tooltip>
         </Space>
-        <Space>
+        <Space wrap style={{ maxWidth: '100%' }}>
           <Button
             icon={<ReloadOutlined />}
             onClick={() => fetchServers(instanceId)}

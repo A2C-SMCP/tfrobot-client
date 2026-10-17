@@ -54,6 +54,11 @@ const signedOutManagerContext = {
 };
 
 const mockResponses: Record<string, unknown> = {
+  get_manager_environment_policy: {
+    buildMode: 'development',
+    allowedEnvironments: ['test', 'staging', 'prod'],
+    defaultEnvironment: 'test',
+  },
   manager_get_context: signedOutManagerContext,
   manager_restore_session: null,
   enable_computer_runtime_events: [

@@ -8,6 +8,7 @@ import {
   MoonOutlined,
   ApiOutlined,
   MessageOutlined,
+  MacCommandOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -170,96 +171,88 @@ function App() {
 
   const menuItems = [
     {
-      key: 'overview-group',
-      label: t('nav.overview'),
-      type: 'group' as const,
-      children: [
-        {
-          key: 'chat',
-          icon: <MessageOutlined />,
-          label: t('chat.title'),
-        },
-        {
-          key: 'computer',
-          icon: <DesktopOutlined />,
-          label: t('nav.computer'),
-        },
-      ],
+      key: 'chat',
+      icon: <MessageOutlined />,
+      label: t('chat.title'),
     },
     {
-      key: 'connection-group',
-      label: t('nav.connectionLayer'),
-      type: 'group' as const,
-      children: [
-        {
-          key: 'robot-connections',
-          icon: <ApiOutlined />,
-          label: t('nav.robotConnections'),
-        },
-      ],
+      key: 'computer',
+      icon: <DesktopOutlined />,
+      label: t('nav.computer'),
     },
     {
-      key: 'dev-group',
-      label: t('nav.development'),
-      type: 'group' as const,
-      children: [
-        {
-          key: 'logs',
-          icon: <FileTextOutlined />,
-          label: t('logs.title'),
-        },
-      ],
+      key: 'robot-connections',
+      icon: <ApiOutlined />,
+      label: t('nav.robotConnections'),
     },
     {
-      key: 'system-group',
-      label: t('nav.system'),
-      type: 'group' as const,
-      children: [
-        {
-          key: 'settings',
-          icon: <SettingOutlined />,
-          label: t('settings.title'),
-        },
-      ],
+      key: 'logs',
+      icon: <FileTextOutlined />,
+      label: t('logs.title'),
+    },
+  ];
+  const settingsItems = [
+    {
+      key: 'settings',
+      icon: <SettingOutlined />,
+      label: t('settings.title'),
     },
   ];
 
   return (
     <Layout className={styles.layout}>
       <AutoUpdateCheck />
-      <Header className={styles.header}>
-        <Title level={4} className={styles.title}>
-          {t('app.name')}
-        </Title>
-        <Space className={styles.headerActions} size="small">
-          <GlobalManagerAccount
-            onOpenPermissionHelp={() => navigation.getState().navigate(permissionHelpRoute('purpose'))}
-          />
-          <Button
-            type="text"
-            className={styles.headerBtn}
-            icon={resolved === 'dark' ? <SunOutlined /> : <MoonOutlined />}
-            onClick={() => setMode(resolved === 'dark' ? 'light' : 'dark')}
-          />
-          <Button
-            type="text"
-            className={styles.headerBtn}
-            onClick={() => i18n.changeLanguage(i18n.language === 'zh' ? 'en' : 'zh')}
-          >
-            {i18n.language === 'zh' ? 'EN' : '中'}
-          </Button>
-        </Space>
-      </Header>
-      <Layout>
-        <Sider width={200} className={styles.sider}>
+      <Sider width={204} className={styles.sider}>
+        <div className={styles.brand}>
+          <span className={styles.appMark} aria-hidden="true"><MacCommandOutlined /></span>
+          <Title level={4} className={styles.title}>{t('app.name')}</Title>
+        </div>
+        <Menu
+          mode="inline"
+          selectedKeys={[menuSelectedKey]}
+          items={menuItems}
+          onClick={({ key }) => navigation.getState().openMenu(key)}
+          className={styles.menu}
+        />
+        <div className={styles.sidebarFooter}>
           <Menu
             mode="inline"
             selectedKeys={[menuSelectedKey]}
-            items={menuItems}
+            items={settingsItems}
             onClick={({ key }) => navigation.getState().openMenu(key)}
-            className={styles.menu}
+            className={`${styles.menu} ${styles.settingsMenu}`}
           />
-        </Sider>
+          <div className={styles.account}>
+            <GlobalManagerAccount
+              onOpenPermissionHelp={() => navigation.getState().navigate(permissionHelpRoute('purpose'))}
+            />
+          </div>
+        </div>
+      </Sider>
+      <Layout className={styles.workspace}>
+        <Header className={styles.header}>
+          <Text className={styles.breadcrumb}>
+            {t('app.workspace')} / {[...menuItems, ...settingsItems]
+              .find((item) => item.key === menuSelectedKey)?.label}
+          </Text>
+          <Space className={styles.headerActions} size="small">
+            <Button
+              type="text"
+              className={styles.headerBtn}
+              aria-label={t(resolved === 'dark' ? 'settings.themeLight' : 'settings.themeDark')}
+              icon={resolved === 'dark' ? <SunOutlined /> : <MoonOutlined />}
+              onClick={() => setMode(resolved === 'dark' ? 'light' : 'dark')}
+            />
+            <Button
+              type="text"
+              className={styles.headerBtn}
+              aria-label={t('settings.language')}
+              onClick={() => i18n.changeLanguage(i18n.language === 'zh' ? 'en' : 'zh')}
+            >
+              {i18n.language === 'zh' ? 'EN' : '中'}
+            </Button>
+          </Space>
+        </Header>
         <Content className={styles.content}>
           <div className={styles.contentInner}>
             <CredentialAccessNotice />

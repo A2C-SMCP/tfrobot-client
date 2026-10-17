@@ -1,8 +1,8 @@
+import type { ReactNode } from 'react';
 import {
   Card,
   Col,
   Row,
-  Space,
   Statistic,
 } from 'antd';
 import { useTranslation } from 'react-i18next';
@@ -14,10 +14,12 @@ import {
   type ResolvedComputerConnection,
 } from './computerActions';
 import { RuntimeProblems } from './RuntimeProblems';
+import styles from './ComputerWorkbench.module.css';
 
 type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface ComputerRuntimeProps {
+  children?: ReactNode;
   instance: ComputerInstance;
   connection: ResolvedComputerConnection;
   loading: boolean;
@@ -32,6 +34,7 @@ interface ComputerRuntimeProps {
 }
 
 export function ComputerRuntime({
+  children,
   instance,
   connection,
   loading,
@@ -51,22 +54,23 @@ export function ComputerRuntime({
     ? t(connectDisabledReasonKey)
     : undefined;
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <RuntimeProblems
-        problems={runtime.problems ?? []}
-        runtimeActions={actions}
-        connectionActions={connection.actions}
-        canConnect={connection.canConnect}
-        connectDisabledReason={connectDisabledReason}
-        loading={loading}
-        onStartRuntime={onStartStop}
-        onRestartRuntime={onRestart}
-        onRetryConnection={onConnect}
-        onRetryDisconnection={onDisconnect}
-        onViewLogs={onViewLogs}
-      />
-
-      <Card title={t('computer.workbench.capabilitySummary')}>
+    <div className={styles.runtimeGrid}>
+      <div className={styles.runtimeProblems}>
+        <RuntimeProblems
+          problems={runtime.problems ?? []}
+          runtimeActions={actions}
+          connectionActions={connection.actions}
+          canConnect={connection.canConnect}
+          connectDisabledReason={connectDisabledReason}
+          loading={loading}
+          onStartRuntime={onStartStop}
+          onRestartRuntime={onRestart}
+          onRetryConnection={onConnect}
+          onRetryDisconnection={onDisconnect}
+          onViewLogs={onViewLogs}
+        />
+      </div>
+      <Card className={styles.capabilitySummary} title={t('computer.workbench.capabilitySummary')}>
         <Row gutter={[16, 16]}>
           <Col xs={12} md={6}>
             <Statistic title={t('dashboard.mcpServers')} value={runtime.mcp_servers} />
@@ -86,7 +90,7 @@ export function ComputerRuntime({
         </Row>
       </Card>
 
-      <Card>
+      <Card className={styles.runtimeMcp}>
         <McpRuntimeControls
           instanceId={instance.id}
           capability={actions.manage_mcp}
@@ -96,6 +100,7 @@ export function ComputerRuntime({
           onOpenPermissionHelp={onOpenPermissionHelp}
         />
       </Card>
-    </Space>
+      {children}
+    </div>
   );
 }

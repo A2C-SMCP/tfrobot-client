@@ -15,7 +15,8 @@ const joins = [];
 const http = createServer((request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
   let data;
-  if (path.endsWith('/status')) data = { working: false, task_id: null };
+  if (path.endsWith('/platforms')) data = [{ platformId: 1, name: 'Fixture' }];
+  else if (path.endsWith('/status')) data = { working: false, task_id: null };
   else if (path.endsWith('/messages')) {
     const id = Number(path.match(/conversations\/(\d+)/)?.[1]);
     data = { messages: [{ msgId: `message-${id}`, conversationId: id, content: `History ${id}`,

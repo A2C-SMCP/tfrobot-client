@@ -111,7 +111,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
         <Avatar src={context.account.avatar || undefined} icon={<UserOutlined />} />
         <div className={styles.identityText} aria-live="polite">
           <Text strong ellipsis>{context.organization.name}</Text>
-          <Text type="secondary" ellipsis>{context.account.nickname || context.account.name}</Text>
+          <Text type="secondary" ellipsis>{context.account.name}</Text>
         </div>
       </Space>
       <Descriptions
@@ -235,7 +235,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
   }
 
   const triggerLabel = authenticated && context.account && context.organization
-    ? `${context.organization.name}, ${context.account.nickname || context.account.name}`
+    ? `${context.organization.name}, ${context.account.name}`
     : context.authState === 'account_selection_required'
     ? t('managerAccount.global.completeSignIn')
     : context.authState === 'onboarding_required'
@@ -249,7 +249,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
       open={open}
       onOpenChange={updateOpen}
       trigger="click"
-      placement="bottomRight"
+      placement="topLeft"
       destroyTooltipOnHide
       content={(
         <div

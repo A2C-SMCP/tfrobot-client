@@ -9,7 +9,7 @@ function nextWriteRevision() {
 }
 
 /** Persist committed selections, never pending clicks or superseded load results. */
-export function useChatRestoration(workspace: ConversationWorkspaceBinding, leaseId?: string) {
+export function useChatRestoration(workspace: ConversationWorkspaceBinding, leaseId?: string, platformId?: number) {
   const controller = workspace.controller;
   const epoch = useRef(0);
   const [attempt, setAttempt] = useState(0);
@@ -31,7 +31,7 @@ export function useChatRestoration(workspace: ConversationWorkspaceBinding, leas
       const writeRevision = nextWriteRevision();
       revision = writeRevision;
       const save = () => {
-        void invoke('chat_remember_conversation', { leaseId, conversationId, revision: writeRevision })
+        void invoke('chat_remember_conversation', { leaseId, platformId, conversationId, revision: writeRevision })
           .then(() => {
             if (active && revision === writeRevision) { retrySave.current = undefined; setError(false); }
           })
@@ -43,7 +43,7 @@ export function useChatRestoration(workspace: ConversationWorkspaceBinding, leas
       save();
     });
     return () => { active = false; retrySave.current = undefined; subscription.dispose(); };
-  }, [controller, leaseId]);
+  }, [controller, leaseId, platformId]);
 
   useEffect(() => {
     if (!controller || !leaseId) return;
@@ -54,7 +54,7 @@ export function useChatRestoration(workspace: ConversationWorkspaceBinding, leas
     setEmpty(false);
     setRestoring(true);
     const restore = async () => {
-      const id = await invoke<string | null>('chat_get_recent_conversation', { leaseId });
+      const id = await invoke<string | null>('chat_get_recent_conversation', { leaseId, platformId });
       if (!current()) return;
       const unavailable = new Set<string>();
       if (id) {
@@ -87,7 +87,7 @@ export function useChatRestoration(workspace: ConversationWorkspaceBinding, leas
     void restore().catch(() => { if (current()) setError(true); })
       .finally(() => { if (current()) setRestoring(false); });
     return () => { active = false; };
-  }, [attempt, controller, leaseId]);
+  }, [attempt, controller, leaseId, platformId]);
 
   const manualSelection = useCallback(() => {
     ++epoch.current;

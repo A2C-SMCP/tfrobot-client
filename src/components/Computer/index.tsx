@@ -3,9 +3,11 @@ import { PageHost } from '@/components/Navigation/PageHost';
 import { NavigationScope } from '@/components/Navigation/NavigationMemory';
 import { useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
-import { App, Button, Card, Col, Empty, Form, Input, Row, Select, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Empty, Form, Input, Select, Segmented, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
+  AppstoreOutlined,
+  BarsOutlined,
   CopyOutlined,
   DesktopOutlined,
   DeleteOutlined,
@@ -30,6 +32,7 @@ import {
   type ComputerWorkbenchSection,
 } from './tabs';
 import { ComputerWorkbench } from './ComputerWorkbench';
+import styles from './Computer.module.css';
 import {
   computerStatusColor,
   connectDisabledReasonTranslationKey,
@@ -80,7 +83,6 @@ function ComputerCard({
         ? t('computer.stop')
         : t('computer.start');
   const startStopIcon = stopAction ? <StopOutlined /> : <PlayCircleOutlined />;
-  const startStopColor = stopAction ? '#fa8c16' : '#52c41a';
   const startStopAction = stopAction ? onStop : onStart;
   const startStopCapability = stopAction
     ? instance.runtime.actions.stop
@@ -99,102 +101,86 @@ function ComputerCard({
     : undefined;
 
   return (
-    <Card
-      title={
-        <Space>
-          <DesktopOutlined />
-          <Button
-            type="link"
-            onClick={onOpen}
-            style={{ padding: 0, height: 'auto', fontWeight: 600 }}
-          >
-            {instance.name}
-          </Button>
-        </Space>
-      }
-      extra={
+    <Card className={styles.computerCard} classNames={{ body: styles.cardBody }}>
+      <div className={styles.identity}>
+        <div className={styles.deviceIcon} aria-hidden="true"><DesktopOutlined /></div>
+        <div className={styles.identityText}>
+          <Button type="text" onClick={onOpen} className={styles.name}>{instance.name}</Button>
+          {instance.description && <Text className={styles.description}>{instance.description}</Text>}
+          <Text type="secondary" copyable className={styles.identifier}>{instance.id}</Text>
+        </div>
+      </div>
+      <div className={styles.metadata}>
         <Tag color={computerStatusColor[instance.status]}>
           {t(`computer.status.${instance.status}`)}
         </Tag>
-      }
-    >
-      <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
-        <Space direction="vertical" size={8} style={{ flex: 1, minWidth: 0 }}>
-          <Text type="secondary" copyable>{instance.id}</Text>
-          {instance.description && <Text>{instance.description}</Text>}
-          <Space wrap>
-            <Tag color={connection.status === 'connected' ? 'green' : 'default'}>
-              {t(`computer.connection.${connection.status}`)}
-            </Tag>
-            <Tag icon={<ApiOutlined />}>
-              {t('computer.mcpServers', { count: instance.mcpServerCount })}
-            </Tag>
-          </Space>
+        <Space wrap size={[4, 6]}>
+          <Tag color={connection.status === 'connected' ? 'green' : 'default'}>
+            {t(`computer.connection.${connection.status}`)}
+          </Tag>
+          <Tag icon={<ApiOutlined />}>
+            {t('computer.mcpServers', { count: instance.mcpServerCount })}
+          </Tag>
+        </Space>
+        <Text type="secondary">
+          {instance.robotName
+            ? t('computer.boundRobot', { name: instance.robotName })
+            : t('computer.noRobotBound')}
+        </Text>
+        {instance.connectionStatus === 'connected' && instance.connectionProfile && (
           <Text type="secondary">
-            {instance.robotName
-              ? t('computer.boundRobot', { name: instance.robotName })
-              : t('computer.noRobotBound')}
+            {t('computer.connectionProfile', { name: instance.connectionProfile })}
           </Text>
-          {instance.connectionStatus === 'connected' && instance.connectionProfile && (
-            <Text type="secondary">
-              {t('computer.connectionProfile', { name: instance.connectionProfile })}
-            </Text>
-          )}
-        </Space>
-
-        <Space
-          direction="vertical"
-          size={6}
-          style={{ borderLeft: '1px solid #f0f0f0', paddingLeft: 12, justifyContent: 'center' }}
-        >
-          <Tooltip title={startStopDisabledReason ?? startStopLabel} placement="right">
+        )}
+      </div>
+      <div className={styles.actions}>
+        <Tooltip title={startStopDisabledReason ?? startStopLabel}>
+          <Button
+            aria-label={startStopLabel}
+            type="text"
+            danger={stopAction}
+            className={styles.runtimeAction}
+            icon={startStopIcon}
+            disabled={!canStartStop}
+            loading={loading}
+            onClick={startStopAction}
+          >{startStopLabel}</Button>
+        </Tooltip>
+        {connection.showDisconnect ? (
+          <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')}>
             <Button
-              aria-label={startStopLabel}
+              aria-label={t('connection.disconnect')}
               type="text"
-              icon={startStopIcon}
-              disabled={!canStartStop}
-              loading={loading}
-              style={{ color: startStopColor }}
-              onClick={startStopAction}
-            />
+              danger
+              icon={<DisconnectOutlined />}
+              disabled={!connection.actions.disconnect.enabled}
+              loading={connection.isDisconnecting}
+              onClick={onDisconnect}
+            >{t('connection.disconnect')}</Button>
           </Tooltip>
-          {connection.showDisconnect ? (
-            <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')} placement="right">
-              <Button
-                aria-label={t('connection.disconnect')}
-                type="text"
-                danger
-                icon={<DisconnectOutlined />}
-                disabled={!connection.actions.disconnect.enabled}
-                loading={connection.isDisconnecting}
-                onClick={onDisconnect}
-              />
-            </Tooltip>
-          ) : (
-            <Tooltip title={connectDisabledReason ?? t('connection.connect')} placement="right">
-              <Button
-                aria-label={t('connection.connect')}
-                type="text"
-                icon={<LinkOutlined />}
-                disabled={!connection.canConnect}
-                loading={connection.isConnecting}
-                style={{ color: connection.canConnect ? '#1677ff' : undefined }}
-                onClick={onConnect}
-              />
-            </Tooltip>
-          )}
-          <Tooltip title={t('computer.edit')} placement="right">
-            <Button aria-label={t('computer.edit')} type="text" icon={<EditOutlined />} onClick={onEdit} />
+        ) : (
+          <Tooltip title={connectDisabledReason ?? t('connection.connect')}>
+            <Button
+              aria-label={t('connection.connect')}
+              type="text"
+              icon={<LinkOutlined />}
+              disabled={!connection.canConnect}
+              loading={connection.isConnecting}
+              onClick={onConnect}
+            >{t('connection.connect')}</Button>
           </Tooltip>
-          <Tooltip title={t('computer.duplicate')} placement="right">
-            <Button aria-label={t('computer.duplicate')} type="text" icon={<CopyOutlined />} onClick={onDuplicate} />
-          </Tooltip>
-          <Tooltip title={t('computer.delete')} placement="right">
-            <Popconfirm title={t('computer.confirmDelete')} onConfirm={onDelete}>
-              <Button aria-label={t('computer.delete')} type="text" danger icon={<DeleteOutlined />} loading={loading} />
-            </Popconfirm>
-          </Tooltip>
-        </Space>
+        )}
+        <Button aria-label={t('computer.edit')} type="text" icon={<EditOutlined />} onClick={onEdit}>
+          {t('computer.edit')}
+        </Button>
+        <Button aria-label={t('computer.duplicate')} type="text" icon={<CopyOutlined />} onClick={onDuplicate}>
+          {t('computer.duplicate')}
+        </Button>
+        <Popconfirm title={t('computer.confirmDelete')} onConfirm={onDelete}>
+          <Button aria-label={t('computer.delete')} type="text" danger icon={<DeleteOutlined />} loading={loading}>
+            {t('computer.delete')}
+          </Button>
+        </Popconfirm>
       </div>
     </Card>
   );
@@ -222,6 +208,7 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
   } = useComputerStore();
   const { inspecting, inspectPackage } = usePortableConfigStore();
   const [view, setView] = useNavigationState<'list' | 'detail'>('computer.view', initialView);
+  const [collectionLayout, setCollectionLayout] = useNavigationState<'list' | 'grid'>('computer.collectionLayout', 'list');
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [importPath, setImportPath] = useState<string | null>(null);
@@ -488,20 +475,29 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
         </NavigationScope>
       )}
       <PageHost name="computer-list" active={!showDetail}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{t('computer.title')}</Title>
-        <Button type="primary" onClick={openCreateModal}>
-          {t('computer.create')}
-        </Button>
-      </div>
+        <div className={styles.listHeader}>
+          <Title level={4} style={{ margin: 0 }}>{t('computer.title')}</Title>
+          <Space wrap>
+            <Segmented
+              aria-label={t('computer.views.label')}
+              value={collectionLayout}
+              onChange={(value) => setCollectionLayout(value as 'list' | 'grid')}
+              options={[
+                { value: 'list', label: t('computer.views.list'), icon: <BarsOutlined /> },
+                { value: 'grid', label: t('computer.views.grid'), icon: <AppstoreOutlined /> },
+              ]}
+            />
+            <Button type="primary" onClick={openCreateModal}>{t('computer.create')}</Button>
+          </Space>
+        </div>
 
-      {instances.length === 0 ? (
-        <Empty description={t('computer.empty')} />
-      ) : (
-        <Row gutter={[16, 16]}>
-          {instances.map((instance) => (
-            <Col key={instance.id} xs={24} lg={12} xl={8}>
+        {instances.length === 0 ? (
+          <Empty description={t('computer.empty')} />
+        ) : (
+          <div className={collectionLayout === 'grid' ? styles.collectionGrid : styles.collectionList}>
+            {instances.map((instance) => (
               <ComputerCard
+                key={instance.id}
                 instance={instance}
                 onOpen={() => {
                   selectInstance(instance.id);
@@ -517,11 +513,10 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
                 onDelete={() => handleDelete(instance)}
                 loading={loading}
               />
-            </Col>
-          ))}
-        </Row>
-      )}
-      {renderComputerModal()}
+            ))}
+          </div>
+        )}
+        {renderComputerModal()}
       </PageHost>
     </div>
   );

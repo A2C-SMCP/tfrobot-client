@@ -286,6 +286,20 @@ jobs:
             exit 1
           }
 
+      - name: Verify development policy and official release guard
+        if: runner.os == 'Linux'
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          cargo test --no-default-features --lib services::manager_environment::tests
+          cargo test --no-default-features --lib services::manager_context::tests
+          if TFROBOT_OFFICIAL_RELEASE=1 cargo check --no-default-features --lib > release-policy.log 2>&1; then
+            echo 'Official release incorrectly accepted development mode'
+            exit 1
+          fi
+          grep -F 'Official release builds must enable Tauri custom-protocol' release-policy.log
+          TFROBOT_OFFICIAL_RELEASE=1 cargo check --lib
+
       # Coverage only on Linux (avoid duplication)
       - name: Generate coverage
         if: runner.os == 'Linux'

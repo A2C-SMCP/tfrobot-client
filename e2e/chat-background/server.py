@@ -67,6 +67,11 @@ async def join(sid, data):
     record('join', sid=sid, data=data)
     return None  # Current-server's empty ACK: exercises REST recovery policy.
 
+@app.get('/api/v1/chat/platforms')
+async def platforms():
+    return dict(code=200, message='Success', data=[dict(platformId=1, name='Background fixture')])
+
+
 @app.get('/api/v1/chat/conversations')
 async def conversations():
     record('list_conversations')

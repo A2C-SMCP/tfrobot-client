@@ -2,53 +2,32 @@ import { test, expect } from '@playwright/test';
 import { setupInvokeMock } from '../fixtures/mock-invoke';
 
 test.describe('Theme switching', () => {
-  test('header has theme toggle button', async ({ page }) => {
+  test('applies and switches the resolved theme to the application surface', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'light' });
     await setupInvokeMock(page);
     await page.goto('/');
-    // The global Manager account entry is first; theme is the second header button.
-    const headerBtns = page.locator('.ant-layout-header button');
-    await expect(headerBtns.nth(1)).toBeVisible();
-  });
-
-  test('clicking theme toggle changes theme', async ({ page }) => {
-    await setupInvokeMock(page);
-    await page.goto('/');
-    const themeBtn = page.locator('.ant-layout-header button').nth(1);
-    await themeBtn.click();
-    // After click, the app should reflect the theme change
-    // We verify by checking that the button is still functional (no crash)
-    await expect(themeBtn).toBeVisible();
+    const app = page.locator('.client-app');
+    await expect(app).toHaveCSS('color-scheme', 'light');
+    await page.getByRole('button', { name: 'Dark', exact: true }).click();
+    await expect(app).toHaveCSS('color-scheme', 'dark');
+    await expect(app).toHaveCSS('background-color', 'rgb(28, 28, 30)');
+    await page.getByRole('button', { name: 'Light', exact: true }).click();
+    await expect(app).toHaveCSS('color-scheme', 'light');
+    await expect(app).toHaveCSS('background-color', 'rgb(250, 250, 250)');
   });
 });
 
 test.describe('Global Manager account entry', () => {
-  test('remains keyboard accessible beside theme and language in a narrow window', async ({
-    page,
-  }) => {
+  test('remains keyboard accessible in the sidebar at a narrow width', async ({ page }) => {
     await page.setViewportSize({ width: 640, height: 720 });
+    await page.emulateMedia({ colorScheme: 'light' });
     await setupInvokeMock(page);
     await page.goto('/');
-
-    const header = page.locator('.ant-layout-header');
-    const account = header.locator('button[title="Sign In"]');
-    const theme = header.locator('button').nth(1);
-    const language = header.getByText('中');
+    const account = page.locator('.ant-layout-sider button[aria-haspopup="dialog"]');
     await expect(account).toBeVisible();
-    await expect(theme).toBeVisible();
-    await expect(language).toBeVisible();
-
-    const [accountBox, themeBox, languageBox] = await Promise.all([
-      account.boundingBox(),
-      theme.boundingBox(),
-      language.boundingBox(),
-    ]);
-    expect(accountBox).not.toBeNull();
-    expect(themeBox).not.toBeNull();
-    expect(languageBox).not.toBeNull();
-    expect(accountBox!.x + accountBox!.width).toBeLessThanOrEqual(themeBox!.x);
-    expect(themeBox!.x + themeBox!.width).toBeLessThanOrEqual(languageBox!.x);
-    expect(languageBox!.x + languageBox!.width).toBeLessThanOrEqual(640);
-
+    await expect(page.getByRole('button', { name: 'Dark', exact: true })).toBeVisible();
+    await expect(page.locator('.ant-layout-header').getByText('中')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(640);
     await account.focus();
     await account.press('Enter');
     const dialog = page.getByRole('dialog', { name: 'Manager Account' });
@@ -63,7 +42,6 @@ test.describe('Language switching', () => {
   test('header has language toggle button', async ({ page }) => {
     await setupInvokeMock(page);
     await page.goto('/');
-    // Language button shows "中" when in English mode
     await expect(page.locator('.ant-layout-header').getByText('中')).toBeVisible();
   });
 
@@ -71,7 +49,6 @@ test.describe('Language switching', () => {
     await setupInvokeMock(page);
     await page.goto('/');
     await page.locator('.ant-layout-header').getByText('中').click();
-    // After switching to Chinese, the button should show "EN"
     await expect(page.locator('.ant-layout-header').getByText('EN')).toBeVisible();
   });
 });

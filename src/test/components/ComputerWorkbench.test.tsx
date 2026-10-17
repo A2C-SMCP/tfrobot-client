@@ -7,8 +7,10 @@ import { runtimeSnapshot } from '../helpers/store';
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
     instance,
+    children,
     connection,
   }: {
+    children?: React.ReactNode;
     instance: ComputerInstance;
     connection: ResolvedComputerConnection;
   }) => (
@@ -18,6 +20,7 @@ vi.mock('@/components/Computer/ComputerRuntime', () => ({
       data-operation-target={connection.operationTarget?.target_id ?? ''}
     >
       {instance.id}
+      {children}
     </div>
   ),
 }));
@@ -98,6 +101,12 @@ describe('ComputerWorkbench', () => {
     expect(screen.getByTestId('runtime-section')).toHaveTextContent('computer-a');
     expect(screen.getByTestId('skills-section')).toHaveTextContent('computer-a');
     expect(screen.getByTestId('resources-section')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('debug-section')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('logs-section')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('advanced-diagnostics')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Debug Panel' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Logs' })).toBeVisible();
+    expect(screen.queryByRole('button', { expanded: false })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
   });
@@ -228,7 +237,7 @@ describe('ComputerWorkbench', () => {
     expect(props.onDisconnect).toHaveBeenCalledOnce();
   });
 
-  it('maps a legacy logs destination to the expanded diagnostics region', async () => {
+  it('maps a legacy logs destination to the logs card', async () => {
     renderWorkbench(instance(), 'logs');
 
     expect(await screen.findByTestId('logs-section')).toHaveTextContent('computer-a');

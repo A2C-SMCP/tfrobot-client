@@ -272,9 +272,9 @@ export function ConfigValueEditor({
             virtual={false}
             options={[
               { value: 'Constant', label: t('mcp.form.constantSource') },
-              { value: 'PromptString', label: 'PromptString' },
-              { value: 'PickString', label: 'PickString' },
-              { value: 'Command', label: 'Command' },
+              { value: 'PromptString', label: t('mcp.form.valueTypes.PromptString') },
+              { value: 'PickString', label: t('mcp.form.valueTypes.PickString') },
+              { value: 'Command', label: t('mcp.form.valueTypes.Command') },
             ]}
           />
         </Form.Item>
@@ -345,10 +345,10 @@ export function ConfigValueEditor({
                       {fields.map((field) => (
                         <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
                           <Form.Item name={[field.name, 'label']} rules={[{ required: true }]}>
-                            <Input placeholder="Label" style={{ width: 180 }} />
+                            <Input placeholder={t('mcp.form.optionLabel')} style={{ width: 180 }} />
                           </Form.Item>
                           <Form.Item name={[field.name, 'value']} rules={[{ required: true }]}>
-                            <Input placeholder="Value" style={{ width: 180 }} />
+                            <Input placeholder={t('mcp.form.optionValue')} style={{ width: 180 }} />
                           </Form.Item>
                           <MinusCircleOutlined onClick={() => remove(field.name)} />
                         </Space>

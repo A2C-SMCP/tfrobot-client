@@ -25,7 +25,7 @@ describe('NoticeStats', () => {
     expect(screen.getByText('Password variable keychain access')).toBeInTheDocument();
     expect(screen.getByText('Remote control security')).toBeInTheDocument();
     expect(screen.getByText('Desktop enumeration unverified')).toBeInTheDocument();
-    expect(screen.getByText(/never written to the activity log/)).toBeInTheDocument();
+    expect(screen.getByText(/never written to logs/)).toBeInTheDocument();
   });
 
   it('derives dismiss and help click rates from the local counters', () => {

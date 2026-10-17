@@ -19,7 +19,7 @@ export function DataSettings() {
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Form layout="vertical">
-        <Form.Item label="Diagnostic level">
+        <Form.Item label={t('settings.diagnosticLevel')}>
           <Select
             value={settings?.diagnostic_log_level ?? 'info'}
             options={['error', 'warn', 'info', 'debug', 'trace'].map((value) => ({
@@ -28,7 +28,7 @@ export function DataSettings() {
             onChange={(diagnostic_log_level) => settings && void updateSettings({ ...settings, diagnostic_log_level })}
           />
         </Form.Item>
-        <Form.Item label="Diagnostic file retention">
+        <Form.Item label={t('settings.diagnosticRetention')}>
           <InputNumber
             min={1}
             max={365}
@@ -37,7 +37,7 @@ export function DataSettings() {
             onChange={(days) => updateNumber('diagnostic_retention_days', days)}
           />
         </Form.Item>
-        <Form.Item label="Activity retention">
+        <Form.Item label={t('settings.logRetention')}>
           <InputNumber
             min={1}
             max={365}
@@ -46,7 +46,7 @@ export function DataSettings() {
             onChange={(days) => updateNumber('activity_retention_days', days)}
           />
         </Form.Item>
-        <Form.Item label="Tool history retention">
+        <Form.Item label={t('settings.toolHistoryRetention')}>
           <InputNumber
             min={1}
             max={365}
@@ -57,12 +57,8 @@ export function DataSettings() {
         </Form.Item>
       </Form>
 
-      <Popconfirm title={t('logs.confirmClear')} onConfirm={() => clearActivity({ kind: 'all' })}>
-        <Button danger>{t('logs.clear')}</Button>
-      </Popconfirm>
-
-      <Popconfirm title={t('settings.resetConfirm')} onConfirm={() => clearActivity({ kind: 'all' })}>
-        <Button danger type="primary">{t('settings.reset')}</Button>
+      <Popconfirm title={t('logs.confirmClearAll')} onConfirm={() => clearActivity({ kind: 'all' })}>
+        <Button danger>{t('logs.clearAll')}</Button>
       </Popconfirm>
     </Space>
   );

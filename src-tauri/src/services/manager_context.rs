@@ -22,7 +22,9 @@ use crate::services::manager_client::{
     ManagerAccountSummary, ManagerClient, ManagerCurrentUser, ManagerError, ManagerRequestOutcome,
     SwitchedManagerAccount, UserInfo,
 };
-use crate::services::manager_environment::ManagerEnvironment;
+use crate::services::manager_environment::{
+    ClientBuildMode, ManagerEnvironment, ManagerEnvironmentPolicy,
+};
 use crate::services::manager_token_bridge::{
     ManagerTokenBridge, ManagerTokenBridgeSink, ManagerTokenProfile,
 };
@@ -150,6 +152,7 @@ pub struct ManagerContextCoordinator {
     event_sink: RwLock<Option<Arc<dyn ManagerContextEventSink>>>,
     lifecycle_sink: RwLock<Option<Arc<dyn ManagerContextLifecycleSink>>>,
     base_url_override: Option<String>,
+    environment_policy: ManagerEnvironmentPolicy,
 }
 
 impl ManagerContextCoordinator {
@@ -172,6 +175,7 @@ impl ManagerContextCoordinator {
             event_sink: RwLock::new(None),
             lifecycle_sink: RwLock::new(None),
             base_url_override: None,
+            environment_policy: ClientBuildMode::current().policy(),
         }
     }
 
@@ -193,11 +197,27 @@ impl ManagerContextCoordinator {
             event_sink: RwLock::new(None),
             lifecycle_sink: RwLock::new(None),
             base_url_override: Some(base_url),
+            environment_policy: ClientBuildMode::Development.policy(),
         }
     }
 
     pub async fn set_event_sink(&self, sink: Arc<dyn ManagerContextEventSink>) {
         *self.event_sink.write().await = Some(sink);
+    }
+
+    pub fn environment_policy(&self) -> ManagerEnvironmentPolicy {
+        self.environment_policy.clone()
+    }
+
+    fn ensure_environment_allowed(
+        &self,
+        environment: ManagerEnvironment,
+    ) -> Result<(), ManagerError> {
+        if self.environment_policy.allows(environment) {
+            Ok(())
+        } else {
+            Err(ManagerError::EnvironmentNotAllowed)
+        }
     }
 
     pub async fn set_lifecycle_sink(&self, sink: Arc<dyn ManagerContextLifecycleSink>) {
@@ -226,6 +246,7 @@ impl ManagerContextCoordinator {
         identifier: &str,
         password: &str,
     ) -> Result<LoginResult, ManagerError> {
+        self.ensure_environment_allowed(environment)?;
         let _transaction = self.transaction_lock.lock().await;
         let (_transition, cleanup_errors) = self.begin_context_transition().await;
         self.log_cleanup_errors("login", &cleanup_errors);
@@ -370,6 +391,10 @@ impl ManagerContextCoordinator {
         let Some(saved) = saved.session else {
             return Ok(None);
         };
+        if let Err(error) = self.ensure_environment_allowed(saved.environment) {
+            self.clear_persisted_session()?;
+            return Err(error);
+        }
         if !self
             .client
             .restore_session_from_base_url(saved.environment, self.base_url(saved.environment))
@@ -981,7 +1006,7 @@ fn same_payload(current: &ManagerContextSnapshot, next: &ManagerContextSnapshot)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::keychain::InMemorySecretStore;
+    use crate::services::keychain::{InMemorySecretStore, KeychainError, SecretStore};
     use tempfile::tempdir;
 
     fn coordinator() -> (ManagerContextCoordinator, tempfile::TempDir) {
@@ -991,6 +1016,77 @@ mod tests {
             InMemorySecretStore::shared(),
         ));
         (ManagerContextCoordinator::new(client, settings), dir)
+    }
+
+    struct UntouchedCredentials;
+
+    impl SecretStore for UntouchedCredentials {
+        fn set_secret(&self, _: &str, _: &str) -> Result<(), KeychainError> {
+            panic!("disallowed environments must not write credentials")
+        }
+        fn get_secret(&self, _: &str) -> Result<Option<String>, KeychainError> {
+            panic!("disallowed environments must not read credentials")
+        }
+        fn delete_secret(&self, _: &str) -> Result<(), KeychainError> {
+            panic!("disallowed environments must not touch credentials")
+        }
+    }
+
+    #[tokio::test]
+    async fn packaged_login_and_restore_reject_nonproduction_before_credentials_or_http() {
+        for environment in [ManagerEnvironment::Test, ManagerEnvironment::Staging] {
+            // A real listening socket proves a forged login/restore never reaches HTTP transport.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let directory = tempdir().unwrap();
+            let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+            let client = Arc::new(ManagerClient::new_with_secret_store(Arc::new(
+                UntouchedCredentials,
+            )));
+            let mut coordinator = ManagerContextCoordinator::new_with_base_url_override(
+                client,
+                settings.clone(),
+                format!("http://{}", listener.local_addr().unwrap()),
+            );
+            coordinator.environment_policy = ClientBuildMode::Production.policy();
+            assert!(matches!(
+                coordinator
+                    .login(environment, "client@example.com", "secret")
+                    .await,
+                Err(ManagerError::EnvironmentNotAllowed)
+            ));
+            assert_eq!(coordinator.snapshot().await.revision, 0);
+
+            let path = settings.global_manager_session_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 2,
+                    "session": { "environment": environment, "userId": "9",
+                        "accountId": "16", "accountName": "client" }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                coordinator.restore_session().await,
+                Err(ManagerError::EnvironmentNotAllowed)
+            ));
+            assert!(settings
+                .load_global_manager_session()
+                .unwrap()
+                .session
+                .is_none());
+            assert_eq!(
+                coordinator.snapshot().await.auth_state,
+                ManagerAuthState::SignedOut
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[tokio::test]

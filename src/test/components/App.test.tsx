@@ -227,7 +227,7 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Activity'));
+    fireEvent.click(screen.getByText('Logs'));
     await waitFor(() => expect(screen.getByText('ActivityViewer')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Manager Account' })).toBeInTheDocument();
   });
@@ -254,7 +254,7 @@ describe('App', () => {
     try {
       render(<App />);
       expect(screen.getByText('计算机')).toBeInTheDocument();
-      expect(i18n.t('computer.title')).toBe('Computer');
+      expect(i18n.t('computer.title')).toBe('计算机');
     } finally {
       await act(async () => {
         await i18n.changeLanguage('en');

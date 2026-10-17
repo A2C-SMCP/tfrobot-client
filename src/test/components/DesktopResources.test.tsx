@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { DesktopResources } from '@/components/DesktopResources';
+import { PageActivity } from '@/components/Navigation/PageActivity';
 import {
   desktopRuntimeKey,
   desktopWindowKey,
@@ -63,10 +64,6 @@ function renderDesktop(
   );
 }
 
-function expandSection() {
-  fireEvent.click(screen.getByText('Desktop Resources'));
-}
-
 function firstRowExpandButton(): Element {
   const button = document.querySelector('.ant-table-row-expand-icon');
   expect(button).toBeInTheDocument();
@@ -82,49 +79,72 @@ describe('DesktopResources', () => {
     mockedInvoke.mockReset();
   });
 
-  it('is collapsed by default and performs zero resource requests on render', () => {
-    renderDesktop();
+  it('automatically loads resources once when the runtime is available', async () => {
+    mockedInvoke.mockResolvedValue({ status: 'unverified', windows });
+    const { rerender } = renderDesktop();
 
     expect(screen.getByText('Desktop Resources')).toBeInTheDocument();
-    expect(mockedInvoke).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Load resources' })).not.toBeInTheDocument();
-  });
-
-  it('still performs zero requests when the section is expanded', () => {
-    renderDesktop();
-
-    expandSection();
-
-    expect(screen.getByRole('button', { name: 'Load resources' })).toBeInTheDocument();
-    expect(screen.getByText('Resources are loaded only when you request them.')).toBeInTheDocument();
-    expect(mockedInvoke).not.toHaveBeenCalled();
-  });
-
-  it('expands a legacy resources destination without eagerly loading resources', () => {
-    renderDesktop({ initiallyExpanded: true });
-
-    expect(screen.getByRole('button', { name: 'Load resources' })).toBeInTheDocument();
-    expect(mockedInvoke).not.toHaveBeenCalled();
-  });
-
-  it('enumerates resources only after an explicit load action', async () => {
-    mockedInvoke.mockResolvedValueOnce({ status: 'unverified', windows });
-    renderDesktop();
-    expandSection();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Load resources' }));
-
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('get_desktop', {
-        instanceId: 'computer-a',
-        uri: null,
-      });
-    });
     expect(await screen.findByText('Main Window')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledExactlyOnceWith('get_desktop', {
+      instanceId: 'computer-a',
+      uri: null,
+    });
     expect(screen.getAllByText('Desktop MCP')).toHaveLength(2);
-    expect(screen.getByText('text/plain')).toBeInTheDocument();
     expect(screen.getByText('Some Desktop Resources may be missing')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+
+    rerender(<DesktopResources instanceId="computer-a" runtime={{ ...activeRuntime, snapshot_revision: 2 }} />);
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the resource list from the card header', async () => {
+    mockedInvoke.mockResolvedValueOnce({ status: 'complete', windows });
+    renderDesktop();
+    expect(await screen.findByText('Main Window')).toBeInTheDocument();
+
+    mockedInvoke.mockResolvedValueOnce({ status: 'complete', windows: [windows[1]] });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() => expect(screen.queryByText('Main Window')).not.toBeInTheDocument());
+    expect(screen.getByText('Secondary')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits until the page and runtime are available before loading', async () => {
+    mockedInvoke.mockResolvedValue({ status: 'complete', windows });
+    const { rerender } = render(
+      <PageActivity active={false}>
+        <DesktopResources instanceId="computer-a" runtime={activeRuntime} />
+      </PageActivity>,
+    );
+    expect(mockedInvoke).not.toHaveBeenCalled();
+
+    rerender(
+      <PageActivity active>
+        <DesktopResources instanceId="computer-a" runtime={{ ...activeRuntime, active_mcp_servers: 0 }} />
+      </PageActivity>,
+    );
+    expect(mockedInvoke).not.toHaveBeenCalled();
+
+    rerender(
+      <PageActivity active>
+        <DesktopResources instanceId="computer-a" runtime={activeRuntime} />
+      </PageActivity>,
+    );
+    expect(await screen.findByText('Main Window')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a load failure without looping and allows a manual retry', async () => {
+    mockedInvoke.mockRejectedValueOnce(new Error('Enumeration failed'));
+    renderDesktop();
+
+    expect(await screen.findByText('Enumeration failed')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    mockedInvoke.mockResolvedValueOnce({ status: 'complete', windows });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('Main Window')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledTimes(2);
   });
 
   it('shows an actionable Runtime state without invoking the backend', () => {
@@ -133,7 +153,6 @@ describe('DesktopResources', () => {
       runtime: runtimeSnapshot({ lifecycle: 'stopped', active_mcp_servers: 0 }),
       onStartRuntime,
     });
-    expandSection();
 
     expect(screen.getByText('Runtime is not ready')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
@@ -151,7 +170,6 @@ describe('DesktopResources', () => {
       }),
       onOpenMcp,
     });
-    expandSection();
 
     expect(screen.getByText('No MCP server is active')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Manage MCP Servers' }));
@@ -171,7 +189,6 @@ describe('DesktopResources', () => {
       ],
     });
     renderDesktop();
-    expandSection();
 
     expect(mockedInvoke).not.toHaveBeenCalled();
     fireEvent.click(firstRowExpandButton());
@@ -190,9 +207,6 @@ describe('DesktopResources', () => {
   it('does not claim an unverified empty enumeration is a real empty resource set', async () => {
     mockedInvoke.mockResolvedValueOnce({ status: 'unverified', windows: [] });
     renderDesktop();
-    expandSection();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Load resources' }));
 
     expect(
       await screen.findByText('Desktop Resources could not be determined'),
@@ -217,7 +231,6 @@ describe('DesktopResources', () => {
       windowDetails: { [key]: detail },
     });
     renderDesktop();
-    expandSection();
 
     fireEvent.click(firstRowExpandButton());
     fireEvent.click(firstRowExpandButton());
@@ -241,7 +254,6 @@ describe('DesktopResources', () => {
       contents: [],
     });
     renderDesktop();
-    expandSection();
     fireEvent.click(firstRowExpandButton());
 
     expect(screen.getByText('Read failed')).toBeInTheDocument();
@@ -276,7 +288,6 @@ describe('DesktopResources', () => {
       },
     });
     const { unmount } = renderDesktop();
-    expandSection();
     fireEvent.click(firstRowExpandButton());
 
     expect(screen.getByAltText('Desktop resource preview')).toHaveAttribute(
@@ -306,7 +317,6 @@ describe('DesktopResources', () => {
       },
     });
     renderDesktop();
-    expandSection();
     fireEvent.click(firstRowExpandButton());
 
     expect(screen.queryByAltText('Desktop resource preview')).not.toBeInTheDocument();
@@ -329,7 +339,6 @@ describe('DesktopResources', () => {
       loaded: true,
     });
     const { rerender } = renderDesktop();
-    expandSection();
     expect(screen.getByText('Main Window')).toBeInTheDocument();
 
     rerender(
@@ -343,14 +352,14 @@ describe('DesktopResources', () => {
     expect(screen.queryByText('Main Window')).not.toBeInTheDocument();
   });
 
-  it('hides cached resources immediately when the Runtime generation changes', () => {
+  it('replaces cached resources automatically when the Runtime generation changes', async () => {
     setDesktopState('computer-a', {
       windows: [windows[0]],
       loaded: true,
     });
     const { rerender } = renderDesktop();
-    expandSection();
     expect(screen.getByText('Main Window')).toBeInTheDocument();
+    mockedInvoke.mockResolvedValueOnce({ status: 'complete', windows: [windows[1]] });
 
     rerender(
       <DesktopResources
@@ -364,6 +373,10 @@ describe('DesktopResources', () => {
     );
 
     expect(screen.queryByText('Main Window')).not.toBeInTheDocument();
-    expect(screen.getByText('Resources are loaded only when you request them.')).toBeInTheDocument();
+    expect(await screen.findByText('Secondary')).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledExactlyOnceWith('get_desktop', {
+      instanceId: 'computer-a',
+      uri: null,
+    });
   });
 });

@@ -2,7 +2,6 @@
   "permissions": {
     "mcp": "Starting an MCP or signing in may request keychain access for its saved passwords or OAuth credentials. Denying access stops that operation. External tools may request additional permissions for their own features; allow only permissions you expect.",
     "password": "Saving or deleting a password variable asks macOS for keychain access; denying it fails that operation.",
-
     "title": "Credential access paused",
     "description": "The system could not access a saved credential. Background attempts for this credential are paused. Allow another attempt, then repeat your original action. Other credentials remain available.",
     "retry": "Retry credential access",
@@ -14,8 +13,9 @@
     "migration": "Older variables need importing; this may request keychain access to verify saved passwords. Declining keeps the existing variables usable.",
     "migrate": "Import older variables",
     "update": "Installing this update replaces the application. macOS may ask for administrator authentication if the application location requires it."
-},
+  },
   "app": {
+    "workspace": "Workspace",
     "name": "TFRobot Client",
     "runtimeEventsUnavailable": "Runtime status updates are unavailable",
     "runtimeInputUnavailable": "Runtime Input prompts are unavailable",
@@ -60,6 +60,11 @@
     "title": "Robot List"
   },
   "chat": {
+    "platformSaveFailed": "Could not save the platform selection. Your current conversation is preserved. Please retry.",
+    "platform": "Conversation platform",
+    "selectPlatform": "Select a conversation platform",
+    "platformLoadFailed": "Could not load or save conversation platforms",
+    "noPlatforms": "No conversation platforms are available for this robot",
     "restorePositionFailed": "Could not restore or save the conversation you had open. Retry, or choose a robot and conversation manually.",
     "rememberRobotFailed": "Could not save your most recently used robot. Retry, or choose a robot manually.",
     "preferenceFailed": "Could not read your saved robot preference. Retry, or choose a robot manually.",
@@ -80,6 +85,25 @@
       "incompatible": "Chat not supported"
     },
     "workspace": {
+      "conversationFailureTitle": "Conversation failed",
+      "failureHistory": "History",
+      "failureUploadsPending": "Attachments are still uploading",
+      "failureRealtime": "Realtime processing",
+      "failureOriginalMessage": "Original message",
+      "restoreFailureDraft": "Restore draft",
+      "overwriteFailureDraftTitle": "Replace current draft?",
+      "overwriteFailureDraftDescription": "Your current draft will be replaced with the failed message.",
+      "overwriteFailureDraftConfirm": "Replace draft",
+      "expandFailure": "View failure details",
+      "unconfirmedMessages": "Unconfirmed messages",
+      "unconfirmedDescription": "Check conversation history before sending again.",
+      "outgoingMessages": "Outgoing messages",
+      "outgoingSending": "Sending",
+      "outgoingAccepted": "Accepted",
+      "outgoingFailed": "Failed",
+      "outgoingUnknown": "Outcome unknown",
+      "outgoingAttachments": "Attachments",
+      "dismissOutgoing": "Dismiss outgoing message",
       "attach": "Attach",
       "pastedTextTitle": "Pasted text",
       "removeAttachment": "Remove attachment",
@@ -234,6 +258,11 @@
     "attachmentRetryHint": "Retry the attachment from the message it belongs to."
   },
   "computer": {
+    "views": {
+      "label": "Computer view",
+      "list": "List",
+      "grid": "Icons"
+    },
     "title": "Computer",
     "create": "Create Computer",
     "empty": "No Computer instances",
@@ -314,7 +343,7 @@
       "securityDescription": "Enable only the tools and target Computers this Robot needs. Secret values remain write-only and all calls are audited.",
       "securitySummary": "Robot control stays limited to the tools and Computers you allow, and every call is audited.",
       "toolScope": "Allowed tools",
-      "allTools": "All 55 tools",
+      "allTools": "All tools",
       "customTools": "Custom selection",
       "targetScope": "Allowed Computer targets",
       "selfOnly": "This Computer only",
@@ -368,6 +397,7 @@
         "copyId": "Copy ID"
       },
       "sections": {
+        "navigation": "Workbench sections",
         "runtime": "Runtime workbench",
         "skills": "Active Skills and Tools",
         "resources": "Desktop Resources",
@@ -545,10 +575,10 @@
       "robotNotRunning": "This Robot is not running and cannot be connected.",
       "manualManagedGlobally": "Manual SMCP targets are managed globally on this page; select one above to bind it to this Computer.",
       "readOnlyTitle": "This page shows connection resources available to this Computer.",
-      "readOnlyDescription": "Robot resources are selected here. Manager identity is managed from the global account entry in the app header.",
+      "readOnlyDescription": "Select Robot resources here. Use the account entry at the bottom of the sidebar to sign in or switch accounts and organizations.",
       "openRobotConnections": "Open Robot Connections",
       "managerLoginRequired": "No Manager account is signed in.",
-      "useGlobalManagerAccount": "Use the Manager Account entry in the app header to sign in.",
+      "useGlobalManagerAccount": "Use the account entry at the bottom of the sidebar to sign in to Manager.",
       "savedManagerRobot": "Saved Robot (employee {{employeeId}})",
       "binding": {
         "reactivate": "Reactivate",
@@ -708,7 +738,7 @@
     "issues": "Issues",
     "needsAttention": "Needs Attention",
     "computerShortcuts": "Computers",
-    "recentActivity": "Recent Activity",
+    "recentActivity": "Recent Logs",
     "total": "Total",
     "running": "Running",
     "stopped": "Stopped",
@@ -717,7 +747,7 @@
     "recentWarnings": "recent warnings and errors",
     "toolsAvailable": "tools available",
     "noIssues": "No issues",
-    "noActivity": "No recent activity"
+    "noActivity": "No recent logs"
   },
   "mcp": {
     "servers": "MCP Servers",
@@ -881,7 +911,16 @@
       "toolMeta": "Per-Tool Metadata (JSON)",
       "vrl": "VRL Transformation Script",
       "toolMetaInvalidJson": "Invalid JSON format",
-      "toolMetaInvalidFormat": "Each tool_meta value must be an object (e.g. {\"auto_apply\": true})"
+      "toolMetaInvalidFormat": "Each tool_meta value must be an object (e.g. {\"auto_apply\": true})",
+      "valueTypes": {
+        "Constant": "Constant",
+        "PromptString": "PromptString",
+        "PickString": "PickString",
+        "Command": "Command",
+        "Unresolved": "Unresolved"
+      },
+      "optionLabel": "Label",
+      "optionValue": "Value"
     },
     "messages": {
       "added": "Server saved; restart Runtime to apply it",
@@ -1040,7 +1079,9 @@
       "clearApiKey": "Clear saved API key",
       "headers": "Custom Headers",
       "addHeader": "Add Header",
-      "autoConnect": "Auto Connect"
+      "autoConnect": "Auto Connect",
+      "headerName": "Header-Name",
+      "headerValue": "value"
     },
     "messages": {
       "profileSaved": "Profile saved successfully",
@@ -1063,7 +1104,7 @@
     "contentType": "Content Type",
     "unknownContentType": "Unknown",
     "noWindows": "No desktop resources are currently exposed",
-    "notLoaded": "Resources are loaded only when you request them.",
+    "notLoaded": "Desktop resources have not loaded. Refresh to try again.",
     "windowContent": "Window Content",
     "noContent": "No content available",
     "clickToLoadDetail": "Click to load details",
@@ -1110,7 +1151,7 @@
       "remote-control-security": "Remote control security",
       "desktop-enumeration-unverified": "Desktop enumeration unverified"
     },
-    "noticesLocalOnly": "Counted on this machine only; never written to the activity log.",
+    "noticesLocalOnly": "Counted on this machine only; never written to logs.",
     "searchTools": "Search tools...",
     "allServers": "All Servers",
     "noTools": "No tools available",
@@ -1139,9 +1180,9 @@
     "loadMoreResources": "Load more"
   },
   "logs": {
-    "title": "Activity",
+    "title": "Logs",
     "export": "Export",
-    "clear": "Clear",
+    "clear": "Clear logs",
     "time": "Time",
     "level": "Level",
     "category": "Category",
@@ -1149,9 +1190,43 @@
     "message": "Message",
     "filterLevel": "Filter by level",
     "filterCategory": "Filter by category",
-    "searchKeyword": "Search keyword...",
+    "searchKeyword": "Search logs…",
     "allTime": "All",
-    "confirmClear": "Clear the selected activity? Tool call history is retained."
+    "confirmClear": "Clear all logs in the selected scope? Time, level and category filters do not limit what is cleared. Tool call history is retained.",
+    "clearAll": "Clear all logs",
+    "confirmClearAll": "Clear all logs? Tool call history is retained.",
+    "scope": "Scope",
+    "operation": "Operation",
+    "client": "Client",
+    "filterScope": "Log scope",
+    "categoryLabel": "Log category",
+    "allScopes": "All logs",
+    "clientOnly": "Client only",
+    "pastHours": "Past {{count}} hours",
+    "pastHours_one": "Past {{count}} hour",
+    "pastDays": "Past {{count}} days",
+    "outcomes": {
+      "succeeded": "SUCCEEDED",
+      "failed": "FAILED",
+      "unknown": "UNKNOWN"
+    },
+    "categories": {
+      "system": "system",
+      "auth": "auth",
+      "config": "config",
+      "security": "security",
+      "update": "update",
+      "observability": "observability",
+      "computer": "computer",
+      "runtime": "runtime",
+      "connection": "connection",
+      "mcp": "mcp",
+      "input": "input",
+      "tool": "tool",
+      "resource": "resource",
+      "skill": "skill",
+      "marketplace": "marketplace"
+    }
   },
   "settings": {
     "title": "Settings",
@@ -1192,8 +1267,6 @@
     "logRetention": "Log Retention",
     "days": "days",
     "exportAll": "Export All Configurations",
-    "reset": "Reset Application",
-    "resetConfirm": "This will delete all data. Are you sure?",
     "appVersion": "App Version",
     "sdkVersion": "SDK Version",
     "license": "License",
@@ -1204,7 +1277,10 @@
     "upToDate": "You are running the latest version",
     "updateLater": "Later",
     "updateCheckFailed": "Could not check for updates. You can try again later.",
-    "updateFailed": "The update could not be installed. Your current version is still available."
+    "updateFailed": "The update could not be installed. Your current version is still available.",
+    "diagnosticLevel": "Diagnostic level",
+    "diagnosticRetention": "Diagnostic file retention",
+    "toolHistoryRetention": "Tool history retention"
   },
   "manager": {
     "errors": {
@@ -1223,7 +1299,8 @@
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
-      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly."
+      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly.",
+      "environment_not_allowed": "This build does not support that environment. Sign in to Production."
     }
   },
   "managerAccount": {
@@ -1239,7 +1316,7 @@
       "completeSignIn": "Complete sign-in",
       "setupRequired": "Account setup required",
       "sessionExpired": "Session expired",
-      "robotConnectionsSignIn": "Sign in from the global Manager Account entry in the app header to view Robots. Local Computer and Manual SMCP features remain available."
+      "robotConnectionsSignIn": "Use the account entry at the bottom of the sidebar to sign in to Manager and view Robots. Local Computer and Manual SMCP connections remain available."
     },
     "login": {
       "title": "Sign in to TFRSManager",
@@ -1250,7 +1327,8 @@
       "environmentRequired": "Environment is required",
       "environments": {
         "staging": "Staging",
-        "prod": "Production"
+        "prod": "Production (including Beta)",
+        "test": "Test"
       },
       "identifier": "Phone or email",
       "identifierRequired": "Phone or email is required",
@@ -1258,7 +1336,9 @@
       "passwordRequired": "Password is required",
       "submit": "Sign In",
       "logout": "Sign Out",
-      "logoutSuccess": "Signed out successfully"
+      "logoutSuccess": "Signed out successfully",
+      "productionOnly": "Distributed builds connect to Production only.",
+      "environmentPolicyFailed": "Could not load the environment policy. Please retry."
     },
     "accountSelection": {
       "title": "Choose an account",

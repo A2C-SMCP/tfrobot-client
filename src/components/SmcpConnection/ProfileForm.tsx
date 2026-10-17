@@ -87,10 +87,10 @@ export function ProfileForm({ initialValues, onSubmit, onCancel, loading }: Prof
               {fields.map((field) => (
                 <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
                   <Form.Item name={[field.name, 'key']} noStyle>
-                    <Input placeholder="Header-Name" style={{ width: 150 }} />
+                    <Input placeholder={t('connection.form.headerName')} style={{ width: 150 }} />
                   </Form.Item>
                   <Form.Item name={[field.name, 'value']} noStyle>
-                    <Input placeholder="value" style={{ width: 200 }} />
+                    <Input placeholder={t('connection.form.headerValue')} style={{ width: 200 }} />
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(field.name)} />
                 </Space>

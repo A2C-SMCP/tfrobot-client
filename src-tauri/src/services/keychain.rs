@@ -725,6 +725,8 @@ mod tests {
 
     #[test]
     fn keychain_secret_namespaces_are_stable_and_isolated() {
+        // Local Computer credentials must remain readable in both dev and packaged builds.
+        assert_eq!(SERVICE_NAME, "tfrobot-client");
         assert_ne!(
             input_secret_key("computer-a", "api-key"),
             input_secret_key("computer-b", "api-key")

@@ -6,6 +6,7 @@ import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useDebugStore, type ToolInfo } from '@/stores/debugStore';
 import { ToolCallTest } from './ToolCallTest';
+import styles from './ToolBrowser.module.css';
 
 const { Text, Paragraph } = Typography;
 const UNKNOWN_SERVER = 'unknown';
@@ -58,9 +59,9 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   });
 
   return (
-    <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 220px)' }}>
+    <div className={styles.browser}>
       {/* Left: Tool List */}
-      <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+      <div className={styles.listPane}>
         <Space style={{ marginBottom: 8, width: '100%' }} direction="vertical">
           <Space.Compact style={{ width: '100%' }}>
             <Input
@@ -96,11 +97,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
               renderItem={(tool) => (
                 <List.Item
                   onClick={() => { setSelectedName(tool.name); selectTool(tool); }}
-                  style={{
-                    cursor: 'pointer',
-                    background: selectedTool?.name === tool.name ? '#e6f4ff' : undefined,
-                    padding: '8px 12px',
-                  }}
+                  className={`${styles.tool} ${selectedTool?.name === tool.name ? styles.selected : ''}`}
                 >
                   <List.Item.Meta
                     title={
@@ -123,7 +120,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
       </div>
 
       {/* Right: Tool Detail + Call Test */}
-      <div data-navigation-scroll="tools-detail" style={{ flex: 1, overflow: 'auto' }}>
+      <div data-navigation-scroll="tools-detail" className={styles.detail}>
         {selectedTool ? (
           <ToolDetail instanceId={instanceId} tool={selectedTool} />
         ) : (
@@ -147,7 +144,7 @@ function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }
       <Paragraph>{tool.description}</Paragraph>
 
       <Divider orientation="left">{t('debug.inputSchema')}</Divider>
-      <pre data-navigation-scroll="tool-schema" style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
+      <pre data-navigation-scroll="tool-schema" className={styles.schema}>
         {JSON.stringify(tool.inputSchema, null, 2)}
       </pre>
 

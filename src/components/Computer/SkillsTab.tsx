@@ -135,7 +135,7 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+      <div className={styles.toolbar}>
         <Title level={4} style={{ margin: 0 }}>{t('skills.title')}</Title>
         <Space wrap>
           <Button icon={<ReloadOutlined />} loading={loadingSkills} onClick={handleRefresh}>
@@ -175,7 +175,7 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
                   dataSource={sourceSkills}
                   renderItem={(skill) => (
                     <List.Item
-                      style={{ background: selectedSkillName === skill.name ? '#f6ffed' : undefined }}
+                      style={{ background: selectedSkillName === skill.name ? 'var(--ant-color-primary-bg)' : undefined }}
                     >
                       <button
                         type="button"

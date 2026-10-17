@@ -1,4 +1,5 @@
 import { Form, Select, Segmented } from 'antd';
+import formStyles from '@/components/common/GroupedForm.module.css';
 import { useTranslation } from 'react-i18next';
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -16,7 +17,7 @@ export function AppearanceSettings() {
   };
 
   return (
-    <Form layout="vertical">
+    <Form layout="vertical" className={formStyles.form}>
       <Form.Item label={t('settings.theme')}>
         <Segmented
           value={mode}
@@ -33,7 +34,7 @@ export function AppearanceSettings() {
         <Select
           value={i18n.language}
           onChange={handleLanguageChange}
-          style={{ width: 200 }}
+          style={{ width: 200, maxWidth: '100%' }}
           options={[
             { label: '中文', value: 'zh' },
             { label: 'English', value: 'en' },
