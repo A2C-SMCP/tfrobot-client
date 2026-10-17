@@ -15,6 +15,10 @@ fn chat_get_recent_robot() -> u32 {
 #[tauri::command]
 fn chat_remember_robot() {}
 #[tauri::command]
+fn chat_platform_preference() -> u64 {
+    1
+}
+#[tauri::command]
 fn chat_get_recent_conversation() -> Option<String> {
     None
 }
@@ -54,6 +58,7 @@ fn main() {
             chat_get_recent_robot,
             chat_remember_robot,
             chat_get_recent_conversation,
+            chat_platform_preference,
             chat_remember_conversation,
             chat_close_session,
             chat_get_session_token,

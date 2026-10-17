@@ -561,7 +561,7 @@ async fn current_user_returns_complete_redacted_context_identity() {
 }
 
 #[tokio::test]
-async fn manager_v2_and_legacy_routes_complete_real_smcp_join_and_chat_http() {
+async fn manager_routes_join_smcp_while_chat_requires_modern_bearer_contract() {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use socketioxide::extract::{AckSender, SocketRef, TryData};
@@ -583,11 +583,7 @@ async fn manager_v2_and_legacy_routes_complete_real_smcp_join_and_chat_http() {
     ] {
         let socket_path = advertised_path.unwrap_or("/socket.io/");
         let modern = socket_path.starts_with("/c/");
-        let api_path = if modern {
-            "/c/tfrobot/rid-42/api/v1/chat/conversations"
-        } else {
-            "/c/tfrobot/tenant-fixture/rid-42/api/v1/chat/conversations"
-        };
+        let api_path = "/c/tfrobot/rid-42/v1/chat/conversations";
         let (layer, io) = SocketIo::builder()
             .req_path(socket_path.trim_end_matches('/').to_string())
             .build_layer();
@@ -609,15 +605,23 @@ async fn manager_v2_and_legacy_routes_complete_real_smcp_join_and_chat_http() {
             move |request: hyper::Request<hyper::body::Incoming>| async move {
                 let is_chat = request.uri().path() == api_path;
                 if is_chat {
-                    let cookie = request.headers().get("cookie").unwrap().to_str().unwrap();
-                    assert!(cookie.contains("tfUserToken=fixture-short-token"));
+                    assert!(
+                        modern,
+                        "legacy Manager routes must not reach the chat Server"
+                    );
+                    assert_eq!(
+                        request.headers().get("authorization").unwrap(),
+                        "Bearer fixture-short-token"
+                    );
+                    assert!(request.headers().get("cookie").is_none());
+                    assert_eq!(request.headers().get("X-TF-RobotId").unwrap(), "rid-42");
                 }
                 Ok::<_, Infallible>(
                     hyper::Response::builder()
                         .status(if is_chat { 200 } else { 404 })
                         .header("content-type", "application/json")
                         .body(Full::<Bytes>::from(if is_chat {
-                            r#"{"code":200,"data":{"items":[]}}"#
+                            r#"{"code":200,"data":{"conversations":[],"cursor":null}}"#
                         } else {
                             r#"{"error":"wrong robot route"}"#
                         }))
@@ -740,26 +744,29 @@ async fn manager_v2_and_legacy_routes_complete_real_smcp_join_and_chat_http() {
         let connection = runtime.connection_state_snapshot().await.unwrap();
         assert!(connection.url.ends_with(socket_path));
         assert_eq!(connection.office_id, "rid-42");
-        let descriptor = state.chat_sessions.open(42, 1).await.unwrap();
-        let response = state
-            .chat_sessions
-            .proxy(
-                &descriptor.lease_id,
-                &format!("{}v1/chat/conversations", descriptor.http_base_url),
-                "GET",
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["code"],
-            200
-        );
+        let opened = state.chat_sessions.open(42, 1).await;
         if modern {
+            let descriptor = opened.expect("modern Manager route must support Bearer chat");
+            let response = state
+                .chat_sessions
+                .proxy(
+                    &descriptor.lease_id,
+                    &format!("{}v1/chat/conversations", descriptor.http_base_url),
+                    "GET",
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["code"],
+                200
+            );
             assert_eq!(descriptor.socket_path, socket_path);
+            state.chat_sessions.close(&descriptor.lease_id).await;
+        } else {
+            assert!(matches!(opened, Err(ManagerError::ChatUnavailable)));
         }
-        state.chat_sessions.close(&descriptor.lease_id).await;
         stop_computer_instance_core(&state, "route-computer".into())
             .await
             .unwrap();
