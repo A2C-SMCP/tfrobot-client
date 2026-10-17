@@ -223,6 +223,7 @@ describe('Chat Kit 0.8.0 published attachment and host resource contracts', () =
       await screen.findByRole('button', { name: 'Remove attachment photo.png' });
       const longText = '长文本😀\n'.repeat(1000);
       fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [], getData: () => longText } });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => expect(onSend).toHaveBeenCalledWith(longText, [expect.objectContaining({
         uri: 's3://bucket/image.png', name: 'photo.png', mimeType: 'image/png',

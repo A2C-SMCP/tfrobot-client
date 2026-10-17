@@ -54,7 +54,7 @@ export function ComputerRuntime({
     ? t(connectDisabledReasonKey)
     : undefined;
   return (
-    <div className={`${styles.runtimeGrid} ${children ? styles.withInspector : ''}`}>
+    <div className={styles.runtimeGrid}>
       <div className={styles.runtimeProblems}>
         <RuntimeProblems
           problems={runtime.problems ?? []}

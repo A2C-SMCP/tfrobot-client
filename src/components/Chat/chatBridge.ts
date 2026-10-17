@@ -48,30 +48,36 @@ export const getChatDeadlineAt = (): number => Date.now() + REQUEST_TIMEOUT_MS;
 interface CreateChatFactoryOptions {
   descriptor: ChatSessionDescriptor;
   messageCreator: ChatMessageCreator;
+  platformId?: number;
   onDiagnostic: (error: ChatError) => void;
   onUnhandledError: (error: unknown) => void;
+}
+
+export function createChatSessionProvider(leaseId: string): SessionProvider<TFRobotSession> {
+  return {
+    async getSession() {
+      const credential = await invoke<ChatSessionCredential>('chat_get_session_token', { leaseId });
+      return { kind: 'bearer', token: credential.token };
+    },
+    async onSessionInvalid(_invalidation: SessionInvalidation) {
+      await invoke('chat_invalidate_session', { leaseId });
+    },
+  };
 }
 
 export function createClientChatFactory({
   descriptor,
   messageCreator,
+  platformId,
   onDiagnostic,
   onUnhandledError,
 }: CreateChatFactoryOptions): ChatClientFactory {
-  const sessionProvider: SessionProvider<TFRobotSession> = {
-    async getSession() {
-      const credential = await invoke<ChatSessionCredential>('chat_get_session_token', {
-        leaseId: descriptor.leaseId,
-      });
-      return { kind: 'bearer', token: credential.token };
-    },
-    async onSessionInvalid(_invalidation: SessionInvalidation) {
-      await invoke('chat_invalidate_session', { leaseId: descriptor.leaseId });
-    },
-  };
+  const sessionProvider = createChatSessionProvider(descriptor.leaseId);
 
   return createTFRobotChatClientFactory({
     baseUrl: descriptor.httpBaseUrl,
+    conversationContract: 'json-v2',
+    platformId,
     socketNamespaceUrl: descriptor.socketNamespaceUrl,
     socketPath: descriptor.socketPath,
     serverProfile: CURRENT_SERVER_PROFILE,
@@ -118,6 +124,25 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
         ? 'errorSummary.unknownOutcome' : 'errorSummary.failed');
       return `${name}: ${cause} ${impact}`;
     },
+    conversationFailureTitle: label('conversationFailureTitle'),
+    failureHistory: label('failureHistory'),
+    failureUploadsPending: label('failureUploadsPending'),
+    failureRealtime: label('failureRealtime'),
+    failureOriginalMessage: label('failureOriginalMessage'),
+    restoreFailureDraft: label('restoreFailureDraft'),
+    overwriteFailureDraftTitle: label('overwriteFailureDraftTitle'),
+    overwriteFailureDraftDescription: label('overwriteFailureDraftDescription'),
+    overwriteFailureDraftConfirm: label('overwriteFailureDraftConfirm'),
+    expandFailure: label('expandFailure'),
+    unconfirmedMessages: label('unconfirmedMessages'),
+    unconfirmedDescription: label('unconfirmedDescription'),
+    outgoingMessages: label('outgoingMessages'),
+    outgoingSending: label('outgoingSending'),
+    outgoingAccepted: label('outgoingAccepted'),
+    outgoingFailed: label('outgoingFailed'),
+    outgoingUnknown: label('outgoingUnknown'),
+    outgoingAttachments: label('outgoingAttachments'),
+    dismissOutgoing: label('dismissOutgoing'),
     composerEnterHint: label('composerEnterHint'),
     composerCtrlEnterHint: label('composerCtrlEnterHint'),
     diagnostics: label('diagnostics'),

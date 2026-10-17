@@ -60,6 +60,11 @@
     "title": "Robot List"
   },
   "chat": {
+    "platformSaveFailed": "Could not save the platform selection. Your current conversation is preserved. Please retry.",
+    "platform": "Conversation platform",
+    "selectPlatform": "Select a conversation platform",
+    "platformLoadFailed": "Could not load or save conversation platforms",
+    "noPlatforms": "No conversation platforms are available for this robot",
     "restorePositionFailed": "Could not restore or save the conversation you had open. Retry, or choose a robot and conversation manually.",
     "rememberRobotFailed": "Could not save your most recently used robot. Retry, or choose a robot manually.",
     "preferenceFailed": "Could not read your saved robot preference. Retry, or choose a robot manually.",
@@ -80,6 +85,25 @@
       "incompatible": "Chat not supported"
     },
     "workspace": {
+      "conversationFailureTitle": "Conversation failed",
+      "failureHistory": "History",
+      "failureUploadsPending": "Attachments are still uploading",
+      "failureRealtime": "Realtime processing",
+      "failureOriginalMessage": "Original message",
+      "restoreFailureDraft": "Restore draft",
+      "overwriteFailureDraftTitle": "Replace current draft?",
+      "overwriteFailureDraftDescription": "Your current draft will be replaced with the failed message.",
+      "overwriteFailureDraftConfirm": "Replace draft",
+      "expandFailure": "View failure details",
+      "unconfirmedMessages": "Unconfirmed messages",
+      "unconfirmedDescription": "Check conversation history before sending again.",
+      "outgoingMessages": "Outgoing messages",
+      "outgoingSending": "Sending",
+      "outgoingAccepted": "Accepted",
+      "outgoingFailed": "Failed",
+      "outgoingUnknown": "Outcome unknown",
+      "outgoingAttachments": "Attachments",
+      "dismissOutgoing": "Dismiss outgoing message",
       "attach": "Attach",
       "pastedTextTitle": "Pasted text",
       "removeAttachment": "Remove attachment",
@@ -1080,7 +1104,7 @@
     "contentType": "Content Type",
     "unknownContentType": "Unknown",
     "noWindows": "No desktop resources are currently exposed",
-    "notLoaded": "Resources are loaded only when you request them.",
+    "notLoaded": "Desktop resources have not loaded. Refresh to try again.",
     "windowContent": "Window Content",
     "noContent": "No content available",
     "clickToLoadDetail": "Click to load details",
@@ -1275,7 +1299,8 @@
       "invalid_response": "Manager returned a response we could not understand.",
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
-      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly."
+      "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly.",
+      "environment_not_allowed": "This build does not support that environment. Sign in to Production."
     }
   },
   "managerAccount": {
@@ -1302,7 +1327,8 @@
       "environmentRequired": "Environment is required",
       "environments": {
         "staging": "Staging",
-        "prod": "Production"
+        "prod": "Production (including Beta)",
+        "test": "Test"
       },
       "identifier": "Phone or email",
       "identifierRequired": "Phone or email is required",
@@ -1310,7 +1336,9 @@
       "passwordRequired": "Password is required",
       "submit": "Sign In",
       "logout": "Sign Out",
-      "logoutSuccess": "Signed out successfully"
+      "logoutSuccess": "Signed out successfully",
+      "productionOnly": "Distributed builds connect to Production only.",
+      "environmentPolicyFailed": "Could not load the environment policy. Please retry."
     },
     "accountSelection": {
       "title": "Choose an account",

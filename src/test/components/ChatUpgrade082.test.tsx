@@ -39,7 +39,7 @@ describe('0.8.2 published composer with the host Enter policy', () => {
       expect(labels.lifecycleStatus?.[state]).toBeTruthy();
       if (language === 'zh') expect(labels.lifecycleStatus?.[state]).toMatch(/[\u4e00-\u9fff]/);
     }
-    for (const key of ['composerEnterHint', 'composerCtrlEnterHint', 'diagnostics', 'copyDiagnostic', 'diagnosticCopied', 'diagnosticCopyFailed', 'diagnosticDetails', 'noDiagnostics', 'activeFaults', 'signInAgain', 'recoveredComplete', 'recoveredBestEffort'] as const) {
+    for (const key of ['conversationFailureTitle', 'failureHistory', 'failureUploadsPending', 'failureRealtime', 'failureOriginalMessage', 'restoreFailureDraft', 'overwriteFailureDraftTitle', 'overwriteFailureDraftDescription', 'overwriteFailureDraftConfirm', 'expandFailure', 'unconfirmedMessages', 'outgoingMessages', 'outgoingSending', 'outgoingAccepted', 'outgoingFailed', 'outgoingUnknown', 'outgoingAttachments', 'dismissOutgoing', 'composerEnterHint', 'composerCtrlEnterHint', 'diagnostics', 'copyDiagnostic', 'diagnosticCopied', 'diagnosticCopyFailed', 'diagnosticDetails', 'noDiagnostics', 'activeFaults', 'signInAgain', 'recoveredComplete', 'recoveredBestEffort'] as const) {
       expect(labels[key]).toBeTruthy();
       expect(labels[key]).not.toContain('chat.workspace.');
       if (language === 'zh') expect(labels[key]).toMatch(/[\u4e00-\u9fff]/);

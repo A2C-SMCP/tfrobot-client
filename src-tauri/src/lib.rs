@@ -482,6 +482,7 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = credential_app.emit("credentials:access-changed", ());
             }));
+            // Computer 配置属于本机，所有 Manager 登录环境共用原有应用数据目录。
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -715,6 +716,7 @@ pub fn run() {
             commands::settings::get_detected_path,
             // TFRSManager HTTP client (issue #23)
             commands::manager::manager_get_context,
+            commands::manager::get_manager_environment_policy,
             commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,
@@ -730,6 +732,7 @@ pub fn run() {
             commands::chat::chat_get_recent_robot,
             commands::chat::chat_remember_robot,
             commands::chat::chat_get_recent_conversation,
+            commands::chat::chat_platform_preference,
             commands::chat::chat_remember_conversation,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,

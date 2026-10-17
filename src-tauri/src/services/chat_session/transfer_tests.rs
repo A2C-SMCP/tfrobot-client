@@ -134,7 +134,7 @@ pub(crate) async fn fixture(status: u16, hold_upload: bool) -> Fixture {
                                 json!({"uri":"s3://robot-bucket/image.png"})
                             };
                             let is_upload = path.ends_with("/cos/upload");
-                            if is_upload { assert!(headers[COOKIE].to_str().unwrap().contains("tfUserToken=upload-token")); }
+                            if is_upload { assert_eq!(headers["authorization"], "Bearer upload-token"); assert!(!headers.contains_key(COOKIE)); }
                             if path.starts_with("/proxy/v1/utils/cos/presign?") { assert!(headers[COOKIE].to_str().unwrap().contains("tfUserToken=resource-token")); }
                             sender.send(Captured { path, headers, body }).unwrap();
                             if hold_upload && is_upload { release.notified().await; }
@@ -263,12 +263,9 @@ async fn multipart_bytes_and_private_resource_use_the_authenticated_lease() {
     );
     let request = fixture.requests.recv().await.unwrap();
     assert_eq!(request.path, "/proxy/v1/dashboard/remote/source/cos/upload");
-    assert_eq!(
-        request.headers[COOKIE],
-        "tfNamespace=tenant-acme; tfRobotId=rid-42; tfUserToken=upload-token"
-    );
+    assert_eq!(request.headers["authorization"], "Bearer upload-token");
     assert_eq!(request.headers["X-TF-Route"], "robot-42");
-    assert!(!request.headers.contains_key("authorization"));
+    assert!(!request.headers.contains_key(COOKIE));
     let content_type = request.headers[CONTENT_TYPE].to_str().unwrap();
     let boundary = content_type
         .strip_prefix("multipart/form-data; boundary=")

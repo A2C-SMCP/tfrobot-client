@@ -306,7 +306,7 @@ impl ChatSessionService {
                     .await?;
                 cancellation.check()?;
                 let mut url = target
-                    .http_base_url
+                    .resource_base_url
                     .join("resource/s3")
                     .map_err(|_| ChatResourceError::Invalid)?;
                 url.query_pairs_mut().append_pair("s3uri", &entry.uri);

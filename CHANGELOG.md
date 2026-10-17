@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-10-17
+
+- Upgrade Chat Kit to 0.10.1 and use the routed Server API with Bearer authentication and JSON conversation creation. This version requires the upgraded Server and Manager; retain the existing sign-in, identity selection, conversation navigation, and Enter/IME behavior.
+- Select a conversation platform beside the Robot and remember the selection per identity and Robot. Isolate conversation positions and drafts by platform, and preserve the current draft if saving a platform change fails.
+- Keep private attachment preview/download behind the native resource boundary. Real-environment download remains pending the controlled endpoint tracked in TFRS-619.
+- Offer Test, Staging, and Production in development builds while restricting packaged clients to Production; resolve the advertised Robot Socket.IO route.
+- Stack workbench runtime and skill cards, keep diagnostic sections visible, and load desktop resources automatically with a refresh action.
+
 ## 0.2.5 — 2026-09-17
 
 - Upgrade Chat Kit to 0.8.2 to fix long-history redaction stalls in macOS WebViews, reuse healthy conversation connections, and improve diagnostics. Preserve Enter/Ctrl+Enter to send and Shift+Enter for a new line; add English and Chinese error and recovery notices.

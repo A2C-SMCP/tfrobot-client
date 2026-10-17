@@ -7937,7 +7937,7 @@ dependencies = [
 
 [[package]]
 name = "tfrobot-client"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "a2c-smcp",
  "anyhow",

@@ -8,8 +8,6 @@ import {
 } from 'react';
 import type { ComputerWorkbenchSection } from './tabs';
 
-type DiagnosticPanel = Extract<ComputerWorkbenchSection, 'debug' | 'logs'>;
-
 export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSection, navigationRevision = 0) {
   const active = usePageActive();
   const action = usePageAction();
@@ -23,7 +21,6 @@ export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSe
   const resourcesRef = useRef<HTMLDivElement>(null);
   const debugRef = useRef<HTMLDivElement>(null);
   const logsRef = useRef<HTMLDivElement>(null);
-  const [diagnosticPanels, setDiagnosticPanels] = useNavigationState<DiagnosticPanel[]>('workbench.diagnostics', []);
   const sectionRefs = useMemo(() => ({
     top: topRef,
     skills: skillsRef,
@@ -33,11 +30,6 @@ export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSe
   }), []);
 
   const openSection = useCallback((section: ComputerWorkbenchSection) => {
-    if (section === 'debug' || section === 'logs') {
-      setDiagnosticPanels((current) => current.includes(section)
-        ? current
-        : [...current, section]);
-    }
     if (!active) return;
     const current = action();
     if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -50,13 +42,7 @@ export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSe
       target?.scrollIntoView?.({ behavior: 'instant', block: 'start' });
       target?.focus?.({ preventScroll: true });
     });
-  }, [active, action, sectionRefs, setDiagnosticPanels]);
-
-  const changeDiagnosticPanels = useCallback((keys: string | string[]) => {
-    const panels = (Array.isArray(keys) ? keys : [keys])
-      .filter((key): key is DiagnosticPanel => key === 'debug' || key === 'logs');
-    setDiagnosticPanels(panels);
-  }, [setDiagnosticPanels]);
+  }, [active, action, sectionRefs]);
 
   useEffect(() => {
     if (!active || appliedRevision === navigationRevision) return;
@@ -66,8 +52,6 @@ export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSe
 
   return {
     sectionRefs,
-    diagnosticPanels,
-    changeDiagnosticPanels,
     openSection,
   };
 }

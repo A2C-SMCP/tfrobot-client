@@ -63,7 +63,7 @@ fn should_warn_manager_auth_retry(attempt: u64) -> bool {
 /// Manager 驱动连接所需的解析结果。
 #[derive(Clone)]
 pub struct ManagerConnectionParams {
-    /// Socket.IO 服务端 URL（connection-info.socketBaseURL）。
+    /// Socket.IO 完整握手 URL（connection-info.socketBaseURL + sioPath）。
     pub url: String,
     /// SMCP office_id（= connection-info.rid，等价机器人 robotId）。
     pub office_id: String,
@@ -1904,12 +1904,7 @@ fn manager_connection_params_from_resolved(
     connection_info: ConnectionInfoResponse,
     scope: Option<String>,
 ) -> Result<ManagerConnectionParams, ManagerError> {
-    let url = connection_info.socket_base_url.trim().to_string();
-    if url.is_empty() {
-        return Err(ManagerError::InvalidResponse(
-            "connection-info missing socketBaseURL".into(),
-        ));
-    }
+    let url = connection_info.resolve_endpoints()?.socket_url.to_string();
     let office_id = connection_info
         .rid
         .filter(|value| !value.trim().is_empty())
@@ -2654,6 +2649,7 @@ mod tests {
             resolve_manager_robot_account_from_list(employees, 42).unwrap();
         let connection_info: ConnectionInfoResponse = serde_json::from_value(serde_json::json!({
             "socketBaseURL": "https://new-smcp.example.com",
+            "sioPath": "/c/tfrobot/new-office/socket.io/",
             "rid": "new-office",
             "namespace": "connection-namespace",
             "routingHeaders": { "X-TF-Route": "new-route" }
@@ -2674,7 +2670,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(params.url, "https://new-smcp.example.com");
+        assert_eq!(
+            params.url,
+            "https://new-smcp.example.com/c/tfrobot/new-office/socket.io/"
+        );
         assert_eq!(params.office_id, "new-office");
         assert_eq!(params.robot_account_id, "new-robot-account");
         assert_eq!(

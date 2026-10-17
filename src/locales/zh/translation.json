@@ -60,6 +60,11 @@
     "title": "数字员工"
   },
   "chat": {
+    "platformSaveFailed": "无法保存对话平台选择，当前对话已保留，请重试。",
+    "platform": "对话平台",
+    "selectPlatform": "请选择对话平台",
+    "platformLoadFailed": "无法读取或保存对话平台，请重试",
+    "noPlatforms": "该机器人暂无可用对话平台",
     "restorePositionFailed": "未能恢复或保存上次打开的对话位置。请重试，或手动选择数字员工和会话。",
     "rememberRobotFailed": "无法保存最近选择的数字员工。你可以重试或重新选择。",
     "preferenceFailed": "无法读取上次选择的数字员工。你可以重试或重新选择。",
@@ -80,6 +85,25 @@
       "incompatible": "不支持对话"
     },
     "workspace": {
+      "conversationFailureTitle": "对话处理失败",
+      "failureHistory": "历史记录",
+      "failureUploadsPending": "仍有附件正在上传",
+      "failureRealtime": "实时处理",
+      "failureOriginalMessage": "原始消息",
+      "restoreFailureDraft": "恢复为草稿",
+      "overwriteFailureDraftTitle": "替换当前草稿？",
+      "overwriteFailureDraftDescription": "当前草稿将被失败消息替换。",
+      "overwriteFailureDraftConfirm": "替换草稿",
+      "expandFailure": "查看失败详情",
+      "unconfirmedMessages": "待确认消息",
+      "unconfirmedDescription": "尚未在历史记录中确认，请核对后再决定是否重发。",
+      "outgoingMessages": "发送记录",
+      "outgoingSending": "正在发送",
+      "outgoingAccepted": "已接收",
+      "outgoingFailed": "发送失败",
+      "outgoingUnknown": "发送结果未知",
+      "outgoingAttachments": "附件",
+      "dismissOutgoing": "关闭发送记录",
       "attach": "添加附件",
       "pastedTextTitle": "粘贴文本",
       "removeAttachment": "移除附件",
@@ -1080,7 +1104,7 @@
     "contentType": "内容类型",
     "unknownContentType": "未知",
     "noWindows": "当前没有 MCP 服务器提供桌面资源",
-    "notLoaded": "仅在你主动请求时加载资源。",
+    "notLoaded": "桌面资源尚未加载，请点击刷新重试。",
     "windowContent": "窗口内容",
     "noContent": "无可用内容",
     "clickToLoadDetail": "点击加载详情",
@@ -1275,7 +1299,8 @@
       "invalid_response": "无法解析 Manager 返回的响应。",
       "keychain_error": "读取或写入安全凭据存储失败。",
       "token_exchange": "未能为此数字员工获取连接凭据，请重试。",
-      "signing_unavailable": "安全连接暂不可用（令牌签名服务未就绪），请稍后重试。"
+      "signing_unavailable": "安全连接暂不可用（令牌签名服务未就绪），请稍后重试。",
+      "environment_not_allowed": "当前版本不支持此环境，请登录正式环境。"
     }
   },
   "managerAccount": {
@@ -1302,7 +1327,8 @@
       "environmentRequired": "请选择环境",
       "environments": {
         "staging": "预发布环境",
-        "prod": "正式环境"
+        "prod": "正式环境（含 Beta）",
+        "test": "测试环境"
       },
       "identifier": "手机号或邮箱",
       "identifierRequired": "请输入手机号或邮箱",
@@ -1310,7 +1336,9 @@
       "passwordRequired": "请输入密码",
       "submit": "登录",
       "logout": "退出登录",
-      "logoutSuccess": "已退出登录"
+      "logoutSuccess": "已退出登录",
+      "productionOnly": "发行版固定连接正式环境。",
+      "environmentPolicyFailed": "无法读取环境配置，请重试。"
     },
     "accountSelection": {
       "title": "选择账号",

@@ -76,7 +76,7 @@
   scroll-margin-top: 24px;
 }
 
-.section + .section {
+.page main > .section + .section {
   margin-top: 20px;
 }
 
@@ -93,10 +93,6 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
-}
-
-.withInspector {
-  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
 }
 
 .runtimeProblems, .capabilitySummary {
@@ -139,7 +135,12 @@
   letter-spacing: -0.35px;
 }
 
-.diagnostics :global(.ant-collapse-content-box) {
+.diagnostics {
+  display: grid;
+  gap: 20px;
+}
+
+.diagnosticCard :global(.ant-card-body) {
   min-width: 0;
   overflow-x: auto;
 }
@@ -162,9 +163,6 @@
   .actionGuidance {
     max-width: none;
     text-align: left;
-  }
-  .withInspector {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

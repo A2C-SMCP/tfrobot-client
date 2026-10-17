@@ -8,6 +8,7 @@ import type {
   ManagerAccountSummary,
   ManagerContextSnapshot,
   ManagerError,
+  ManagerEnvironmentPolicy,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import i18n from '@/i18n';
@@ -91,6 +92,11 @@ import { GlobalManagerAccount } from '@/components/ManagerAccount/GlobalManagerA
 
 const mockUseManagerStore = vi.mocked(useManagerStore);
 const mockedInvoke = vi.mocked(invoke);
+const developmentPolicy: ManagerEnvironmentPolicy = {
+  buildMode: 'development',
+  allowedEnvironments: ['test', 'staging', 'prod'],
+  defaultEnvironment: 'test',
+};
 
 function adaptMock(store: ManagerStoreMock) {
   let context: ManagerContextSnapshot;
@@ -182,7 +188,9 @@ function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
 describe('ManagerAccount', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedInvoke.mockResolvedValue({ connected: false });
+    localStorage.clear();
+    mockedInvoke.mockImplementation(async (command) => command === 'get_manager_environment_policy'
+      ? developmentPolicy : { connected: false });
     // connectionStore 是真实 store（未 mock），复位到断开状态，让 EmployeeList 默认渲染"连接"而非"已连接"
     useConnectionStore.setState({
       statuses: {},
@@ -193,11 +201,12 @@ describe('ManagerAccount', () => {
   });
 
   describe('LoginForm', () => {
-    it.each([false, true])('offers only supported environments (embedded=%s)', (embedded) => {
+    it.each([false, true])('offers only supported environments (embedded=%s)', async (embedded) => {
       render(<LoginForm embedded={embedded} />);
-      fireEvent.mouseDown(screen.getByRole('combobox'));
+      fireEvent.mouseDown(await screen.findByRole('combobox'));
+      expect(screen.getAllByText('Test').length).toBeGreaterThan(0);
       expect(screen.getAllByText('Staging').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Production').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Production (including Beta)').length).toBeGreaterThan(0);
       expect(screen.queryByText('Beta')).not.toBeInTheDocument();
     });
 
@@ -220,12 +229,48 @@ describe('ManagerAccount', () => {
       fireEvent.change(screen.getByLabelText('Password'), {
         target: { value: 'Test@123456' },
       });
+      await waitFor(() => expect(screen.getByRole('button', { name: /Sign In/i })).toBeEnabled());
       fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
 
       await waitFor(() => {
-        expect(login).toHaveBeenCalledWith('staging', '13800138008', 'Test@123456');
+        expect(login).toHaveBeenCalledWith('test', '13800138008', 'Test@123456');
       });
     });
+
+    it.each(['staging', 'prod'])('remembers development choice %s', async (environment) => {
+      localStorage.setItem('tfrobot-client.development.managerEnvironment', environment);
+      render(<LoginForm />);
+      await screen.findByRole('combobox');
+      expect(screen.getByText(environment === 'staging' ? 'Staging' : 'Production (including Beta)')).toBeInTheDocument();
+    });
+
+    it('ignores development preferences in a packaged client and submits prod', async () => {
+      localStorage.setItem('tfrobot-client.development.managerEnvironment', 'staging');
+      mockedInvoke.mockResolvedValue({ buildMode: 'production', allowedEnvironments: ['prod'], defaultEnvironment: 'prod' });
+      const login = vi.fn().mockResolvedValue({ kind: 'authenticated' });
+      applyMock({ login });
+      render(<LoginForm />);
+      await screen.findByText('Production (including Beta)');
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText('Phone or email'), { target: { value: 'client@example.com' } });
+      fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+      fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
+      await waitFor(() => expect(login).toHaveBeenCalledWith('prod', 'client@example.com', 'secret'));
+    });
+
+    it.each([null, { buildMode: 'production', allowedEnvironments: ['staging'], defaultEnvironment: 'staging' }])(
+      'fails closed on an unavailable or invalid backend policy', async (response) => {
+        mockedInvoke.mockResolvedValue(response);
+        render(<LoginForm />);
+        await screen.findByRole('button', { name: 'Retry' });
+        expect(screen.getByRole('button', { name: /Sign In/i })).toBeDisabled();
+        expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+        mockedInvoke.mockResolvedValue(developmentPolicy);
+        fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+        await screen.findByRole('combobox');
+        expect(screen.getByRole('button', { name: /Sign In/i })).toBeEnabled();
+      },
+    );
 
     it('renders localized error message', () => {
       applyMock({ error: { kind: 'unauthorized' } });
