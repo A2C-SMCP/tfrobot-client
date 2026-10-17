@@ -4,6 +4,8 @@
 //! endpoints; short `chat:read chat:send` tokens are returned on demand for the browser-owned
 //! Socket.IO transport and are retained only in memory.
 
+#[cfg(test)]
+mod live_contract_tests;
 mod resources;
 mod transfers;
 pub use resources::{ChatResourceDiagnostic, ChatResourceError, ChatResourceHandle};
@@ -65,6 +67,7 @@ struct ResolvedChatTarget {
     robot_account_id: String,
     robot_name: String,
     http_base_url: Url,
+    resource_base_url: Url,
     socket_namespace_url: String,
     socket_path: String,
     frontend_namespace: String,
@@ -75,6 +78,7 @@ struct ResolvedChatTarget {
 #[derive(Debug)]
 struct ResolvedChatEndpoints {
     http_base_url: Url,
+    resource_base_url: Url,
     socket_namespace_url: String,
     socket_path: String,
     frontend_namespace: String,
@@ -118,7 +122,7 @@ impl CachedToken {
 struct ChatLease {
     target: ResolvedChatTarget,
     selection_revision: u64,
-    conversation_revision: u64,
+    conversation_revision: HashMap<u64, u64>,
     token: Option<CachedToken>,
     cancelled: watch::Sender<bool>,
 }
@@ -236,6 +240,7 @@ impl ChatSessionService {
             robot_account_id,
             robot_name: employee.name,
             http_base_url: endpoints.http_base_url,
+            resource_base_url: endpoints.resource_base_url,
             socket_namespace_url: endpoints.socket_namespace_url,
             socket_path: endpoints.socket_path,
             frontend_namespace: endpoints.frontend_namespace,
@@ -253,7 +258,7 @@ impl ChatSessionService {
         let committed_lease = Arc::new(Mutex::new(ChatLease {
             target,
             selection_revision,
-            conversation_revision: 0,
+            conversation_revision: HashMap::new(),
             token: Some(CachedToken::new(exchanged)),
             cancelled: watch::channel(false).0,
         }));
@@ -292,9 +297,47 @@ impl ChatSessionService {
             .await
     }
 
+    pub async fn platform_preference(
+        &self,
+        lease_id: &str,
+        platform_id: Option<u64>,
+    ) -> Result<Option<u64>, ManagerError> {
+        let lease = self.lease(lease_id).await?;
+        let (target, revision) = {
+            let current = lease.lock().await;
+            (current.target.clone(), current.selection_revision)
+        };
+        let _write = self.preference_write.lock().await;
+        self.manager()?
+            .commit_for_authenticated_generation(target.manager_generation, || async {
+                self.validate_active_lease(lease_id, &lease, &target.context_key, revision)
+                    .await?;
+                let Some(settings) = &self.settings else {
+                    return Ok(None);
+                };
+                if let Some(id) = platform_id {
+                    settings
+                        .save_chat_platform_state(&target.context_key, target.employee_id, id, None)
+                        .map_err(|_| {
+                            ManagerError::InvalidResponse(
+                                "Chat preference could not be saved".into(),
+                            )
+                        })?;
+                }
+                settings
+                    .load_chat_platform_state(&target.context_key, target.employee_id, None)
+                    .map(|state| state.0)
+                    .map_err(|_| {
+                        ManagerError::InvalidResponse("Chat preference could not be read".into())
+                    })
+            })
+            .await
+    }
+
     pub async fn recent_conversation(
         &self,
         lease_id: &str,
+        platform_id: u64,
     ) -> Result<Option<String>, ManagerError> {
         let lease = self.lease(lease_id).await?;
         let (target, revision) = {
@@ -309,7 +352,12 @@ impl ChatSessionService {
                     .as_ref()
                     .map(|settings| {
                         settings
-                            .load_recent_chat_conversation(&target.context_key, target.employee_id)
+                            .load_chat_platform_state(
+                                &target.context_key,
+                                target.employee_id,
+                                Some(platform_id),
+                            )
+                            .map(|state| state.1)
                             .map_err(|_| {
                                 ManagerError::InvalidResponse(
                                     "Chat preference could not be read".into(),
@@ -326,6 +374,7 @@ impl ChatSessionService {
         lease_id: &str,
         conversation_id: &str,
         revision: u64,
+        platform_id: u64,
     ) -> Result<(), ManagerError> {
         if conversation_id.is_empty() || conversation_id.len() > 1024 {
             return Err(ManagerError::InvalidResponse(
@@ -345,8 +394,7 @@ impl ChatSessionService {
                     &lease,
                     &target,
                     selection_revision,
-                    conversation_id,
-                    revision,
+                    (platform_id, conversation_id, revision),
                 )
                 .await
             })
@@ -359,22 +407,28 @@ impl ChatSessionService {
         lease: &Arc<Mutex<ChatLease>>,
         target: &ResolvedChatTarget,
         selection_revision: u64,
-        conversation_id: &str,
-        revision: u64,
+        position: (u64, &str, u64),
     ) -> Result<(), ManagerError> {
+        let (platform_id, conversation_id, revision) = position;
         self.validate_active_lease(lease_id, lease, &target.context_key, selection_revision)
             .await?;
         let mut current = lease.lock().await;
-        if revision < current.conversation_revision {
+        if revision
+            < *current
+                .conversation_revision
+                .get(&platform_id)
+                .unwrap_or(&0)
+        {
             return Err(ManagerError::ContextChanged);
         }
-        current.conversation_revision = revision;
+        current.conversation_revision.insert(platform_id, revision);
         if let Some(settings) = &self.settings {
             settings
-                .save_recent_chat_conversation(
+                .save_chat_platform_state(
                     &target.context_key,
                     target.employee_id,
-                    conversation_id,
+                    platform_id,
+                    Some(conversation_id),
                 )
                 .map_err(|_| {
                     ManagerError::InvalidResponse("Chat preference could not be saved".into())
@@ -642,7 +696,7 @@ impl ChatSessionService {
             .http
             .request(request_method, url)
             .header(ACCEPT, "application/json")
-            .header(COOKIE, frontend_session_cookie(target, &credential.token)?);
+            .bearer_auth(&credential.token);
         for (name, value) in &target.routing_headers {
             let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                 ManagerError::InvalidResponse(
@@ -788,31 +842,25 @@ fn resolve_chat_endpoints(
         required_frontend_route_id(connection_info.robot_type.as_deref(), "robotType")?;
     let namespace = required_frontend_route_id(connection_info.namespace.as_deref(), "namespace")?;
     let robot_id = required_frontend_route_id(connection_info.rid.as_deref(), "rid")?;
-    let modern = endpoints.robot_path_prefix.is_some();
+    // Chat requires the routed Server contract. Older environments must be upgraded first.
     let instance_prefix = endpoints
         .robot_path_prefix
-        .unwrap_or_else(|| format!("/c/{robot_type}/{namespace}/{robot_id}"));
-
+        .ok_or(ManagerError::ChatUnavailable)?;
+    if instance_prefix != format!("/c/{robot_type}/{robot_id}") {
+        return Err(ManagerError::ChatUnavailable);
+    }
     let mut http_base = transport_base.clone();
-    http_base.set_path(&format!("{instance_prefix}/api/"));
-
-    let socket_path = if modern {
-        transport_base.path().to_string()
-    } else {
-        // Legacy Front BFFs used a namespace-bearing prefix around the transport path.
-        // Keep that contract only for old Manager responses; v2 already includes its prefix.
-        let legacy_path = connection_info
-            .sio_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .unwrap_or("/socket.io");
-        format!("{instance_prefix}{legacy_path}")
-    };
+    http_base.set_path(&format!("{instance_prefix}/"));
+    // Private resource streaming retains its separate, native-only Front boundary until
+    // the Server exposes a desktop-reachable download endpoint (TFRS-619).
+    let mut resource_base = transport_base.clone();
+    resource_base.set_path(&format!("{instance_prefix}/api/"));
+    let socket_path = transport_base.path().to_string();
     let mut socket_namespace = transport_base;
     socket_namespace.set_path("/chat");
     Ok(ResolvedChatEndpoints {
         http_base_url: http_base,
+        resource_base_url: resource_base,
         socket_namespace_url: socket_namespace.to_string(),
         socket_path,
         frontend_namespace: namespace.to_string(),
@@ -889,6 +937,7 @@ fn validate_chat_request_url(
         .trim_start_matches('/');
     let segments = relative_path.split('/').collect::<Vec<_>>();
     let allowed_path = match segments.as_slice() {
+        ["v1", "chat", "platforms"] => method == "GET",
         ["v1", "chat", "conversations"] => method == "GET" || method == "POST",
         ["v1", "chat", "conversations", id, "messages"] if !id.is_empty() => {
             method == "GET" || method == "POST"
@@ -950,6 +999,7 @@ mod tests {
             employee_id: 42,
             robot_account_id: "robot-account-42".into(),
             robot_name: "Robot".into(),
+            resource_base_url: http_base_url.clone(),
             http_base_url,
             socket_namespace_url: "http://127.0.0.1/chat".into(),
             socket_path: "/socket.io".into(),
@@ -978,7 +1028,7 @@ mod tests {
             Arc::new(Mutex::new(ChatLease {
                 target,
                 selection_revision,
-                conversation_revision: 0,
+                conversation_revision: HashMap::new(),
                 token: Some(CachedToken::new(ExchangedToken {
                     access_token: "short-chat-token".into(),
                     token_type: "Bearer".into(),
@@ -1024,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn http_endpoint_uses_instance_bff_without_exposing_credentials_or_manager_secrets() {
+    fn chat_rejects_legacy_front_contract() {
         let info = ConnectionInfoResponse {
             socket_base_url: "wss://robot.example.com/proxy".into(),
             sio_path: Some("/robot/socket.io".into()),
@@ -1035,21 +1085,10 @@ mod tests {
             computer_name: None,
             routing_headers: HashMap::new(),
         };
-        let endpoints = resolve_chat_endpoints(&info).unwrap();
-        assert_eq!(
-            endpoints.http_base_url.as_str(),
-            "https://robot.example.com/c/tfrobot/tenant-acme/rid-42/api/"
-        );
-        assert_eq!(
-            endpoints.socket_namespace_url,
-            "https://robot.example.com/chat"
-        );
-        assert_eq!(
-            endpoints.socket_path,
-            "/c/tfrobot/tenant-acme/rid-42/robot/socket.io"
-        );
-        assert_eq!(endpoints.frontend_namespace, "tenant-acme");
-        assert_eq!(endpoints.frontend_robot_id, "rid-42");
+        assert!(matches!(
+            resolve_chat_endpoints(&info),
+            Err(ManagerError::ChatUnavailable)
+        ));
     }
 
     #[test]
@@ -1065,7 +1104,7 @@ mod tests {
         let endpoints = resolve_chat_endpoints(&info).unwrap();
         assert_eq!(
             endpoints.http_base_url.as_str(),
-            "https://robot.example.com/c/tfrobot/robot-42/api/"
+            "https://robot.example.com/c/tfrobot/robot-42/"
         );
         assert_eq!(endpoints.socket_path, "/c/tfrobot/robot-42/socket.io/");
         assert_eq!(
@@ -1094,6 +1133,29 @@ mod tests {
         info.namespace = Some("tenant-acme".into());
         info.rid = None;
         assert!(resolve_chat_endpoints(&info).is_err());
+    }
+
+    #[test]
+    fn platforms_are_read_only_and_bound_to_the_active_robot_route() {
+        let base = Url::parse("https://robot.example/c/tfrobot/rid-42/").unwrap();
+        assert!(validate_chat_request_url(
+            &base,
+            "https://robot.example/c/tfrobot/rid-42/v1/chat/platforms",
+            "GET"
+        )
+        .is_ok());
+        assert!(validate_chat_request_url(
+            &base,
+            "https://robot.example/c/tfrobot/rid-42/v1/chat/platforms",
+            "POST"
+        )
+        .is_err());
+        assert!(validate_chat_request_url(
+            &base,
+            "https://robot.example/c/tfrobot/other/v1/chat/platforms",
+            "GET"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1175,18 +1237,19 @@ mod tests {
             .await;
         let lease = service.lease("current").await.unwrap();
         service
-            .commit_conversation_preference("current", &lease, &target, 10, "latest", 20)
+            .commit_conversation_preference("current", &lease, &target, 10, (1, "latest", 20))
             .await
             .unwrap();
         assert!(matches!(
             service
-                .commit_conversation_preference("current", &lease, &target, 10, "old", 19)
+                .commit_conversation_preference("current", &lease, &target, 10, (1, "old", 19))
                 .await,
             Err(ManagerError::ContextChanged)
         ));
         assert_eq!(
             settings
-                .load_recent_chat_conversation(&context, target.employee_id)
+                .load_chat_platform_state(&context, target.employee_id, Some(1))
+                .map(|state| state.1)
                 .unwrap()
                 .as_deref(),
             Some("latest")
@@ -1194,13 +1257,14 @@ mod tests {
         service.close("current").await;
         assert!(matches!(
             service
-                .commit_conversation_preference("current", &lease, &target, 10, "closed", 21)
+                .commit_conversation_preference("current", &lease, &target, 10, (1, "closed", 21))
                 .await,
             Err(ManagerError::ContextChanged)
         ));
         assert_eq!(
             settings
-                .load_recent_chat_conversation(&context, target.employee_id)
+                .load_chat_platform_state(&context, target.employee_id, Some(1))
+                .map(|state| state.1)
                 .unwrap()
                 .as_deref(),
             Some("latest")
@@ -1404,10 +1468,10 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(uri, "/proxy/v1/chat/conversations?count=20");
         assert_eq!(
-            headers.get(COOKIE).unwrap(),
-            "tfNamespace=tenant-acme; tfRobotId=rid-42; tfUserToken=short-chat-token"
+            headers.get("authorization").unwrap(),
+            "Bearer short-chat-token"
         );
-        assert!(headers.get("authorization").is_none());
+        assert!(headers.get(COOKIE).is_none());
         assert_eq!(headers.get("X-TF-Route").unwrap(), "robot-42");
         server.await.unwrap();
     }
@@ -1461,8 +1525,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires an explicit staging chat credential and route context"]
-    async fn staging_instance_bff_returns_a_valid_conversation_envelope() {
+    #[ignore = "requires an explicit routed Server chat credential and route context"]
+    async fn routed_server_returns_a_valid_conversation_envelope() {
         let socket_base_url = std::env::var("TFRC_CHAT_SOCKET_BASE_URL").unwrap();
         let namespace = std::env::var("TFRC_CHAT_NAMESPACE").unwrap();
         let robot_id = std::env::var("TFRC_CHAT_ROBOT_ID").unwrap();
@@ -1470,7 +1534,7 @@ mod tests {
         let short_token = std::env::var("TFRC_CHAT_SHORT_TOKEN").unwrap();
         let info = ConnectionInfoResponse {
             socket_base_url,
-            sio_path: Some("/socket.io/".into()),
+            sio_path: Some(format!("/c/{robot_type}/{robot_id}/socket.io/")),
             namespace: Some(namespace.clone()),
             rid: Some(robot_id.clone()),
             robot_type: Some(robot_type.clone()),
@@ -1490,6 +1554,7 @@ mod tests {
             robot_account_id: "staging-robot-account".into(),
             robot_name: "staging-robot".into(),
             http_base_url: endpoints.http_base_url.clone(),
+            resource_base_url: endpoints.resource_base_url.clone(),
             socket_namespace_url: endpoints.socket_namespace_url,
             socket_path: endpoints.socket_path,
             frontend_namespace: endpoints.frontend_namespace,

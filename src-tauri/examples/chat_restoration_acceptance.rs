@@ -38,12 +38,31 @@ fn chat_remember_robot(state: State<'_, SettingsService>, lease_id: String) {
         .unwrap();
 }
 #[tauri::command]
+fn chat_platform_preference(
+    state: State<'_, SettingsService>,
+    lease_id: String,
+    platform_id: Option<u64>,
+) -> Option<u64> {
+    let employee_id = lease_id.parse().unwrap();
+    if let Some(id) = platform_id {
+        state
+            .save_chat_platform_state(&context(), employee_id, id, None)
+            .unwrap();
+    }
+    state
+        .load_chat_platform_state(&context(), employee_id, None)
+        .unwrap()
+        .0
+}
+#[tauri::command]
 fn chat_get_recent_conversation(
+    platform_id: u64,
     state: State<'_, SettingsService>,
     lease_id: String,
 ) -> Option<String> {
     state
-        .load_recent_chat_conversation(&context(), lease_id.parse().unwrap())
+        .load_chat_platform_state(&context(), lease_id.parse().unwrap(), Some(platform_id))
+        .map(|state| state.1)
         .unwrap()
 }
 #[tauri::command]
@@ -51,9 +70,15 @@ fn chat_remember_conversation(
     state: State<'_, SettingsService>,
     lease_id: String,
     conversation_id: String,
+    platform_id: u64,
 ) {
     state
-        .save_recent_chat_conversation(&context(), lease_id.parse().unwrap(), &conversation_id)
+        .save_chat_platform_state(
+            &context(),
+            lease_id.parse().unwrap(),
+            platform_id,
+            Some(&conversation_id),
+        )
         .unwrap();
     emit(json!({"kind":"saved","employeeId":lease_id,"conversationId":conversation_id}));
 }
@@ -91,6 +116,7 @@ fn main() {
             chat_get_recent_robot,
             chat_remember_robot,
             chat_get_recent_conversation,
+            chat_platform_preference,
             chat_remember_conversation,
             chat_close_session,
             chat_get_session_token,

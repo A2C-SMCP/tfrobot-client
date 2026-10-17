@@ -1,6 +1,7 @@
 import { usePageActive } from '@/components/Navigation/pageActivityState';
 import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
@@ -25,6 +26,8 @@ import {
   theme,
 } from 'antd';
 import {
+  createTFRobotPlatformClient,
+  type TFRobotConversationPlatform,
   ChatConversationView,
   ChatResourceProvider,
   ChatUiShell,
@@ -48,6 +51,8 @@ import { info, warn } from '@/utils/logger';
 import {
   chatUiLabels,
   createClientChatFactory,
+  createChatSessionProvider,
+  createTauriChatFetch,
   getChatDeadlineAt,
   type ChatSessionDescriptor,
 } from './chatBridge';
@@ -86,6 +91,8 @@ const RETRYABLE_ATTACHMENT_ERRORS = new Set(['network', 'timeout', 'busy']);
 interface ActiveChatProps {
   descriptor: ChatSessionDescriptor;
   creator: { uid: string; name: string };
+  platformId: number;
+  platformContainer?: HTMLElement | null;
 }
 
 type WorkspaceSnapshot = ConversationWorkspaceBinding['snapshot'];
@@ -120,12 +127,13 @@ function contentStateFor(
   return { kind: 'empty' };
 }
 
-function ActiveChat({ descriptor, creator }: ActiveChatProps) {
+function ActiveChat({ descriptor, creator, platformId }: ActiveChatProps) {
   const { t } = useTranslation();
   const labels = useMemo(() => chatUiLabels((key) => t(key)), [t]);
   const factory = useMemo(() => createClientChatFactory({
     descriptor,
     messageCreator: creator,
+    platformId,
     onDiagnostic: (error: ChatError) => {
       // Only select Chat Kit's sanitized error fields; never log raw exceptions or sessions.
       void warn(`chat: diagnostic ${JSON.stringify({
@@ -140,7 +148,7 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
     onUnhandledError: () => {
       warn('chat: unhandled client callback error');
     },
-  }), [creator, descriptor]);
+  }), [creator, descriptor, platformId]);
 
   useEffect(() => {
     const context = { leaseId: descriptor.leaseId, employeeId: descriptor.employeeId };
@@ -173,7 +181,7 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
           : undefined}
         onClose={() => setResourceError(undefined)} />}
       <ChatResourceProvider port={resources} scope={descriptor.leaseId}>
-        <CompactChatWorkspace labels={labels} leaseId={descriptor.leaseId} />
+        <CompactChatWorkspace labels={labels} leaseId={descriptor.leaseId} platformId={platformId} />
       </ChatResourceProvider>
     </OwnedChatProvider>
   );
@@ -181,6 +189,7 @@ function ActiveChat({ descriptor, creator }: ActiveChatProps) {
 
 interface CompactChatWorkspaceProps {
   leaseId?: string;
+  platformId?: number;
   labels: ChatUiLabelOverrides;
 }
 
@@ -190,7 +199,7 @@ interface CompactChatWorkspaceProps {
  * listing, creation, paging, selection and async races stay owned by the
  * workspace controller — only the navigation chrome is host-rendered.
  */
-export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspaceProps) {
+export function CompactChatWorkspace({ labels, leaseId, platformId }: CompactChatWorkspaceProps) {
   const { t } = useTranslation();
   const active = usePageActive();
   const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('auto');
@@ -200,7 +209,7 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
     onUnhandledError: () => warn('chat: unhandled workspace error'),
     pageSize: 50,
   });
-  const restoration = useChatRestoration(workspace, leaseId);
+  const restoration = useChatRestoration(workspace, leaseId, platformId);
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -315,14 +324,81 @@ export function CompactChatWorkspace({ labels, leaseId }: CompactChatWorkspacePr
   );
 }
 
+/** The platform directory and its errors are owned by Chat Kit; only selection UI lives here. */
+function PlatformChat({ descriptor, creator, platformContainer }: Omit<ActiveChatProps, 'platformId'>) {
+  const { t } = useTranslation();
+  const [platforms, setPlatforms] = useState<readonly TFRobotConversationPlatform[]>();
+  const [selected, setSelected] = useState<number>();
+  const [failed, setFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<number>();
+  const [attempt, setAttempt] = useState(0);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    let active = true;
+    const abort = new AbortController();
+    const client = createTFRobotPlatformClient({
+      baseUrl: descriptor.httpBaseUrl,
+      sessionProvider: createChatSessionProvider(descriptor.leaseId),
+      fetch: createTauriChatFetch(descriptor.leaseId),
+    });
+    setFailed(false);
+    setPlatforms(undefined);
+    setSelected(undefined);
+    void Promise.all([
+      client.list({ signal: abort.signal, deadlineAt: getChatDeadlineAt() }),
+      invoke<number | null>('chat_platform_preference', { leaseId: descriptor.leaseId }),
+    ]).then(async ([result, remembered]) => {
+      if (!active) return;
+      if (!result.ok) throw result.error;
+      const items = result.value;
+      const choice = items.find((item) => item.platformId === remembered)?.platformId
+        ?? (items.length === 1 ? items[0].platformId : undefined);
+      if (choice !== undefined) {
+        await invoke('chat_platform_preference', { leaseId: descriptor.leaseId, platformId: choice });
+        if (!active) return;
+      }
+      setPlatforms(items);
+      setSelected(choice);
+    }).catch(() => { if (active) setFailed(true); });
+    return () => { active = false; alive.current = false; abort.abort(); client.dispose(); };
+  }, [descriptor, attempt]);
+  const selectPlatform = (platformId: number) => {
+    setSaving(true);
+    setSaveError(undefined);
+    void invoke('chat_platform_preference', { leaseId: descriptor.leaseId, platformId })
+      .then(() => { if (alive.current) setSelected(platformId); })
+      .catch(() => { if (alive.current) setSaveError(platformId); })
+      .finally(() => { if (alive.current) setSaving(false); });
+  };
+  if (failed) return <Alert type="error" showIcon message={t('chat.platformLoadFailed')}
+    action={<Button onClick={() => setAttempt((value) => value + 1)}>{t('common.retry')}</Button>} />;
+  if (!platforms) return <div className={styles.centered}><Spin /></div>;
+  if (platforms.length === 0) return <Empty description={t('chat.noPlatforms')} />;
+  return <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    {platforms.length > 1 && platformContainer && createPortal(<Select aria-label={t('chat.platform')} placeholder={t('chat.selectPlatform')}
+        size="large" style={{ width: 200 }} value={selected} disabled={saving} loading={saving}
+        options={platforms.map((item) => ({ value: item.platformId, label: item.name }))}
+        onChange={selectPlatform} />, platformContainer)}
+    {saveError !== undefined && <Alert type="warning" showIcon message={t('chat.platformSaveFailed')}
+      action={<Button onClick={() => selectPlatform(saveError)}>{t('common.retry')}</Button>} />}
+    <div style={{ flex: 1, minHeight: 0 }}>
+      {selected === undefined ? <Empty description={t('chat.selectPlatform')} />
+        : <ActiveChat key={selected} descriptor={descriptor} creator={creator} platformId={selected} />}
+    </div>
+  </div>;
+}
+
 interface ChatSessionHostProps {
   creator: { uid: string; name: string };
   employeeId: number;
   onOpened: (employeeId: number) => void;
   onUnavailable: (employeeId: number) => void;
+  platformContainer: HTMLElement | null;
 }
 
-function ChatSessionHost({ creator, employeeId, onOpened, onUnavailable }: ChatSessionHostProps) {
+function ChatSessionHost({ creator, employeeId, onOpened, onUnavailable, platformContainer }: ChatSessionHostProps) {
   const { t } = useTranslation();
   const [descriptor, setDescriptor] = useState<ChatSessionDescriptor | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -381,7 +457,7 @@ function ChatSessionHost({ creator, employeeId, onOpened, onUnavailable }: ChatS
         void invoke('chat_remember_robot', { leaseId: descriptor.leaseId })
           .then(() => setSaveFailed(false)).catch(() => setSaveFailed(true));
       }}>{t('common.retry')}</Button>} />}
-    <ActiveChat descriptor={descriptor} creator={creator} />
+    <PlatformChat descriptor={descriptor} creator={creator} platformContainer={platformContainer} />
   </>;
 }
 
@@ -407,6 +483,7 @@ export function Chat() {
   const handleUnavailable = useCallback((employeeId: number) => {
     setUnavailable((previous) => ({ scope, ids: [...(previous.scope === scope ? previous.ids : []), employeeId] }));
   }, [scope]);
+  const [platformContainer, setPlatformContainer] = useState<HTMLDivElement | null>(null);
   const [selection, setSelection] = useState<ChatSelection | null>(null);
   const [recentEmployeeId, setRecentEmployeeId] = useState<number | null>(null);
   const [preferenceError, setPreferenceError] = useState(false);
@@ -546,6 +623,7 @@ export function Chat() {
                 }
               }}
             />
+            <div ref={setPlatformContainer} className={styles.platformSelector} />
             <Tooltip title={t('common.refresh')}>
               <Button
                 aria-label={t('common.refresh')}
@@ -594,6 +672,7 @@ export function Chat() {
             <ChatSessionHost
               key={`${scope}:${selectedEmployeeId}`}
               creator={creator}
+              platformContainer={platformContainer}
               employeeId={selectedEmployeeId}
               onOpened={handleSessionOpened}
               onUnavailable={handleUnavailable}

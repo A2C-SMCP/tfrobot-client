@@ -732,6 +732,7 @@ pub fn run() {
             commands::chat::chat_get_recent_robot,
             commands::chat::chat_remember_robot,
             commands::chat::chat_get_recent_conversation,
+            commands::chat::chat_platform_preference,
             commands::chat::chat_remember_conversation,
             commands::chat::chat_get_session_token,
             commands::chat::chat_invalidate_session,

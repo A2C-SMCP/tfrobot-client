@@ -20,7 +20,7 @@ fn default_tool_history_retention_days() -> u32 {
 }
 
 pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
-const CHAT_PREFERENCES_SCHEMA_VERSION: u32 = 2;
+const CHAT_PREFERENCES_SCHEMA_VERSION: u32 = 3;
 const UI_NOTICE_SCHEMA_VERSION: u32 = 1;
 /// Upper bound for persisted notice entries. The frontend only ever uses a fixed, small set of
 /// ids; the cap keeps a buggy caller from growing the user's settings file without bound.
@@ -52,6 +52,11 @@ struct ChatPreferenceEntry {
     employee_id: u64,
     #[serde(default)]
     conversations: std::collections::BTreeMap<u64, String>,
+    #[serde(default)]
+    platforms: std::collections::BTreeMap<u64, u64>,
+    #[serde(default)]
+    platform_conversations:
+        std::collections::BTreeMap<u64, std::collections::BTreeMap<u64, String>>,
 }
 
 impl ChatPreferenceEntry {
@@ -619,6 +624,8 @@ impl SettingsService {
                 organization_id: context.organization_id.clone(),
                 employee_id,
                 conversations: Default::default(),
+                platforms: Default::default(),
+                platform_conversations: Default::default(),
             });
         }
         write_json_atomically(&self.chat_preferences_path(), &preferences)?;
@@ -666,6 +673,8 @@ impl SettingsService {
                     organization_id: context.organization_id.clone(),
                     employee_id,
                     conversations: Default::default(),
+                    platforms: Default::default(),
+                    platform_conversations: Default::default(),
                 });
                 preferences.entries.last_mut().expect("inserted preference")
             }
@@ -674,6 +683,79 @@ impl SettingsService {
         entry
             .conversations
             .insert(employee_id, conversation_id.to_owned());
+        write_json_atomically(&self.chat_preferences_path(), &preferences)?;
+        Ok(())
+    }
+
+    pub fn load_chat_platform_state(
+        &self,
+        context: &ManagerContextKey,
+        employee_id: u64,
+        platform_id: Option<u64>,
+    ) -> Result<(Option<u64>, Option<String>), ChatPreferencesError> {
+        let _guard = self
+            .chat_preferences_lock
+            .lock()
+            .map_err(|_| ChatPreferencesError::LockPoisoned)?;
+        let preferences = self.load_chat_preferences_unlocked()?;
+        let entry = preferences
+            .entries
+            .iter()
+            .find(|entry| entry.matches(context));
+        Ok(entry
+            .map(|entry| {
+                (
+                    entry.platforms.get(&employee_id).copied(),
+                    platform_id.and_then(|id| {
+                        entry
+                            .platform_conversations
+                            .get(&employee_id)?
+                            .get(&id)
+                            .cloned()
+                    }),
+                )
+            })
+            .unwrap_or_default())
+    }
+
+    pub fn save_chat_platform_state(
+        &self,
+        context: &ManagerContextKey,
+        employee_id: u64,
+        platform_id: u64,
+        conversation_id: Option<&str>,
+    ) -> Result<(), ChatPreferencesError> {
+        let _guard = self
+            .chat_preferences_lock
+            .lock()
+            .map_err(|_| ChatPreferencesError::LockPoisoned)?;
+        let mut preferences = self.load_chat_preferences_unlocked()?;
+        let index = preferences
+            .entries
+            .iter()
+            .position(|entry| entry.matches(context))
+            .unwrap_or_else(|| {
+                preferences.entries.push(ChatPreferenceEntry {
+                    environment: context.environment,
+                    account_id: context.account_id.clone(),
+                    organization_id: context.organization_id.clone(),
+                    employee_id,
+                    conversations: Default::default(),
+                    platforms: Default::default(),
+                    platform_conversations: Default::default(),
+                });
+                preferences.entries.len() - 1
+            });
+        let entry = &mut preferences.entries[index];
+        if let Some(id) = conversation_id {
+            entry
+                .platform_conversations
+                .entry(employee_id)
+                .or_default()
+                .insert(platform_id, id.to_owned());
+        } else {
+            entry.platforms.insert(employee_id, platform_id);
+        }
         write_json_atomically(&self.chat_preferences_path(), &preferences)?;
         Ok(())
     }
@@ -700,9 +782,10 @@ impl SettingsService {
             }
         }
         let mut preferences: ChatPreferences = serde_json::from_value(value)?;
-        if preferences.schema_version != 1
-            && preferences.schema_version != CHAT_PREFERENCES_SCHEMA_VERSION
-        {
+        if !matches!(
+            preferences.schema_version,
+            1 | 2 | CHAT_PREFERENCES_SCHEMA_VERSION
+        ) {
             return Err(ChatPreferencesError::UnsupportedSchemaVersion {
                 expected: CHAT_PREFERENCES_SCHEMA_VERSION,
                 actual: preferences.schema_version,
@@ -798,6 +881,66 @@ mod tests {
         let tmp = tempdir().unwrap();
         let svc = SettingsService::new(tmp.path().to_path_buf());
         (svc, tmp)
+    }
+
+    #[test]
+    fn chat_platform_preferences_survive_restart_and_isolate_all_scopes() {
+        let (svc, tmp) = setup();
+        let context = ManagerContextKey {
+            environment: ManagerEnvironment::Staging,
+            account_id: "account-a".into(),
+            organization_id: "org-a".into(),
+        };
+        svc.save_recent_chat_conversation(&context, 42, "legacy-unknown-platform")
+            .unwrap();
+        assert_eq!(
+            svc.load_chat_platform_state(&context, 42, Some(1)).unwrap(),
+            (None, None)
+        );
+        svc.save_chat_platform_state(&context, 42, 1, None).unwrap();
+        svc.save_chat_platform_state(&context, 42, 1, Some("platform-one"))
+            .unwrap();
+        svc.save_chat_platform_state(&context, 42, 2, Some("platform-two"))
+            .unwrap();
+        // Saving a late conversation selection must not change the selected platform.
+        assert_eq!(
+            svc.load_chat_platform_state(&context, 42, Some(2)).unwrap(),
+            (Some(1), Some("platform-two".into()))
+        );
+        let reopened = SettingsService::new(tmp.path().to_path_buf());
+        assert_eq!(
+            reopened
+                .load_chat_platform_state(&context, 42, Some(1))
+                .unwrap(),
+            (Some(1), Some("platform-one".into()))
+        );
+        assert_eq!(
+            reopened
+                .load_chat_platform_state(&context, 43, Some(1))
+                .unwrap(),
+            (None, None)
+        );
+        for other in [
+            ManagerContextKey {
+                account_id: "account-b".into(),
+                ..context.clone()
+            },
+            ManagerContextKey {
+                organization_id: "org-b".into(),
+                ..context.clone()
+            },
+            ManagerContextKey {
+                environment: ManagerEnvironment::Prod,
+                ..context.clone()
+            },
+        ] {
+            assert_eq!(
+                reopened
+                    .load_chat_platform_state(&other, 42, Some(1))
+                    .unwrap(),
+                (None, None)
+            );
+        }
     }
 
     #[test]
@@ -1193,7 +1336,7 @@ mod tests {
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(svc.chat_preferences_path()).unwrap())
                 .unwrap();
-        assert_eq!(stored["schema_version"], 2);
+        assert_eq!(stored["schema_version"], CHAT_PREFERENCES_SCHEMA_VERSION);
         assert_eq!(
             svc.load_recent_chat_conversation(&context, 42)
                 .unwrap()

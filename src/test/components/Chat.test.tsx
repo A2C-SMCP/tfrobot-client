@@ -22,12 +22,14 @@ import type {
 } from '@/stores/managerStore';
 
 const chatKitMock = vi.hoisted(() => ({
+  platforms: vi.fn(async () => ({ ok: true, value: [{ platformId: 1, name: 'Default' }] })),
   createFactory: vi.fn((_options: unknown) => ({ create: vi.fn(), getDisposeOptions: vi.fn() })),
   useConversationWorkspace: vi.fn(),
 }));
 
 vi.mock('@turingfocus/chat-kit', () => ({
   createTFRobotChatClientFactory: chatKitMock.createFactory,
+  createTFRobotPlatformClient: () => ({ list: chatKitMock.platforms, dispose: vi.fn() }),
   OwnedChatProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   ChatUiShell: () => <div>Managed Chat Workspace</div>,
   ChatConversationView: () => null,
@@ -104,6 +106,7 @@ function currentEmployeeResource(): ManagerEmployeeResource {
 describe('Chat', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    chatKitMock.platforms.mockResolvedValue({ ok: true, value: [{ platformId: 1, name: 'Default' }] });
     managerStoreMock.context = {
       revision: 0,
       authState: 'signed_out',
@@ -158,6 +161,54 @@ describe('Chat', () => {
     const opens = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'chat_open_session');
     expect(opens).toHaveLength(1);
     expect(opens[0][1]).toMatchObject({ employeeId: 43 });
+  });
+
+  it('requires a valid selection for multiple platforms and keys clients by platform', async () => {
+    setAuthenticatedEmployees([employee()]);
+    chatKitMock.platforms.mockResolvedValue({ ok: true, value: [
+      { platformId: 1, name: 'A2A' }, { platformId: 2, name: 'Workspace' },
+    ] });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'chat_get_recent_robot') return 42;
+      if (command === 'chat_platform_preference') return (args as { platformId?: number }).platformId ?? 999;
+      if (command === 'chat_open_session') return {
+        leaseId: 'platforms', employeeId: 42, robotName: 'Robot A', httpBaseUrl: 'https://robot.example/',
+        socketNamespaceUrl: 'https://robot.example/chat', socketPath: '/socket.io',
+      };
+    });
+    render(<Chat />);
+    await screen.findByRole('combobox', { name: 'Conversation platform' });
+    expect(chatKitMock.createFactory).not.toHaveBeenCalled();
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Conversation platform' }));
+    fireEvent.click(await screen.findByText('Workspace'));
+    await screen.findByText('Managed Chat Workspace');
+    expect(chatKitMock.createFactory).toHaveBeenLastCalledWith(expect.objectContaining({ platformId: 2 }));
+    expect(invoke).toHaveBeenCalledWith('chat_get_recent_conversation', { leaseId: 'platforms', platformId: 2 });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Conversation platform' }));
+    fireEvent.click(await screen.findByText('A2A'));
+    await waitFor(() => expect(chatKitMock.createFactory).toHaveBeenLastCalledWith(expect.objectContaining({ platformId: 1 })));
+    expect(invoke).toHaveBeenCalledWith('chat_get_recent_conversation', { leaseId: 'platforms', platformId: 1 });
+  }, 15_000);
+
+  it('restores a remembered platform and retries directory errors without creating a default client', async () => {
+    setAuthenticatedEmployees([employee()]);
+    chatKitMock.platforms.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ ok: true, value: [
+      { platformId: 1, name: 'A2A' }, { platformId: 2, name: 'Workspace' },
+    ] });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'chat_get_recent_robot') return 42;
+      if (command === 'chat_platform_preference') return 2;
+      if (command === 'chat_open_session') return {
+        leaseId: 'platforms', employeeId: 42, robotName: 'Robot A', httpBaseUrl: 'https://robot.example/',
+        socketNamespaceUrl: 'https://robot.example/chat', socketPath: '/socket.io',
+      };
+    });
+    render(<Chat />);
+    await screen.findByText('Could not load or save conversation platforms');
+    expect(chatKitMock.createFactory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Managed Chat Workspace');
+    expect(chatKitMock.createFactory).toHaveBeenLastCalledWith(expect.objectContaining({ platformId: 2 }));
   });
 
   it('offers a retry when the robot list itself could not be loaded', async () => {
