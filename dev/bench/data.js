@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791983934783,
+  "lastUpdate": 1792235522826,
   "repoUrl": "https://github.com/A2C-SMCP/tfrobot-client",
   "entries": {
     "Benchmark": [
@@ -587,6 +587,90 @@ window.BENCHMARK_DATA = {
             "name": "sdk_config/add_config",
             "value": 978234,
             "range": "± 36621",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "394943230@qq.com",
+            "name": "hrz",
+            "username": "hrz394943230"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b5e3f767e8695c34abe4570078e821048a5ac135",
+          "message": "Merge pull request #115 from A2C-SMCP/develop\n\nrelease: TFRobot Client 0.3.0",
+          "timestamp": "2026-10-17T18:55:29+08:00",
+          "tree_id": "3e84dc933c4e80a25160efb1ebd3cc000c45b207",
+          "url": "https://github.com/A2C-SMCP/tfrobot-client/commit/b5e3f767e8695c34abe4570078e821048a5ac135"
+        },
+        "date": 1792235521937,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "log_write_single",
+            "value": 149267,
+            "range": "± 423632",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/10",
+            "value": 27409,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/100",
+            "value": 128995,
+            "range": "± 1950",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/1000",
+            "value": 574065,
+            "range": "± 4240",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_keyword_filter",
+            "value": 2777026,
+            "range": "± 18904",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_level_filter",
+            "value": 675294,
+            "range": "± 3022",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_cleanup_10k",
+            "value": 10955496,
+            "range": "± 30174597",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/load_50_configs",
+            "value": 317015,
+            "range": "± 1357",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/save_50_configs",
+            "value": 471590,
+            "range": "± 2082269",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/add_config",
+            "value": 871693,
+            "range": "± 11709",
             "unit": "ns/iter"
           }
         ]
