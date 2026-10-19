@@ -9,8 +9,11 @@ permissions:
 
 jobs:
   signing-inputs:
-    if: false # Captured in diagnostic run 39194001870; repeat only the Linux probe.
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -19,11 +22,12 @@ jobs:
         with:
           node-version: 20
       - run: pnpm install --frozen-lockfile
-      - name: Check updater inputs without exposing values
+      - run: pnpm test:release
+      - name: Check original updater credentials with the patched CLI
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
-        run: node scripts/diagnose-release-signing.mjs
+        run: pnpm release:check-signing
 
   apple-service:
     if: false # Captured in diagnostic run 39194001870; repeat only the Linux probe.
@@ -56,6 +60,7 @@ jobs:
           JS
 
   linux-bundle:
+    if: false # Linux regression was isolated in run 39194448352.
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
