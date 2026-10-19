@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   signing-inputs:
+    if: false # Original-key recoverability established on all three operating systems.
 
     strategy:
       fail-fast: false
@@ -29,6 +30,31 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
         run: node scripts/diagnose-original-key-recoverability.mjs
+
+  repair-original-key:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install --frozen-lockfile
+      - run: sudo apt-get install -y libsodium23
+      - name: Repair original key encoding without changing its public key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
+          TFROBOT_SEALED_SECRET_OUTPUT: ${{ runner.temp }}/repaired-secret-payload.json
+          PYTHONOPTIMIZE: "1"
+        run: node scripts/repair-original-updater-key.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sealed-original-key-repair
+          path: ${{ runner.temp }}/repaired-secret-payload.json
+          retention-days: 1
+          if-no-files-found: error
 
   apple-service:
 

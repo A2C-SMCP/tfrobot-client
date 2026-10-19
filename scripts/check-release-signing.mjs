@@ -8,6 +8,11 @@ import { dirname, join, resolve } from 'node:path';
 const require = createRequire(import.meta.url);
 const probe = Buffer.from('TFRobot release signing preflight; not an application update.\n');
 
+function readKey(value, baseDirectory) {
+  const path = resolve(baseDirectory, value);
+  return existsSync(path) ? readFileSync(path, 'utf8') : value;
+}
+
 // Tauri updater keys/signatures are base64-wrapped Minisign boxes. Verify both
 // the probe signature and trusted comment, using Node's Ed25519 implementation.
 // Format: https://jedisct1.github.io/minisign/
@@ -42,17 +47,27 @@ try {
     publicKey = JSON.parse(readFileSync(configPath, 'utf8')).plugins?.updater?.pubkey;
     if (typeof publicKey !== 'string' || !publicKey) throw new Error();
     // Mirror Tauri's support for a public-key file relative to src-tauri.
-    const publicKeyPath = resolve(dirname(configPath), publicKey);
-    if (existsSync(publicKeyPath)) publicKey = readFileSync(publicKeyPath, 'utf8');
+    publicKey = readKey(publicKey, dirname(configPath));
   } catch {
     throw new Error('Unable to read the configured updater public key.');
   }
   temporaryRoot = mkdtempSync(join(tmpdir(), 'tfrc-signing-preflight-'));
   const probePath = join(temporaryRoot, 'probe.txt');
   writeFileSync(probePath, probe, { mode: 0o600 });
+  const signerEnv = {
+    ...process.env,
+    TAURI_SIGNING_PRIVATE_KEY: readKey(process.env.TAURI_SIGNING_PRIVATE_KEY, dirname(configPath)),
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? '',
+  };
+  // tauri build consumes these two inputs directly; unrelated signer-only or
+  // legacy path variables must not override the credentials being checked.
+  delete signerEnv.TAURI_SIGNING_PRIVATE_KEY_PATH;
+  delete signerEnv.TAURI_PRIVATE_KEY_PATH;
+  delete signerEnv.TAURI_PRIVATE_KEY;
+  delete signerEnv.TAURI_PRIVATE_KEY_PASSWORD;
   const result = spawnSync(process.execPath, [require.resolve('@tauri-apps/cli/tauri.js'), 'signer', 'sign', probePath], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000,
-    env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? '' },
+    env: signerEnv,
   });
   // Never forward signer output: malformed credentials must not enter CI logs.
   if (result.status !== 0) {
