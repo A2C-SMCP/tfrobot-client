@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   signing-inputs:
+    if: false # Updated CLI still cannot unlock the stored key; preserve run evidence.
     strategy:
       fail-fast: false
       matrix:
@@ -60,9 +61,8 @@ jobs:
           JS
 
   linux-bundle:
-    if: false # Linux regression was isolated in run 39194448352.
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -73,65 +73,31 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.17"
-      - name: Match release system dependencies
-        run: |
+      - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm runtime:prepare:tfbash -- x86_64-unknown-linux-gnu
-      - name: Stage previously released binary and identical runtime for packaging-only probe
+      - name: Build the actual 0.3.0 Linux packages with the fixed search path
         env:
-          GH_TOKEN: ${{ github.token }}
+          TFROBOT_OFFICIAL_RELEASE: "1"
         run: |
-          gh release download v0.2.5 --repo A2C-SMCP/tfrobot-client --pattern '*amd64.deb' --dir "$RUNNER_TEMP/prior-release"
-          prior_deb=$(find "$RUNNER_TEMP/prior-release" -name '*.deb' -type f -print -quit)
-          dpkg-deb -x "$prior_deb" "$RUNNER_TEMP/prior-root"
-          prior_binary=$(find "$RUNNER_TEMP/prior-root" -type f -path '*/usr/bin/tfrobot-client' -print -quit)
-          test -n "$prior_binary"
-          mkdir -p src-tauri/target/x86_64-unknown-linux-gnu/release dist
-          cp "$prior_binary" src-tauri/target/x86_64-unknown-linux-gnu/release/tfrobot-client
-          node scripts/prepare-tfbash-runtime.mjs x86_64-unknown-linux-gnu --verify
-          echo 'Original Python GUI dependency metadata:'
-          find src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python -iname '*tk*' -o -iname '*tcl*'
-          python_extension=$(find src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python -type f -name '_tkinter*.so' -print -quit)
-          readelf -d "$python_extension" | grep -E 'NEEDED|RPATH|RUNPATH'
-          ldd "$python_extension" || true
-          echo 'Packaging-only control: v0.2.5 published binary, v0.3.0 bundle configuration, identical runtime; updater signing disabled.'
-      - name: Compare default strip and NO_STRIP with verbose logs
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          pnpm exec tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm --no-sign --verbose > "$RUNNER_TEMP/linux-packaging.log" 2>&1
+      - name: Verify runtime in the actual packaged AppImage
         run: |
-          set +e
-          pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-default.log" 2>&1
-          default_status=$?
-          echo "Default strip exit status: $default_status"
-          tail -100 "$RUNNER_TEMP/appimage-default.log"
-          NO_STRIP=true pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-no-strip.log" 2>&1
-          no_strip_status=$?
-          echo "NO_STRIP exit status: $no_strip_status"
-          tail -100 "$RUNNER_TEMP/appimage-no-strip.log"
-          printf '{"defaultExitStatus":%s,"noStripExitStatus":%s}\n' "$default_status" "$no_strip_status" > "$RUNNER_TEMP/appimage-results.json"
-          echo 'Bundled Python GUI dependency metadata:'
-          bundled_extension=$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -type f -name '_tkinter*.so' -print -quit)
-          readelf -d "$bundled_extension" | grep -E 'NEEDED|RPATH|RUNPATH'
-          ldd "$bundled_extension" || true
-          runtime_libdirs=$(find "$PWD/src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python/lib" -maxdepth 2 -type f -name '*.so*' -exec dirname {} \; | sort -u | paste -sd :)
-          echo 'Compare explicit bundled-Python library discovery:'
-          LD_LIBRARY_PATH="$runtime_libdirs" pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-runtime-path.log" 2>&1
-          runtime_path_status=$?
-          echo "Runtime library path exit status: $runtime_path_status"
-          tail -75 "$RUNNER_TEMP/appimage-runtime-path.log"
-          NO_STRIP=true LD_LIBRARY_PATH="$runtime_libdirs" pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-runtime-path-no-strip.log" 2>&1
-          runtime_path_no_strip_status=$?
-          echo "Runtime library path with NO_STRIP exit status: $runtime_path_no_strip_status"
-          tail -75 "$RUNNER_TEMP/appimage-runtime-path-no-strip.log"
-          printf '{"defaultExitStatus":%s,"noStripExitStatus":%s,"runtimePathExitStatus":%s,"runtimePathNoStripExitStatus":%s}\n' "$default_status" "$no_strip_status" "$runtime_path_status" "$runtime_path_no_strip_status" > "$RUNNER_TEMP/appimage-results.json"
+          APPIMAGE_PATH=$(find "$GITHUB_WORKSPACE/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage" -maxdepth 1 -name '*.AppImage' -type f -print -quit)
+          test -n "$APPIMAGE_PATH"
+          EXTRACT_DIR="$RUNNER_TEMP/verify-appimage-runtime"
+          mkdir -p "$EXTRACT_DIR"
+          (cd "$EXTRACT_DIR" && "$APPIMAGE_PATH" --appimage-extract > /dev/null)
+          RUNTIME_MANIFEST=$(find "$EXTRACT_DIR/squashfs-root" -path '*/tfbash/x86_64-unknown-linux-gnu/runtime-manifest.json' -type f -print -quit)
+          test -n "$RUNTIME_MANIFEST"
+          pnpm runtime:verify:tfbash -- x86_64-unknown-linux-gnu "--verify-root=$(dirname "$RUNTIME_MANIFEST")"
+          "$(dirname "$RUNTIME_MANIFEST")/python/bin/python3" --version
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: appimage-diagnostic-logs
-          path: |
-            ${{ runner.temp }}/appimage-default.log
-            ${{ runner.temp }}/appimage-no-strip.log
-            ${{ runner.temp }}/appimage-runtime-path.log
-            ${{ runner.temp }}/appimage-runtime-path-no-strip.log
-            ${{ runner.temp }}/appimage-results.json
+          name: actual-linux-packaging-log
+          path: ${{ runner.temp }}/linux-packaging.log
           retention-days: 7
