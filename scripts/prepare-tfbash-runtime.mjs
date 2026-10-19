@@ -33,11 +33,6 @@ const targets = {
 const args = process.argv.slice(2);
 const verifyOnly = args.includes('--verify');
 const refreshManifestOnly = args.includes('--refresh-manifest');
-const verifyRootArg = args.find((value) => value.startsWith('--verify-root='));
-const verifyRoot = verifyRootArg?.slice('--verify-root='.length);
-if (verifyRootArg && (!verifyOnly || !verifyRoot)) {
-  throw new Error('--verify-root=<directory> requires --verify and a non-empty directory');
-}
 const requestedTarget = args.find((value) => !value.startsWith('--'))
   ?? process.env.TAURI_ENV_TARGET_TRIPLE
   ?? process.env.TARGET;
@@ -46,7 +41,7 @@ if (!requestedTarget || !(requestedTarget in targets)) {
 }
 
 const target = targets[requestedTarget];
-const outputRoot = verifyRoot ? resolve(verifyRoot) : resolve('src-tauri', 'resources', 'tfbash', requestedTarget);
+const outputRoot = resolve('src-tauri', 'resources', 'tfbash', requestedTarget);
 const manifestPath = join(outputRoot, 'runtime-manifest.json');
 const lockPath = resolve('scripts', 'tfbash-locks', `${requestedTarget}.txt`);
 const pythonPath = requestedTarget.includes('windows')

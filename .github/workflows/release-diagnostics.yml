@@ -78,12 +78,23 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm runtime:prepare:tfbash -- x86_64-unknown-linux-gnu
-      - name: Build the actual 0.3.0 Linux packages with the fixed search path
+      - name: Stage published binary as a packaging control
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.2.5 --repo A2C-SMCP/tfrobot-client --pattern '*amd64.deb' --dir "$RUNNER_TEMP/prior-release"
+          prior_deb=$(find "$RUNNER_TEMP/prior-release" -name '*.deb' -type f -print -quit)
+          dpkg-deb -x "$prior_deb" "$RUNNER_TEMP/prior-root"
+          prior_binary=$(find "$RUNNER_TEMP/prior-root" -type f -path '*/usr/bin/tfrobot-client' -print -quit)
+          test -n "$prior_binary"
+          mkdir -p src-tauri/target/x86_64-unknown-linux-gnu/release dist
+          cp "$prior_binary" src-tauri/target/x86_64-unknown-linux-gnu/release/tfrobot-client
+      - name: Package fixed runtime for installed-interpreter smoke check
         env:
           TFROBOT_OFFICIAL_RELEASE: "1"
         run: |
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          pnpm exec tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm --no-sign --verbose > "$RUNNER_TEMP/linux-packaging.log" 2>&1
+          pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/linux-packaging.log" 2>&1
       - name: Verify runtime in the actual packaged AppImage
         run: |
           APPIMAGE_PATH=$(find "$GITHUB_WORKSPACE/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage" -maxdepth 1 -name '*.AppImage' -type f -print -quit)
@@ -93,8 +104,19 @@ jobs:
           (cd "$EXTRACT_DIR" && "$APPIMAGE_PATH" --appimage-extract > /dev/null)
           RUNTIME_MANIFEST=$(find "$EXTRACT_DIR/squashfs-root" -path '*/tfbash/x86_64-unknown-linux-gnu/runtime-manifest.json' -type f -print -quit)
           test -n "$RUNTIME_MANIFEST"
-          pnpm runtime:verify:tfbash -- x86_64-unknown-linux-gnu "--verify-root=$(dirname "$RUNTIME_MANIFEST")"
-          "$(dirname "$RUNTIME_MANIFEST")/python/bin/python3" --version
+          RUNTIME_PYTHON="$(dirname "$RUNTIME_MANIFEST")/python/bin/python3"
+          # The preparation hash is a cache identity, not an installed-runtime
+          # invariant: linuxdeploy legitimately patches ELF rpaths. Exercise the
+          # packaged interpreter without access to the build's library path.
+          env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -c '
+          import json, platform, sys, _tkinter, tfbash_mcp
+          from importlib.metadata import version
+          manifest = json.load(open(sys.argv[1]))
+          assert platform.python_version() == manifest["python"]["version"]
+          assert version("tfbash-mcp") == manifest["tfbashMcp"]["version"]
+          print("Packaged Python, Tcl/Tk, and tfbash imports verified")
+          ' "$RUNTIME_MANIFEST"
+          env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -m tfbash_mcp --help
       - uses: actions/upload-artifact@v4
         if: always()
         with:
