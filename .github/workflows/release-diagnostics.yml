@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   signing-inputs:
+    if: false # Captured in diagnostic run 39194001870; repeat only the Linux probe.
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -25,6 +26,7 @@ jobs:
         run: node scripts/diagnose-release-signing.mjs
 
   apple-service:
+    if: false # Captured in diagnostic run 39194001870; repeat only the Linux probe.
     runs-on: macos-latest
     timeout-minutes: 5
     steps:
@@ -63,11 +65,15 @@ jobs:
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
       - name: Match release system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
+      - run: pnpm runtime:prepare:tfbash -- x86_64-unknown-linux-gnu
       - name: Stage previously released binary and identical runtime for packaging-only probe
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,12 +82,9 @@ jobs:
           prior_deb=$(find "$RUNNER_TEMP/prior-release" -name '*.deb' -type f -print -quit)
           dpkg-deb -x "$prior_deb" "$RUNNER_TEMP/prior-root"
           prior_binary=$(find "$RUNNER_TEMP/prior-root" -type f -path '*/usr/bin/tfrobot-client' -print -quit)
-          prior_runtime=$(find "$RUNNER_TEMP/prior-root" -type d -name tfbash -print -quit)
           test -n "$prior_binary"
-          test -n "$prior_runtime"
           mkdir -p src-tauri/target/x86_64-unknown-linux-gnu/release dist
           cp "$prior_binary" src-tauri/target/x86_64-unknown-linux-gnu/release/tfrobot-client
-          cp -a "$prior_runtime" src-tauri/resources/
           node scripts/prepare-tfbash-runtime.mjs x86_64-unknown-linux-gnu --verify
           echo 'Packaging-only control: v0.2.5 published binary, v0.3.0 bundle configuration, identical runtime; updater signing disabled.'
       - name: Compare default strip and NO_STRIP with verbose logs
