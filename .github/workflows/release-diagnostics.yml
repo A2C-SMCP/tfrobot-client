@@ -32,6 +32,7 @@ jobs:
         run: node scripts/diagnose-original-key-recoverability.mjs
 
   repair-original-key:
+    if: false # Original encoding repaired and verified across all three operating systems.
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -69,6 +70,7 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import { spawnSync } from 'node:child_process';
+          import { createHash } from 'node:crypto';
           const result = spawnSync('xcrun', [
             'notarytool', 'history', '--apple-id', process.env.APPLE_ID,
             '--password', process.env.APPLE_PASSWORD, '--team-id', process.env.APPLE_TEAM_ID,
@@ -78,6 +80,7 @@ jobs:
           console.log(JSON.stringify({
             checkedAt: new Date().toISOString(),
             matchesBrowserTeam: process.env.APPLE_TEAM_ID === '65MA8GS98T',
+            matchesBrowserAccount: createHash('sha256').update((process.env.APPLE_ID ?? '').trim().toLowerCase()).digest('hex') === '2d7345dbbb8d93768c635bd19bf893b1bc345a9bf2e4a0154597ce61dd9608ba',
             operation: 'notarytool history (read only)',
             exitStatus: result.status,
             accepted: result.status === 0,
