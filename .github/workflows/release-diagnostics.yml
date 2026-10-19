@@ -86,6 +86,11 @@ jobs:
           mkdir -p src-tauri/target/x86_64-unknown-linux-gnu/release dist
           cp "$prior_binary" src-tauri/target/x86_64-unknown-linux-gnu/release/tfrobot-client
           node scripts/prepare-tfbash-runtime.mjs x86_64-unknown-linux-gnu --verify
+          echo 'Original Python GUI dependency metadata:'
+          find src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python -iname '*tk*' -o -iname '*tcl*'
+          python_extension=$(find src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python -type f -name '_tkinter*.so' -print -quit)
+          readelf -d "$python_extension" | grep -E 'NEEDED|RPATH|RUNPATH'
+          ldd "$python_extension" || true
           echo 'Packaging-only control: v0.2.5 published binary, v0.3.0 bundle configuration, identical runtime; updater signing disabled.'
       - name: Compare default strip and NO_STRIP with verbose logs
         run: |
@@ -99,6 +104,21 @@ jobs:
           echo "NO_STRIP exit status: $no_strip_status"
           tail -100 "$RUNNER_TEMP/appimage-no-strip.log"
           printf '{"defaultExitStatus":%s,"noStripExitStatus":%s}\n' "$default_status" "$no_strip_status" > "$RUNNER_TEMP/appimage-results.json"
+          echo 'Bundled Python GUI dependency metadata:'
+          bundled_extension=$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -type f -name '_tkinter*.so' -print -quit)
+          readelf -d "$bundled_extension" | grep -E 'NEEDED|RPATH|RUNPATH'
+          ldd "$bundled_extension" || true
+          runtime_libdirs=$(find "$PWD/src-tauri/resources/tfbash/x86_64-unknown-linux-gnu/python/lib" -maxdepth 2 -type f -name '*.so*' -exec dirname {} \; | sort -u | paste -sd :)
+          echo 'Compare explicit bundled-Python library discovery:'
+          LD_LIBRARY_PATH="$runtime_libdirs" pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-runtime-path.log" 2>&1
+          runtime_path_status=$?
+          echo "Runtime library path exit status: $runtime_path_status"
+          tail -75 "$RUNNER_TEMP/appimage-runtime-path.log"
+          NO_STRIP=true LD_LIBRARY_PATH="$runtime_libdirs" pnpm exec tauri bundle --target x86_64-unknown-linux-gnu --bundles appimage --no-sign --verbose > "$RUNNER_TEMP/appimage-runtime-path-no-strip.log" 2>&1
+          runtime_path_no_strip_status=$?
+          echo "Runtime library path with NO_STRIP exit status: $runtime_path_no_strip_status"
+          tail -75 "$RUNNER_TEMP/appimage-runtime-path-no-strip.log"
+          printf '{"defaultExitStatus":%s,"noStripExitStatus":%s,"runtimePathExitStatus":%s,"runtimePathNoStripExitStatus":%s}\n' "$default_status" "$no_strip_status" "$runtime_path_status" "$runtime_path_no_strip_status" > "$RUNNER_TEMP/appimage-results.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -106,5 +126,7 @@ jobs:
           path: |
             ${{ runner.temp }}/appimage-default.log
             ${{ runner.temp }}/appimage-no-strip.log
+            ${{ runner.temp }}/appimage-runtime-path.log
+            ${{ runner.temp }}/appimage-runtime-path-no-strip.log
             ${{ runner.temp }}/appimage-results.json
           retention-days: 7
