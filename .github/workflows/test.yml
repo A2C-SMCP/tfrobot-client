@@ -48,6 +48,7 @@ jobs:
             patchelf
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm test:release
       # Tauri's generate_context! validates frontendDist while clippy compiles
       # the Rust library, so a clean checkout must build the frontend first.
       - run: pnpm build
