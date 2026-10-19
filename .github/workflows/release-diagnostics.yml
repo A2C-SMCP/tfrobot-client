@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   signing-inputs:
-    if: false # Updated CLI still cannot unlock the stored key; preserve run evidence.
+
     strategy:
       fail-fast: false
       matrix:
@@ -28,10 +28,10 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
-        run: pnpm release:check-signing
+        run: node scripts/diagnose-original-key-recoverability.mjs
 
   apple-service:
-    if: false # Captured in diagnostic run 39194001870; repeat only the Linux probe.
+
     runs-on: macos-latest
     timeout-minutes: 5
     steps:
@@ -51,6 +51,7 @@ jobs:
           const response = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
           console.log(JSON.stringify({
             checkedAt: new Date().toISOString(),
+            matchesBrowserTeam: process.env.APPLE_TEAM_ID === '65MA8GS98T',
             operation: 'notarytool history (read only)',
             exitStatus: result.status,
             accepted: result.status === 0,
@@ -58,9 +59,11 @@ jobs:
             agreementRequired: /required agreement|agreement.*expired|agreement.*signed/i.test(response),
             credentialRejected: /401|Invalid credentials|authentication failed/i.test(response),
           }));
+          process.exitCode = result.status === 0 ? 0 : 1;
           JS
 
   linux-bundle:
+    if: false # Linux packaging and installed runtime have already been verified.
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
