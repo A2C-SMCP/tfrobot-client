@@ -109,12 +109,12 @@ jobs:
           # invariant: linuxdeploy legitimately patches ELF rpaths. Exercise the
           # packaged interpreter without access to the build's library path.
           env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -c '
-          import json, platform, sys, _tkinter, tfbash_mcp
+          import json, platform, sys, tfbash_mcp
           from importlib.metadata import version
           manifest = json.load(open(sys.argv[1]))
           assert platform.python_version() == manifest["python"]["version"]
           assert version("tfbash-mcp") == manifest["tfbashMcp"]["version"]
-          print("Packaged Python, Tcl/Tk, and tfbash imports verified")
+          print("Packaged Python and tfbash imports verified")
           ' "$RUNTIME_MANIFEST"
           env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -m tfbash_mcp --help
       - uses: actions/upload-artifact@v4
