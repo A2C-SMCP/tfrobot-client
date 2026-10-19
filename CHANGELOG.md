@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-10-19
+
+- Fix Linux AppImage packaging by resolving Tcl/Tk libraries from bundled Python, and verify that the packaged tfbash runtime starts.
+- Pin Tauri CLI 2.10.1 to fix empty-password updater key generation, and verify signing credentials against the configured public key before building.
+- Retain the upgraded Server/Manager requirements from 0.3.0 and preserve the existing updater public key and signing identity.
+
 ## 0.3.0 — 2026-10-17
 
 - Upgrade Chat Kit to 0.10.1 and use the routed Server API with Bearer authentication and JSON conversation creation. This version requires the upgraded Server and Manager; retain the existing sign-in, identity selection, conversation navigation, and Enter/IME behavior.
