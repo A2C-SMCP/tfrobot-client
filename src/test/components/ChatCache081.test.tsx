@@ -116,7 +116,7 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     try {
-      render(<ChatProvider client={client}><ChatConversationView
+      render(<ChatProvider client={client}><ChatConversationView debug
         labels={chatUiLabels((key) => i18n.t(key, { lng: language }))} getDeadlineAt={deadlineAt} /></ChatProvider>);
       fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Diagnostic draft' } });
       fireEvent.click(screen.getByRole('button', { name: language === 'zh' ? /发\s*送/ : 'Send' }));
@@ -138,6 +138,17 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
       else Reflect.deleteProperty(navigator, 'clipboard');
     }
   }, 15_000);
+
+  it('keeps user-facing errors available with developer diagnostics hidden by default', async () => {
+    expect((await load('42')).ok).toBe(true);
+    failure = 503;
+    render(<ChatProvider client={client}><ChatConversationView
+      labels={chatUiLabels((key) => i18n.t(key, { lng: 'en' }))} getDeadlineAt={deadlineAt} /></ChatProvider>);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Product error draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText((text) => text.includes('Server error.'), {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Diagnostic details' })).not.toBeInTheDocument();
+  });
 
   it('renders cached A in the actual compact workspace before server completion, then synchronizes', async () => {
     render(<ChatProvider client={client}><CompactChatWorkspace labels={chatUiLabels((key) => i18n.t(key))} /></ChatProvider>);
