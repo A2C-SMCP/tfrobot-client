@@ -1,6 +1,26 @@
 import type { ThemeConfig } from 'antd';
 import { theme } from 'antd';
 
+/** Host-owned chat palette, scoped independently from desktop component overrides. */
+export function chatWorkspaceTheme(dark: boolean): ThemeConfig {
+  return {
+    inherit: false,
+    cssVar: { key: 'chat-workspace' },
+    algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    token: {
+      colorPrimary: '#236653',
+      borderRadius: 8,
+      fontSize: 14,
+      ...(dark ? {} : {
+        colorText: '#293832',
+        colorTextSecondary: '#647366',
+        colorBorder: '#d7e0d9',
+        colorBgContainer: '#ffffff',
+      }),
+    },
+  };
+}
+
 /** Shared desktop chrome and component tokens, including themed portal surfaces. */
 export function clientTheme(dark: boolean): ThemeConfig {
   return {

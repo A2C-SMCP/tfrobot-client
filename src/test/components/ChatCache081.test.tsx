@@ -190,9 +190,9 @@ describe('0.8.1 cache through the client host and real HTTP/Socket.IO', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
-  it('keeps timeline event details available without the removed event navigation toolbar', async () => {
-    expect((await load('42')).ok).toBe(true);
-    render(<ChatProvider client={client}><ChatConversationView labels={chatUiLabels((key) => i18n.t(key))} getDeadlineAt={deadlineAt} eventDetailMode="modal" /></ChatProvider>);
+  it('opens event details in a modal by default through the client workspace', async () => {
+    render(<ChatProvider client={client}><CompactChatWorkspace labels={chatUiLabels((key) => i18n.t(key))} /></ChatProvider>);
+    await screen.findByText('History 42');
     await act(async () => {
       sockets.of('/chat').emit('chat_event', {
         eventId: 'event-1', status: 'success', eventScene: 'Chain', conversationId: 42,

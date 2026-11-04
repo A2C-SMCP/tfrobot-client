@@ -194,18 +194,6 @@
   }
 }
 
-/* Use Chat Kit's semantic event trigger; never match translated labels or virtual-list IDs. */
-
-.conversation :global([role="group"]:has(> [data-chat-event-trigger])) {
-  border-bottom: 1px solid var(--chat-border);
-}
-
-.conversation :global([data-chat-event-trigger]) {
-  border: 0 !important;
-  min-width: 28px !important;
-  color: var(--chat-text-secondary) !important;
-}
-
 .platformSelector:empty {
   display: none;
 }

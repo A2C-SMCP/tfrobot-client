@@ -59,4 +59,17 @@ describe('Chat Kit 0.7.0 bridge configuration', () => {
     expect(labels.deleteConversationConfirm).toBe('chat.workspace.deleteConversationConfirm');
     expect(labels.deleteConversationPrompt).toBe('chat.workspace.deleteConversationPrompt');
   });
+
+  it('uses the published Chinese product copy without losing native error sanitization', () => {
+    const labels = chatUiLabels((key) => key, 'zh-CN');
+    expect(labels.expandIntermediateMessage).toBe('展开全文');
+    expect(labels.eventDetailModeSplit).toBe('双栏');
+    expect(labels.composerPlaceholder).toBe('写下你的问题…');
+    const summary = labels.formatChatError?.({
+      code: 'server', message: 'token=private-server-message', retryable: false,
+    });
+    expect(summary).not.toContain('private-server-message');
+    expect(summary).toContain('chat.workspace.errorSummary');
+    expect(labels.resource?.network).toBe('chat.workspace.resource.network');
+  });
 });

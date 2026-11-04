@@ -40,6 +40,7 @@
     "@tauri-apps/plugin-shell": "^2.2.0",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "@turingfocus/chat-kit": "0.11.0",
+    "@turingfocus/chat-ui-antd": "0.11.0",
     "@turingfocus/tfrs-auth": "0.2.0",
     "antd": "^5.23.4",
     "dayjs": "^1.11.19",
