@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.3.0 — 2026-10-17
+## 0.3.0 — 2026-10-19
 
+- Fix Linux AppImage packaging by resolving Tcl/Tk libraries from bundled Python, and verify that the packaged tfbash runtime starts.
+- Pin Tauri CLI 2.10.1 to fix empty-password updater key generation, and verify signing credentials against the configured public key before building. Preserve the original updater public key and signing identity.
 - Upgrade Chat Kit to 0.10.1 and use the routed Server API with Bearer authentication and JSON conversation creation. This version requires the upgraded Server and Manager; retain the existing sign-in, identity selection, conversation navigation, and Enter/IME behavior.
 - Select a conversation platform beside the Robot and remember the selection per identity and Robot. Isolate conversation positions and drafts by platform, and preserve the current draft if saving a platform change fails.
 - Keep private attachment preview/download behind the native resource boundary. Real-environment download remains pending the controlled endpoint tracked in TFRS-619.

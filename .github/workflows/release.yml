@@ -64,6 +64,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Verify updater signing credentials before building
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
+        run: pnpm release:check-signing
+
       - name: Prepare and verify offline tfbash runtime
         run: pnpm runtime:prepare:tfbash -- ${{ matrix.target }}
 
@@ -102,6 +108,16 @@ jobs:
           echo "Signed and verified $SIGNED_COUNT bundled Mach-O files."
           pnpm runtime:prepare:tfbash -- "${{ matrix.target }}" --refresh-manifest
 
+      # linuxdeploy scans Python extensions independently of the Python loader.
+      # Their Tcl/Tk dependencies live in this runtime, outside system ldconfig.
+      - name: Configure bundled Python library discovery (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          RUNTIME_LIB="$GITHUB_WORKSPACE/src-tauri/resources/tfbash/${{ matrix.target }}/python/lib"
+          test -d "$RUNTIME_LIB"
+          echo "LD_LIBRARY_PATH=$RUNTIME_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -130,7 +146,33 @@ jobs:
           # have passed the integrity gate below.
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          # Verbose Linux bundling preserves linuxdeploy stderr on failures.
+          args: ${{ runner.os == 'Linux' && '--verbose' || '' }} --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Verify Python runtime inside the AppImage (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          APPIMAGE_PATH=$(find "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/appimage" -maxdepth 1 -name '*.AppImage' -type f -print -quit)
+          test -n "$APPIMAGE_PATH"
+          EXTRACT_DIR="$RUNNER_TEMP/verify-appimage-runtime"
+          mkdir -p "$EXTRACT_DIR"
+          (cd "$EXTRACT_DIR" && "$APPIMAGE_PATH" --appimage-extract > /dev/null)
+          RUNTIME_MANIFEST=$(find "$EXTRACT_DIR/squashfs-root" -path '*/tfbash/${{ matrix.target }}/runtime-manifest.json' -type f -print -quit)
+          test -n "$RUNTIME_MANIFEST"
+          RUNTIME_PYTHON="$(dirname "$RUNTIME_MANIFEST")/python/bin/python3"
+          # The preparation hash is a cache identity, not an installed-runtime
+          # invariant: linuxdeploy legitimately patches ELF rpaths. Exercise the
+          # packaged interpreter without access to the build's library path.
+          env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -c '
+          import json, platform, sys, tfbash_mcp
+          from importlib.metadata import version
+          manifest = json.load(open(sys.argv[1]))
+          assert platform.python_version() == manifest["python"]["version"]
+          assert version("tfbash-mcp") == manifest["tfbashMcp"]["version"]
+          print("Packaged Python and tfbash imports verified")
+          ' "$RUNTIME_MANIFEST"
+          env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH "$RUNTIME_PYTHON" -I -B -m tfbash_mcp --help
 
       # tauri-action 只把 .app 提交给 notarytool 公证，.dmg 容器从未公证 → stapler
       # 拿 .dmg 的 hash 在 Apple CloudKit 上查不到 ticket。这里单独把 .dmg 公证 + staple。
