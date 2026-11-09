@@ -118,6 +118,7 @@ export interface SseServerParameters {
 
 // Internally tagged discriminated union configs
 export interface StdioServerConfig {
+  connect_timeout_secs?: number;
   type: 'Stdio';
   bundle_id?: string;
   name: string;
