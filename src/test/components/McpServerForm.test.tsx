@@ -24,7 +24,7 @@ import {
   hasConflictingHttpAuthorization,
   preserveHttpAuthenticationOptions,
 } from '@/components/McpConfig/httpAuthentication';
-import type { HttpServerConfig } from '@/stores/mcpStore';
+import type { HttpServerConfig, StdioServerConfig } from '@/stores/mcpStore';
 
 const { fetchInputs, inputState } = vi.hoisted(() => ({
   fetchInputs: vi.fn().mockResolvedValue(undefined),
@@ -804,4 +804,28 @@ describe('McpServerForm technical fields and config value sources', () => {
     expect(screen.getByText('Options')).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: 'Password Mode' })).not.toBeInTheDocument();
   }, 20_000);
+});
+
+it('preserves imported stdio initialization timeout', async () => {
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  const initial: StdioServerConfig = {
+    type: 'Stdio',
+    name: 'slow-imported',
+    disabled: false,
+    forbidden_tools: [],
+    tool_meta: {},
+    connect_timeout_secs: 90,
+    server_parameters: { command: 'node', args: ['slow.js'], env: {} },
+  };
+  render(
+    <McpServerForm
+      instanceId="computer-a"
+      initialValues={initial}
+      onSubmit={onSubmit}
+      onCancel={() => {}}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][0]).toHaveProperty('connect_timeout_secs', 90);
 });

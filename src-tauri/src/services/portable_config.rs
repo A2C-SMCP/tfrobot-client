@@ -27,7 +27,7 @@ pub const SUPPORTED_PACKAGE_FORMAT_VERSIONS: std::ops::RangeInclusive<u32> = 1..
 pub const PORTABLE_SDK_SCHEMA_VERSION: u32 = 1;
 
 /// The `a2c-smcp` crate version this client was built against.
-pub const A2C_SMCP_SDK_VERSION: &str = "0.4.1";
+pub const A2C_SMCP_SDK_VERSION: &str = "0.5.0";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

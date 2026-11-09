@@ -238,6 +238,7 @@ export function McpServerForm({
       config = {
         type: 'Stdio' as const,
         ...commonFields,
+        connect_timeout_secs: initialValues?.type === 'Stdio' ? initialValues.connect_timeout_secs : undefined,
         server_parameters: {
           command: values.command || '',
           args: values.args || [],

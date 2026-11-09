@@ -4,7 +4,7 @@ use crate::commands::inputs::{
 use crate::services::computer::is_reserved_built_in_bundle_id;
 use crate::services::config::ConfigService;
 use crate::services::input_references::{find_project_input_references, referenced_input_ids};
-use crate::services::storage::write_json_atomically;
+use crate::services::storage::{write_atomically, write_json_atomically};
 use a2c_smcp::smcp_computer::mcp_clients::bundle_id::resolve_bundle_id;
 use a2c_smcp::smcp_computer::mcp_clients::MCPServerConfig;
 use a2c_smcp::smcp_computer::settings::config::{
@@ -16,7 +16,8 @@ use a2c_smcp::smcp_computer::settings::config::{
 use a2c_smcp::smcp_computer::settings::{
     resolve_mcp_config, resolve_settings, user_mcp_config_path, workdir_mcp_config_path, EnvMap,
     ResolveMcpConfigArgs, ResolveSettingsArgs, ResolvedMcpConfig, SettingsValidationError,
-    MANAGED_MCP_FILENAME, TFROBOT_DIRNAME, XDG_CONFIG_HOME_ENV,
+    MANAGED_MCP_FILENAME, MCP_CONFIG_FILENAME, TFROBOT_DIRNAME, USER_SETTINGS_FILENAME,
+    XDG_CONFIG_HOME_ENV,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -99,7 +100,14 @@ struct AnchorRestoreTransaction {
     phase: AnchorRestorePhase,
     original_project_dir_existed: bool,
     original_user_dir_existed: bool,
+    /// None reads pre-0.5 Client journals, which replaced the entire User directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_user_files: Option<[bool; 2]>,
 }
+
+/// Only these User-scope files belong to configuration transactions. The SDK owns
+/// other files in the same directory, including the independently created computer-id.
+const USER_CONFIG_FILES: [&str; 2] = [USER_SETTINGS_FILENAME, MCP_CONFIG_FILENAME];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkConfigPortabilityError {
@@ -912,17 +920,25 @@ impl SdkConfigService {
         let staging_anchor = staging.path().join("sdk-anchor");
         fs::create_dir_all(&staging_anchor)
             .map_err(|error| raw_restore_io(&staging_anchor, error))?;
-        for relative in [Path::new(TFROBOT_DIRNAME), Path::new("a2c")] {
-            let source = anchor.join(relative);
+        let project = anchor.join(TFROBOT_DIRNAME);
+        if project.exists() {
+            copy_directory_tree(&project, &staging_anchor.join(TFROBOT_DIRNAME))?;
+        }
+        for file in USER_CONFIG_FILES {
+            let source = anchor.join("a2c").join(file);
             if source.exists() {
-                copy_directory_tree(&source, &staging_anchor.join(relative))?;
+                let destination = staging_anchor.join("a2c").join(file);
+                fs::create_dir_all(destination.parent().unwrap())
+                    .map_err(|error| raw_restore_io(&destination, error))?;
+                fs::copy(&source, &destination).map_err(|error| raw_restore_io(&source, error))?;
             }
         }
         Ok((staging, staging_anchor))
     }
 
-    /// Commits a fully prepared SDK scope root with one recovery journal. Swapping the complete
-    /// instance anchor keeps User/Project/Local files in the same logical transaction.
+    /// Commits Project/Local and the owned User configuration files with one recovery journal.
+    /// The live User directory stays in place so SDK identity creation/reset cannot be rolled back
+    /// by an older configuration snapshot.
     #[cfg(test)]
     fn commit_complete_sdk_anchor(
         &self,
@@ -972,6 +988,9 @@ impl SdkConfigService {
             phase: AnchorRestorePhase::Prepared,
             original_project_dir_existed: current_project_dir.exists(),
             original_user_dir_existed: current_user_dir.exists(),
+            original_user_files: Some(
+                USER_CONFIG_FILES.map(|file| current_user_dir.join(file).exists()),
+            ),
         };
         write_anchor_restore_transaction(&transaction_root, &transaction)?;
 
@@ -1004,12 +1023,18 @@ impl SdkConfigService {
             reached.wait();
             resume.wait();
         }
-        if current_user_dir.exists() {
-            if let Err(error) = fs::rename(&current_user_dir, &previous_user_dir) {
-                return Err(rollback_anchor_restore_after_error(
-                    &anchor,
-                    raw_restore_io(&current_user_dir, error),
-                ));
+        for file in USER_CONFIG_FILES {
+            let current = current_user_dir.join(file);
+            if current.exists() {
+                let backup = previous_user_dir.join(file);
+                let result =
+                    fs::read(&current).and_then(|content| write_atomically(&backup, &content));
+                if let Err(error) = result {
+                    return Err(rollback_anchor_restore_after_error(
+                        &anchor,
+                        raw_restore_io(&current, error),
+                    ));
+                }
             }
         }
         transaction.phase = AnchorRestorePhase::PreviousMoved;
@@ -1043,11 +1068,19 @@ impl SdkConfigService {
                 ));
             }
         }
-        if transaction_staged_user_dir.exists() {
-            if let Err(error) = fs::rename(&transaction_staged_user_dir, &current_user_dir) {
+        for file in USER_CONFIG_FILES {
+            let staged = transaction_staged_user_dir.join(file);
+            let current = current_user_dir.join(file);
+            let result = if staged.exists() {
+                fs::read(&staged).and_then(|content| write_atomically(&current, &content))
+            } else {
+                remove_path_if_present(&current)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            };
+            if let Err(error) = result {
                 return Err(rollback_anchor_restore_after_error(
                     &anchor,
-                    raw_restore_io(&transaction_staged_user_dir, error),
+                    raw_restore_io(&current, error),
                 ));
             }
         }
@@ -1055,7 +1088,7 @@ impl SdkConfigService {
         if let Err(error) = write_anchor_restore_transaction(&transaction_root, &transaction) {
             return Err(rollback_anchor_restore_after_error(&anchor, error));
         }
-        if let Err(error) = fs::remove_dir_all(&transaction_root) {
+        if let Err(error) = cleanup_anchor_restore_transaction(&transaction_root) {
             log::warn!(
                 "Complete SDK restore committed for Computer '{}', but transaction cleanup failed: {}",
                 instance_id,
@@ -1956,10 +1989,31 @@ fn recover_anchor_restore_transaction(anchor: &Path) -> Result<(), ConfigCrudErr
             .map_err(|error| raw_restore_io(&transaction_root, error))?;
         return Ok(());
     }
-    let transaction = load_anchor_restore_transaction(&transaction_root)?;
+    let mut transaction = load_anchor_restore_transaction(&transaction_root)?;
     if transaction.phase != AnchorRestorePhase::Committed {
         let current_project_dir = anchor.join(TFROBOT_DIRNAME);
         let current_user_dir = anchor.join("a2c");
+        if let Some(original_files) = transaction.original_user_files {
+            for (index, file) in USER_CONFIG_FILES.into_iter().enumerate() {
+                let current = current_user_dir.join(file);
+                let previous = previous_user_dir.join(file);
+                if previous.exists() {
+                    let content =
+                        fs::read(&previous).map_err(|error| raw_restore_io(&previous, error))?;
+                    write_atomically(&current, &content)
+                        .map_err(|error| raw_restore_io(&current, error))?;
+                } else if transaction.phase == AnchorRestorePhase::PreviousMoved {
+                    if original_files[index] {
+                        return Err(ConfigCrudError::Io {
+                            path: previous,
+                            reason: "complete SDK restore lost a previous User configuration file"
+                                .to_string(),
+                        });
+                    }
+                    remove_path_if_present(&current)?;
+                }
+            }
+        }
         for (current, previous, originally_existed, label) in [
             (
                 current_project_dir,
@@ -1974,13 +2028,16 @@ fn recover_anchor_restore_transaction(anchor: &Path) -> Result<(), ConfigCrudErr
                 "User",
             ),
         ] {
+            if label == "User" && transaction.original_user_files.is_some() {
+                continue;
+            }
             if previous.exists() {
                 remove_path_if_present(&current)?;
                 if let Some(parent) = current.parent() {
                     fs::create_dir_all(parent).map_err(|error| raw_restore_io(parent, error))?;
                 }
-                fs::rename(&previous, &current)
-                    .map_err(|error| raw_restore_io(&previous, error))?;
+                // Keep all backups until the recovered state is durably marked terminal.
+                copy_directory_tree(&previous, &current)?;
             } else if transaction.phase == AnchorRestorePhase::PreviousMoved {
                 if originally_existed {
                     return Err(ConfigCrudError::Io {
@@ -1993,9 +2050,31 @@ fn recover_anchor_restore_transaction(anchor: &Path) -> Result<(), ConfigCrudErr
                 remove_path_if_present(&current)?;
             }
         }
+        // A recovered tree is final too. A crash during subsequent backup cleanup
+        // must not replay a partially deleted backup as another rollback.
+        transaction.phase = AnchorRestorePhase::Committed;
+        write_anchor_restore_transaction(&transaction_root, &transaction)?;
     }
-    fs::remove_dir_all(&transaction_root)
-        .map_err(|error| raw_restore_io(&transaction_root, error))?;
+    cleanup_anchor_restore_transaction(&transaction_root)
+}
+
+/// Delete the durable terminal marker last, so every interrupted cleanup can be resumed.
+fn cleanup_anchor_restore_transaction(transaction_root: &Path) -> Result<(), ConfigCrudError> {
+    let marker = anchor_restore_transaction_path(transaction_root);
+    for entry in
+        fs::read_dir(transaction_root).map_err(|error| raw_restore_io(transaction_root, error))?
+    {
+        let entry = entry.map_err(|error| raw_restore_io(transaction_root, error))?;
+        if entry.path() != marker {
+            remove_path_if_present(&entry.path())?;
+        }
+    }
+    #[cfg(unix)]
+    fs::File::open(transaction_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| raw_restore_io(transaction_root, error))?;
+    fs::remove_file(&marker).map_err(|error| raw_restore_io(&marker, error))?;
+    fs::remove_dir(transaction_root).map_err(|error| raw_restore_io(transaction_root, error))?;
     Ok(())
 }
 
@@ -2375,6 +2454,213 @@ mod tests {
             after
         );
         assert_eq!(fs::read(extension).unwrap(), b"preserve-me");
+    }
+
+    #[tokio::test]
+    async fn complete_sdk_restore_preserves_identity_created_after_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Arc::new(ConfigService::new(directory.path().into()).unwrap());
+        let service = SdkConfigService::new(config);
+        service.init("computer-a").unwrap();
+        let (_staging, staged_anchor) = service.stage_complete_sdk_anchor("computer-a").unwrap();
+        let env = service.env("computer-a");
+        let identity = a2c_smcp::smcp_computer::identity::load_or_create_computer_id(Some(&env))
+            .await
+            .unwrap();
+        service
+            .commit_complete_sdk_anchor("computer-a", &staged_anchor)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(a2c_smcp::smcp_computer::identity::computer_id_path(Some(
+                &env
+            )))
+            .unwrap()
+            .trim(),
+            identity,
+            "config commit must leave the concurrently created SDK identity in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_sdk_restore_preserves_identity_reset_during_commit_and_rollback() {
+        for fail_after_backup in [false, true] {
+            let directory = tempdir().unwrap();
+            let config = Arc::new(ConfigService::new(directory.path().into()).unwrap());
+            let service = SdkConfigService::new(config);
+            service.init("computer-a").unwrap();
+            let env = service.env("computer-a");
+            let old_identity =
+                a2c_smcp::smcp_computer::identity::load_or_create_computer_id(Some(&env))
+                    .await
+                    .unwrap();
+            let (_staging, staged_anchor) =
+                service.stage_complete_sdk_anchor("computer-a").unwrap();
+            let staged_user = staged_anchor.join("a2c");
+            fs::create_dir_all(&staged_user).unwrap();
+            // Even a stale/foreign sidecar in staging must never be published.
+            fs::write(staged_user.join("computer-id"), &old_identity).unwrap();
+            if fail_after_backup {
+                service.inject_raw_restore_failure_after_backup();
+            }
+            let (reached, resume) = service.pause_anchor_restore_after_project_backup();
+            let commit_service = service.clone();
+            let commit = std::thread::spawn(move || {
+                commit_service.commit_complete_sdk_anchor("computer-a", &staged_anchor)
+            });
+            reached.wait();
+            let current_identity = a2c_smcp::smcp_computer::identity::reset_computer_id(Some(&env))
+                .await
+                .unwrap();
+            let extension = service
+                .project_anchor("computer-a")
+                .join("a2c/extension-state.bin");
+            fs::write(&extension, b"written-during-commit").unwrap();
+            resume.wait();
+            assert_eq!(commit.join().unwrap().is_err(), fail_after_backup);
+            assert_ne!(old_identity, current_identity);
+            assert_eq!(
+                a2c_smcp::smcp_computer::identity::load_or_create_computer_id(Some(&env))
+                    .await
+                    .unwrap(),
+                current_identity
+            );
+            assert_eq!(fs::read(&extension).unwrap(), b"written-during-commit");
+        }
+    }
+
+    #[test]
+    fn complete_sdk_restore_crash_recovery_only_changes_owned_user_files() {
+        for phase in [
+            AnchorRestorePhase::Prepared,
+            AnchorRestorePhase::PreviousMoved,
+            AnchorRestorePhase::Committed,
+        ] {
+            let directory = tempdir().unwrap();
+            let anchor = directory.path().join("sdk_config");
+            let root = anchor_restore_transaction_root(&anchor).unwrap();
+            fs::create_dir_all(root.join("previous-project")).unwrap();
+            fs::create_dir_all(root.join("previous-user")).unwrap();
+            fs::create_dir_all(anchor.join(TFROBOT_DIRNAME)).unwrap();
+            fs::create_dir_all(anchor.join("a2c")).unwrap();
+            fs::write(root.join("previous-project/marker"), b"old-project").unwrap();
+            fs::write(root.join("previous-user/settings.json"), b"old-settings").unwrap();
+            fs::write(anchor.join(TFROBOT_DIRNAME).join("marker"), b"new-project").unwrap();
+            fs::write(anchor.join("a2c/settings.json"), b"new-settings").unwrap();
+            fs::write(anchor.join("a2c/mcp.json"), b"new-mcp").unwrap();
+            fs::write(
+                anchor.join("a2c/computer-id"),
+                b"identity-created-after-snapshot",
+            )
+            .unwrap();
+            write_anchor_restore_transaction(
+                &root,
+                &AnchorRestoreTransaction {
+                    phase,
+                    original_project_dir_existed: true,
+                    original_user_dir_existed: true,
+                    original_user_files: Some([true, false]),
+                },
+            )
+            .unwrap();
+            recover_anchor_restore_transaction(&anchor).unwrap();
+            recover_anchor_restore_transaction(&anchor).unwrap();
+            let committed = phase == AnchorRestorePhase::Committed;
+            assert_eq!(
+                fs::read(anchor.join("a2c/computer-id")).unwrap(),
+                b"identity-created-after-snapshot"
+            );
+            assert_eq!(
+                fs::read(anchor.join("a2c/settings.json")).unwrap(),
+                if committed {
+                    b"new-settings"
+                } else {
+                    b"old-settings"
+                }
+            );
+            assert_eq!(
+                fs::read(anchor.join(TFROBOT_DIRNAME).join("marker")).unwrap(),
+                if committed {
+                    b"new-project"
+                } else {
+                    b"old-project"
+                }
+            );
+            // In Prepared, an originally absent file cannot have been installed yet.
+            assert_eq!(
+                anchor.join("a2c/mcp.json").exists(),
+                phase != AnchorRestorePhase::PreviousMoved
+            );
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn complete_sdk_restore_resumes_cleanup_without_replaying_partial_backups() {
+        let directory = tempdir().unwrap();
+        let anchor = directory.path().join("sdk_config");
+        let root = anchor_restore_transaction_root(&anchor).unwrap();
+        fs::create_dir_all(root.join("previous-project")).unwrap();
+        fs::create_dir_all(root.join("previous-user")).unwrap();
+        fs::create_dir_all(anchor.join("a2c")).unwrap();
+        fs::write(anchor.join("a2c/settings.json"), b"recovered-settings").unwrap();
+        fs::write(anchor.join("a2c/computer-id"), b"live-identity").unwrap();
+        // Recovery already completed and cleanup removed some backup entries.
+        // Remaining partial backups must never be replayed onto the final live tree.
+        fs::write(root.join("previous-user/mcp.json"), b"stale-partial-backup").unwrap();
+        write_anchor_restore_transaction(
+            &root,
+            &AnchorRestoreTransaction {
+                phase: AnchorRestorePhase::Committed,
+                original_project_dir_existed: true,
+                original_user_dir_existed: true,
+                original_user_files: Some([true, true]),
+            },
+        )
+        .unwrap();
+        recover_anchor_restore_transaction(&anchor).unwrap();
+        assert_eq!(
+            fs::read(anchor.join("a2c/settings.json")).unwrap(),
+            b"recovered-settings"
+        );
+        assert_eq!(
+            fs::read(anchor.join("a2c/computer-id")).unwrap(),
+            b"live-identity"
+        );
+        assert!(!anchor.join("a2c/mcp.json").exists());
+        assert!(!root.exists());
+        // The only state possible after deleting the terminal marker is an empty root.
+        fs::create_dir(&root).unwrap();
+        recover_anchor_restore_transaction(&anchor).unwrap();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn complete_sdk_restore_recovers_legacy_directory_journal() {
+        let directory = tempdir().unwrap();
+        let anchor = directory.path().join("sdk_config");
+        let root = anchor_restore_transaction_root(&anchor).unwrap();
+        fs::create_dir_all(root.join("previous-project")).unwrap();
+        fs::create_dir_all(root.join("previous-user")).unwrap();
+        fs::write(root.join("previous-user/settings.json"), b"legacy-settings").unwrap();
+        fs::write(root.join("previous-project/marker"), b"legacy-project").unwrap();
+        write_json_atomically(
+            &anchor_restore_transaction_path(&root),
+            &json!({
+                "phase": "previous_moved", "original_project_dir_existed": true,
+                "original_user_dir_existed": true
+            }),
+        )
+        .unwrap();
+        recover_anchor_restore_transaction(&anchor).unwrap();
+        assert_eq!(
+            fs::read(anchor.join("a2c/settings.json")).unwrap(),
+            b"legacy-settings"
+        );
+        assert_eq!(
+            fs::read(anchor.join(TFROBOT_DIRNAME).join("marker")).unwrap(),
+            b"legacy-project"
+        );
+        assert!(!root.exists());
     }
 
     #[test]
