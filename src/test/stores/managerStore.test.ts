@@ -4,6 +4,7 @@ import {
   currentEmployeeResource,
   managerContextScope,
   managerSessionFromContext,
+  sameManagerContextKey,
   useManagerStore,
   type AccountOption,
   type DigitalEmployeeBrief,
@@ -122,6 +123,14 @@ describe('managerStore authoritative Context', () => {
     mockedLogError.mockReset();
   });
 
+  it('matches separately decoded custom context keys only at the same address', () => {
+    const key = { environment: { custom: 'https://manager.example/first' }, accountId: '9', organizationId: '2' };
+    expect(sameManagerContextKey(key, { ...key, environment: { ...key.environment } })).toBe(true);
+    expect(sameManagerContextKey(key, {
+      ...key, environment: { custom: 'https://manager.example/second' },
+    })).toBe(false);
+  });
+
   it('accepts only monotonic backend snapshots and derives the legacy display session', () => {
     const revision2 = authenticatedContext(2);
     expect(useManagerStore.getState().applyContext(revision2)).toBe(true);
@@ -192,22 +201,23 @@ describe('managerStore authoritative Context', () => {
 
   it('does not let an older environment read overwrite a completed switch', async () => {
     const previousEnvironment = deferred<string>();
+    const custom = { custom: 'https://manager.example.com' };
     mockedInvoke
       .mockReturnValueOnce(previousEnvironment.promise)
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(custom)
       .mockResolvedValueOnce(signedOutContext(2));
     useManagerStore.getState().applyContext(authenticatedContext(1));
     const loading = useManagerStore.getState().loadLoginEnvironment();
 
-    await useManagerStore.getState().changeLoginEnvironment('test', 1);
+    await useManagerStore.getState().changeLoginEnvironment(custom, 1);
     previousEnvironment.resolve('staging');
     await loading;
 
     expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'set_manager_login_environment', {
-      environment: 'test', confirmedRevision: 1,
+      environment: custom, confirmedRevision: 1,
     });
     expect(useManagerStore.getState()).toMatchObject({
-      context: signedOutContext(2), loginEnvironment: 'test', signInRequest: 1,
+      context: signedOutContext(2), loginEnvironment: custom, signInRequest: 1,
     });
   });
 

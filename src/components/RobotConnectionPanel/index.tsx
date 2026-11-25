@@ -25,6 +25,7 @@ import {
   currentEmployeeResource,
   managerContextScope,
   managerSessionFromContext,
+  sameManagerContextKey,
   useManagerStore,
   type DigitalEmployeeBrief,
   type ManagerContextKey,
@@ -116,7 +117,7 @@ export function RobotConnectionPanel({ instanceId }: RobotConnectionPanelProps) 
     const persistedTarget = selectedInstance?.connectionPolicy.target;
     if (
       persistedTarget?.type === 'manager_robot'
-      && sameContextKey(persistedTarget.contextKey, context.contextKey)
+      && sameManagerContextKey(persistedTarget.contextKey, context.contextKey)
       && !employees.some((employee) => employee.id === persistedTarget.employeeId)
     ) {
       managerOptions.push({
@@ -267,7 +268,7 @@ function managerTargetToValue(
 ): string | undefined {
   return target?.type === 'manager_robot'
     && currentContextKey !== null
-    && sameContextKey(target.contextKey, currentContextKey)
+    && sameManagerContextKey(target.contextKey, currentContextKey)
     ? targetToValue(target)
     : undefined;
 }
@@ -318,12 +319,6 @@ function valueToTarget(
   };
 }
 
-function sameContextKey(left: ManagerContextKey, right: ManagerContextKey): boolean {
-  return left.environment === right.environment
-    && left.accountId === right.accountId
-    && left.organizationId === right.organizationId;
-}
-
 type ManagerBindingPresentation =
   | 'active'
   | 'dormant'
@@ -348,9 +343,9 @@ function managerBindingPresentation(
   if (
     currentContext === null
     || managerTarget === null
-    || !sameContextKey(managerTarget.contextKey, currentContext)
+    || !sameManagerContextKey(managerTarget.contextKey, currentContext)
     || (binding?.context_key !== undefined
-      && !sameContextKey(binding.context_key, currentContext))
+      && !sameManagerContextKey(binding.context_key, currentContext))
     || binding?.state === 'dormant'
   ) {
     return 'dormant';

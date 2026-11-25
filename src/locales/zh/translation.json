@@ -1368,6 +1368,8 @@
     "appearance": "外观",
     "loginEnvironment": "登录环境",
     "loginEnvironmentHint": "此设备上的开发版和安装版共用此设置。",
+    "managerCustomAddress": "Manager 服务地址",
+    "managerCustomAddressInvalid": "请输入完整的 HTTP 或 HTTPS 地址，地址中不能包含账号密码、查询参数或片段。",
     "loginEnvironmentConfirmTitle": "切换登录环境？",
     "loginEnvironmentConfirmDescription": "切换会退出当前账号并断开 Manager 连接。请重新登录以使用{{environment}}。",
     "loginEnvironmentConfirm": "切换并退出登录",
@@ -1465,10 +1467,11 @@
       "credentialHint": "登录会读取系统钥匙串中已保存的凭据；拒绝授权只会停止本次登录。",
       "environment": "环境",
       "environmentHint": "可在设置中修改登录环境。",
+      "insecureCustomAddress": "此 HTTP 地址会明文传输登录凭据。",
       "environments": {
         "staging": "预发布环境",
         "prod": "正式环境（含 Beta）",
-        "test": "测试环境"
+        "custom": "自定义环境"
       },
       "identifier": "手机号或邮箱",
       "identifierRequired": "请输入手机号或邮箱",

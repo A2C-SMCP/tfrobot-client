@@ -208,15 +208,22 @@ impl ManagerContextCoordinator {
         &self,
         environment: ManagerEnvironment,
         confirmed_revision: Option<u64>,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<ManagerEnvironment, ManagerError> {
         let _transaction = self.transaction_lock.lock().await;
+        let environment = environment.preserve_legacy_test_identity();
+        let selected = match self.settings.manager_environment() {
+            Ok(selected) => Some(selected),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => None,
+            Err(error) => return Err(login_environment_settings_error(error)),
+        };
         let current = self.snapshot().await;
-        if self.configured_environment()? == environment
+        if selected.as_ref() == Some(&environment)
             && current
                 .environment
-                .is_none_or(|active| active == environment)
+                .as_ref()
+                .is_none_or(|active| active == &environment)
         {
-            return Ok(());
+            return Ok(environment);
         }
         if current.auth_state != ManagerAuthState::SignedOut
             && confirmed_revision != Some(current.revision)
@@ -225,9 +232,10 @@ impl ManagerContextCoordinator {
         }
         // Persist the choice before signing out so an interrupted switch cannot restore an
         // old environment's session on startup.
-        let save = self.settings.set_manager_environment(environment);
-        self.finish_environment_switch_in_transaction(environment, save)
-            .await
+        let save = self.settings.set_manager_environment(environment.clone());
+        self.finish_environment_switch_in_transaction(environment.clone(), save)
+            .await?;
+        Ok(environment)
     }
 
     async fn finish_environment_switch_in_transaction(
@@ -301,7 +309,12 @@ impl ManagerContextCoordinator {
         self.clear_persisted_session()?;
         let result = self
             .client
-            .login(Some(self.base_url(environment)), identifier, password)
+            .login_in_environment(
+                self.base_url(&environment),
+                environment.clone(),
+                identifier,
+                password,
+            )
             .await;
         let result = match result {
             Ok(result) => result,
@@ -324,7 +337,7 @@ impl ManagerContextCoordinator {
                     self.abort_incomplete_authentication().await;
                     return Err(error);
                 }
-                if let Err(error) = self.persist_authenticated(environment, &current) {
+                if let Err(error) = self.persist_authenticated(&environment, &current) {
                     self.abort_incomplete_authentication().await;
                     return Err(error);
                 }
@@ -401,7 +414,7 @@ impl ManagerContextCoordinator {
             .await
             .environment
             .ok_or(ManagerError::MissingBaseUrl)?;
-        if let Err(error) = self.persist_authenticated(environment, &current) {
+        if let Err(error) = self.persist_authenticated(&environment, &current) {
             self.abort_incomplete_authentication().await;
             return Err(error);
         }
@@ -431,7 +444,7 @@ impl ManagerContextCoordinator {
         }
         if !self
             .client
-            .restore_session_from_base_url(saved.environment, self.base_url(saved.environment))
+            .restore_session_from_base_url(environment.clone(), self.base_url(&environment))
             .await?
         {
             self.clear_persisted_session()?;
@@ -457,19 +470,19 @@ impl ManagerContextCoordinator {
                 "manager: persisted identity differs from live /auth/me; repairing metadata from server truth"
             );
         }
-        if let Err(error) = self.persist_authenticated(saved.environment, &current) {
+        if let Err(error) = self.persist_authenticated(&environment, &current) {
             self.abort_incomplete_authentication().await;
             return Err(error);
         }
         let restored = RestoredManagerSession {
-            environment: saved.environment,
+            environment: environment.clone(),
             user: UserInfo {
                 user_id: current.id.clone(),
                 account_id: current.account_id.clone(),
                 account_name: current.account_name.clone(),
             },
         };
-        self.transition_identity(authenticated_snapshot(saved.environment, current))
+        self.transition_identity(authenticated_snapshot(environment, current))
             .await;
         Ok(Some(restored))
     }
@@ -516,6 +529,7 @@ impl ManagerContextCoordinator {
             .read()
             .await
             .environment
+            .clone()
             .ok_or(ManagerError::MissingBaseUrl)?;
         let (_transition, cleanup_errors) = self.begin_context_transition().await;
         self.log_cleanup_errors("account switch", &cleanup_errors);
@@ -541,7 +555,7 @@ impl ManagerContextCoordinator {
             self.abort_incomplete_authentication().await;
             return Err(error);
         }
-        if let Err(error) = self.persist_authenticated(environment, &current) {
+        if let Err(error) = self.persist_authenticated(&environment, &current) {
             self.abort_incomplete_authentication().await;
             return Err(error);
         }
@@ -838,10 +852,10 @@ impl ManagerContextCoordinator {
         }
     }
 
-    fn base_url(&self, environment: ManagerEnvironment) -> String {
+    fn base_url(&self, environment: &ManagerEnvironment) -> String {
         self.base_url_override.as_ref().map_or_else(
             || environment.base_url().to_string(),
-            |resolve| resolve(environment),
+            |resolve| resolve(environment.clone()),
         )
     }
 
@@ -857,13 +871,13 @@ impl ManagerContextCoordinator {
 
     fn persist_authenticated(
         &self,
-        environment: ManagerEnvironment,
+        environment: &ManagerEnvironment,
         current: &ManagerCurrentUser,
     ) -> Result<(), ManagerError> {
         let config = ManagerSessionConfig {
             schema_version: MANAGER_SESSION_SCHEMA_VERSION,
             session: Some(PersistedManagerSession {
-                environment,
+                environment: environment.clone(),
                 user_id: current.id.clone(),
                 user_nickname: Some(current.nickname.clone()),
                 user_email: Some(current.email.clone()),
@@ -962,7 +976,7 @@ fn authenticated_snapshot(
     current: ManagerCurrentUser,
 ) -> ManagerContextSnapshot {
     let context_key = ManagerContextKey {
-        environment,
+        environment: environment.clone(),
         account_id: current.account_id.clone(),
         organization_id: current.organization_id.clone(),
     };
@@ -1097,7 +1111,7 @@ mod tests {
             );
             assert!(matches!(
                 coordinator
-                    .login(environment, "client@example.com", "secret")
+                    .login(environment.clone(), "client@example.com", "secret")
                     .await,
                 Err(ManagerError::LoginEnvironmentChanged)
             ));
@@ -1168,6 +1182,80 @@ mod tests {
                 assert_eq!(current, original);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_custom_address_can_be_repaired_without_resetting_other_settings() {
+        let (coordinator, directory) = coordinator();
+        let path = directory.path().join("settings.json");
+        let mut settings = serde_json::to_value(coordinator.settings.load()).unwrap();
+        settings["language"] = serde_json::json!("zh");
+        settings["manager_environment"] = serde_json::json!({ "custom": "ftp://manager.example" });
+        settings["manager_session"] = serde_json::json!({
+            "baseUrl": "https://api.turingfocus.cn",
+            "userId": 7,
+            "accountId": 8,
+            "accountName": "Legacy Manager account"
+        });
+        std::fs::write(&path, settings.to_string()).unwrap();
+
+        coordinator.settings.clear_legacy_manager_session().unwrap();
+        settings.as_object_mut().unwrap().remove("manager_session");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            settings
+        );
+        assert!(coordinator.login_environment().await.is_err());
+        assert!(coordinator.restore_session().await.is_err());
+        assert_eq!(coordinator.settings.load().language, "zh");
+        assert_eq!(
+            coordinator
+                .settings
+                .load_legacy_for_migration()
+                .unwrap()
+                .language,
+            "zh"
+        );
+        assert!(coordinator
+            .settings
+            .claim_automatic_update_check(100, 10)
+            .is_err());
+        let saved = coordinator
+            .set_login_environment(ManagerEnvironment::Staging, None)
+            .await
+            .unwrap();
+        assert_eq!(saved, ManagerEnvironment::Staging);
+        settings["manager_environment"] = serde_json::json!("staging");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            settings
+        );
+    }
+
+    #[tokio::test]
+    async fn selecting_the_previous_test_address_keeps_the_legacy_environment_identity() {
+        let (coordinator, _directory) = coordinator();
+        coordinator
+            .set_login_environment(ManagerEnvironment::Test, None)
+            .await
+            .unwrap();
+        coordinator
+            .set_login_environment(ManagerEnvironment::Staging, None)
+            .await
+            .unwrap();
+        let custom = serde_json::from_value(serde_json::json!({
+            "custom": "https://REST.TEST.TURINGFOCUS.CN/"
+        }))
+        .unwrap();
+        let selected = coordinator
+            .set_login_environment(custom, None)
+            .await
+            .unwrap();
+        assert_eq!(selected, ManagerEnvironment::Test);
+        assert_eq!(
+            coordinator.settings.load().manager_environment,
+            ManagerEnvironment::Test
+        );
     }
 
     #[tokio::test]

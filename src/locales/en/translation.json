@@ -1370,6 +1370,8 @@
     "appearance": "Appearance",
     "loginEnvironment": "Sign-in environment",
     "loginEnvironmentHint": "Development builds and installed builds on this device use this selection.",
+    "managerCustomAddress": "Manager server address",
+    "managerCustomAddressInvalid": "Enter a complete HTTP or HTTPS URL without credentials, a query, or a fragment.",
     "loginEnvironmentConfirmTitle": "Change the sign-in environment?",
     "loginEnvironmentConfirmDescription": "You’ll be signed out and active Manager connections will close. Sign in again to use {{environment}}.",
     "loginEnvironmentConfirm": "Switch and sign out",
@@ -1467,10 +1469,11 @@
       "credentialHint": "Signing in reads saved credentials from your system keychain. Declining stops this sign-in only.",
       "environment": "Environment",
       "environmentHint": "Change the sign-in environment in Settings.",
+      "insecureCustomAddress": "This HTTP address sends sign-in credentials without encryption.",
       "environments": {
         "staging": "Staging",
         "prod": "Production (including Beta)",
-        "test": "Test"
+        "custom": "Custom environment"
       },
       "identifier": "Phone or email",
       "identifierRequired": "Phone or email is required",

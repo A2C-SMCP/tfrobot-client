@@ -22,7 +22,9 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  managerCustomAddress,
   managerContextScope,
+  managerEnvironmentKind,
   useManagerStore,
   type ManagerError,
 } from '@/stores/managerStore';
@@ -65,6 +67,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
     && context.account !== null
     && context.organization !== null;
   const authenticatedScope = managerContextScope(context);
+  const customAddress = managerCustomAddress(context.environment);
 
   const handledSignInRequest = useRef(signInRequest);
   useEffect(() => {
@@ -132,7 +135,10 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
             key: 'environment',
             label: t('managerAccount.global.environment'),
             children: context.environment
-              ? t(`managerAccount.login.environments.${context.environment}`)
+              ? <Space direction="vertical" size={0}>
+                <Text>{t(`managerAccount.login.environments.${managerEnvironmentKind(context.environment)}`)}</Text>
+                {customAddress && <Text style={{ overflowWrap: 'anywhere' }}>{customAddress}</Text>}
+              </Space>
               : '—',
           },
           {

@@ -496,11 +496,12 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
     const environmentPreference = 'fixture.managerLoginEnvironment';
     const getMockResponse = (responses: Record<string, unknown>, cmd: string, args?: unknown) => {
       if (cmd === 'get_manager_login_environment') {
-        return localStorage.getItem(environmentPreference) ?? responses[cmd];
+        const saved = localStorage.getItem(environmentPreference);
+        return saved ? JSON.parse(saved) : responses[cmd];
       }
       if (cmd === 'set_manager_login_environment') {
-        const { environment } = args as { environment: string };
-        localStorage.setItem(environmentPreference, environment);
+        const { environment } = args as { environment: string | { custom: string } };
+        localStorage.setItem(environmentPreference, JSON.stringify(environment));
         const previous = responses.manager_get_context as { revision: number };
         responses.manager_get_context = {
           revision: previous.revision + 1,
@@ -508,7 +509,7 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
           environment: null, contextKey: null, user: null, account: null, organization: null,
           permissions: [],
         };
-        return null;
+        return environment;
       }
       if (cmd === 'get_mcp_servers') {
         const instanceId = typeof args === 'object' && args !== null && 'instanceId' in args

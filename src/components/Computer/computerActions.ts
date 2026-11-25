@@ -4,7 +4,7 @@ import type {
   ComputerStatus,
   RobotBindingMetadata,
 } from '@/stores/computerStore';
-import type { ManagerContextKey } from '@/stores/managerStore';
+import { sameManagerContextKey, type ManagerContextKey } from '@/stores/managerStore';
 
 export const computerStatusColor: Record<ComputerStatus, string> = {
   running: 'success',
@@ -26,15 +26,11 @@ export function isConnectionTargetConnectable(
 ): boolean {
   if (!target) return false;
   if (target.type === 'manual_smcp') return true;
-  const sameContext = (left?: ManagerContextKey | null, right?: ManagerContextKey | null) =>
-    left?.environment === right?.environment
-    && left?.accountId === right?.accountId
-    && left?.organizationId === right?.organizationId;
   return currentContext != null
-    && sameContext(target.contextKey, currentContext)
+    && sameManagerContextKey(target.contextKey, currentContext)
     && binding?.state === 'active'
     && binding.employee_id === target.employeeId
-    && sameContext(binding.context_key, currentContext);
+    && sameManagerContextKey(binding.context_key, currentContext);
 }
 
 export function resolveComputerConnection(
