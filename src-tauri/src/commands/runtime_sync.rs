@@ -63,3 +63,11 @@ pub async fn apply_updated_computer_instance(
         }
     }
 }
+
+/// Invalidate configuration observations even after partial failures: persisted work may exist.
+/// This signal is separate from SDK config revisions (which do not track client-side CRUD).
+pub(crate) async fn notify_config_observers(state: &AppState, id: &str) {
+    if let Some(runtime) = state.computer_registry.runtime(id).await {
+        runtime.publish_config_change().await;
+    }
+}

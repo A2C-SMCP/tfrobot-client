@@ -3,6 +3,7 @@ import { ComputerWorkbench } from '@/components/Computer/ComputerWorkbench';
 import type { ResolvedComputerConnection } from '@/components/Computer/computerActions';
 import type { ComputerInstance } from '@/stores/computerStore';
 import { runtimeSnapshot } from '../helpers/store';
+import { ScopeContext } from '@/components/Navigation/navigationMemoryState';
 
 vi.mock('@/components/Computer/ComputerRuntime', () => ({
   ComputerRuntime: ({
@@ -44,9 +45,6 @@ vi.mock('@/components/ActivityViewer', () => ({
     <div data-testid="logs-section">{instanceId}</div>
   ),
 }));
-vi.mock('@/components/Computer/RuntimeDiagnostics', () => ({
-  RuntimeDiagnostics: () => <div data-testid="advanced-diagnostics" />,
-}));
 
 function instance(overrides: Partial<ComputerInstance> = {}): ComputerInstance {
   return {
@@ -84,12 +82,16 @@ function renderWorkbench(
     onConnect: vi.fn(),
     onDisconnect: vi.fn(),
   };
-  render(<ComputerWorkbench {...props} />);
+  render(
+    <ScopeContext.Provider value={new Map([['workbench.diagnosticTab', 'status']])}>
+      <ComputerWorkbench {...props} />
+    </ScopeContext.Provider>,
+  );
   return props;
 }
 
 describe('ComputerWorkbench', () => {
-  it('renders an accessible icon-only back action and one longitudinal workbench', () => {
+  it('renders an accessible back action and switches task panels without mixing their contents', () => {
     const props = renderWorkbench();
 
     const back = screen.getByRole('button', { name: 'Back to Computers' });
@@ -99,15 +101,19 @@ describe('ComputerWorkbench', () => {
 
     expect(screen.getByLabelText('Computer runtime workbench')).toBeInTheDocument();
     expect(screen.getByTestId('runtime-section')).toHaveTextContent('computer-a');
+    expect(screen.queryByTestId('skills-section')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills and tools' }));
     expect(screen.getByTestId('skills-section')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('runtime-section')).not.toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: 'Desktop Resources' }));
     expect(screen.getByTestId('resources-section')).toHaveTextContent('computer-a');
-    expect(screen.getByTestId('debug-section')).toHaveTextContent('computer-a');
-    expect(screen.getByTestId('logs-section')).toHaveTextContent('computer-a');
-    expect(screen.getByTestId('advanced-diagnostics')).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Debug Panel' })).toBeVisible();
-    expect(screen.getByRole('region', { name: 'Logs' })).toBeVisible();
-    expect(screen.queryByRole('button', { expanded: false })).not.toBeInTheDocument();
-    expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Diagnostics' }));
+    expect(screen.getByTestId('logs-section')).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Logs', selected: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Debug Panel' }));
+    expect(screen.getByTestId('debug-section')).toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
+    expect(screen.getByTestId('logs-section')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
   });
 

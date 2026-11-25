@@ -47,6 +47,9 @@ function ScopedPages({ navigation }: { navigation: Navigation }) {
   const listRequest = requests.computer;
   const computerRequest = (listRequest?.revision ?? 0) > (detailRequest?.revision ?? 0) ? listRequest : detailRequest;
   const settingsRequest = requests['computer-settings'];
+  const rawMcpTarget = computerRequest?.route.split(':')[2];
+  let targetMcpId: string | null = null;
+  try { targetMcpId = rawMcpTarget ? decodeURIComponent(rawMcpTarget) : null; } catch { /* Ignore a malformed optional focus target. */ }
   const [, rawSettingsSection] = (settingsRequest?.route ?? '').split(':');
   const targetPlugin = useMemo(() => parsePluginSettingsTarget((settingsRequest?.route ?? '').split(':').slice(2)), [settingsRequest]);
   const settingsSection = toComputerSettingsSection(rawSettingsSection);
@@ -91,6 +94,7 @@ function ScopedPages({ navigation }: { navigation: Navigation }) {
         <PageHost name="chat" active={page === 'chat'}><Chat /></PageHost>
         <PageHost name="computer" active={page === 'computer' || page === 'computer-detail'}>
           <Computer
+            targetMcpId={targetMcpId}
             initialView={computerRequest?.route.startsWith('computer-detail') ? 'detail' : 'list'}
             initialSection={toComputerWorkbenchSection(computerRequest?.route.split(':')[1])}
             navigationRevision={computerRequest?.revision ?? 0}

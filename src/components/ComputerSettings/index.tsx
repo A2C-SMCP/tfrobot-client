@@ -1,3 +1,4 @@
+import { ConfigAdoptionStatus } from '@/components/Computer/ConfigAdoptionStatus';
 import { usePageActive } from '@/components/Navigation/pageActivityState';
 import { PageHost } from '@/components/Navigation/PageHost';
 import { NavigationScope } from '@/components/Navigation/NavigationMemory';
@@ -18,7 +19,7 @@ import {
   ArrowLeftOutlined,
   DesktopOutlined,
   FormOutlined,
-  ReadOutlined,
+  SettingOutlined,
   RobotOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
@@ -35,12 +36,14 @@ import {
   type ComputerSettingsSection,
   type PluginSettingsTarget,
 } from '@/components/Computer/tabs';
+import { ComputerIdentity } from '@/components/Computer/ComputerIdentity';
+import { StartupSettings } from './StartupSettings';
 import { GeneralSettings } from './GeneralSettings';
 import { SkillsSettings } from './SkillsSettings';
 import { BuiltInToolsSettings } from './BuiltInToolsSettings';
 import styles from './ComputerSettings.module.css';
 
-const { Paragraph, Text, Title } = Typography;
+const { Paragraph, Title } = Typography;
 
 interface ComputerSettingsProps {
   navigationRevision?: number;
@@ -63,7 +66,10 @@ function ComputerSettingsContent({
 }: ComputerSettingsProps) {
   const pageActive = usePageActive();
   const { t } = useTranslation();
-  const [activeSection, setActiveSection] = useNavigationState<ComputerSettingsSection>('settings.section', initialSection);
+  const [storedSection, setActiveSection] = useNavigationState<ComputerSettingsSection>('settings.section', initialSection);
+  const activeSection = toComputerSettingsSection(storedSection);
+  const [workbenchSection] = useNavigationState('workbench.section', 'top');
+  const openRuntime = () => onNavigate?.(`computer-detail:${workbenchSection}`);
   const [focusedPlugin, setFocusedPlugin] = useState<PluginSettingsTarget | null>(targetPlugin);
   const {
     instances,
@@ -92,19 +98,20 @@ function ComputerSettingsContent({
 
   const sections = useMemo(() => [
     { key: 'general', icon: <DesktopOutlined /> },
-    { key: 'skills', icon: <ReadOutlined /> },
     { key: 'plugins', icon: <AppstoreOutlined /> },
     { key: 'mcp', icon: <ApiOutlined /> },
     { key: 'inputs', icon: <FormOutlined /> },
     { key: 'connection', icon: <RobotOutlined /> },
     { key: 'built-in-tools', icon: <ToolOutlined /> },
+    { key: 'advanced', icon: <SettingOutlined /> },
   ] satisfies Array<{ key: ComputerSettingsSection; icon: React.ReactNode }>, []);
 
-  const menuItems = sections.map(({ key, icon }) => ({
-    key,
-    icon,
-    label: t(`computer.settings.sections.${key}.title`),
-  }));
+  const menuItem = (key: ComputerSettingsSection) => ({ key, icon: sections.find((section) => section.key === key)?.icon, label: t(`computer.settings.sections.${key}.title`) });
+  const menuItems = [
+    { type: 'group' as const, label: t('computer.redesign.basicGroup'), children: ['general', 'connection'].map((key) => menuItem(key as ComputerSettingsSection)) },
+    { type: 'group' as const, label: t('computer.redesign.capabilityGroup'), children: ['plugins', 'mcp', 'inputs', 'built-in-tools'].map((key) => menuItem(key as ComputerSettingsSection)) },
+    { type: 'group' as const, label: t('computer.redesign.advancedGroup'), children: [menuItem('advanced')] },
+  ];
   const sectionTitle = t(`computer.settings.sections.${activeSection}.title`);
   const sectionDescription = t(`computer.settings.sections.${activeSection}.description`);
 
@@ -120,12 +127,13 @@ function ComputerSettingsContent({
     switch (section) {
       case 'general':
         return <GeneralSettings instance={selectedInstance} />;
-      case 'skills':
-        return <SkillsSettings instance={selectedInstance} onNavigate={onNavigate} />;
+      case 'advanced':
+        return <Space direction="vertical" size={24} style={{ width: '100%' }}><StartupSettings instance={selectedInstance} /><SkillsSettings instance={selectedInstance} onNavigate={onNavigate} /></Space>;
       case 'plugins':
         return (
           <MarketplaceTab
             instanceId={selectedInstance.id}
+            onOpenRuntime={() => onNavigate?.('computer-detail:runtime')}
             targetPlugin={focusedPlugin}
             onTargetPluginConsumed={() => setFocusedPlugin(null)}
           />
@@ -133,6 +141,8 @@ function ComputerSettingsContent({
       case 'mcp':
         return (
           <McpConfig
+            embedded
+            onOpenRuntime={(bundleId) => onNavigate?.(bundleId ? `computer-detail:top:${encodeURIComponent(bundleId)}` : 'computer-detail:top')}
             instanceId={selectedInstance.id}
             onOpenPlugin={(owner) => {
               setFocusedPlugin(owner);
@@ -144,6 +154,7 @@ function ComputerSettingsContent({
       case 'inputs':
         return (
           <InputVariables
+            embedded
             instanceId={selectedInstance.id}
             onOpenPermissionHelp={() => onNavigate?.(permissionHelpRoute('password'))}
           />
@@ -152,7 +163,6 @@ function ComputerSettingsContent({
         return (
           <RobotConnectionPanel
             instanceId={selectedInstance.id}
-            onNavigate={onNavigate}
           />
         );
       case 'built-in-tools':
@@ -182,18 +192,15 @@ function ComputerSettingsContent({
         <Button
           icon={<ArrowLeftOutlined />}
           aria-label={t('computer.settings.backToComputer')}
-          onClick={() => onNavigate?.('computer-detail:runtime')}
+          onClick={openRuntime}
         >
           {t('computer.settings.backToComputer')}
         </Button>
-        <Space direction="vertical" size={0} className={styles.identity}>
-          <Title level={3} style={{ margin: 0 }}>
-            {t('computer.settings.title', { name: selectedInstance.name })}
-          </Title>
-          <Text type="secondary" copyable>{selectedInstance.id}</Text>
-        </Space>
+        <ComputerIdentity instance={selectedInstance} settings />
       </div>
 
+      <Paragraph type="secondary" className={styles.pageDescription}>{t('computer.redesign.settingsDescription')}</Paragraph>
+      <ConfigAdoptionStatus summaryOnly instance={selectedInstance} onOpenRuntime={openRuntime} onOpenPlugin={(owner) => onNavigate?.(computerSettingsNavigationKey('plugins', owner))} />
       <div className={styles.shell}>
         <Card size="small" className={styles.navigation}>
           <Menu

@@ -15,12 +15,12 @@
 
 .columns {
   display: grid;
-  grid-template-columns: minmax(240px, 0.9fr) minmax(260px, 1fr) minmax(300px, 1.1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
   gap: 0;
   align-items: stretch;
   overflow: hidden;
-  background: #fff;
-  border: 1px solid #f0f0f0;
+  background: var(--ant-color-bg-container);
+  border: 1px solid var(--ant-color-border-secondary);
   border-radius: 8px;
 }
 
@@ -57,7 +57,20 @@
 }
 
 .selectedItem {
-  background: #f6ffed;
+  background: var(--ant-color-primary-bg);
+}
+
+.filters {
+  display: flex;
+  gap: 12px;
+}
+
+.filters > :global(.ant-select) {
+  min-width: 150px;
+}
+
+.sourcePath {
+  overflow-wrap: anywhere;
 }
 
 .listBody,
@@ -207,6 +220,13 @@ button.assetCard:hover {
 }
 
 @media (max-width: 900px) {
+  .header {
+    flex-wrap: wrap;
+  }
+
+  .filters {
+    flex-direction: column;
+  }
   .columns {
     grid-template-columns: 1fr;
   }

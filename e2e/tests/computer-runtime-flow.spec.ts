@@ -27,12 +27,12 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Duplicate' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Copy ID' })).toBeVisible();
+    await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
     await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toBeVisible();
-    const runtimeCards = workbench.locator('.ant-card');
-    await expect(runtimeCards.first().getByText('Active capability summary', { exact: true }))
-      .toBeVisible();
-    await expect(workbench.locator('.ant-card-head-title', { hasText: 'Connection' }))
-      .toHaveCount(0);
+    await page.getByRole('tab', { name: 'Workbench', exact: true }).click();
+    await expect(workbench.getByText('Available in this run', { exact: true })).toBeVisible();
+    await expect(workbench.getByText('Connection overview', { exact: true })).toBeVisible();
     for (const configurationAction of [
       'Add Server',
       'Import Config',
@@ -69,22 +69,21 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     const settingsNavigation = page.getByRole('menu', {
       name: 'Computer settings sections',
     });
-    await settingsNavigation.getByText('Skills', { exact: true }).click();
+    await settingsNavigation.getByText('Advanced', { exact: true }).click();
     await expect(page.getByRole('button', { name: /keyboard-helper/i })).toHaveCount(0);
-    await expect(page.getByRole('button', {
-      name: 'View active Skills in Computer',
-    })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open local directory' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open saved directory' })).toBeVisible();
 
     await settingsNavigation.getByText('MCP Servers', { exact: true }).click();
     await expect(page.getByRole('button', { name: 'Add Server' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Import Config' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Export Config' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Validate Schema' })).toBeVisible();
+    await page.getByRole('button', { name: 'More configuration actions' }).click();
+    await expect(page.getByRole('menuitem', { name: 'Import Config' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Export Config' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Validate Schema' })).toBeVisible();
+    await page.keyboard.press('Escape');
     await expect(page.getByRole('button', { name: 'Start All' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Stop All' })).not.toBeVisible();
 
-    await page.getByRole('button', { name: 'Back to Computer' }).click();
+    await page.getByRole('button', { name: 'Back to runtime workbench' }).click();
     await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByRole('button', { name: /Reload$/ })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Start All' })).toBeVisible();
@@ -92,17 +91,19 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Import Config' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).not.toBeVisible();
 
-    await page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Debug Panel', exact: true }).click();
+    await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
+    await page.getByRole('tab', { name: 'Debug Panel', exact: true }).click();
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Search tools...')).toBeVisible();
-    await page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Logs', exact: true }).click();
+    await page.getByRole('tab', { name: 'Logs', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
   });
 
   test('projects runtime status events into the active Computer view and refreshes consumers', async ({ page }) => {
-    await page.getByText('Advanced Runtime Diagnostics').click();
-    await expect(page.getByRole('cell', { name: /Snapshot Revision\s*:\s*1/ })).toBeVisible();
-    await expect(page.getByRole('cell', { name: /Capability Revision\s*:\s*1/ })).toBeVisible();
+    const toolsCount = page.locator('.ant-statistic')
+      .filter({ has: page.getByText('Available tools', { exact: true }) })
+      .locator('.ant-statistic-content');
+    await expect(toolsCount).toHaveText('0');
 
     await expect.poll(() => page.evaluate(() => {
       const invokes = (window as any).__TAURI_INVOKES__ as Array<{
@@ -161,14 +162,11 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       });
     });
 
-    await expect(page.getByRole('cell', { name: /Snapshot Revision\s*:\s*2/ })).toBeVisible();
-    await expect(page.getByRole('cell', { name: /Capability Revision\s*:\s*2/ })).toBeVisible();
-    await expect(page.getByText('Capability revision changed to 2')).toBeVisible();
+    await expect(toolsCount).toHaveText('1');
     await expect.poll(async () => page.evaluate(() => (
       (window as any).__TAURI_INVOKES__ as Array<{ cmd: string; args?: unknown }>
     ).filter((entry) => entry.cmd === 'get_mcp_servers'
       && JSON.stringify(entry.args) === JSON.stringify({ instanceId: 'computer-a' })).length)).toBeGreaterThan(1);
-    await page.getByText('Advanced Runtime Diagnostics').click();
 
     await page.evaluate(() => {
       const invokes = (window as any).__TAURI_INVOKES__ as Array<{
@@ -237,7 +235,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       });
     });
 
-    const runtimePanel = page.getByRole('region', { name: 'Runtime workbench' });
+    const runtimePanel = page.locator('[data-page=workbench-top]');
     await expect(runtimePanel.getByText('The Runtime is available, but an MCP server could not start.'))
       .toBeVisible();
     await expect(runtimePanel.getByText('Affected: MCP server Browser MCP')).toBeVisible();
@@ -262,14 +260,16 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     expect(await page.evaluate(() => document.documentElement.scrollWidth))
       .toBeLessThanOrEqual(await page.evaluate(() => document.documentElement.clientWidth));
 
+    await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
     const skill = page.getByRole('button', { name: /keyboard-helper/i });
     await skill.focus();
     await page.keyboard.press('Enter');
     await expect(page.getByRole('heading', { name: 'Keyboard Helper' })).toBeVisible();
 
-    const debugPanel = page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Debug Panel', exact: true });
+    await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
+    const debugPanel = page.getByRole('tab', { name: 'Debug Panel', exact: true });
     await debugPanel.focus();
-    await debugPanel.press('Enter');
+    await page.keyboard.press('Enter');
     await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
   });
 });

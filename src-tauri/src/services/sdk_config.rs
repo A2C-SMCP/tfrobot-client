@@ -274,7 +274,7 @@ impl InstanceConfigContext {
         load_config(&self.sdk_context())
     }
 
-    fn validate(&self) -> ValidationReport {
+    pub(crate) fn validate(&self) -> ValidationReport {
         self.with_read(|| self.validate_unlocked())
     }
 

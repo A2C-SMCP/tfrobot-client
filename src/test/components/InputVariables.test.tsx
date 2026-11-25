@@ -1,9 +1,13 @@
+import { NavigationMemoryProvider, NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { NavigationMemory } from '@/stores/navigationStore';
 import { invoke } from '@tauri-apps/api/core';
-import { fireEvent, render, screen, waitFor, within } from '../helpers/render';
+import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InputVariables } from '@/components/InputVariables';
 import { useUiNoticeStore } from '@/stores/uiNoticeStore';
 import i18n from '@/i18n';
+import { PageHost } from '@/components/Navigation/PageHost';
+import { InputValueEditor } from '@/components/InputVariables/InputValueEditor';
 
 const mockStore = {
   entries: [],
@@ -44,7 +48,7 @@ describe('InputVariables', () => {
   it('loads only saved InputEntries and exposes add without clear-all', () => {
     render(<InputVariables instanceId="computer-a" />);
     expect(mockStore.fetchEntries).toHaveBeenCalledWith('computer-a');
-    expect(screen.getByText('Input Entries')).toBeInTheDocument();
+    expect(screen.getByText('Variables and credentials')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Add Input/ })).toBeInTheDocument();
     expect(screen.queryByText('Clear All Values')).not.toBeInTheDocument();
   });
@@ -113,6 +117,73 @@ describe('InputVariables', () => {
       );
     });
   });
+
+  it.each([['success', false], ['success', true], ['failure', false], ['failure', true]] as const)('retains the actual InputEntry save result after delayed %s and page return (unmounted: %s)', async (outcome, released) => {
+    let finish!: () => void;
+    mockStore.upsertEntry.mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+      finish = () => outcome === 'success' ? resolve() : reject(new Error('save unavailable'));
+    }));
+    const memory = new NavigationMemory();
+    const tree = (active: boolean) => <NavigationMemoryProvider memory={memory}><NavigationScope id={released && !active ? 'computer:b' : 'computer:a'} key={released && !active ? 'b' : 'a'}>
+      {released ? active ? <InputVariables instanceId="computer-a" /> : <div>Other Computer</div> : <PageHost name="inputs" active={active}><InputVariables instanceId="computer-a" /></PageHost>}
+    </NavigationScope></NavigationMemoryProvider>;
+    const view = render(tree(true));
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    const fields = screen.getAllByRole('textbox');
+    fireEvent.change(fields[0], { target: { value: 'retained-input' } });
+    fireEvent.change(fields[1], { target: { value: 'retained-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    expect(fields[1]).toBeDisabled();
+    view.rerender(tree(false));
+    await act(async () => { finish(); });
+    view.rerender(tree(true));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(outcome === 'success' ? /^Saved$/ : 'Save failed'));
+    expect(screen.getAllByRole('button', { name: /Save$/ })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument();
+    const value = screen.getAllByRole('textbox')[1];
+    expect(value).toHaveValue('retained-value');
+    fireEvent.change(value, { target: { value: 'new-edit' } });
+    expect(screen.getByRole('status')).toHaveTextContent('Unsaved changes');
+  }, 15_000);
+
+  it.each(['success', 'failure'] as const)('reports the Input value editor result after %s and allows a new complete edit', async (outcome) => {
+    let finish!: () => void;
+    const submit = vi.fn(() => new Promise<void>((resolve, reject) => {
+      finish = () => outcome === 'success' ? resolve() : reject(new Error('save unavailable'));
+    }));
+    render(<InputValueEditor inputId="value" inputs={[]} currentValue="old" onSubmit={submit} onCancel={() => {}} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'next' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    await act(async () => { finish(); });
+    expect(screen.getByRole('status')).toHaveTextContent(outcome === 'success' ? /^Saved$/ : 'Save failed');
+    expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'new-edit' } });
+    expect(screen.getByRole('status')).toHaveTextContent('Unsaved changes');
+  });
+
+  it('does not close or acknowledge a replacement editor when a discarded save finishes', async () => {
+    let finish!: () => void;
+    mockStore.upsertEntry.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const memory = new NavigationMemory();
+    render(<NavigationMemoryProvider memory={memory}><NavigationScope id="computer:a"><InputVariables instanceId="computer-a" /></NavigationScope></NavigationMemoryProvider>);
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    let fields = screen.getAllByRole('textbox');
+    fireEvent.change(fields[0], { target: { value: 'old' } });
+    fireEvent.change(fields[1], { target: { value: 'old-value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: /Add Input/ }));
+    fields = screen.getAllByRole('textbox');
+    fireEvent.change(fields[0], { target: { value: 'replacement' } });
+    await act(async () => { finish(); });
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getAllByRole('textbox')[0]).toHaveValue('replacement');
+    expect(screen.getByRole('status')).toHaveTextContent('Unsaved changes');
+  }, 15_000);
 
   it('lets a user mark a new InputEntry as secret without exposing storage details', async () => {
     render(<InputVariables instanceId="computer-a" />);

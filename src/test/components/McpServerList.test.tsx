@@ -95,3 +95,18 @@ describe('MCP runtime source ordering', () => {
     expect(row('robot').queryByRole('button')).not.toBeInTheDocument();
   });
 });
+
+it('focuses the requested bundle once without selecting another resource on refresh', () => {
+  const view = render(<McpServerList servers={[userA, userZ]} focusedBundleId="z-user" focusRequest={1} />);
+  const selected = screen.getAllByRole('row').find((node) => node.getAttribute('data-row-key') === 'z-user')!;
+  expect(selected).toHaveAttribute('aria-current', 'true');
+  expect(selected).toHaveFocus();
+  const other = screen.getAllByRole('row').find((node) => node.getAttribute('data-row-key') === 'a-user')!;
+  other.focus();
+  view.rerender(<McpServerList servers={[{ ...userA }, { ...userZ }]} focusedBundleId="z-user" focusRequest={1} />);
+  expect(other).toHaveFocus();
+  view.rerender(<McpServerList servers={[userA, userZ]} focusedBundleId="z-user" focusRequest={2} />);
+  expect(selected).toHaveFocus();
+  view.rerender(<McpServerList servers={[userA, userZ]} focusedBundleId="missing" focusRequest={3} />);
+  expect(screen.getAllByRole('row').filter((node) => node.hasAttribute('aria-current'))).toHaveLength(0);
+});

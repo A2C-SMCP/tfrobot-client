@@ -1,6 +1,6 @@
 import { Page } from '@playwright/test';
 
-const startedRuntime = {
+export const startedRuntime = {
   incarnation: 1,
   generation: 1,
   snapshot_revision: 1,
@@ -25,7 +25,7 @@ const startedRuntime = {
   degraded_reason: null,
 };
 
-const shutdownRuntime = {
+export const shutdownRuntime = {
   ...startedRuntime,
   lifecycle: 'shutdown',
   user_state: 'not_running',
@@ -53,7 +53,7 @@ const signedOutManagerContext = {
   permissions: [],
 };
 
-const mockResponses: Record<string, unknown> = {
+export const mockResponses: Record<string, unknown> = {
   get_manager_environment_policy: {
     buildMode: 'development',
     allowedEnvironments: ['test', 'staging', 'prod'],
@@ -464,6 +464,15 @@ const mockResponses: Record<string, unknown> = {
       },
     ],
   },
+  get_marketplace_removal_plan: {
+    instanceId: 'computer-a',
+    marketplace: 'acme',
+    source: { type: 'remoteGit', displayGitUrl: 'https://example.com/acme.git' },
+    installedPlugins: [{ plugin: 'audit', version: '1.0.0', enabled: true, bundledSkills: ['audit:review'], bundledMcpServers: ['plugin-tools'] }],
+  },
+  get_client_control_catalog: [{ id: 'computer_list', group: 'computer_fleet', risk: 'read_only', target: 'discovery' }],
+  get_remote_control_policy: { enabled: false, tool_scope: { mode: 'all' }, target_scope: { mode: 'self_only' } },
+  get_command_line_tool_state: { policy: { enabled: false }, effectiveWorkspace: '/mock/workspace', runtimeState: 'disabled', assetsAvailable: true },
   list_inputs: [],
   list_input_values: {},
   get_available_tools: [],
@@ -474,6 +483,8 @@ const mockResponses: Record<string, unknown> = {
   add_mcp_server: null,
   remove_mcp_server: null,
   update_mcp_server: null,
+  get_computer_config_adoption: { incarnation: 1, generation: 1, state: 'current', changes: [], unknown_resources: [] },
+  patch_computer_general: { id: 'computer-a', name: 'Renamed Computer', description: 'Primary Computer', runtime: startedRuntime, connection_policy: { auto_connect: false } },
   start_mcp_server: null,
   stop_mcp_server: null,
   start_all_servers: null,

@@ -86,7 +86,7 @@ impl ComputerInstanceRuntime {
             )
             .await
             .map_err(ComputerRuntimeStartError::from)?;
-            let failures = self.start_desired_mcp_servers_inner().await;
+            let failures = self.start_desired_mcp_servers_inner(false).await;
             self.handle_desired_mcp_start_failures(
                 failures,
                 "idempotent Computer startup",
@@ -127,7 +127,7 @@ impl ComputerInstanceRuntime {
             }
             return Err(start_error);
         }
-        let failures = self.start_desired_mcp_servers_inner().await;
+        let failures = self.start_desired_mcp_servers_inner(true).await;
         if let Err(error) =
             self.handle_desired_mcp_start_failures(failures, "Computer startup", failure_policy)
         {

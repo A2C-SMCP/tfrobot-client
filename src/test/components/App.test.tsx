@@ -304,7 +304,7 @@ describe('App', () => {
       ['Open legacy marketplace', 'plugins'],
       ['Open legacy inputs', 'inputs'],
       ['Open legacy connection', 'connection'],
-      ['Open legacy configuration', 'skills'],
+      ['Open legacy configuration', 'advanced'],
     ] as const;
 
     for (const [entry, section] of routes) {
