@@ -1033,10 +1033,13 @@ describe('MarketplaceTab', () => {
     });
     render(<MarketplaceTab instanceId="computer-a" />);
     fireEvent.click(await screen.findByRole('tab', { name: 'Discover plugins' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Install Plugin' }));
+    const install = await screen.findByRole('button', { name: 'Install Plugin' });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
     const enable = await screen.findByRole('button', { name: 'Enable Plugin' });
     expect(mockedInvoke).toHaveBeenCalledWith('install_plugin', { instanceId: 'computer-a', request: { marketplace: 'acme', plugin: 'new-tools' } });
     expect(mockedInvoke).not.toHaveBeenCalledWith('enable_plugin', expect.anything());
+    await waitFor(() => expect(enable).toBeEnabled());
     fireEvent.click(enable);
     expect(await screen.findByRole('button', { name: 'Disable Plugin' })).toBeInTheDocument();
     expect(screen.getByText(/Actual skill availability and MCP tool health/)).toBeInTheDocument();
