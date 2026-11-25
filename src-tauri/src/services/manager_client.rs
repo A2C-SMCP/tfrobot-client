@@ -103,8 +103,8 @@ pub enum ManagerError {
     #[error("Manager base URL was not resolved from an environment")]
     MissingBaseUrl,
 
-    #[error("This build does not allow the selected Manager environment")]
-    EnvironmentNotAllowed,
+    #[error("The Manager login environment changed")]
+    LoginEnvironmentChanged,
 
     /// 服务器返回的 body 无法反序列化为预期 DTO。
     #[error("Invalid Manager response: {0}")]

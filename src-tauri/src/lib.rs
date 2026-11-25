@@ -720,7 +720,8 @@ pub fn run() {
             commands::settings::get_detected_path,
             // TFRSManager HTTP client (issue #23)
             commands::manager::manager_get_context,
-            commands::manager::get_manager_environment_policy,
+            commands::manager::get_manager_login_environment,
+            commands::manager::set_manager_login_environment,
             commands::manager::manager_restore_session,
             commands::manager::manager_login,
             commands::manager::manager_select_account,

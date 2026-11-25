@@ -29,7 +29,7 @@ use tfrobot_client_lib::services::manager_token_bridge::{
     ManagerTokenBridgeCompletion, ManagerTokenBridgeRequest, ManagerTokenBridgeSink,
     ManagerTokenProfile,
 };
-use tfrobot_client_lib::services::settings::SettingsService;
+use tfrobot_client_lib::services::settings::{AppSettings, SettingsService};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -136,6 +136,20 @@ impl ManagerContextEventSink for RecordingContextEvents {
     }
 }
 
+fn settings_for_environment(
+    directory: &tempfile::TempDir,
+    manager_environment: ManagerEnvironment,
+) -> SettingsService {
+    let settings = SettingsService::new(directory.path().to_path_buf());
+    settings
+        .save(&AppSettings {
+            manager_environment,
+            ..AppSettings::default()
+        })
+        .unwrap();
+    settings
+}
+
 fn test_context_coordinator(
     base_url: String,
     settings: Arc<SettingsService>,
@@ -144,7 +158,7 @@ fn test_context_coordinator(
     ManagerContextCoordinator::new_with_base_url_override(
         Arc::new(ManagerClient::new_with_secret_store(secret_store)),
         settings,
-        base_url,
+        move |_| base_url.clone(),
     )
 }
 
@@ -660,7 +674,7 @@ async fn manager_routes_join_smcp_while_chat_requires_modern_bearer_contract() {
             }))),
         ]).await;
         let directory = tempfile::tempdir().unwrap();
-        let settings = SettingsService::new(directory.path().to_path_buf());
+        let settings = settings_for_environment(&directory, ManagerEnvironment::Test);
         let secrets = InMemorySecretStore::shared();
         let mut state = AppState::new_with_secret_store(
             ConfigService::new(directory.path().to_path_buf()).unwrap(),
@@ -776,6 +790,191 @@ async fn manager_routes_join_smcp_while_chat_requires_modern_bearer_contract() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_manager_environment_routes_auth_to_the_new_origin() {
+    use serde_json::json;
+    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
+    use tfrobot_client_lib::commands::manager;
+    use tfrobot_client_lib::services::{
+        config::ConfigService, observability::ObservabilityService,
+    };
+    use tfrobot_client_lib::AppState;
+
+    let manager_responses = |token| {
+        vec![
+            json_script(
+                "/auth/login-by-password",
+                "HTTP/1.1 200 OK",
+                envelope(single_account_login_data(token)),
+            ),
+            json_script(
+                "/api/v1/auth/me",
+                "HTTP/1.1 200 OK",
+                envelope(current_user_data()),
+            ),
+        ]
+    };
+    let (prod_url, prod_requests, _prod_server) =
+        spawn_mock_manager(manager_responses("prod-jwt")).await;
+    let (test_url, test_requests, _test_server) =
+        spawn_mock_manager(manager_responses("test-jwt")).await;
+    let directory = tempfile::tempdir().unwrap();
+    let secrets = InMemorySecretStore::shared();
+    let mut state = AppState::new_with_secret_store(
+        ConfigService::new(directory.path().to_path_buf()).unwrap(),
+        ObservabilityService::new(directory.path()).unwrap(),
+        SettingsService::new(directory.path().to_path_buf()),
+        secrets.clone(),
+    );
+    let settings = state.settings_service.clone();
+    let coordinator = Arc::new(ManagerContextCoordinator::new_with_base_url_override(
+        Arc::new(ManagerClient::new_with_secret_store(secrets)),
+        settings.clone(),
+        move |environment| match environment {
+            ManagerEnvironment::Prod => prod_url.clone(),
+            ManagerEnvironment::Test => test_url.clone(),
+            ManagerEnvironment::Staging => panic!("unexpected staging request"),
+        },
+    ));
+    state.manager_context = coordinator.clone();
+    let app = mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            manager::get_manager_login_environment,
+            manager::set_manager_login_environment,
+            manager::manager_login,
+            manager::manager_restore_session,
+        ])
+        .build(mock_context(noop_assets()))
+        .unwrap();
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+    let webview_url = webview.url().unwrap();
+    let invoke = |cmd: &str, body| {
+        get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: webview_url.clone(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+    };
+
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    coordinator.set_lifecycle_sink(lifecycle.clone()).await;
+    assert_eq!(
+        invoke("get_manager_login_environment", json!({}))
+            .unwrap()
+            .deserialize::<String>()
+            .unwrap(),
+        "prod"
+    );
+    let prod_login = json!({
+        "expectedEnvironment": "prod", "identifier": "prod@example.com", "password": "secret",
+    });
+    assert_eq!(
+        invoke("manager_login", prod_login.clone())
+            .unwrap()
+            .deserialize::<serde_json::Value>()
+            .unwrap()["kind"],
+        "authenticated"
+    );
+    let production = coordinator.snapshot().await;
+
+    assert_eq!(
+        invoke(
+            "set_manager_login_environment",
+            json!({ "environment": "test", "confirmedRevision": null })
+        )
+        .unwrap_err()["kind"],
+        "context_changed"
+    );
+    assert_eq!(coordinator.snapshot().await, production);
+    assert_eq!(
+        settings.load().manager_environment,
+        ManagerEnvironment::Prod
+    );
+
+    invoke(
+        "set_manager_login_environment",
+        json!({ "environment": "test", "confirmedRevision": production.revision }),
+    )
+    .unwrap();
+    assert_eq!(
+        coordinator.snapshot().await.auth_state,
+        ManagerAuthState::SignedOut
+    );
+    assert!(matches!(
+        coordinator.capture_authenticated_generation().await,
+        Err(ManagerError::NoSession)
+    ));
+    assert_eq!(
+        settings.load().manager_environment,
+        ManagerEnvironment::Test
+    );
+    assert!(settings
+        .load_global_manager_session()
+        .unwrap()
+        .session
+        .is_none());
+    assert_eq!(
+        lifecycle.contexts.lock().unwrap().last(),
+        Some(&production.context_key)
+    );
+    assert_eq!(
+        invoke("manager_login", prod_login).unwrap_err()["kind"],
+        "login_environment_changed"
+    );
+    assert!(invoke("manager_restore_session", json!({}))
+        .unwrap()
+        .deserialize::<Option<serde_json::Value>>()
+        .unwrap()
+        .is_none());
+    assert!(test_requests.lock().await.is_empty());
+
+    let test_login = json!({
+        "expectedEnvironment": "test", "identifier": "test@example.com", "password": "secret",
+    });
+    let settings_path = directory.path().join("settings.json");
+    let valid_settings = std::fs::read(&settings_path).unwrap();
+    std::fs::write(&settings_path, "[]").unwrap();
+    assert!(invoke("get_manager_login_environment", json!({})).is_err());
+    assert!(invoke("manager_login", test_login.clone()).is_err());
+    assert!(invoke("manager_restore_session", json!({})).is_err());
+    assert!(test_requests.lock().await.is_empty());
+    std::fs::write(settings_path, valid_settings).unwrap();
+
+    assert_eq!(
+        invoke("manager_login", test_login)
+            .unwrap()
+            .deserialize::<serde_json::Value>()
+            .unwrap()["kind"],
+        "authenticated"
+    );
+    assert_eq!(
+        coordinator.snapshot().await.environment,
+        Some(ManagerEnvironment::Test)
+    );
+    let prod = prod_requests.lock().await;
+    let test = test_requests.lock().await;
+    assert_eq!(prod.len(), 2);
+    assert_eq!(test.len(), 2);
+    assert!(prod[0].request_line.contains("/auth/login-by-password"));
+    assert!(prod[0].body.contains("prod@example.com"));
+    assert!(test[0].request_line.contains("/auth/login-by-password"));
+    assert!(test[0].body.contains("test@example.com"));
+    assert_eq!(
+        test[1].headers.get("authorization").map(String::as_str),
+        Some("Bearer test-jwt")
+    );
+}
+
 #[tokio::test]
 async fn manager_environments_share_local_computers_across_login_restore_and_logout() {
     use tfrobot_client_lib::services::computer::ComputerInstance;
@@ -824,6 +1023,10 @@ async fn manager_environments_share_local_computers_across_login_restore_and_log
         ])
         .await;
         let first = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
+        first
+            .set_login_environment(environment, None)
+            .await
+            .unwrap();
         first
             .login(environment, "client@example.com", "fixture-password")
             .await
@@ -897,7 +1100,10 @@ async fn context_login_persists_complete_server_identity_and_logout_clears_it() 
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator =
         test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
 
@@ -964,7 +1170,10 @@ async fn manual_login_recovers_from_incomplete_v3_session_metadata() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     std::fs::create_dir_all(settings.global_manager_session_path().parent().unwrap()).unwrap();
     std::fs::write(
         settings.global_manager_session_path(),
@@ -1039,7 +1248,10 @@ async fn context_lists_accounts_with_current_bearer_without_exposing_credentials
     let directory = tempfile::tempdir().unwrap();
     let coordinator = test_context_coordinator(
         base,
-        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        Arc::new(settings_for_environment(
+            &directory,
+            ManagerEnvironment::Staging,
+        )),
         InMemorySecretStore::shared(),
     );
     coordinator
@@ -1103,7 +1315,10 @@ async fn context_switch_account_cleans_departing_context_and_publishes_one_final
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator =
         test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
     let events = Arc::new(RecordingContextEvents::default());
@@ -1245,7 +1460,10 @@ async fn context_onboarding_state_never_exposes_an_authenticated_scope() {
     )])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator =
         test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
 
@@ -1374,7 +1592,10 @@ async fn context_restore_revalidates_incomplete_v3_metadata_with_auth_me() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let secrets = InMemorySecretStore::shared();
     test_context_coordinator(base.clone(), settings.clone(), secrets.clone())
         .login(ManagerEnvironment::Staging, "client@example.com", "secret")
@@ -1434,7 +1655,10 @@ async fn transient_restore_validation_failure_preserves_retryable_credentials() 
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let secrets = InMemorySecretStore::shared();
     test_context_coordinator(base.clone(), settings.clone(), secrets.clone())
         .login(ManagerEnvironment::Staging, "client@example.com", "secret")
@@ -1509,7 +1733,10 @@ async fn context_switch_account_preserves_opaque_public_id_on_the_wire() {
     let directory = tempfile::tempdir().unwrap();
     let coordinator = test_context_coordinator(
         base,
-        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        Arc::new(settings_for_environment(
+            &directory,
+            ManagerEnvironment::Staging,
+        )),
         InMemorySecretStore::shared(),
     );
     coordinator
@@ -1555,7 +1782,10 @@ async fn context_unauthorized_clears_identity_and_emits_expiry_once() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator =
         test_context_coordinator(base, settings.clone(), InMemorySecretStore::shared());
     let events = Arc::new(RecordingContextEvents::default());
@@ -1634,7 +1864,10 @@ async fn concurrent_switch_unauthorized_and_logout_serialize_cleanup_without_old
     let directory = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(test_context_coordinator(
         base,
-        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        Arc::new(settings_for_environment(
+            &directory,
+            ManagerEnvironment::Staging,
+        )),
         InMemorySecretStore::shared(),
     ));
     let events = Arc::new(RecordingContextEvents::default());
@@ -1713,7 +1946,10 @@ async fn stale_unauthorized_after_relogin_cannot_clear_the_new_context() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base,
         settings,
@@ -1771,7 +2007,10 @@ async fn stale_unauthorized_after_explicit_logout_does_not_emit_auth_expired() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base,
         settings,
@@ -1828,7 +2067,10 @@ async fn stale_success_after_relogin_is_rejected_before_reaching_the_caller() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base,
         settings,
@@ -1875,7 +2117,10 @@ async fn pinned_composite_generation_rejects_an_account_change_between_steps() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = test_context_coordinator(base, settings, InMemorySecretStore::shared());
     coordinator
         .login(ManagerEnvironment::Staging, "client@example.com", "secret")
@@ -1923,7 +2168,10 @@ async fn generation_guarded_commit_excludes_logout_until_local_side_effect_finis
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base,
         settings,
@@ -1994,7 +2242,10 @@ async fn departing_context_cleanup_rejects_an_old_generation_commit_before_side_
     let directory = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(test_context_coordinator(
         base,
-        Arc::new(SettingsService::new(directory.path().to_path_buf())),
+        Arc::new(settings_for_environment(
+            &directory,
+            ManagerEnvironment::Staging,
+        )),
         InMemorySecretStore::shared(),
     ));
     coordinator
@@ -2672,7 +2923,10 @@ async fn context_delegates_token_exchange_to_generation_bound_typescript_bridge(
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base.clone(),
         settings,
@@ -2792,7 +3046,10 @@ async fn old_bridge_unauthorized_completion_cannot_clear_new_session() {
     ])
     .await;
     let directory = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    let settings = Arc::new(settings_for_environment(
+        &directory,
+        ManagerEnvironment::Staging,
+    ));
     let coordinator = Arc::new(test_context_coordinator(
         base,
         settings,
@@ -2892,7 +3149,7 @@ async fn retired_beta_restore_does_not_reuse_credentials_and_allows_fresh_login(
         ])
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+        let settings = Arc::new(settings_for_environment(&directory, environment));
         let secrets = InMemorySecretStore::shared();
         let old = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
         old.login(environment, "client@example.com", "secret")

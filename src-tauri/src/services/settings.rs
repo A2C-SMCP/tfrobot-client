@@ -22,6 +22,7 @@ fn default_tool_history_retention_days() -> u32 {
 pub const MANAGER_SESSION_SCHEMA_VERSION: u32 = 3;
 const CHAT_PREFERENCES_SCHEMA_VERSION: u32 = 3;
 const UI_NOTICE_SCHEMA_VERSION: u32 = 1;
+const MANAGER_ENVIRONMENT_FIELD: &str = "manager_environment";
 /// Upper bound for persisted notice entries. The frontend only ever uses a fixed, small set of
 /// ids; the cap keeps a buggy caller from growing the user's settings file without bound.
 const MAX_UI_NOTICE_ENTRIES: usize = 64;
@@ -80,6 +81,8 @@ pub struct AppSettings {
     #[serde(default = "default_tool_history_retention_days")]
     pub tool_history_retention_days: u32,
     pub custom_runtime_paths: CustomRuntimePaths,
+    #[serde(default, deserialize_with = "deserialize_manager_environment")]
+    pub manager_environment: ManagerEnvironment,
     #[serde(default, skip_serializing)]
     pub manager_session: Option<ManagerSessionSettings>,
     /// User-configured PATH override. When set, takes priority over auto-detected PATH.
@@ -91,6 +94,21 @@ pub struct AppSettings {
     /// Machine-level UI notice dismissals and local usage counters.
     #[serde(default, deserialize_with = "deserialize_ui_notices_lenient")]
     pub ui_notices: UiNoticeState,
+}
+
+fn deserialize_manager_environment<'de, D>(deserializer: D) -> Result<ManagerEnvironment, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(ManagerEnvironment::deserialize(&value).unwrap_or_default())
+}
+
+fn manager_environment_from_settings(document: &serde_json::Value) -> ManagerEnvironment {
+    document
+        .get(MANAGER_ENVIRONMENT_FIELD)
+        .and_then(|value| ManagerEnvironment::deserialize(value).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -304,6 +322,7 @@ impl Default for AppSettings {
             activity_retention_days: default_activity_retention_days(),
             tool_history_retention_days: default_tool_history_retention_days(),
             custom_runtime_paths: CustomRuntimePaths::default(),
+            manager_environment: ManagerEnvironment::default(),
             manager_session: None,
             custom_path: None,
             updater: UpdatePreferences::default(),
@@ -347,35 +366,68 @@ impl SettingsService {
     }
 
     pub fn load(&self) -> AppSettings {
-        if !self.settings_file.exists() {
+        let Ok(Some(document)) = self.read_settings_document() else {
             return AppSettings::default();
+        };
+        Self::decode_settings(&document).unwrap_or_else(|_| AppSettings {
+            manager_environment: manager_environment_from_settings(&document),
+            ..AppSettings::default()
+        })
+    }
+
+    fn read_settings(&self) -> std::io::Result<AppSettings> {
+        match self.read_settings_document()? {
+            Some(document) => Self::decode_settings(&document).map_err(std::io::Error::other),
+            None => Ok(AppSettings::default()),
         }
-        let mut settings = fs::read_to_string(&self.settings_file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-            .and_then(|value| {
-                let legacy_retention = value
-                    .get("log_retention_days")
-                    .and_then(|value| value.as_u64());
-                let has_activity_retention = value.get("activity_retention_days").is_some();
-                serde_json::from_value::<AppSettings>(value)
-                    .ok()
-                    .map(|mut settings| {
-                        if !has_activity_retention {
-                            if let Some(days) =
-                                legacy_retention.and_then(|days| u32::try_from(days).ok())
-                            {
-                                settings.activity_retention_days = days.max(1);
-                            }
-                        }
-                        settings.normalize();
-                        settings
-                    })
-            })
-            .unwrap_or_default();
+    }
+
+    fn decode_settings(document: &serde_json::Value) -> serde_json::Result<AppSettings> {
+        let mut settings = AppSettings::deserialize(document)?;
+        if document.get("activity_retention_days").is_none() {
+            if let Some(days) = document
+                .get("log_retention_days")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|days| u32::try_from(days).ok())
+            {
+                settings.activity_retention_days = days;
+            }
+        }
+        settings.normalize();
         // Legacy Manager metadata is migration-only and is never an active settings source.
         settings.manager_session = None;
-        settings
+        Ok(settings)
+    }
+
+    fn read_settings_document(&self) -> std::io::Result<Option<serde_json::Value>> {
+        let content = match fs::read_to_string(&self.settings_file) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is an existing setting whose contents are unavailable.
+                return match fs::symlink_metadata(&self.settings_file) {
+                    Err(metadata) if metadata.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(metadata) => Err(metadata),
+                    Ok(_) => Err(error),
+                };
+            }
+            Err(error) => return Err(error),
+        };
+        let document: serde_json::Value = serde_json::from_str(&content)?;
+        if !document.is_object() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings.json must contain a JSON object",
+            ));
+        }
+        Ok(Some(document))
+    }
+
+    pub(crate) fn manager_environment(&self) -> std::io::Result<ManagerEnvironment> {
+        let document = self.read_settings_document()?;
+        Ok(document.as_ref().map_or_else(
+            ManagerEnvironment::default,
+            manager_environment_from_settings,
+        ))
     }
 
     pub fn load_legacy_for_migration(&self) -> Result<AppSettings, ManagerSessionConfigError> {
@@ -399,9 +451,7 @@ impl SettingsService {
         self.save_unlocked(settings)
     }
 
-    /// Save user-editable settings without allowing a stale UI snapshot to overwrite `updater`
-    /// state written by the startup checker or the About page, or `ui_notices` state written by
-    /// the notice store.
+    /// Save user-editable settings while preserving fields owned by dedicated commands.
     pub fn save_user_settings(
         &self,
         requested: &AppSettings,
@@ -410,12 +460,29 @@ impl SettingsService {
             .settings_lock
             .lock()
             .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
-        let current = self.load();
+        let current = self.read_settings()?;
         let mut persisted = requested.clone();
+        persisted.manager_environment = current.manager_environment;
         persisted.updater = current.updater;
         persisted.ui_notices = current.ui_notices;
         self.save_unlocked(&persisted)?;
         Ok(persisted)
+    }
+
+    pub(crate) fn set_manager_environment(
+        &self,
+        environment: ManagerEnvironment,
+    ) -> Result<(), std::io::Error> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let mut document = match self.read_settings_document()? {
+            Some(document) => document,
+            None => serde_json::to_value(AppSettings::default())?,
+        };
+        document[MANAGER_ENVIRONMENT_FIELD] = serde_json::to_value(environment)?;
+        write_json_atomically(&self.settings_file, &document).map_err(std::io::Error::other)
     }
 
     /// Atomically claim the next automatic update check for this installation.
@@ -431,7 +498,7 @@ impl SettingsService {
             .settings_lock
             .lock()
             .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
-        let mut settings = self.load();
+        let mut settings = self.read_settings()?;
         if settings
             .updater
             .last_automatic_check_at
@@ -452,7 +519,7 @@ impl SettingsService {
             .settings_lock
             .lock()
             .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
-        let mut settings = self.load();
+        let mut settings = self.read_settings()?;
         settings.updater.deferred_version = version;
         self.save_unlocked(&settings)
     }
@@ -489,7 +556,7 @@ impl SettingsService {
             .settings_lock
             .lock()
             .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
-        let mut settings = self.load();
+        let mut settings = self.read_settings()?;
         let additions = updates
             .keys()
             .filter(|id| !settings.ui_notices.entries.contains_key(*id))
@@ -881,6 +948,107 @@ mod tests {
         let tmp = tempdir().unwrap();
         let svc = SettingsService::new(tmp.path().to_path_buf());
         (svc, tmp)
+    }
+
+    #[test]
+    fn missing_or_invalid_manager_environment_defaults_to_prod_without_resetting_other_settings() {
+        let (service, dir) = setup();
+        assert_eq!(
+            service.manager_environment().unwrap(),
+            ManagerEnvironment::Prod
+        );
+        for invalid in [
+            None,
+            Some(serde_json::json!("demo")),
+            Some(serde_json::json!(42)),
+        ] {
+            let mut document = serde_json::to_value(AppSettings::default()).unwrap();
+            document["language"] = serde_json::json!("zh");
+            document
+                .as_object_mut()
+                .unwrap()
+                .remove("manager_environment");
+            if let Some(invalid) = invalid {
+                document["manager_environment"] = invalid;
+            }
+            std::fs::write(dir.path().join("settings.json"), document.to_string()).unwrap();
+            let loaded = service.load();
+            assert_eq!(loaded.manager_environment, ManagerEnvironment::Prod);
+            assert_eq!(
+                service.manager_environment().unwrap(),
+                ManagerEnvironment::Prod
+            );
+            assert_eq!(loaded.language, "zh");
+        }
+    }
+
+    #[test]
+    fn setting_manager_environment_only_updates_the_environment_field() {
+        let (service, _dir) = setup();
+        let mut document = serde_json::json!({
+            "theme": 17,
+            "language": "zh",
+            "manager_environment": "test",
+            "future_setting": { "enabled": true }
+        });
+        fs::write(&service.settings_file, document.to_string()).unwrap();
+        assert_eq!(
+            service.manager_environment().unwrap(),
+            ManagerEnvironment::Test
+        );
+        assert_eq!(service.load().manager_environment, ManagerEnvironment::Test);
+
+        service
+            .set_manager_environment(ManagerEnvironment::Staging)
+            .unwrap();
+        document["manager_environment"] = serde_json::json!("staging");
+        assert!(service.claim_automatic_update_check(100, 10).is_err());
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&service.settings_file).unwrap()).unwrap();
+        assert_eq!(saved, document);
+    }
+
+    #[test]
+    fn malformed_settings_cannot_be_used_for_sign_in_or_overwritten_by_setting_updates() {
+        let (service, _dir) = setup();
+        for content in ["{ broken json", "[]"] {
+            fs::write(&service.settings_file, content).unwrap();
+            assert!(service.manager_environment().is_err());
+            assert!(service
+                .set_manager_environment(ManagerEnvironment::Test)
+                .is_err());
+            assert!(service.claim_automatic_update_check(100, 10).is_err());
+            assert_eq!(fs::read_to_string(&service.settings_file).unwrap(), content);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_settings_symlink_target_does_not_default_or_replace_the_link() {
+        let (service, dir) = setup();
+        let target = dir.path().join("unavailable.json");
+        std::os::unix::fs::symlink(&target, &service.settings_file).unwrap();
+
+        assert!(service.manager_environment().is_err());
+        assert!(service
+            .set_manager_environment(ManagerEnvironment::Test)
+            .is_err());
+        assert!(service.claim_automatic_update_check(100, 10).is_err());
+        assert_eq!(fs::read_link(&service.settings_file).unwrap(), target);
+    }
+
+    #[test]
+    fn stale_settings_save_preserves_manager_environment_and_other_preferences() {
+        let (service, dir) = setup();
+        let mut stale = service.load();
+        service
+            .set_manager_environment(ManagerEnvironment::Test)
+            .unwrap();
+        stale.language = "zh".into();
+        service.save_user_settings(&stale).unwrap();
+        let reopened = SettingsService::new(dir.path().to_path_buf()).load();
+        assert_eq!(reopened.manager_environment, ManagerEnvironment::Test);
+        assert_eq!(reopened.language, "zh");
     }
 
     #[test]

@@ -3,8 +3,7 @@ TFRobot Client - A cross-platform desktop application for A2C-SMCP Computer
 
 ## Manager environments
 
-The Manager sign-in screen accepts an environment instead of an arbitrary URL. The desktop client
-uses these fixed mappings:
+The desktop client uses the following fixed Manager API endpoints.
 
 | Environment | Manager API |
 |-------------|-------------|
@@ -13,9 +12,8 @@ uses these fixed mappings:
 | `prod` (including Beta) | `https://api.turingfocus.cn` |
 
 Start the native development client with `pnpm tauri:dev` or, on macOS when signed execution is
-needed, `pnpm tauri:dev:signed`. The sign-in dialog offers Test, Staging, and Production (including
-Beta), defaults to Test, and remembers the selection. Sign out before changing environments.
-`pnpm dev` remains the Vite frontend server used by Tauri; native login needs the Tauri backend.
+needed, `pnpm tauri:dev:signed`. The `pnpm dev` command starts the Vite frontend only. Manager
+sign-in requires the native backend.
 
 Computers are local to this machine, independent of the Manager login environment. Development
 and packaged builds use the same application identifier (`com.tfrobot.client`), original app
@@ -24,12 +22,13 @@ keeps the same Computer profiles, MCP configuration, local inputs, and stored Co
 Existing Computers appear directly without copying or recreating them. Manager credentials
 remain scoped to their API origin, and environment changes use the existing sign-out cleanup.
 
-Packaged builds (`pnpm tauri build`, including `--debug`) connect only to Production. Rust rejects
-Test/Staging login requests and clears unsupported session hints before reading credentials or
-sending authentication requests. The build policy follows Tauri's `custom-protocol` feature,
-independently of debug assertions, frontend mode, or stored preferences. Release CI sets
-`TFROBOT_OFFICIAL_RELEASE=1` and fails if production mode is disabled.
+Open **Settings → Sign-in environment** to select Production, Staging, or Test in either build.
+Production is the default. The choice is saved as `manager_environment` in the shared
+`settings.json` and the sign-in screen shows the saved environment. Changing it while signed in
+requires confirmation and a new sign-in. On startup, the client restores a session only when
+it belongs to the selected environment. After upgrading from a version that saved the
+development preference in the webview, select your environment once in Settings.
 
-Beta is an alias for Production for new requests. Upgrades still discard retired, separate Beta
-session hints and Beta chat preferences: old Beta credentials are never reused as Production.
-The login API contract is shared across environments; the client accepts only enums, not URLs.
+Beta is an alias for Production for new requests. Upgrades discard session hints and chat
+preferences from the retired Beta environment. Credentials stay scoped to their original API
+endpoint.

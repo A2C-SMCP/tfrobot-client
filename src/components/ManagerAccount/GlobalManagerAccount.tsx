@@ -48,6 +48,8 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const {
+    signInRequest,
+    loginEnvironmentChanging,
     context,
     pendingAccountSelection,
     identityLoading,
@@ -63,6 +65,13 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
     && context.account !== null
     && context.organization !== null;
   const authenticatedScope = managerContextScope(context);
+
+  const handledSignInRequest = useRef(signInRequest);
+  useEffect(() => {
+    if (handledSignInRequest.current === signInRequest) return;
+    handledSignInRequest.current = signInRequest;
+    setOpen(true);
+  }, [signInRequest]);
 
   useEffect(() => {
     if (!open || authenticatedScope === null) return;
@@ -161,7 +170,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
                   <Button
                     type="text"
                     className={styles.accountAction}
-                    disabled={identityLoading || current}
+                    disabled={identityLoading || loginEnvironmentChanging || current}
                     aria-current={current ? 'true' : undefined}
                     onClick={() => void handleSwitch(account.accountId)}
                   >
@@ -192,6 +201,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
           className={styles.logoutButton}
           icon={<LogoutOutlined />}
           loading={identityLoading}
+          disabled={loginEnvironmentChanging}
           onClick={() => void handleLogout()}
         >
           {t('managerAccount.login.logout')}
