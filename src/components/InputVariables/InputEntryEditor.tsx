@@ -1,5 +1,6 @@
+import { ConfigSaveStatus } from '@/components/ComputerSettings/ConfigSaveStatus';
 import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { useState } from 'react';
+import { useConfigCommit } from '@/components/ComputerSettings/useConfigCommit';
 import { Alert, Button, Select, Space, Switch, Typography } from 'antd';
 import { Input } from '@/components/common/Input';
 import { NoticeBar } from '@/components/common/NoticeBar';
@@ -18,7 +19,7 @@ interface InputEntryEditorProps {
   requireValue?: boolean;
   /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
   onOpenPermissionHelp?: () => void;
-  onSubmit: (key: string, value: string | undefined, secret: boolean) => Promise<void>;
+  onSubmit: (key: string, value: string | undefined, secret: boolean) => Promise<void | boolean>;
   onCancel: () => void;
 }
 
@@ -46,8 +47,11 @@ export function InputEntryEditor({
     entry?.value !== undefined || initialValue !== undefined,
   );
   const [secret, setSecret] = useNavigationState(`input.${fixedKey ?? entry?.key ?? 'new'}.secret`, entry?.secret ?? initialSecret);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const editorId = fixedKey ?? entry?.key ?? 'new';
+  const submission = useConfigCommit(`input.${editorId}.commit`, (payload: { key: string; value: string | undefined; secret: boolean }) => onSubmit(payload.key, payload.value, payload.secret), entry ? 'saved' : 'dirty');
+  const submitting = submission.state === 'saving';
+  const error = submission.state === 'error' ? t('inputs.entry.saveFailed') : null;
+  const edited = submission.dirty;
 
   const storesSecret = secret || Boolean(entry?.secret);
   // Saving a secret is what triggers the macOS keychain prompt, so the explanation is shown in
@@ -60,19 +64,13 @@ export function InputEntryEditor({
   const canSubmit = validKey && validValue && (!requireValue || valueTouched) && !submitting;
   const handleSubmit = async () => {
     if (!canSubmit) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await onSubmit(key, entry && !valueTouched ? undefined : (value ?? ''), secret);
-    } catch {
-      setError(t('inputs.entry.saveFailed'));
-    } finally {
-      setSubmitting(false);
-    }
+    await submission.commit({ key, value: entry && !valueTouched ? undefined : (value ?? ''), secret });
+
   };
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <ConfigSaveStatus state={submission.state} />
       {error && <Alert type="error" showIcon message={error} />}
       {keychainNotice.visible && (
         <NoticeBar
@@ -99,7 +97,7 @@ export function InputEntryEditor({
           aria-label={t('inputs.entry.key')}
           value={key}
           disabled={Boolean(fixedKey || entry) || submitting}
-          onChange={(event) => setKey(event.target.value)}
+          onChange={(event) => { edited(); setKey(event.target.value); }}
           placeholder={t('inputs.entry.keyPlaceholder')}
           status={key.length > 0 && !validKey ? 'error' : undefined}
         />
@@ -113,6 +111,7 @@ export function InputEntryEditor({
             value={value}
             disabled={submitting}
             onChange={(nextValue) => {
+              edited();
               setValue(nextValue);
               setValueTouched(true);
             }}
@@ -129,6 +128,7 @@ export function InputEntryEditor({
             type={secret ? 'password' : 'text'}
             disabled={submitting}
             onChange={(event) => {
+              edited();
               setValue(event.target.value);
               setValueTouched(true);
             }}
@@ -145,7 +145,7 @@ export function InputEntryEditor({
             aria-label={t('inputs.entry.storeAsSecret')}
             checked={secret}
             disabled={submitting || lockSecret}
-            onChange={setSecret}
+            onChange={(next) => { edited(); setSecret(next); }}
           />
           <Space direction="vertical" size={0}>
             <Typography.Text>{t('inputs.entry.storeAsSecret')}</Typography.Text>

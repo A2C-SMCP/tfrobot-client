@@ -689,6 +689,9 @@ async fn record_computer_profile_activity<T>(
     duplicate_source_computer_id: Option<&str>,
     result: &Result<T, String>,
 ) {
+    if let Some(id) = computer_id {
+        crate::commands::runtime_sync::notify_config_observers(state, id).await;
+    }
     let (level, outcome, message, error) = match result {
         Ok(_) => (
             ActivityLevel::Info,
@@ -1505,6 +1508,7 @@ pub async fn update_computer_connection_policy_core(
     }
     .await;
     if result.as_ref().is_err() || result.as_ref().is_ok_and(|(_, changed)| *changed) {
+        crate::commands::runtime_sync::notify_config_observers(state, &computer_id).await;
         record_computer_activity(
             state,
             ComputerActivitySpec {
@@ -1647,6 +1651,7 @@ pub async fn update_computer_skill_home_core(
     }
     .await;
     if result.as_ref().is_err() || result.as_ref().is_ok_and(|(_, changed)| *changed) {
+        crate::commands::runtime_sync::notify_config_observers(state, &computer_id).await;
         record_computer_activity(
             state,
             ComputerActivitySpec {
@@ -2261,6 +2266,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manager_policy_connection_failures_are_queryable_in_computer_logs() {
+        for started in [false, true] {
+            let (state, _dir) = test_state();
+            let context = ManagerContextKey {
+                environment: ManagerEnvironment::Staging,
+                account_id: "fixture-account".into(),
+                organization_id: "fixture-organization".into(),
+            };
+            let target = ComputerConnectionTarget::manager_robot(context, 42, None);
+            state
+                .config
+                .update_computer_instance("computer-a", |instance| {
+                    instance.connection_policy.target = Some(target.clone());
+                })
+                .unwrap();
+            if started {
+                start_computer_instance_core(None, &state, "computer-a".into())
+                    .await
+                    .unwrap();
+            }
+
+            let error =
+                connect_computer_connection_target_by_policy(None, &state, "computer-a", &target)
+                    .await
+                    .expect_err("missing runtime or Manager session must reject the connection");
+            let page = state
+                .observability
+                .query_activity_async(ActivityQuery {
+                    scope: ActivityScopeFilter::Computer {
+                        computer_id: "computer-a".into(),
+                    },
+                    categories: Some(vec!["connection".into()]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                page.total, 1,
+                "a rejected policy connection must be visible in Computer logs (started={started})"
+            );
+            let event = &page.items[0];
+            assert_eq!(event.operation, "connect_manager");
+            assert_eq!(event.outcome, ActivityOutcome::Failed);
+            assert_eq!(event.level, ActivityLevel::Warn);
+            assert!(event.correlation_id.is_some());
+            let fields = event.fields.as_ref().unwrap();
+            assert_eq!(fields["target_id"], "manager:42");
+            assert_eq!(fields["target_type"], "manager_robot");
+            assert_eq!(fields["error"], redact_text(&error));
+            if started {
+                stop_computer_instance_core(&state, "computer-a".into())
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn computer_runtime_core_records_success_and_failure_in_computer_scope() {
         let (state, _dir) = test_state();
         start_computer_instance_core(None, &state, "computer-a".to_string())
@@ -2865,4 +2928,64 @@ mod tests {
             Some(ManagerRobotBindingState::Dormant)
         );
     }
+}
+
+/// A complete field edit, merged under the Computer operation lease. Other fields are untouched.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "field", content = "value", rename_all = "camelCase")]
+pub enum GeneralFieldPatch {
+    Name(String),
+    Description(String),
+    McpStartConcurrency(usize),
+}
+
+#[tauri::command]
+pub async fn patch_computer_general(
+    state: State<'_, AppState>,
+    id: String,
+    patch: GeneralFieldPatch,
+) -> Result<ComputerInstanceStatus, String> {
+    patch_computer_general_core(&state, id, patch).await
+}
+
+pub async fn patch_computer_general_core(
+    state: &AppState,
+    id: String,
+    patch: GeneralFieldPatch,
+) -> Result<ComputerInstanceStatus, String> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let patch = match patch {
+            GeneralFieldPatch::Name(name) => GeneralFieldPatch::Name(normalize_name(&name)?),
+            GeneralFieldPatch::McpStartConcurrency(value)
+                if value == 0 || value > crate::services::computer::MAX_MCP_START_CONCURRENCY =>
+            {
+                return Err("MCP start concurrency must be between 1 and 64".into())
+            }
+            other => other,
+        };
+        let _operation = state.computer_registry.operation_lease(&id).await;
+        let previous = state
+            .config
+            .get_computer_instance(&id)
+            .map_err(|e| e.to_string())?;
+        let updated = state
+            .config
+            .update_computer_instance(&id, |instance| match patch {
+                GeneralFieldPatch::Name(value) => instance.name = value,
+                GeneralFieldPatch::Description(value) => {
+                    instance.description = normalize_optional_text(Some(value))
+                }
+                GeneralFieldPatch::McpStartConcurrency(value) => {
+                    instance.mcp_start_concurrency = value
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        let runtime = apply_updated_computer_instance(state, previous, updated.clone()).await?;
+        Ok(status_from_instance(&updated, &runtime).await)
+    }
+    .await;
+    record_computer_profile_activity(state, Some(&id), "update", "user", started, None, &result)
+        .await;
+    result
 }

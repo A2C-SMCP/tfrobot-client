@@ -42,7 +42,8 @@
     "export": "Export",
     "confirm": "Confirm",
     "dismissNotice": "Don't show again",
-    "permissionsHelp": "Permissions & security"
+    "permissionsHelp": "Permissions & security",
+    "close": "Close"
   },
   "nav": {
     "overview": "OVERVIEW",
@@ -299,12 +300,12 @@
       "title": "{{name}} Settings",
       "pageLabel": "Computer settings",
       "navigationLabel": "Computer settings sections",
-      "backToComputer": "Back to Computer",
+      "backToComputer": "Back to runtime workbench",
       "noComputer": "No Computer is available to configure",
       "sections": {
         "general": {
           "title": "General",
-          "description": "Manage this Computer's saved name and description."
+          "description": "Name and describe this Computer."
         },
         "skills": {
           "title": "Skills",
@@ -315,15 +316,15 @@
           "openPlugins": "Manage Plugins and Marketplace"
         },
         "plugins": {
-          "title": "Plugins & Marketplace",
-          "description": "Manage Marketplace sources and the Plugin installation lifecycle."
+          "title": "Plugins",
+          "description": "Install and enable plugins to add skills and MCP tools to this Computer."
         },
         "mcp": {
           "title": "MCP Servers",
-          "description": "Manage saved MCP declarations, sources, enablement, import, export, and validation."
+          "description": "Manage saved MCP connection declarations and startup policies. Running services are operated in the workbench."
         },
         "inputs": {
-          "title": "Inputs",
+          "title": "Variables and credentials",
           "description": "Manage resolved values for this Computer's MCP Input definitions; secret values are stored securely and hidden in the interface."
         },
         "connection": {
@@ -333,6 +334,10 @@
         "built-in-tools": {
           "title": "Built-in Tools",
           "description": "Manage capabilities shipped with TFRobot Client. They are isolated from ordinary user MCP declarations."
+        },
+        "advanced": {
+          "title": "Advanced",
+          "description": "Storage and other advanced settings for this Computer."
         }
       }
     },
@@ -429,17 +434,10 @@
       "title": "Runtime",
       "statusTitle": "Runtime Status",
       "userState": "Status",
-      "lifecycle": "Lifecycle",
-      "incarnation": "Runtime Incarnation",
-      "generation": "Runtime Generation",
-      "snapshotRevision": "Snapshot Revision",
       "connection": "Connection",
-      "configRevision": "Config Revision",
-      "capabilityRevision": "Capability Revision",
       "activeMcpServers": "Active MCP Servers",
       "mcpLifecycle": "MCP Runtime",
       "restart": "Restart",
-      "advancedDiagnostics": "Advanced Runtime Diagnostics",
       "actionProgress": {
         "starting": "Starting…",
         "stopping": "Stopping…"
@@ -461,26 +459,6 @@
       },
       "lastError": "Runtime Error",
       "degraded": "Runtime Degraded",
-      "recentEvents": "Recent Runtime Events",
-      "noEvents": "No runtime events received",
-      "eventRevision": "Snapshot revision {{revision}} · {{receivedAt}}",
-      "eventCauses": {
-        "lifecycleChanged": "Lifecycle changed to {{state}}",
-        "configRevisionBumped": "Config revision changed to {{revision}}",
-        "capabilityRevisionBumped": "Capability revision changed to {{revision}}",
-        "diagnosticsChanged": "Runtime diagnostics changed at revision {{revision}}",
-        "clientConnectionStateChanged": "Connection state revision {{revision}} changed to {{status}}",
-        "connectionPresent": "present",
-        "connectionAbsent": "absent",
-        "clientDiagnosticChanged": "{{operation}} diagnostic {{status}}",
-        "mcpDiagnosticChanged": "MCP {{bundleId}} {{operation}} diagnostic {{status}}",
-        "oauthStatusChanged": "MCP {{bundleId}} authorization status: {{status}}",
-        "diagnosticFailed": "failed",
-        "diagnosticCleared": "cleared",
-        "handleReplaced": "Runtime handle replaced: {{reason}}",
-        "observationAdvanced": "Runtime observation advanced beyond its triggering event",
-        "resync": "Runtime events resynchronized after {{count}} skipped events"
-      },
       "problems": {
         "severity": {
           "error": "Error",
@@ -514,9 +492,7 @@
           "viewLogs": "View logs",
           "unavailable": "This action is unavailable in the current state."
         },
-        "actionUnavailable": "{{action}} unavailable: {{reason}}",
-        "technicalDiagnostics": "Current Technical Diagnostics",
-        "noTechnicalDiagnostics": "No current technical diagnostics"
+        "actionUnavailable": "{{action}} unavailable: {{reason}}"
       },
       "lifecycleStates": {
         "created": "Created",
@@ -623,6 +599,123 @@
       "restarted": "Computer restarted",
       "runtimeOperationFailed": "The Runtime operation failed. View Runtime diagnostics or logs for details.",
       "connectionOperationFailed": "The connection operation failed. View Runtime diagnostics or logs for details."
+    },
+    "configSave": {
+      "saved": "Saved",
+      "dirty": "Unsaved changes",
+      "saving": "Saving…",
+      "error": "Save failed. Your edits are retained.",
+      "retry": "Retry saving",
+      "discard": "Discard changes"
+    },
+    "adoption": {
+      "checking": "Checking configuration adoption…",
+      "waiting_start": "Configuration saved; will be adopted on start",
+      "waitingDescription": "This Computer is not running. Editing configuration does not start it.",
+      "current": "Current runtime configuration adopted",
+      "healthSeparate": "Configuration adoption, tool health and connection status are shown separately.",
+      "pending": "{{count}} configuration changes not yet adopted",
+      "unknown": "Some configuration adoption could not be confirmed",
+      "openRuntime": "Open runtime workbench",
+      "viewChanges": "View configuration changes and actions",
+      "inputsUnknown": "Configuration adoption for the resources below could not be confirmed. Restart the affected user MCP, or use its Plugin owner lifecycle to confirm adoption.",
+      "configurationChanged": "Saved configuration changed",
+      "reasons": {
+        "skill_home": "The current instance still uses the previous skill directory. Restart the Computer to switch.",
+        "startup": "The current instance uses the previous startup concurrency. The next start adopts the saved value.",
+        "mcp_config": "The saved MCP declaration differs from the currently loaded declaration.",
+        "disabled_running": "Disabled for the next start; this MCP is still running.",
+        "input_definition": "The input definition changed and has not been adopted by this MCP.",
+        "input_value": "The input value changed; this MCP still uses the previously resolved value."
+      },
+      "actions": {
+        "start_mcp": "Start and adopt configuration",
+        "restart_mcp": "Restart this MCP and adopt configuration",
+        "stop_mcp": "Stop this MCP now",
+        "restart_computer": "Restart Computer to adopt configuration",
+        "manage_plugin": "Manage owning plugin"
+      },
+      "connectionPolicyHint": "The saved target is used for the next connection. Saving does not switch the current connection.",
+      "currentConnection": "Current connection: {{name}}",
+      "retry": "Check configuration status again",
+      "openPlugin": "Manage plugin {{name}}",
+      "pending_one": "{{count}} configuration change not yet adopted",
+      "pending_other": "{{count}} configuration changes not yet adopted",
+      "compact": {
+        "current": "Configuration adopted",
+        "waiting_start": "Waiting to adopt on start",
+        "checking": "Checking configuration"
+      },
+      "settings": {
+        "checking": "Checking saved configuration and runtime…",
+        "current": "This runtime has adopted the saved configuration",
+        "waiting_start": "Not running · Saved configuration will be used on start"
+      }
+    },
+    "storage": {
+      "title": "Skill and plugin storage",
+      "description": "This directory stores local skills and manages installed plugins. To see skills available in this run, open the runtime workbench.",
+      "current": "Saved location",
+      "default": "Default directory",
+      "custom": "Custom directory",
+      "openSaved": "Open saved directory",
+      "change": "Change storage location",
+      "changeDescription": "Changing this location switches the skill and plugin library used by this Computer. A running Computer keeps its current directory until restarted. Saving does not start or restart it.",
+      "noMigration": "Existing files stay in the original directory and are not moved automatically. If other Computers share the new directory, they may share its contents.",
+      "location": "Storage location",
+      "customPath": "Custom directory path",
+      "pathRequired": "Enter or choose a directory",
+      "defaultResolved": "The Computer uses its default skill_home directory."
+    },
+    "redesign": {
+      "identifier": "Computer ID",
+      "settings": "Settings",
+      "overview": "Workbench",
+      "skillsTools": "Skills and tools",
+      "diagnostics": "Diagnostics",
+      "activeCapabilities": "Capabilities available in this run",
+      "manageCapabilities": "Manage plugins",
+      "desktopWaiting": "Desktop resources can be read after this Computer starts.",
+      "connectionOverview": "Connection overview",
+      "currentConnection": "Current connection",
+      "nextConnection": "Saved target for the next connection",
+      "editConnection": "Edit connection policy",
+      "manualTarget": "Manual target: {{id}}",
+      "noTarget": "No connection target selected",
+      "autoConnectOn": "Automatic connection is enabled for Computer startup. Saving a target does not switch the current connection.",
+      "autoConnectOff": "Automatic connection is off. Connect explicitly when needed.",
+      "observedCapabilities": "Available in this run",
+      "availableTools": "Available tools",
+      "availableSkills": "Available skills",
+      "observationWaiting": "Run availability will be observed after startup; a dash does not mean no capabilities are configured.",
+      "runtimeMcpDescription": "Current MCP state and actions. Plugin-owned services are managed through their plugin.",
+      "editMcp": "Manage MCP configuration",
+      "startupTitle": "Startup settings",
+      "autoSaveHint": "Valid edits are saved when you finish editing a field.",
+      "viewAdoption": "View adoption and actions in the workbench",
+      "viewRuntime": "View runtime state",
+      "settingsDescription": "Edit saved configuration here. Current connections, availability and adoption actions are shown in the workbench.",
+      "basicGroup": "Basics",
+      "capabilityGroup": "Capabilities and access",
+      "advancedGroup": "Advanced options",
+      "readOnlySource": "Read-only source",
+      "moreConfig": "More configuration actions",
+      "variableImpact": "These are saved variables and credentials. Running tools may keep previously resolved values; check adoption in the workbench after a change.",
+      "policyEnabled": "Enabled in the saved policy",
+      "policyDisabled": "Disabled in the saved policy",
+      "selectedTools": "{{count}} selected tools",
+      "selectedTargets": "{{count}} selected Computers",
+      "editAuthorization": "Edit authorization",
+      "editWorkspace": "Change working directory",
+      "workspaceImpact": "Choose the directory used by the command-line capability. Files are not moved. The directory cannot be changed while this capability is running.",
+      "mcpNotLoaded": "This declaration was not found in the current instance. Check configuration adoption above before starting it.",
+      "manageBuiltIn": "Manage built-in tools",
+      "loadAuthorizationFailed": "Could not read the saved authorization policy.",
+      "loadCommandPolicyFailed": "Could not read the saved command-line policy.",
+      "savedPolicyRefreshFailed": "Could not refresh. The last confirmed policy is shown below."
+    },
+    "identity": {
+      "identifier": "Computer ID"
     }
   },
   "skills": {
@@ -639,10 +732,12 @@
     "nonTextSkillMd": "The resource is not returned as inline text.",
     "messages": {
       "refreshed": "Skills refreshed"
-    }
+    },
+    "runtimeHelp": "Skills currently available to this running Computer.",
+    "waitingStart": "Start this Computer to view skills available in this run. Installed plugins can still be managed in settings."
   },
   "marketplace": {
-    "title": "Marketplace",
+    "title": "Plugins",
     "supported": "SDK marketplace lifecycle is available",
     "unsupported": "SDK marketplace lifecycle is unavailable",
     "scope": "Install scope",
@@ -652,7 +747,7 @@
     "pluginsForMarketplace": "Plugins in {{marketplace}}",
     "lastUpdated": "Last updated: {{time}}",
     "emptyMarketplaces": "No SDK marketplaces returned",
-    "emptyPlugins": "No SDK plugins returned",
+    "emptyPlugins": "No plugins found in the configured sources",
     "emptyMarketplaceSelection": "Select a marketplace to manage plugins",
     "sdkOwnedState": "State is owned by SDK governance APIs.",
     "bundledSkills": "Bundled skills: {{skills}}",
@@ -677,8 +772,8 @@
       "skillPreviewUnavailable": "This skill is not available as inline preview content for the current Computer."
     },
     "form": {
-      "name": "Name",
-      "nameRequired": "Marketplace name is required",
+      "name": "Source name",
+      "nameRequired": "Enter a source name",
       "sourceType": "Source type",
       "gitUrl": "Git URL",
       "gitUrlRequired": "Git URL is required",
@@ -686,30 +781,31 @@
       "gitUrlEditHelp": "For security, enter the complete Git URL again. The displayed source omits credentials, query, and fragment.",
       "localPath": "Local repository path",
       "localPathRequired": "Select a local Git repository",
-      "sourceLocked": "This Marketplace has installed Plugins. Uninstall them before changing its source.",
+      "sourceLocked": "This source has installed plugins. Changing its source is not supported.",
       "marketplace": "Marketplace",
       "marketplaceRequired": "Marketplace is required",
       "plugin": "Plugin",
       "pluginRequired": "Plugin is required"
     },
     "actions": {
-      "addMarketplace": "Add Marketplace",
+      "addMarketplace": "Add plugin source",
       "chooseFolder": "Choose folder",
       "selectMarketplace": "Select marketplace {{marketplace}}",
       "selectPlugin": "Select plugin {{plugin}} ({{pluginId}})",
-      "refreshMarketplace": "Refresh Marketplace",
-      "removeMarketplace": "Remove Marketplace",
-      "updateMarketplace": "Update Marketplace",
+      "refreshMarketplace": "Sync plugin catalog",
+      "removeMarketplace": "Remove source",
+      "updateMarketplace": "Edit plugin source",
       "installPlugin": "Install Plugin",
       "enablePlugin": "Enable Plugin",
       "disablePlugin": "Disable Plugin",
       "uninstallPlugin": "Uninstall Plugin"
     },
     "operations": {
-      "add": "Cloning Marketplace {{target}}…",
-      "update": "Updating and cloning Marketplace {{target}}…",
-      "refresh": "Refreshing Marketplace {{target}}…",
-      "remove": "Removing Marketplace {{target}}…",
+      "add": "Cloning plugin source {{target}}…",
+      "addUnnamed": "Cloning plugin source…",
+      "update": "Updating plugin source {{target}}…",
+      "refresh": "Syncing plugin catalog {{target}}…",
+      "remove": "Removing plugin source {{target}}…",
       "install": "Installing Plugin {{target}}…",
       "enable": "Enabling Plugin {{target}}…",
       "disable": "Disabling Plugin {{target}}…",
@@ -718,14 +814,71 @@
       "defaultDescription": "The list will refresh automatically when the operation finishes."
     },
     "messages": {
-      "added": "Marketplace added",
-      "refreshed": "Marketplace refreshed",
-      "removed": "Marketplace removed",
-      "updated": "Marketplace updated",
-      "install": "Plugin installed",
+      "added": "Plugin source added",
+      "refreshed": "Plugin catalog synced",
+      "removed": "Plugin source removed",
+      "updated": "Plugin source updated",
+      "install": "Installed, not enabled. Select Enable Plugin to use it.",
       "enable": "Plugin enabled",
       "disable": "Plugin disabled",
       "uninstall": "Plugin uninstalled"
+    },
+    "context": "Manage plugins for {{name}}",
+    "reloadList": "Reload list",
+    "manageSources": "Manage sources",
+    "installedTab": "Installed ({{count}})",
+    "discoverTab": "Discover plugins",
+    "installedList": "Installed plugins",
+    "search": "Search plugins by name, purpose or source",
+    "filterSource": "Filter by source",
+    "allSources": "All sources",
+    "noInstalled": "No plugins installed for this Computer",
+    "noSources": "No plugin sources configured. Add a Git repository to discover plugins.",
+    "noMatches": "No plugins match these filters",
+    "fromSource": "Source: {{name}}",
+    "sourcesHelp": "Sources are local or remote Git repositories that list available plugins. Syncing a source refreshes its catalog; it does not upgrade installed plugins.",
+    "sourceHidden": "Repository address hidden",
+    "more": "More",
+    "installHelp": "Installation adds the package without enabling it. You can enable it after installation.",
+    "disabledHelp": "Installed, not enabled. Enable to make its skills and tools available to this Computer. Missing inputs may be requested.",
+    "enabledHelp": "Enabled. Actual skill availability and MCP tool health are shown in the runtime workbench.",
+    "installedContents": "Installed package contents; availability depends on enablement and runtime state.",
+    "declaredContents": "Contents declared by the source; this package has not been installed.",
+    "removeSourceConfirm": "Remove source {{name}}?",
+    "loadOrOperationFailed": "Plugin list or operation could not be completed",
+    "retryOperation": "Retry operation",
+    "status": {
+      "available": "Not installed",
+      "disabled": "Not enabled",
+      "enabled": "Enabled",
+      "degraded": "Needs attention",
+      "unknown": "Status unconfirmed"
+    },
+    "sourceStatus": {
+      "known": "Configured",
+      "available": "Catalog available",
+      "degraded": "Sync needs attention",
+      "unknown": "Status unconfirmed"
+    },
+    "uninstall": {
+      "title": "Uninstall {{name}}?",
+      "description": "This removes the installed plugin and its managed skills and MCP tools from this Computer's current library. Reinstall it to use it again. Computers sharing this directory may also be affected."
+    },
+    "errors": {
+      "install": "Installation failed",
+      "enable": "Enable operation failed",
+      "disable": "Disable operation failed",
+      "uninstall": "Uninstall operation failed"
+    },
+    "storagePending": "Storage change not yet adopted",
+    "storagePendingDescription": "Plugin management still uses the current instance directory. The next Computer start or restart adopts the saved location. Open the runtime workbench to switch.",
+    "removal": {
+      "warning": "Removing this source will uninstall the following plugins, skills, and MCP tools",
+      "description": "Their installed contents will be removed from this Computer, and affected MCP tools in use will stop. Other sources and independently configured resources are unaffected. Continue?",
+      "empty": "This source has no installed plugins or skills. Removing it will delete its registration and local catalog cache.",
+      "confirmCascade": "Uninstall contents and remove source",
+      "failed": "Removal did not complete",
+      "reload": "Reload affected items"
     }
   },
   "dashboard": {
@@ -800,7 +953,7 @@
       "name": "Name",
       "source": "Source",
       "transport": "Transport",
-      "enabled": "Enabled",
+      "enabled": "Enable on start",
       "status": "Status",
       "message": "Message",
       "authorization": "Authorization",
@@ -821,7 +974,7 @@
       "commandLineName": "Command line tool",
       "commandLineManagedHint": "Managed by the Built-in Tools setting."
     },
-    "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}. Use Marketplace to manage its lifecycle.",
+    "pluginManagedHint": "Managed by plugin {{plugin}} from {{marketplace}}.",
     "batch": {
       "startSummary": "Start complete: {{candidates}} candidates, {{actual}} started, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
       "stopSummary": "Stop complete: {{candidates}} candidates, {{actual}} stopped, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
@@ -923,10 +1076,10 @@
       "optionValue": "Value"
     },
     "messages": {
-      "added": "Server saved; restart Runtime to apply it",
-      "updated": "Server saved; restart Runtime to apply changes",
-      "enabled": "Server {{name}} saved as enabled; restart Runtime to apply it",
-      "disabled": "Server {{name}} saved as disabled; restart Runtime to apply it",
+      "added": "Server configuration saved",
+      "updated": "Server configuration saved",
+      "enabled": "Server {{name}} will be enabled on start",
+      "disabled": "Server {{name}} will be disabled on the next start; check the workbench for its current runtime state",
       "removed": "Server removed",
       "started": "Server {{name}} started",
       "reconnected": "Server {{name}} reconnected",
@@ -942,7 +1095,7 @@
     }
   },
   "inputs": {
-    "title": "Input Entries",
+    "title": "Variables and credentials",
     "addInput": "Add Variable",
     "editInput": "Edit Variable",
     "editInputFor": "Edit variable {{id}}",
@@ -1134,24 +1287,8 @@
     "tabs": {
       "tools": "Tools",
       "resources": "Resources",
-      "history": "History",
-      "notices": "Notice stats"
+      "history": "History"
     },
-    "noticeColumns": {
-      "notice": "Notice",
-      "impressions": "Shown",
-      "dismissed": "Dismissed",
-      "helpClicks": "Help clicks",
-      "dismissRate": "Dismiss rate",
-      "helpRate": "Help click rate"
-    },
-    "notices": {
-      "mcp-runtime-keychain": "MCP runtime keychain access",
-      "password-variable-keychain": "Password variable keychain access",
-      "remote-control-security": "Remote control security",
-      "desktop-enumeration-unverified": "Desktop enumeration unverified"
-    },
-    "noticesLocalOnly": "Counted on this machine only; never written to logs.",
     "searchTools": "Search tools...",
     "allServers": "All Servers",
     "noTools": "No tools available",

@@ -599,6 +599,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // MCP server management
+            commands::computer_runtime::get_computer_config_adoption,
+            commands::computer::patch_computer_general,
             commands::mcp::get_mcp_servers,
             commands::mcp::authorize_mcp_server,
             commands::mcp::cancel_mcp_authorization,
@@ -607,6 +609,7 @@ pub fn run() {
             commands::sdk_config::upsert_computer_mcp_config,
             commands::sdk_config::upsert_computer_mcp_config_with_inputs,
             commands::sdk_config::remove_computer_mcp_config,
+            commands::mcp::restart_mcp_server_with_latest_config,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::start_all_servers,
@@ -614,6 +617,7 @@ pub fn run() {
             // Skills marketplace governance
             commands::marketplace::get_marketplace_capabilities,
             commands::marketplace::get_marketplace_governance,
+            commands::marketplace::get_marketplace_removal_plan,
             commands::marketplace::add_marketplace,
             commands::marketplace::refresh_marketplace,
             commands::marketplace::remove_marketplace,

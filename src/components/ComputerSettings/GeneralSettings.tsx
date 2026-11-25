@@ -1,96 +1,48 @@
-import { useRef } from 'react';
+import { Form, Input, Typography } from 'antd';
+import { useTranslation } from 'react-i18next';
 import formStyles from '@/components/common/GroupedForm.module.css';
 import { useNavigationForm } from '@/components/Navigation/navigationMemoryState';
-import { usePageAction } from '@/components/Navigation/pageActivityState';
-import { App, Button, Form, Input, InputNumber, Space } from 'antd';
-import { useTranslation } from 'react-i18next';
-import {
-  useComputerStore,
-  type ComputerFormValues,
-  type ComputerInstance,
-} from '@/stores/computerStore';
+import { useComputerStore, type ComputerInstance } from '@/stores/computerStore';
+import { ConfigSaveStatus } from './ConfigSaveStatus';
+import { useConfigCommit } from './useConfigCommit';
 
-interface GeneralSettingsProps {
-  instance: ComputerInstance;
-}
-
-interface GeneralSettingsValues extends ComputerFormValues {
-  mcpStartConcurrency: number;
-}
-
-export function GeneralSettings({ instance }: GeneralSettingsProps) {
+interface Values { name: string; description: string }
+export function GeneralSettings({ instance }: { instance: ComputerInstance }) {
   const { t } = useTranslation();
-  const { message } = App.useApp();
-  const [form] = Form.useForm<GeneralSettingsValues>();
-  const loading = useComputerStore((state) => state.loading);
-  const updateInstance = useComputerStore((state) => state.updateInstance);
-
-  const action = usePageAction(instance.id);
-  const submission = useRef<() => boolean>(() => false);
+  const [form] = Form.useForm<Values>();
+  const patch = useComputerStore((state) => state.patchGeneral);
   const draft = useNavigationForm('settings.general', form, {
-    name: instance.name,
-    description: instance.description,
-    mcpStartConcurrency: instance.mcpStartConcurrency ?? 5,
+    name: instance.name, description: instance.description ?? '',
   });
-
-  const handleSave = async () => {
-    const current = submission.current;
-    const values = await form.validateFields();
-    if (!current()) return;
+  const name = useConfigCommit(`${instance.id}:name`, (value: string) => patch(instance.id, { field: 'name', value }));
+  const description = useConfigCommit(`${instance.id}:description`, (value: string) => patch(instance.id, { field: 'description', value }));
+  const commit = async (field: keyof Values) => {
+    const control = field === 'name' ? name : description;
+    if (control.state !== 'dirty' && control.state !== 'error' && !draft.dirtyFields.includes(field)) return;
+    const current = control.capture();
+    const value = form.getFieldValue(field);
     try {
-      await updateInstance(instance.id, values);
+      await form.validateFields([field]);
       if (!current()) return;
-      draft.clearDraft();
-      message.success(t('common.saved'));
-    } catch (error) {
-      message.error(String(error));
-    }
+      const acknowledge = () => draft.clearFields([field]);
+      if (field === 'name') await name.commit(value, acknowledge);
+      else await description.commit(value, acknowledge);
+    } catch { /* Ant Form retains the invalid edit and displays its validation message. */ }
   };
+  return <>
+    <Typography.Paragraph type="secondary">{t('computer.redesign.autoSaveHint')}</Typography.Paragraph>
+    <Form className={formStyles.form} form={form} layout="vertical" name={`computer-general-${instance.id}`}
+    onValuesChange={(changed) => {
+      draft.onValuesChange(changed);
+      if ('name' in changed) name.dirty();
+      if ('description' in changed) description.dirty();
+    }}>
+    <Form.Item name="name" label={t('computer.form.name')} extra={<ConfigSaveStatus state={name.state === 'saved' && draft.dirtyFields.includes('name') ? 'dirty' : name.state} onRetry={() => commit('name')} />} rules={[{ validator: (_, value) => value?.trim() ? Promise.resolve() : Promise.reject(new Error(t('computer.form.nameRequired'))) }]}>
+      <Input autoComplete="off" onBlur={() => void commit('name')} onPressEnter={(event) => { event.preventDefault(); void commit('name'); }} />
+    </Form.Item>
+    <Form.Item name="description" label={t('computer.form.description')} extra={<ConfigSaveStatus state={description.state === 'saved' && draft.dirtyFields.includes('description') ? 'dirty' : description.state} onRetry={() => commit('description')} />}>
+      <Input.TextArea rows={4} onBlur={() => void commit('description')} />
+    </Form.Item>
 
-  return (
-    <Form
-      className={formStyles.form}
-      name={`computer-general-${instance.id}`}
-      form={form}
-      onValuesChange={draft.onValuesChange}
-      layout="vertical"
-      initialValues={{
-        name: instance.name,
-        description: instance.description,
-        mcpStartConcurrency: instance.mcpStartConcurrency ?? 5,
-      }}
-      onSubmitCapture={() => { submission.current = action(); }}
-      onFinish={() => void handleSave()}
-    >
-      <Form.Item
-        name="name"
-        label={t('computer.form.name')}
-        rules={[
-          {
-            validator: (_, value) => value?.trim()
-              ? Promise.resolve()
-              : Promise.reject(new Error(t('computer.form.nameRequired'))),
-          },
-        ]}
-      >
-        <Input autoComplete="off" />
-      </Form.Item>
-      <Form.Item name="description" label={t('computer.form.description')}>
-        <Input.TextArea rows={4} />
-      </Form.Item>
-      <Form.Item
-        name="mcpStartConcurrency"
-        label={t('computer.form.mcpStartConcurrency')}
-        extra={t('computer.form.mcpStartConcurrencyHint')}
-        rules={[{ required: true, type: 'number', min: 1, max: 64 }]}
-      >
-        <InputNumber min={1} max={64} precision={0} />
-      </Form.Item>
-      <Space className={formStyles.actions}>
-        <Button type="primary" htmlType="submit" loading={loading}>
-          {t('common.save')}
-        </Button>
-      </Space>
-    </Form>
-  );
+  </Form></>;
 }

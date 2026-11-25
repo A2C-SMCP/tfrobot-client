@@ -29,16 +29,16 @@ test('restores Computer settings, tab drafts and the selected instance after men
   await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
   await page.getByRole('button', { name: 'Open Computer settings', exact: true }).click();
   const name = page.getByRole('textbox', { name: 'Name', exact: true });
-  await name.fill('unfinished name');
-  await page.getByRole('menu', { name: 'Computer settings sections' }).getByText('Skills', { exact: true }).click();
+  await name.fill('');
+  await page.getByRole('menu', { name: 'Computer settings sections' }).getByText('Advanced', { exact: true }).click();
   await menu(page, 'Settings').click();
   await menu(page, 'Computer').click();
   await expect(page.getByRole('heading', { name: 'Second Computer Settings' })).toBeVisible();
   await page.getByRole('menu', { name: 'Computer settings sections' }).getByText('General', { exact: true }).click();
-  await expect(name).toHaveValue('unfinished name');
+  await expect(name).toHaveValue('');
   const saves = await page.evaluate(() => (window as unknown as {
     __TAURI_INVOKES__: { cmd: string }[];
-  }).__TAURI_INVOKES__.filter(({ cmd }) => cmd === 'rename_computer_instance').length);
+  }).__TAURI_INVOKES__.filter(({ cmd }) => cmd === 'patch_computer_general').length);
   expect(saves).toBe(0);
 });
 
@@ -57,7 +57,11 @@ test('restores the window scroll of each Settings tab', async ({ page }) => {
   await page.getByRole('tab', { name: 'Runtime', exact: true }).click();
   await page.getByText('Custom Paths', { exact: true }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(700);
-  await page.evaluate(() => window.scrollTo(0, 160));
+  await page.evaluate(() => {
+    window.scrollTo(0, 160);
+    // Let the page host record the browser's scroll event before leaving the tab.
+    return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(160);
   // DOM clicks avoid Playwright scrolling the old tab into view before switching.
   await page.getByRole('tab', { name: 'About', exact: true }).evaluate((node: HTMLElement) => node.click());
@@ -79,7 +83,7 @@ test('does not inherit another Computer settings scroll on a first visit', async
   expect(scrollTarget).toBeGreaterThan(0);
   await page.evaluate((target) => window.scrollTo(0, target), scrollTarget);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTarget);
-  for (const name of ['Back to Computer', 'Back to Computers', 'Second Computer', 'Open Computer settings']) {
+  for (const name of ['Back to runtime workbench', 'Back to Computers', 'Second Computer', 'Open Computer settings']) {
     await page.getByRole('button', { name, exact: true }).evaluate((node: HTMLElement) => node.click());
   }
   await expect(page.getByRole('heading', { name: 'Second Computer Settings' })).toBeVisible();

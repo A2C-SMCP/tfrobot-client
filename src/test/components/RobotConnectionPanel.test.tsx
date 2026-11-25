@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { fireEvent, render, screen, waitFor } from '../helpers/render';
+import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { RobotConnectionPanel } from '@/components/RobotConnectionPanel';
 import {
   useComputerStore,
@@ -123,7 +123,7 @@ describe('RobotConnectionPanel', () => {
   });
 
   it('shows a Manager login guide and never loads Manual SMCP targets', async () => {
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
     expect(await screen.findByText(/No Manager account is signed in/i)).toBeInTheDocument();
     expect(screen.queryByText(/Manual SMCP/i)).not.toBeInTheDocument();
@@ -134,7 +134,7 @@ describe('RobotConnectionPanel', () => {
   it('hides a persisted legacy Manual target without clearing it', () => {
     setComputer({ type: 'manual_smcp', id: 'legacy-target' });
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
     expect(screen.queryByText('legacy-target')).not.toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
@@ -144,11 +144,34 @@ describe('RobotConnectionPanel', () => {
   it('lists Manager Robots as read-only resources when signed in', async () => {
     setManagerRobots();
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
-    expect(await screen.findByText('Running Robot')).toBeInTheDocument();
-    expect(screen.getByText('robot-25')).toBeInTheDocument();
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    expect(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)')).toBeInTheDocument();
+    expect(screen.queryByText('robot-25')).not.toBeInTheDocument();
     expect(mockedInvoke).not.toHaveBeenCalledWith('connect_computer_connection_target', expect.anything());
+  });
+
+  it('does not carry a delayed policy failure into another Computer', async () => {
+    setManagerRobots();
+    setComputer(managerTarget(25, '2525'));
+    let fail!: () => void;
+    mockedInvoke.mockImplementation((command) => command === 'update_computer_connection_policy'
+      ? new Promise((_, reject) => { fail = () => reject(new Error('save unavailable')); })
+      : Promise.resolve(undefined));
+    const view = render(<RobotConnectionPanel instanceId="computer-a" />);
+    fireEvent.click(screen.getByRole('switch', { name: 'Auto Connect' }));
+    await waitFor(() => expect(fail).toBeDefined());
+    const first = useComputerStore.getState().instances[0];
+    act(() => useComputerStore.setState({ instances: [first, { ...first, id: 'computer-b', name: 'B', connectionPolicy: { target: null, auto_connect: false } }] }));
+    view.rerender(<RobotConnectionPanel instanceId="computer-b" />);
+    await act(async () => { fail(); });
+    expect(screen.getByRole('status')).toHaveTextContent(/^Saved$/);
+    expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();
+    view.rerender(<RobotConnectionPanel instanceId="computer-a" />);
+    expect(screen.getByRole('status')).toHaveTextContent('Save failed');
+    expect(screen.getByRole('button', { name: 'Retry saving' })).toBeInTheDocument();
   });
 
   it('only exposes a running Manager Robot as a selectable policy target', async () => {
@@ -158,7 +181,7 @@ describe('RobotConnectionPanel', () => {
       return null;
     });
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
     fireEvent.mouseDown(await screen.findByRole('combobox'));
     expect(screen.queryByText('Deleted Robot (deleted)')).not.toBeInTheDocument();
@@ -182,7 +205,7 @@ describe('RobotConnectionPanel', () => {
       return null;
     });
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
     fireEvent.mouseDown(await screen.findByRole('combobox'));
     fireEvent.click(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)'));
@@ -202,9 +225,10 @@ describe('RobotConnectionPanel', () => {
       return null;
     });
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
-    await screen.findByText('Running Robot');
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    await screen.findAllByText('Running Robot (running / UAT / tfrserver / org-a)');
     expect(mockedInvoke).not.toHaveBeenCalledWith(
       'update_computer_connection_policy',
       expect.anything(),
@@ -219,9 +243,10 @@ describe('RobotConnectionPanel', () => {
       organizationId: 'org-2',
     });
 
-    render(<RobotConnectionPanel instanceId="computer-a" onNavigate={vi.fn()} />);
+    render(<RobotConnectionPanel instanceId="computer-a" />);
 
-    expect(await screen.findByText('Running Robot')).toBeInTheDocument();
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    expect(await screen.findByText('Running Robot (running / UAT / tfrserver / org-a)')).toBeInTheDocument();
     expect(screen.getByText('Select a Manager Robot')).toBeInTheDocument();
     expect(screen.getByText('This Robot binding is dormant')).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Auto Connect' })).toBeDisabled();

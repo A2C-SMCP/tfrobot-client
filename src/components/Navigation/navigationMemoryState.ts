@@ -1,18 +1,37 @@
-import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, useSyncExternalStore, type Dispatch, type SetStateAction } from 'react';
 import type { FormInstance } from 'antd';
 import type { NavigationMemory } from '@/stores/navigationStore';
 export const MemoryContext = createContext<NavigationMemory | null>(null);
 export const ScopeContext = createContext<Map<string, unknown> | null>(null);
+const subscriptions = new WeakMap<Map<string, unknown>, Map<string, { revision: number; listeners: Set<() => void> }>>();
+function subscription(scope: Map<string, unknown>, key: string) {
+  let keys = subscriptions.get(scope);
+  if (!keys) { keys = new Map(); subscriptions.set(scope, keys); }
+  let entry = keys.get(key);
+  if (!entry) { entry = { revision: 0, listeners: new Set() }; keys.set(key, entry); }
+  return entry;
+}
+function notify(scope: Map<string, unknown>, key: string) {
+  const entry = subscription(scope, key);
+  entry.revision += 1;
+  for (const listener of [...entry.listeners]) listener();
+}
 
 /** Lightweight view state survives an object's component tree being released. */
 export function useNavigationState<T>(key: string, initial: T | (() => T)): [T, Dispatch<SetStateAction<T>>] {
   const scope = useContext(ScopeContext);
+  const changes = scope ? subscription(scope, key) : null;
+  useSyncExternalStore(useCallback((listener: () => void) => {
+    changes?.listeners.add(listener);
+    return () => { changes?.listeners.delete(listener); };
+  }, [changes]), () => changes?.revision ?? 0);
   const read = () => scope?.has(key)
     ? scope.get(key) as T
     : typeof initial === 'function' ? (initial as () => T)() : initial;
   const [snapshot, setSnapshot] = useState(() => ({ scope, key, value: read() }));
   let current = snapshot;
-  if (snapshot.scope !== scope || snapshot.key !== key) {
+  if (snapshot.scope !== scope || snapshot.key !== key
+    || (scope?.has(key) && !Object.is(snapshot.value, scope.get(key)))) {
     current = { scope, key, value: read() };
     setSnapshot(current);
   }
@@ -20,13 +39,14 @@ export function useNavigationState<T>(key: string, initial: T | (() => T)): [T, 
   currentRef.current = current;
   const update = useCallback<Dispatch<SetStateAction<T>>>((next) => {
     const previous = currentRef.current;
-    if (previous.scope !== scope || previous.key !== key) return;
-    const result = typeof next === 'function' ? (next as (value: T) => T)(previous.value) : next;
-    if (Object.is(previous.value, result)) return;
+    const ownsView = previous.scope === scope && previous.key === key;
+    if (!ownsView && !scope?.has(key)) return;
+    const value = scope?.has(key) ? scope.get(key) as T : previous.value;
+    const result = typeof next === 'function' ? (next as (value: T) => T)(value) : next;
+    if (Object.is(value, result)) return;
     const snapshot = { scope, key, value: result };
-    currentRef.current = snapshot;
-    scope?.set(key, result);
-    setSnapshot(snapshot);
+    if (scope) { scope.set(key, result); notify(scope, key); }
+    if (ownsView) { currentRef.current = snapshot; setSnapshot(snapshot); }
   }, [key, scope]);
   return [current.value, update];
 }
@@ -60,11 +80,17 @@ export function useNavigationForm<T extends object>(key: string, form: FormInsta
     form.setFieldsValue(mergeFields(baselineRef.current, draftRef.current) as Parameters<FormInstance<T>['setFieldsValue']>[0]);
   }, [form, key, scope, signature]);
   return {
+    dirtyFields: Object.keys(draft) as (keyof T)[],
     onValuesChange: (changed: Partial<T>) => setDraft((current) => mergeFields(current, changed)),
     setValues: (changed: Partial<T>) => {
       form.setFieldsValue(mergeFields(form.getFieldsValue(true), changed));
       setDraft((current) => mergeFields(current, changed));
     },
+    clearFields: (keys: (keyof T)[]) => setDraft((current) => {
+      const next = { ...current };
+      for (const field of keys) delete next[field];
+      return next;
+    }),
     clearDraft: () => setDraft({}),
   };
 }
@@ -74,6 +100,8 @@ export function useForgetNavigationState() {
   const scope = useContext(ScopeContext);
   return (prefix: string) => {
     if (!scope) return;
-    for (const key of scope.keys()) if (key.startsWith(prefix)) scope.delete(key);
+    for (const key of [...scope.keys()]) if (key.startsWith(prefix) || key.startsWith(`configCommit:${prefix}`)) {
+      scope.delete(key); notify(scope, key);
+    }
   };
 }

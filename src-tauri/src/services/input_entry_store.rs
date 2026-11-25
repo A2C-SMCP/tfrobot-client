@@ -1,3 +1,4 @@
+use crate::services::computer::config_adoption::InputObservations;
 use crate::services::config::ConfigService;
 use crate::services::input_value_index::{
     self, InputValueIndexProvenance, InputValueStorageKind, LoadedInputValueIndex,
@@ -97,6 +98,7 @@ pub struct InputEntryStore {
     path: PathBuf,
     values: InputValueStore,
     secrets: Arc<dyn SecretStore>,
+    pub(crate) observations: Arc<InputObservations>,
 }
 
 impl InputEntryStore {
@@ -121,6 +123,7 @@ impl InputEntryStore {
         let storage_root = storage_root.as_ref().to_path_buf();
         Self {
             instance_id: instance_id.into(),
+            observations: InputObservations::for_root(&storage_root),
             path: storage_root.join(FILE_NAME),
             values: InputValueStore::from_storage_root(&storage_root),
             storage_root,
@@ -309,11 +312,15 @@ impl InputEntryStore {
                 Ok(()) => Err(format!(
                     "Failed to save InputEntry '{key}'; changes were reverted: {primary}"
                 )),
-                Err(rollback) => Err(format!(
-                    "Failed to save InputEntry '{key}': {primary}; rollback also failed: {rollback}"
-                )),
+                Err(rollback) => {
+                    self.observations.invalidate_value(key);
+                    Err(format!(
+                        "Failed to save InputEntry '{key}': {primary}; rollback also failed: {rollback}"
+                    ))
+                }
             };
         }
+        self.observations.written(key, Some(&next_value));
         Ok(())
     }
 
@@ -348,11 +355,15 @@ impl InputEntryStore {
                 Ok(()) => Err(format!(
                     "Failed to delete InputEntry '{key}'; changes were reverted: {primary}"
                 )),
-                Err(rollback) => Err(format!(
-                    "Failed to delete InputEntry '{key}': {primary}; rollback also failed: {rollback}"
-                )),
+                Err(rollback) => {
+                    self.observations.invalidate_value(key);
+                    Err(format!(
+                        "Failed to delete InputEntry '{key}': {primary}; rollback also failed: {rollback}"
+                    ))
+                }
             };
         }
+        self.observations.written(key, None);
         Ok(())
     }
 

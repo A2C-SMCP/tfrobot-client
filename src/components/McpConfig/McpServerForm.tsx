@@ -1,3 +1,5 @@
+import { ConfigSaveStatus } from '@/components/ComputerSettings/ConfigSaveStatus';
+import { useConfigCommit } from '@/components/ComputerSettings/useConfigCommit';
 import { usePageAction } from '@/components/Navigation/pageActivityState';
 import { useForgetNavigationState, useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { useEffect, useRef } from 'react';
@@ -119,6 +121,8 @@ export function McpServerForm({
   loading,
 }: McpServerFormProps) {
   const { t } = useTranslation();
+  const commitControl = useConfigCommit(`mcp.form.${JSON.stringify(initialValues?.name ?? null)}.commit:${instanceId}`, (payload: { config: McpServerConfig; inputs: InputDefinitionChanges }) => onSubmit(payload.config, payload.inputs), initialValues ? 'saved' : 'dirty');
+  const saveState = commitControl.state;
   const [form] = Form.useForm<FormValues>();
   const action = usePageAction(JSON.stringify([instanceId, initialValues?.name]));
   const submission = useRef<() => boolean>(() => false);
@@ -285,13 +289,8 @@ export function McpServerForm({
         ? projectConfigEntries(initialValues.server_parameters.env, inputs)
         : projectConfigEntries(initialValues.server_parameters.headers, inputs)
       : [];
-    const saved = await onSubmit(
-      config,
-      buildInputDefinitionChanges(initialEntries, serializedEntries.definitions, inputs),
-    );
-    if (saved === false || !current()) return;
-    draft.clearDraft();
-    forget(draftKey);
+    await commitControl.commit({ config, inputs: buildInputDefinitionChanges(initialEntries, serializedEntries.definitions, inputs) });
+
   };
 
   if (inputInstanceId !== instanceId || inputsLoading) {
@@ -312,9 +311,10 @@ export function McpServerForm({
 
   return (
     <Form
+      disabled={loading || saveState === 'saving'}
       name={`mcp-server-${instanceId}`}
       form={form}
-      onValuesChange={draft.onValuesChange}
+      onValuesChange={(changed) => { draft.onValuesChange(changed); commitControl.dirty(); }}
       layout="vertical"
       initialValues={getInitialFormValues()}
       onSubmitCapture={() => { submission.current = action(); }}
@@ -325,7 +325,7 @@ export function McpServerForm({
         label={t('mcp.form.type')}
         rules={[{ required: true }]}
       >
-        <Select disabled={!!initialValues}>
+        <Select disabled={!!initialValues || loading || saveState === 'saving'}>
           <Select.Option value="stdio">Stdio</Select.Option>
           <Select.Option value="http">HTTP</Select.Option>
           <Select.Option value="sse">SSE</Select.Option>
@@ -337,7 +337,7 @@ export function McpServerForm({
         label={t('mcp.form.name')}
         rules={[{ required: true, message: t('mcp.form.nameRequired') }]}
       >
-        <Input disabled={!!initialValues} />
+        <Input disabled={!!initialValues || loading || saveState === 'saving'} />
       </Form.Item>
 
       <Form.Item
@@ -345,7 +345,7 @@ export function McpServerForm({
         label={t('mcp.form.bundleId')}
         extra={t('mcp.form.bundleIdHint')}
       >
-        <Input disabled={!!initialValues} placeholder={t('mcp.form.bundleIdPlaceholder')} />
+        <Input disabled={!!initialValues || loading || saveState === 'saving'} placeholder={t('mcp.form.bundleIdPlaceholder')} />
       </Form.Item>
 
       {serverType === 'stdio' && (
@@ -463,6 +463,7 @@ export function McpServerForm({
         </Collapse.Panel>
       </Collapse>
 
+      <ConfigSaveStatus state={saveState} />
       <Form.Item>
         <Space>
           <Button type="primary" htmlType="submit" loading={loading}>

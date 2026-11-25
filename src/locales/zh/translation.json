@@ -42,7 +42,8 @@
     "export": "导出",
     "confirm": "确认",
     "dismissNotice": "不再提示",
-    "permissionsHelp": "权限与安全"
+    "permissionsHelp": "权限与安全",
+    "close": "关闭"
   },
   "nav": {
     "overview": "概览",
@@ -299,12 +300,12 @@
       "title": "{{name}} 设置",
       "pageLabel": "计算机设置",
       "navigationLabel": "计算机设置模块",
-      "backToComputer": "返回计算机",
+      "backToComputer": "返回运行工作台",
       "noComputer": "没有可配置的计算机",
       "sections": {
         "general": {
           "title": "常规",
-          "description": "管理当前计算机保存的名称和描述。"
+          "description": "设置当前计算机的名称与描述。"
         },
         "skills": {
           "title": "技能",
@@ -315,15 +316,15 @@
           "openPlugins": "管理插件与插件市场"
         },
         "plugins": {
-          "title": "插件与插件市场",
-          "description": "管理插件市场来源，以及插件的安装、启用与卸载。"
+          "title": "插件",
+          "description": "为当前 Computer 安装、启用插件，扩展技能与 MCP 工具。"
         },
         "mcp": {
           "title": "MCP 服务器",
-          "description": "管理保存的 MCP 声明、来源、启用配置、导入、导出和校验。"
+          "description": "管理已保存的 MCP 连接声明与启动策略；运行中的服务在工作台操作。"
         },
         "inputs": {
-          "title": "输入项",
+          "title": "变量与凭据",
           "description": "管理当前计算机 MCP 输入项的实际值；密钥会安全保存，界面不会显示其内容。"
         },
         "connection": {
@@ -333,6 +334,10 @@
         "built-in-tools": {
           "title": "内置工具",
           "description": "管理客户端自带的工具。这些工具与自行配置的 MCP 服务器分开管理。"
+        },
+        "advanced": {
+          "title": "高级",
+          "description": "管理当前 Computer 的存储位置等高级配置。"
         }
       }
     },
@@ -429,17 +434,10 @@
       "title": "运行时",
       "statusTitle": "运行时状态",
       "userState": "状态",
-      "lifecycle": "生命周期",
-      "incarnation": "实例代次",
-      "generation": "运行时代次",
-      "snapshotRevision": "快照修订号",
       "connection": "连接",
-      "configRevision": "配置修订号",
-      "capabilityRevision": "能力修订号",
       "activeMcpServers": "活跃 MCP 服务器",
       "mcpLifecycle": "MCP 运行时",
       "restart": "重启",
-      "advancedDiagnostics": "高级运行诊断",
       "actionProgress": {
         "starting": "启动中…",
         "stopping": "停止中…"
@@ -461,26 +459,6 @@
       },
       "lastError": "运行时错误",
       "degraded": "运行时降级",
-      "recentEvents": "最近运行时事件",
-      "noEvents": "尚未收到运行时事件",
-      "eventRevision": "快照修订号 {{revision}} · {{receivedAt}}",
-      "eventCauses": {
-        "lifecycleChanged": "生命周期变更为 {{state}}",
-        "configRevisionBumped": "配置修订号变更为 {{revision}}",
-        "capabilityRevisionBumped": "能力修订号变更为 {{revision}}",
-        "diagnosticsChanged": "运行时诊断变更为修订号 {{revision}}",
-        "clientConnectionStateChanged": "连接状态修订号 {{revision}}：{{status}}",
-        "connectionPresent": "存在",
-        "connectionAbsent": "不存在",
-        "clientDiagnosticChanged": "{{operation}} 诊断状态：{{status}}",
-        "mcpDiagnosticChanged": "MCP {{bundleId}} 的 {{operation}} 诊断状态：{{status}}",
-        "oauthStatusChanged": "MCP {{bundleId}} 授权状态：{{status}}",
-        "diagnosticFailed": "失败",
-        "diagnosticCleared": "已清除",
-        "handleReplaced": "运行时句柄已替换：{{reason}}",
-        "observationAdvanced": "运行时观测已推进到触发事件之后",
-        "resync": "跳过 {{count}} 个事件后已重新同步运行时状态"
-      },
       "problems": {
         "severity": {
           "error": "运行异常",
@@ -514,9 +492,7 @@
           "viewLogs": "查看日志",
           "unavailable": "当前状态下无法执行此操作。"
         },
-        "actionUnavailable": "{{action}}不可用：{{reason}}",
-        "technicalDiagnostics": "当前技术诊断",
-        "noTechnicalDiagnostics": "当前没有技术诊断"
+        "actionUnavailable": "{{action}}不可用：{{reason}}"
       },
       "lifecycleStates": {
         "created": "已创建",
@@ -623,6 +599,121 @@
       "restarted": "计算机已重启",
       "runtimeOperationFailed": "运行时操作失败，请查看运行时诊断或日志了解详情。",
       "connectionOperationFailed": "连接操作失败，请查看运行时诊断或日志了解详情。"
+    },
+    "configSave": {
+      "saved": "已保存",
+      "dirty": "未保存",
+      "saving": "保存中…",
+      "error": "保存失败，编辑内容已保留",
+      "retry": "重试保存",
+      "discard": "放弃修改"
+    },
+    "adoption": {
+      "checking": "正在确认配置采用状态…",
+      "waiting_start": "配置已保存，启动时采用",
+      "waitingDescription": "计算机尚未运行。修改配置不会自动启动计算机。",
+      "current": "当前运行配置已采用",
+      "healthSeparate": "配置采用情况与工具运行、连接状态分别显示。",
+      "pending": "有 {{count}} 项配置变更尚未采用",
+      "unknown": "部分配置的采用情况尚未确认",
+      "openRuntime": "前往运行工作台",
+      "viewChanges": "查看配置差异与生效操作",
+      "inputsUnknown": "尚未确认以下资源是否已采用配置。可重新启动对应用户 MCP，或通过其所属插件的生命周期操作确认。",
+      "configurationChanged": "已保存的配置发生变化",
+      "reasons": {
+        "skill_home": "当前实例仍使用原技能目录，重启计算机后切换。",
+        "startup": "当前实例使用原启动并发数，下次启动采用新值。",
+        "mcp_config": "已保存的 MCP 声明与当前加载的声明不同。",
+        "disabled_running": "已设置为下次禁用；当前 MCP 仍在运行。",
+        "input_definition": "输入定义已修改，当前 MCP 尚未采用。",
+        "input_value": "输入值已修改，当前 MCP 仍使用此前解析的值。"
+      },
+      "actions": {
+        "start_mcp": "启动并采用配置",
+        "restart_mcp": "重新启动此 MCP 并采用配置",
+        "stop_mcp": "立即停止此 MCP",
+        "restart_computer": "重启计算机以采用配置",
+        "manage_plugin": "前往所属插件管理"
+      },
+      "connectionPolicyHint": "保存的目标用于下一次连接；保存不会切换当前连接。",
+      "currentConnection": "当前连接：{{name}}",
+      "retry": "重新确认状态",
+      "openPlugin": "前往插件 {{name}} 管理",
+      "compact": {
+        "current": "配置已采用",
+        "waiting_start": "等待启动采用",
+        "checking": "正在确认配置"
+      },
+      "settings": {
+        "checking": "正在核对已保存配置与本次运行…",
+        "current": "本次运行已采用已保存配置",
+        "waiting_start": "未启动 · 启动时采用已保存配置"
+      }
+    },
+    "storage": {
+      "title": "技能与插件存储位置",
+      "description": "此目录用于存放本地技能和管理已安装插件。本次运行可用的技能在运行工作台查看。",
+      "current": "已保存的位置",
+      "default": "默认目录",
+      "custom": "自定义目录",
+      "openSaved": "打开已保存目录",
+      "change": "更改存储位置",
+      "changeDescription": "更改后，当前 Computer 将切换使用另一目录中的技能和插件。运行中的 Computer 在重启前继续使用原目录；保存不会自动启动或重启。",
+      "noMigration": "原目录中的文件会保留，不会自动搬迁。如果其他 Computer 也使用新目录，可能共享其中内容。",
+      "location": "存储位置",
+      "customPath": "自定义目录路径",
+      "pathRequired": "请输入或选择目录",
+      "defaultResolved": "使用当前 Computer 的默认 skill_home 目录。"
+    },
+    "redesign": {
+      "identifier": "计算机 ID",
+      "settings": "设置",
+      "overview": "工作台",
+      "skillsTools": "技能与工具",
+      "diagnostics": "诊断",
+      "activeCapabilities": "本次运行可用的能力",
+      "manageCapabilities": "管理插件",
+      "desktopWaiting": "启动计算机后可读取桌面资源。",
+      "connectionOverview": "连接概况",
+      "currentConnection": "当前连接",
+      "nextConnection": "下次连接目标",
+      "editConnection": "修改连接策略",
+      "manualTarget": "手动目标：{{id}}",
+      "noTarget": "尚未选择连接目标",
+      "autoConnectOn": "已开启启动时自动连接。保存目标不会切换当前连接。",
+      "autoConnectOff": "自动连接已关闭，需要时手动连接。",
+      "observedCapabilities": "本次运行能力",
+      "availableTools": "可用工具",
+      "availableSkills": "可用技能",
+      "observationWaiting": "启动后确认运行可用性；“—”不代表未配置能力。",
+      "runtimeMcpDescription": "查看 MCP 当前状态并执行操作；插件提供的服务由插件管理。",
+      "editMcp": "管理 MCP 配置",
+      "startupTitle": "启动设置",
+      "autoSaveHint": "完成字段编辑后自动保存有效修改。",
+      "viewAdoption": "在工作台查看采用情况与操作",
+      "viewRuntime": "查看运行状态",
+      "settingsDescription": "此页编辑已保存配置。当前连接、可用能力及采用操作在工作台查看。",
+      "basicGroup": "基础",
+      "capabilityGroup": "能力与权限",
+      "advancedGroup": "高级选项",
+      "readOnlySource": "只读来源",
+      "moreConfig": "更多配置操作",
+      "variableImpact": "这里管理已保存的变量与凭据。运行中的工具可能继续使用原值，修改后可在工作台查看采用情况。",
+      "policyEnabled": "已保存：启用",
+      "policyDisabled": "已保存：关闭",
+      "selectedTools": "已选择 {{count}} 个工具",
+      "selectedTargets": "已选择 {{count}} 个计算机",
+      "editAuthorization": "修改授权",
+      "editWorkspace": "更改工作目录",
+      "workspaceImpact": "选择命令行能力使用的目录；文件不会搬迁。此能力运行期间不能更改目录。",
+      "mcpNotLoaded": "当前实例中尚未找到此声明，可先在上方查看配置采用情况。",
+      "manageBuiltIn": "管理内置工具",
+      "loadAuthorizationFailed": "无法读取已保存的授权策略。",
+      "loadCommandPolicyFailed": "无法读取已保存的命令行策略。",
+      "savedPolicyRefreshFailed": "刷新失败，以下显示上次确认的策略。"
+    },
+    "identity": {
+      "identifier": "计算机 ID"
     }
   },
   "skills": {
@@ -639,10 +730,12 @@
     "nonTextSkillMd": "资源未以内联文本返回。",
     "messages": {
       "refreshed": "技能已刷新"
-    }
+    },
+    "runtimeHelp": "这里展示当前 Computer 本次运行实际可用的技能。",
+    "waitingStart": "启动 Computer 后查看本次运行可用的技能。已安装插件仍可在设置中管理。"
   },
   "marketplace": {
-    "title": "插件市场",
+    "title": "插件",
     "supported": "支持管理插件市场",
     "unsupported": "当前 SDK 不支持管理插件市场",
     "scope": "安装范围",
@@ -652,7 +745,7 @@
     "pluginsForMarketplace": "{{marketplace}} 中的插件",
     "lastUpdated": "最近更新：{{time}}",
     "emptyMarketplaces": "暂无插件市场",
-    "emptyPlugins": "暂无插件",
+    "emptyPlugins": "已配置的来源中暂无插件",
     "emptyMarketplaceSelection": "选择一个插件市场以管理其中的插件",
     "sdkOwnedState": "安装和启用状态由 SDK 统一管理。",
     "bundledSkills": "内置技能：{{skills}}",
@@ -677,8 +770,8 @@
       "skillPreviewUnavailable": "当前计算机无法预览此技能。"
     },
     "form": {
-      "name": "名称",
-      "nameRequired": "请输入插件市场名称",
+      "name": "来源名称",
+      "nameRequired": "请输入来源名称",
       "sourceType": "来源类型",
       "gitUrl": "Git 仓库地址",
       "gitUrlRequired": "请输入 Git 仓库地址",
@@ -686,30 +779,31 @@
       "gitUrlEditHelp": "请重新输入完整 Git 仓库地址。当前展示的地址已隐藏凭据、查询参数和片段。",
       "localPath": "本地仓库路径",
       "localPathRequired": "请选择本地 Git 仓库",
-      "sourceLocked": "此插件市场已安装插件，请先卸载后再更换来源。",
+      "sourceLocked": "此来源有已安装插件，暂不支持更改来源。",
       "marketplace": "插件市场",
       "marketplaceRequired": "请输入插件市场名称",
       "plugin": "插件",
       "pluginRequired": "请输入插件名称"
     },
     "actions": {
-      "addMarketplace": "添加插件市场",
+      "addMarketplace": "添加插件来源",
       "chooseFolder": "选择文件夹",
       "selectMarketplace": "选择插件市场 {{marketplace}}",
       "selectPlugin": "选择插件 {{plugin}}（{{pluginId}}）",
-      "refreshMarketplace": "刷新插件市场",
-      "removeMarketplace": "删除插件市场",
-      "updateMarketplace": "更新插件市场",
+      "refreshMarketplace": "同步插件目录",
+      "removeMarketplace": "移除来源",
+      "updateMarketplace": "编辑插件来源",
       "installPlugin": "安装插件",
       "enablePlugin": "启用插件",
-      "disablePlugin": "禁用插件",
+      "disablePlugin": "停用插件",
       "uninstallPlugin": "卸载插件"
     },
     "operations": {
-      "add": "正在克隆插件市场 {{target}}…",
-      "update": "正在更新插件市场 {{target}}…",
-      "refresh": "正在刷新插件市场 {{target}}…",
-      "remove": "正在删除插件市场 {{target}}…",
+      "add": "正在获取插件来源 {{target}}…",
+      "addUnnamed": "正在获取插件来源…",
+      "update": "正在更新插件来源 {{target}}…",
+      "refresh": "正在同步插件目录 {{target}}…",
+      "remove": "正在移除插件来源 {{target}}…",
       "install": "正在安装插件 {{target}}…",
       "enable": "正在启用插件 {{target}}…",
       "disable": "正在禁用插件 {{target}}…",
@@ -718,14 +812,71 @@
       "defaultDescription": "操作完成后列表会自动刷新。"
     },
     "messages": {
-      "added": "插件市场已添加",
-      "refreshed": "插件市场已刷新",
-      "removed": "插件市场已删除",
-      "updated": "插件市场已更新",
-      "install": "插件已安装",
+      "added": "已添加插件来源",
+      "refreshed": "插件目录已同步",
+      "removed": "已移除插件来源",
+      "updated": "已更新插件来源",
+      "install": "已安装，尚未启用。点击启用后使用。",
       "enable": "插件已启用",
       "disable": "插件已禁用",
       "uninstall": "插件已卸载"
+    },
+    "context": "当前管理：{{name}}",
+    "reloadList": "重新读取列表",
+    "manageSources": "管理来源",
+    "installedTab": "已安装（{{count}}）",
+    "discoverTab": "发现插件",
+    "installedList": "已安装插件",
+    "search": "搜索插件名称、用途或来源",
+    "filterSource": "按来源筛选",
+    "allSources": "全部来源",
+    "noInstalled": "当前 Computer 尚未安装插件",
+    "noSources": "尚未配置插件来源。添加 Git 仓库后即可发现插件。",
+    "noMatches": "没有符合筛选条件的插件",
+    "fromSource": "来源：{{name}}",
+    "sourcesHelp": "来源是提供插件目录的本地或远程 Git 仓库。同步来源会刷新可发现的插件目录，不会升级已安装插件。",
+    "sourceHidden": "仓库地址已隐藏",
+    "more": "更多",
+    "installHelp": "安装会添加插件包，完成后可按需启用。",
+    "disabledHelp": "已安装，尚未启用。启用后，插件可向当前 Computer 提供技能和工具；需要时会提示补充输入。",
+    "enabledHelp": "已启用。本次运行实际可用的技能及 MCP 工具运行状态，请在运行工作台查看。",
+    "installedContents": "以下是已安装包的内容，可用情况取决于启用与运行状态。",
+    "declaredContents": "以下内容来自来源声明，当前尚未安装此插件。",
+    "removeSourceConfirm": "移除插件来源 {{name}}？",
+    "loadOrOperationFailed": "插件列表读取或操作未完成",
+    "retryOperation": "重试操作",
+    "status": {
+      "available": "未安装",
+      "disabled": "未启用",
+      "enabled": "已启用",
+      "degraded": "需要处理",
+      "unknown": "状态待确认"
+    },
+    "sourceStatus": {
+      "known": "已配置",
+      "available": "目录可用",
+      "degraded": "同步需要处理",
+      "unknown": "状态待确认"
+    },
+    "uninstall": {
+      "title": "卸载 {{name}}？",
+      "description": "此操作会从当前 Computer 管理的目录中移除插件及其管理的技能与 MCP 工具。后续使用需要重新安装。共用此目录的其他 Computer 也可能受到影响。"
+    },
+    "errors": {
+      "install": "安装未完成",
+      "enable": "启用未完成",
+      "disable": "停用未完成",
+      "uninstall": "卸载未完成"
+    },
+    "storagePending": "存储位置变更尚未采用",
+    "storagePendingDescription": "当前插件列表与操作仍使用现有实例的目录。下次启动或重启 Computer 时采用已保存的新位置，可前往运行工作台完成切换。",
+    "removal": {
+      "warning": "移除来源将级联卸载以下插件、技能和 MCP 工具",
+      "description": "这些插件的已安装内容将从当前计算机移除，正在使用的相关 MCP 工具会停止。其他来源和独立配置的资源不受影响。是否继续？",
+      "empty": "此来源没有已安装插件或技能。确认后将移除来源及其本地目录缓存。",
+      "confirmCascade": "卸载内容并移除来源",
+      "failed": "移除未完成",
+      "reload": "重新读取影响清单"
     }
   },
   "dashboard": {
@@ -800,7 +951,7 @@
       "name": "名称",
       "source": "来源",
       "transport": "传输类型",
-      "enabled": "启用",
+      "enabled": "启动时启用",
       "status": "状态",
       "message": "消息",
       "authorization": "授权",
@@ -821,7 +972,7 @@
       "commandLineName": "命令行工具",
       "commandLineManagedHint": "生命周期由内置工具设置管理。"
     },
-    "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。请在插件市场中管理其生命周期。",
+    "pluginManagedHint": "由 {{marketplace}} 的插件 {{plugin}} 管理。",
     "batch": {
       "startSummary": "批量启动完成：候选 {{candidates}} 个，实际启动 {{actual}} 个，未变化 {{unchanged}} 个，排除插件托管 {{excluded}} 个，失败 {{failed}} 个。",
       "stopSummary": "批量停止完成：候选 {{candidates}} 个，实际停止 {{actual}} 个，未变化 {{unchanged}} 个，排除插件托管 {{excluded}} 个，失败 {{failed}} 个。",
@@ -923,10 +1074,10 @@
       "optionValue": "选项值"
     },
     "messages": {
-      "added": "服务器已保存，重启运行时后生效",
-      "updated": "服务器已保存，重启运行时后生效",
-      "enabled": "服务器 {{name}} 已保存为启用，重启运行时后生效",
-      "disabled": "服务器 {{name}} 已保存为禁用，重启运行时后生效",
+      "added": "服务器配置已保存",
+      "updated": "服务器配置已保存",
+      "enabled": "服务器 {{name}} 已设置为启动时启用",
+      "disabled": "服务器 {{name}} 已设置为下次禁用；当前运行状态请查看工作台",
       "removed": "服务器已删除",
       "started": "服务器 {{name}} 已启动",
       "reconnected": "服务器 {{name}} 已重新连接",
@@ -942,7 +1093,7 @@
     }
   },
   "inputs": {
-    "title": "输入项",
+    "title": "变量与凭据",
     "addInput": "添加变量",
     "editInput": "编辑变量",
     "editInputFor": "编辑变量 {{id}}",
@@ -1134,24 +1285,8 @@
     "tabs": {
       "tools": "工具",
       "resources": "资源",
-      "history": "历史记录",
-      "notices": "提示统计"
+      "history": "历史记录"
     },
-    "noticeColumns": {
-      "notice": "提示",
-      "impressions": "展示次数",
-      "dismissed": "已关闭",
-      "helpClicks": "帮助点击",
-      "dismissRate": "关闭率",
-      "helpRate": "帮助点击率"
-    },
-    "notices": {
-      "mcp-runtime-keychain": "MCP 运行时钥匙串授权",
-      "password-variable-keychain": "密码变量钥匙串授权",
-      "remote-control-security": "远程控制安全说明",
-      "desktop-enumeration-unverified": "桌面资源枚举未校验"
-    },
-    "noticesLocalOnly": "仅统计本机提示状态，不写入日志。",
     "searchTools": "搜索工具...",
     "allServers": "所有服务器",
     "noTools": "暂无可用工具",

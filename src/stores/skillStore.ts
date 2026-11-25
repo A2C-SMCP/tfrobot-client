@@ -70,8 +70,15 @@ export interface MarketplaceGovernance {
   plugins: PluginSummary[];
 }
 
+export interface MarketplaceRemovalPlan {
+  instanceId: string;
+  marketplace: string;
+  source: MarketplaceSourceSummary;
+  installedPlugins: Array<Pick<PluginSummary, 'plugin' | 'version' | 'enabled' | 'bundledSkills' | 'bundledMcpServers'>>;
+}
+
 export interface AddMarketplaceRequest {
-  name: string;
+  name?: string;
   source: MarketplaceSource;
 }
 
@@ -132,9 +139,9 @@ interface SkillState extends InstanceSkillRecord {
   fetchMarketplaceCapabilities: (instanceId: string) => Promise<void>;
   fetchMarketplaceGovernance: (instanceId: string) => Promise<void>;
   addMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
-  updateMarketplace: (instanceId: string, request: AddMarketplaceRequest) => Promise<void>;
+  updateMarketplace: (instanceId: string, request: AddMarketplaceRequest & { name: string }) => Promise<void>;
   refreshMarketplace: (instanceId: string, marketplace: string) => Promise<void>;
-  removeMarketplace: (instanceId: string, marketplace: string) => Promise<void>;
+  removeMarketplace: (instanceId: string, marketplace: string, confirmedPlan?: MarketplaceRemovalPlan) => Promise<void>;
   installPlugin: (instanceId: string, request: PluginLifecycleRequest) => Promise<void>;
   enablePlugin: (instanceId: string, request: PluginLifecycleRequest) => Promise<void>;
   disablePlugin: (instanceId: string, request: PluginLifecycleRequest) => Promise<void>;
@@ -416,7 +423,7 @@ export const useSkillStore = create<SkillState>((set, get) => ({
       set,
       get,
       instanceId,
-      { kind: 'add', target: request.name },
+      { kind: 'add', target: request.name ?? '' },
       () => invokeMarketplace('add_marketplace', instanceId, { request }),
     );
   },
@@ -441,13 +448,13 @@ export const useSkillStore = create<SkillState>((set, get) => ({
     );
   },
 
-  removeMarketplace: async (instanceId, marketplace) => {
+  removeMarketplace: async (instanceId, marketplace, confirmedPlan) => {
     await runMarketplaceLifecycle(
       set,
       get,
       instanceId,
       { kind: 'remove', target: marketplace },
-      () => invokeMarketplace('remove_marketplace', instanceId, { marketplace }),
+      () => invokeMarketplace('remove_marketplace', instanceId, { marketplace, ...(confirmedPlan ? { confirmedPlan } : {}) }),
     );
   },
 

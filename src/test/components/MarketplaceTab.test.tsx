@@ -3,8 +3,10 @@ import { NavigationMemory } from '@/stores/navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { StrictMode, useCallback, useState } from 'react';
-import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
+import { ConfigProvider } from 'antd';
+import { act, fireEvent, render, screen, waitFor, within } from '../helpers/render';
 import { MarketplaceTab } from '@/components/Computer/MarketplaceTab';
+import { useConfigAdoptionStore } from '@/stores/configAdoptionStore';
 import { useSkillStore } from '@/stores/skillStore';
 
 const mockedInvoke = vi.mocked(invoke);
@@ -41,8 +43,92 @@ const supportedCapabilities = {
 describe('MarketplaceTab', () => {
   beforeEach(() => {
     useSkillStore.getState().reset();
+    useConfigAdoptionStore.getState().reset();
     mockedInvoke.mockReset();
     mockedOpen.mockReset();
+  });
+
+  it('previews installed contents, cancels without deleting, and submits the confirmed impact list once', async () => {
+    const source = { type: 'remoteGit' as const, displayGitUrl: 'https://example.com/acme.git' };
+    const installed = { plugin: 'audit', version: '1.0.0', enabled: true, bundledSkills: ['audit:review'], bundledMcpServers: ['audit-mcp'] };
+    const plan = { instanceId: 'computer-a', marketplace: 'acme', source, installedPlugins: [installed] };
+    const preview = deferred<typeof plan>();
+    let removed = false;
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return {
+        capabilities: supportedCapabilities,
+        marketplaces: removed ? [] : [{ name: 'acme', source, status: 'known', message: null }],
+        plugins: removed ? [] : [{ ...installed, marketplace: 'acme', installed: true, status: 'enabled', declared: null }],
+      };
+      if (command === 'list_skills') return [];
+      if (command === 'get_marketplace_removal_plan') return preview.promise;
+      if (command === 'remove_marketplace') { removed = true; return; }
+    });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><MarketplaceTab instanceId="computer-a" /></ConfigProvider>);
+    await screen.findByRole('tab', { name: 'Installed (1)' });
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    const sources = screen.getByRole('dialog', { name: 'Manage sources' });
+    expect(within(sources).getByRole('button', { name: 'Remove source' })).toBeEnabled();
+    fireEvent.click(within(sources).getByRole('button', { name: 'Remove source' }));
+    const dialog = (await screen.findByText('Remove source acme?')).closest('[role=dialog]')! as HTMLElement;
+    await waitFor(() => expect(dialog).toBeVisible());
+    expect(within(dialog).getByRole('button', { name: 'Remove source' })).toBeDisabled();
+    await act(async () => preview.resolve(plan));
+    expect(await within(dialog).findByText('audit:review', { exact: false })).toBeVisible();
+    expect(within(dialog).getByText(/audit-mcp/)).toBeVisible();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(mockedInvoke).not.toHaveBeenCalledWith('remove_marketplace', expect.anything());
+    fireEvent.click(within(sources).getByRole('button', { name: 'Remove source' }));
+    const secondDialog = (await screen.findByText('Remove source acme?')).closest('[role=dialog]')! as HTMLElement;
+    const confirm = await within(secondDialog).findByRole('button', { name: 'Uninstall contents and remove source' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('remove_marketplace', {
+      instanceId: 'computer-a', marketplace: 'acme', confirmedPlan: plan,
+    }));
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === 'remove_marketplace')).toHaveLength(1);
+    await waitFor(() => expect(secondDialog).not.toBeVisible());
+  });
+
+  it('confirms removal of an empty source and keeps failures visible for a fresh preview', async () => {
+    const source = { type: 'remoteGit' as const, displayGitUrl: 'https://example.com/acme.git' };
+    const plan = { instanceId: 'computer-a', marketplace: 'acme', source, installedPlugins: [] };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return { capabilities: supportedCapabilities,
+        marketplaces: [{ name: 'acme', source, status: 'known', message: null }], plugins: [] };
+      if (command === 'list_skills') return [];
+      if (command === 'get_marketplace_removal_plan') return plan;
+      if (command === 'remove_marketplace') throw new Error('Source was retained; cleanup failed');
+    });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><MarketplaceTab instanceId="computer-a" /></ConfigProvider>);
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove source' }));
+    const dialog = (await screen.findByText('Remove source acme?')).closest('[role=dialog]')! as HTMLElement;
+    await waitFor(() => expect(dialog).toBeVisible());
+    expect(await within(dialog).findByText(/This source has no installed plugins or skills/)).toBeVisible();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove source' }));
+    expect(await within(dialog).findByText(/Source was retained; cleanup failed/)).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: 'Remove source' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Reload affected items' })).toBeEnabled();
+  });
+
+  it('does not offer deletion when the removal preview cannot be read', async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return { capabilities: supportedCapabilities,
+        marketplaces: [{ name: 'acme', source: { type: 'remoteGit', displayGitUrl: null }, status: 'known' }], plugins: [] };
+      if (command === 'list_skills') return [];
+      if (command === 'get_marketplace_removal_plan') throw new Error('Preview unavailable');
+    });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><MarketplaceTab instanceId="computer-a" /></ConfigProvider>);
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove source' }));
+    const dialog = (await screen.findByText('Remove source acme?')).closest('[role=dialog]')! as HTMLElement;
+    await waitFor(() => expect(dialog).toBeVisible());
+    expect(await within(dialog).findByText('Preview unavailable')).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: 'Remove source' })).toBeDisabled();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('remove_marketplace', expect.anything());
   });
 
   it('does not render persistent SDK capability metadata and disables lifecycle actions when unsupported', async () => {
@@ -59,15 +145,17 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
-    expect(screen.getByText('Select a marketplace to manage plugins')).toBeInTheDocument();
-    expect(screen.getByText('Add').closest('button')).toBeDisabled();
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText('No plugin sources configured. Add a Git repository to discover plugins.')).toBeInTheDocument();
+
+    expect(screen.getByText('Add plugin source').closest('button')).toBeDisabled();
     expect(screen.queryByText('SDK marketplace lifecycle is unavailable')).not.toBeInTheDocument();
     expect(screen.queryByText('Computer::install_plugin')).not.toBeInTheDocument();
     expect(screen.queryByText('Install scope')).not.toBeInTheDocument();
   });
 
-  it('renders three-pane marketplace, filtered plugin list, and selected plugin contents', async () => {
+  it('lists installed plugins across sources and shows the selected package contents', async () => {
     mockedInvoke.mockResolvedValueOnce({
       capabilities: supportedCapabilities,
       marketplaces: [
@@ -113,23 +201,21 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    expect(await screen.findByText('Marketplaces')).toBeInTheDocument();
-    expect(await screen.findByText('Last updated: 2026-07-03T06:08:14Z')).toBeInTheDocument();
-    expect(screen.getByText('Plugins in tf-market')).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Installed (2)' })).toBeInTheDocument();
+    expect(screen.queryByText('https://example.com/tf.git')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select plugin audit (plugin-2)' })).toBeInTheDocument();
     expect(screen.getByText('Plugin Contents')).toBeInTheDocument();
     expect(screen.getAllByText('desktop-tools').length).toBeGreaterThan(0);
-    expect(screen.queryByText('audit')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select plugin audit (plugin-2)' })).toBeInTheDocument();
     expect(await screen.findByText('browser')).toBeInTheDocument();
     expect(screen.getByText('summarizer')).toBeInTheDocument();
 
-    const acmeSelection = screen.getByRole('button', {
-      name: 'Select marketplace acme',
-    });
+    const acmeSelection = screen.getByRole('button', { name: 'Select plugin audit (plugin-2)' });
     fireEvent.click(acmeSelection);
 
-    expect(screen.getByText('Plugins in acme')).toBeInTheDocument();
+    expect(acmeSelection).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
-    expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select plugin desktop-tools (plugin-1)' })).toBeInTheDocument();
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.getByText('audit:code-review')).toBeInTheDocument();
   });
@@ -208,23 +294,23 @@ describe('MarketplaceTab', () => {
     }
 
     render(<NavigationHarness />);
-    expect(await screen.findByText('Plugins in tf-market')).toBeInTheDocument();
+    expect(await screen.findByText('browser')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
 
-    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Select plugin audit (plugin-2)' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getAllByText('audit').length).toBeGreaterThan(0);
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
-    expect(screen.queryByText('desktop-tools')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select plugin desktop-tools (plugin-1)' })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByTestId('plugin-navigation-state')).toHaveTextContent('idle');
     });
 
-    fireEvent.click(screen.getByText('tf-market'));
+    fireEvent.click(screen.getByRole('button', { name: 'Select plugin desktop-tools (plugin-1)' }));
     expect((await screen.findAllByText('desktop-tools')).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Open audit Plugin' }));
-    expect(await screen.findByText('Plugins in acme')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Select plugin audit (plugin-2)' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('audit-mcp')).toBeInTheDocument();
     expect(screen.queryByText('legacy-audit-mcp')).not.toBeInTheDocument();
   });
@@ -309,6 +395,8 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
+    fireEvent.click(await screen.findByRole('tab', { name: 'Discover plugins' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Select plugin unknown-plugin (unknown@tf-market)' }));
     expect(await screen.findByText('Bundled skill capabilities are unknown')).toBeInTheDocument();
     expect(screen.getByText('Bundled MCP server capabilities are unknown')).toBeInTheDocument();
 
@@ -320,55 +408,32 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('catalog-skill')).toBeInTheDocument();
     expect(screen.getByText('catalog-mcp')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('installed-plugin'));
+    fireEvent.click(screen.getByRole('button', { name: 'Select plugin installed-plugin (installed@tf-market)' }));
     expect(await screen.findByText('actual-skill')).toBeInTheDocument();
     expect(screen.getByText('actual-mcp')).toBeInTheDocument();
     expect(screen.queryByText('declared-only-skill')).not.toBeInTheDocument();
     expect(screen.queryByText('declared-only-mcp')).not.toBeInTheDocument();
   });
 
-  it('updates an existing marketplace URL from the marketplace form', async () => {
-    mockedInvoke
-      .mockResolvedValueOnce({
-        capabilities: supportedCapabilities,
-        marketplaces: [
-          { name: 'tf-mkt', source: { type: 'remoteGit', displayGitUrl: 'https://example.com/private.git' }, status: 'known', message: null },
-        ],
-        plugins: [],
-      })
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        capabilities: supportedCapabilities,
-        marketplaces: [],
-        plugins: [],
-      })
-      .mockResolvedValueOnce([]);
+  it.each([
+    { type: 'remoteGit', displayGitUrl: 'https://example.com/private.git' },
+    { type: 'localGit', path: '/tmp/local-market' },
+  ])('shows source details without an unavailable edit action ($type)', async (source) => {
+    mockedInvoke.mockResolvedValueOnce({
+      capabilities: { ...supportedCapabilities, supportedOperations: supportedCapabilities.supportedOperations.filter((operation) => operation !== 'update_marketplace') },
+      marketplaces: [{ name: 'sdk-name', source, status: 'known', message: null }],
+      plugins: [],
+    }).mockResolvedValueOnce([]);
 
-    render(<MarketplaceTab instanceId="computer-a" />);
-
-    expect(await screen.findByText('tf-mkt')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Edit'));
-    expect(screen.getByText('Update Marketplace')).toBeInTheDocument();
-    expect(screen.getByLabelText('Git URL')).toHaveValue('');
-    expect(screen.getByText(/enter the complete Git URL again/i)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Git URL'), {
-      target: { value: 'https://oauth2:test-token@example.com/private.git?ref=release#v1' },
-    });
-    fireEvent.click(screen.getByText('Update').closest('button')!);
-
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('update_marketplace', {
-        instanceId: 'computer-a',
-        request: {
-          name: 'tf-mkt',
-          source: {
-            type: 'remoteGit',
-            gitUrl: 'https://oauth2:test-token@example.com/private.git?ref=release#v1',
-          },
-        },
-      });
-    });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><MarketplaceTab instanceId="computer-a" /></ConfigProvider>);
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    const dialog = screen.getByRole('dialog', { name: 'Manage sources' });
+    await waitFor(() => expect(within(dialog).getByText('sdk-name')).toBeVisible());
+    expect(within(dialog).getByText(source.type === 'localGit' ? source.path! : source.displayGitUrl!)).toBeVisible();
+    expect(within(dialog).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Sync plugin catalog' })).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: 'Remove source' })).toBeEnabled();
   });
 
   it('rejects file URLs in remote repository mode before invoking Tauri', async () => {
@@ -382,13 +447,15 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Add').closest('button')!);
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'local-market' } });
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText('No plugin sources configured. Add a Git repository to discover plugins.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add plugin source').closest('button')!);
+    expect(screen.queryByLabelText('Source name')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Git URL'), {
       target: { value: 'file:///tmp/local-market' },
     });
-    const addButtons = screen.getAllByText('Add');
+    const addButtons = screen.getAllByText('Add plugin source');
     fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
 
     expect(await screen.findByText(/must be added as a local repository/i)).toBeInTheDocument();
@@ -419,8 +486,11 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Add').closest('button')!);
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText('No plugin sources configured. Add a Git repository to discover plugins.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add plugin source').closest('button')!);
+    expect(screen.queryByLabelText('Source name')).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Local repository'));
     expect(screen.getByLabelText('Local repository')).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: 'Choose folder' }));
@@ -433,98 +503,14 @@ describe('MarketplaceTab', () => {
     await waitFor(() => expect(mockedOpen).toHaveBeenCalledTimes(2));
     expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/Marketplace 空格');
 
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'local-market' } });
-    const addButtons = screen.getAllByText('Add');
+    const addButtons = screen.getAllByText('Add plugin source');
     fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
         instanceId: 'computer-a',
         request: {
-          name: 'local-market',
           source: { type: 'localGit', path: '/tmp/Marketplace 空格' },
-        },
-      });
-    });
-  });
-
-  it('recognizes a saved local source and blocks source changes while Plugins are installed', async () => {
-    mockedInvoke
-      .mockResolvedValueOnce({
-        capabilities: supportedCapabilities,
-        marketplaces: [{
-          name: 'local-market',
-          source: { type: 'localGit', path: '/tmp/local-market' },
-          status: 'known',
-          message: null,
-        }],
-        plugins: [{
-          marketplace: 'local-market',
-          plugin: 'tools',
-          pluginId: 'tools@local-market',
-          version: null,
-          installed: true,
-          enabled: false,
-          status: 'disabled',
-          bundledMcpServers: [],
-          bundledSkills: [],
-          declared: null,
-          message: null,
-        }],
-      })
-      .mockResolvedValueOnce([]);
-
-    render(<MarketplaceTab instanceId="computer-a" />);
-
-    expect(await screen.findByText('/tmp/local-market')).toBeInTheDocument();
-    expect(screen.getByText('Local repository')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Edit'));
-
-    expect(screen.getByLabelText('Local repository')).toBeChecked();
-    expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/local-market');
-    expect(screen.getByText(/uninstall them before changing its source/i)).toBeInTheDocument();
-    expect(screen.getByText('Update').closest('button')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Choose folder' })).toBeDisabled();
-  });
-
-  it('updates an existing local Marketplace from a newly selected directory', async () => {
-    mockedOpen.mockResolvedValueOnce('/tmp/local-market-next');
-    mockedInvoke
-      .mockResolvedValueOnce({
-        capabilities: supportedCapabilities,
-        marketplaces: [{
-          name: 'local-market',
-          source: { type: 'localGit', path: '/tmp/local-market' },
-          status: 'known',
-          message: null,
-        }],
-        plugins: [],
-      })
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        capabilities: supportedCapabilities,
-        marketplaces: [],
-        plugins: [],
-      })
-      .mockResolvedValueOnce([]);
-
-    render(<MarketplaceTab instanceId="computer-a" />);
-
-    expect(await screen.findByText('/tmp/local-market')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Edit'));
-    fireEvent.click(screen.getByRole('button', { name: 'Choose folder' }));
-    await waitFor(() => {
-      expect(screen.getByLabelText('Local repository path')).toHaveValue('/tmp/local-market-next');
-    });
-    fireEvent.click(screen.getByText('Update').closest('button')!);
-
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('update_marketplace', {
-        instanceId: 'computer-a',
-        request: {
-          name: 'local-market',
-          source: { type: 'localGit', path: '/tmp/local-market-next' },
         },
       });
     });
@@ -552,7 +538,9 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    const refresh = await screen.findByRole('button', { name: 'Refresh Marketplace' });
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    const refresh = await screen.findByRole('button', { name: 'Sync plugin catalog' });
     fireEvent.click(refresh);
 
     await waitFor(() => {
@@ -561,7 +549,7 @@ describe('MarketplaceTab', () => {
         marketplace: 'tf-market',
       });
     });
-    expect(await screen.findByText('Marketplace refreshed')).toBeInTheDocument();
+    expect(await screen.findByText('Plugin catalog synced')).toBeInTheDocument();
   });
 
   it('reports Marketplace refresh failures without changing the selection', async () => {
@@ -583,15 +571,12 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Refresh Marketplace' }));
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sync plugin catalog' }));
 
     expect(await screen.findByText('refresh failed')).toBeInTheDocument();
-    expect(screen.getByRole('button', {
-      name: 'Select marketplace tf-market',
-    })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    expect(screen.getByText('tf-market')).toBeInTheDocument();
   });
 
   it('closes the form and shows clone status while adding a marketplace in the background', async () => {
@@ -630,42 +615,43 @@ describe('MarketplaceTab', () => {
       </StrictMode>,
     );
 
-    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Add').closest('button')!);
-    expect(screen.getByText('Add Marketplace')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'tf-market' } });
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText('No plugin sources configured. Add a Git repository to discover plugins.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add plugin source').closest('button')!);
+    expect(screen.queryByLabelText('Source name')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Source type').closest('.ant-modal')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/tf.git' } });
-    const addButtons = screen.getAllByText('Add');
+    const addButtons = screen.getAllByText('Add plugin source');
     fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('add_marketplace', {
         instanceId: 'computer-a',
         request: {
-          name: 'tf-market',
           source: { type: 'remoteGit', gitUrl: 'https://example.com/tf.git' },
         },
       });
     });
     await waitFor(() => {
-      expect(screen.getByText('Add Marketplace').closest('.ant-modal'))
+      expect(screen.getByLabelText('Source type').closest('.ant-modal'))
         .toHaveClass('ant-zoom-leave');
     });
-    expect(screen.getByText('Cloning Marketplace tf-market…')).toBeInTheDocument();
+    expect(screen.getByText('Cloning plugin source…')).toBeInTheDocument();
     expect(screen.queryByText(/trust/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/confirm/i)).not.toBeInTheDocument();
 
     await act(async () => {
       await useSkillStore.getState().fetchMarketplaceGovernance('computer-a');
     });
-    expect(screen.getByText('Refresh').closest('button')).toBeDisabled();
-    expect(screen.getAllByText('Add')[0].closest('button')).toBeDisabled();
+    expect(screen.getByText('Reload list').closest('button')).toBeDisabled();
+    expect(screen.getAllByText('Add plugin source')[0].closest('button')).toBeDisabled();
 
     addMarketplace.resolve();
 
-    expect(await screen.findByText('Marketplace added')).toBeInTheDocument();
+    expect(await screen.findByText('Plugin source added')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByText('Cloning Marketplace tf-market…')).not.toBeInTheDocument();
+      expect(screen.queryByText('Cloning plugin source…')).not.toBeInTheDocument();
     });
   });
 
@@ -688,13 +674,15 @@ describe('MarketplaceTab', () => {
 
     const view = render(<MarketplaceTab instanceId="computer-a" />);
 
-    expect(await screen.findByText('No SDK marketplaces returned')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Add').closest('button')!);
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'tf-market' } });
+    await screen.findByText('No plugins installed for this Computer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText('No plugin sources configured. Add a Git repository to discover plugins.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Add plugin source').closest('button')!);
+    expect(screen.queryByLabelText('Source name')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Git URL'), { target: { value: 'https://example.com/tf.git' } });
-    const addButtons = screen.getAllByText('Add');
+    const addButtons = screen.getAllByText('Add plugin source');
     fireEvent.click(addButtons[addButtons.length - 1].closest('button')!);
-    expect(await screen.findByText('Cloning Marketplace tf-market…')).toBeInTheDocument();
+    expect(await screen.findByText('Cloning plugin source…')).toBeInTheDocument();
 
     view.rerender(<MarketplaceTab instanceId="computer-b" />);
     await waitFor(() => {
@@ -710,7 +698,7 @@ describe('MarketplaceTab', () => {
         .toBeNull();
     });
 
-    expect(screen.queryByText('Marketplace added')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plugin source added')).not.toBeInTheDocument();
   });
 
   it('enables only operations exposed by SDK capabilities', async () => {
@@ -746,8 +734,9 @@ describe('MarketplaceTab', () => {
     expect(await screen.findByText('desktop-tools')).toBeInTheDocument();
     expect(screen.getByText('Enable Plugin').closest('button')).toBeEnabled();
     expect(screen.queryByText('Refresh Marketplace')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Remove Marketplace')).toBeDisabled();
-    expect(screen.getByText('Add').closest('button')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(screen.getByRole('button', { name: 'Remove source' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add plugin source' })).toBeDisabled();
   });
 
   it('keeps one plugin enable pending while the global runtime input bridge owns prompting', async () => {
@@ -805,7 +794,7 @@ describe('MarketplaceTab', () => {
       await enable.promise;
     });
     await waitFor(() => {
-      expect(screen.getAllByText('enabled').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Enabled').length).toBeGreaterThan(0);
     });
     expect(mockedInvoke.mock.calls.filter(([command]) => command === 'enable_plugin')).toHaveLength(1);
   });
@@ -854,7 +843,7 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    fireEvent.click(await screen.findByText('summarizer'));
+    fireEvent.click(await screen.findByRole('button', { name: /summarizer/ }));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('get_skill', {
@@ -878,9 +867,8 @@ describe('MarketplaceTab', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     const view = render(<MarketplaceTab instanceId="computer-a" />);
-    await screen.findByText('No SDK marketplaces returned');
-    const refreshButton = screen.getByRole('button', { name: /Refresh/ });
-    // The empty state is visible while the initial request is still pending.
+    const refreshButton = screen.getByRole('button', { name: 'Reload list' });
+    // The initial request keeps reload disabled while a skeleton is shown.
     expect(refreshButton).toBeDisabled();
     await act(async () => { initialLoad.resolve(governance); });
     expect(refreshButton).toBeEnabled();
@@ -912,7 +900,7 @@ describe('MarketplaceTab', () => {
       <NavigationScope id={`computer:${id}`} key={id}><MarketplaceTab instanceId={id} /></NavigationScope>
     </NavigationMemoryProvider>;
     const view = render(tree('computer-a'));
-    fireEvent.click(await screen.findByText('summarizer'));
+    fireEvent.click(await screen.findByRole('button', { name: /summarizer/ }));
     expect(await screen.findByText('Restored preview')).toBeInTheDocument();
     view.rerender(tree('computer-b'));
     await screen.findByText('summarizer');
@@ -935,8 +923,8 @@ describe('MarketplaceTab', () => {
             pluginId: 'plugin-1',
             version: '1.0.0',
             installed: true,
-            enabled: false,
-            status: 'disabled',
+            enabled: true,
+            status: 'enabled',
             bundledMcpServers: [],
             bundledSkills: ['summarizer'],
             declared: null,
@@ -951,7 +939,7 @@ describe('MarketplaceTab', () => {
 
     render(<MarketplaceTab instanceId="computer-a" />);
 
-    fireEvent.click(await screen.findByText('summarizer'));
+    fireEvent.click(await screen.findByRole('button', { name: /summarizer/ }));
 
     expect(await screen.findByText('Skill not found: summarizer')).toBeInTheDocument();
     expect(screen.queryByText('[object Object]')).not.toBeInTheDocument();
@@ -1025,8 +1013,111 @@ describe('MarketplaceTab', () => {
 
     expect(screen.queryByText('stale-market')).not.toBeInTheDocument();
     expect(screen.queryByText('stale-plugin')).not.toBeInTheDocument();
-    expect(screen.getByText('No SDK marketplaces returned')).toBeInTheDocument();
-    expect(screen.getByText('Select a marketplace to manage plugins')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Installed (0)' })).toBeInTheDocument();
     expect(mockedInvoke).toHaveBeenCalledWith('get_marketplace_governance', { instanceId: 'computer-b' });
   });
+  it('installs without enabling, then enables through a separate explicit action', async () => {
+    let installed = false;
+    let enabled = false;
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return {
+        capabilities: supportedCapabilities,
+        marketplaces: [{ name: 'acme', source: { type: 'remoteGit', displayGitUrl: null }, status: 'known' }],
+        plugins: [{ marketplace: 'acme', plugin: 'new-tools', pluginId: 'new@acme', installed, enabled,
+          status: !installed ? 'available' : enabled ? 'enabled' : 'disabled', bundledSkills: [], bundledMcpServers: [], declared: null }],
+      };
+      if (command === 'list_skills') return [];
+      if (command === 'install_plugin') { installed = true; return; }
+      if (command === 'enable_plugin') { enabled = true; return; }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MarketplaceTab instanceId="computer-a" />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Discover plugins' }));
+    const install = await screen.findByRole('button', { name: 'Install Plugin' });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+    const enable = await screen.findByRole('button', { name: 'Enable Plugin' });
+    expect(mockedInvoke).toHaveBeenCalledWith('install_plugin', { instanceId: 'computer-a', request: { marketplace: 'acme', plugin: 'new-tools' } });
+    expect(mockedInvoke).not.toHaveBeenCalledWith('enable_plugin', expect.anything());
+    await waitFor(() => expect(enable).toBeEnabled());
+    fireEvent.click(enable);
+    expect(await screen.findByRole('button', { name: 'Disable Plugin' })).toBeInTheDocument();
+    expect(screen.getByText(/Actual skill availability and MCP tool health/)).toBeInTheDocument();
+  });
+
+  it('keeps uninstall in More and requires confirmation before removing a package', async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return {
+        capabilities: supportedCapabilities, marketplaces: [],
+        plugins: [{ marketplace: 'acme', plugin: 'tools', pluginId: 'tools@acme', installed: true, enabled: true,
+          status: 'enabled', bundledSkills: [], bundledMcpServers: [], declared: null }],
+      };
+      return [];
+    });
+    render(<MarketplaceTab instanceId="computer-a" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'More' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Uninstall Plugin' }));
+    const confirmation = within(await screen.findByRole('dialog'));
+    expect(mockedInvoke).not.toHaveBeenCalledWith('uninstall_plugin', expect.anything());
+    fireEvent.click(confirmation.getByRole('button', { name: 'Uninstall Plugin' }));
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('uninstall_plugin', { instanceId: 'computer-a', request: { marketplace: 'acme', plugin: 'tools' } }));
+  });
+
+  it('identifies the failed action and retries it without misreporting installation failure', async () => {
+    let attempts = 0;
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return {
+        capabilities: supportedCapabilities, marketplaces: [],
+        plugins: [{ marketplace: 'acme', plugin: 'tools', pluginId: 'tools@acme', installed: true, enabled: attempts > 1,
+          status: 'disabled', bundledSkills: [], bundledMcpServers: [], declared: null }],
+      };
+      if (command === 'enable_plugin') { attempts += 1; if (attempts === 1) throw new Error('input unavailable'); }
+      return [];
+    });
+    render(<MarketplaceTab instanceId="computer-a" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Enable Plugin' }));
+    expect(await screen.findByText('Enable operation failed')).toBeInTheDocument();
+    expect(screen.getByText('input unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Installation failed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry operation' }));
+    expect(await screen.findByRole('button', { name: 'Disable Plugin' })).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it('searches installed plugins across sources and separates source sync from reloading the list', async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_marketplace_governance') return {
+        capabilities: supportedCapabilities,
+        marketplaces: ['first', 'second'].map((name) => ({ name, source: { type: 'remoteGit', displayGitUrl: null }, status: 'known' })),
+        plugins: ['first', 'second'].map((marketplace) => ({ marketplace, plugin: marketplace + '-tools', pluginId: marketplace,
+          installed: true, enabled: false, status: 'disabled', bundledSkills: [], bundledMcpServers: [], declared: null })),
+      };
+      return [];
+    });
+    render(<MarketplaceTab instanceId="computer-a" />);
+    expect(await screen.findByRole('button', { name: 'Select plugin second-tools (second)' })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search plugins by name, purpose or source' }), { target: { value: 'second' } });
+    expect(screen.queryByRole('button', { name: 'Select plugin first-tools (first)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select plugin second-tools (second)' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage sources' }));
+    expect(await screen.findByText(/Syncing a source refreshes its catalog/)).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('refresh_marketplace', expect.anything());
+  });
+
+  it('explains which library is managed while a saved directory switch awaits adoption', async () => {
+    mockedInvoke.mockResolvedValue({ capabilities: supportedCapabilities, marketplaces: [], plugins: [] });
+    useConfigAdoptionStore.setState({ statuses: { 'computer-a': {
+      incarnation: 1, generation: 1, state: 'pending', unknown_resources: [], changes: [{
+        resource_id: 'skill_home', reason: 'skill_home', section: 'skills', action: 'restart_computer',
+        current_value: '/old/home', saved_value: '/new/home',
+      }],
+    } } });
+    const openRuntime = vi.fn();
+    render(<MarketplaceTab instanceId="computer-a" onOpenRuntime={openRuntime} />);
+    expect(await screen.findByText('Storage change not yet adopted')).toBeInTheDocument();
+    expect(screen.getByText(/Plugin management still uses the current instance directory/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open runtime workbench' }));
+    expect(openRuntime).toHaveBeenCalledOnce();
+  });
+
 });

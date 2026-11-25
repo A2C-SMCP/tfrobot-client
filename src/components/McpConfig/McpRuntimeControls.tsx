@@ -23,9 +23,13 @@ type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpRuntimeControlsProps {
   instanceId: string;
+  focusedBundleId?: string | null;
+  focusRequest?: number;
   capability: ComputerRuntimeActionCapability;
   onStartRuntime?: () => void;
   onRestartRuntime?: () => void;
+  showRuntimeGuidance?: boolean;
+  onOpenBuiltIn?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
   onOpenPermissionHelp?: () => void;
@@ -44,9 +48,13 @@ function runtimeSuccessMessage(action: McpRuntimeAction) {
 
 export function McpRuntimeControls({
   instanceId,
+  focusedBundleId,
+  focusRequest,
   capability,
   onStartRuntime,
   onRestartRuntime,
+  showRuntimeGuidance = true,
+  onOpenBuiltIn,
   onOpenPlugin,
   onOpenPermissionHelp,
 }: McpRuntimeControlsProps) {
@@ -234,6 +242,7 @@ export function McpRuntimeControls({
           >
             {t('common.refresh')}
           </Button>
+          {(showRuntimeGuidance || !disabled) && <>
           <Button
             icon={<PlayCircleOutlined />}
             onClick={() => runtimeActions.run({ kind: 'startAll' })}
@@ -250,6 +259,7 @@ export function McpRuntimeControls({
           >
             {t('mcp.stopAll')}
           </Button>
+          </>}
         </Space>
       </div>
 
@@ -290,14 +300,18 @@ export function McpRuntimeControls({
         />
       )}
 
-      {renderDisabledGuidance()}
+      {showRuntimeGuidance && renderDisabledGuidance()}
       {renderBatchFeedback()}
 
+      {focusedBundleId && !loading && !servers.some((server) => server.bundleId === focusedBundleId) && <Typography.Paragraph type="secondary">{t('computer.redesign.mcpNotLoaded')}</Typography.Paragraph>}
       <McpServerList
+        focusedBundleId={focusedBundleId}
+        focusRequest={focusRequest}
         servers={servers}
         actionsDisabled={disabled}
         actionsDisabledReason={disabledReason}
         loading={loading}
+        onOpenBuiltIn={onOpenBuiltIn}
         onOpenPlugin={onOpenPlugin}
         onAuthorize={(bundleId) => runAuthorizationAction(authorizeServer, bundleId)}
         onCancelAuthorization={(bundleId) => runAuthorizationAction(cancelAuthorization, bundleId)}

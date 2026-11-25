@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '../helpers/render';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { McpConfig } from '@/components/McpConfig';
+import { PageActivity } from '@/components/Navigation/PageActivity';
 import { save } from '@tauri-apps/plugin-dialog';
 
 const mockSdkStore = {
@@ -36,6 +37,7 @@ const mockMcpStore = vi.hoisted(() => ({
   error: null as string | null,
   fetchServers: vi.fn(),
 }));
+const submittedResult = vi.hoisted(() => vi.fn());
 
 vi.mock('@/stores/sdkConfigStore', () => ({
   useSdkConfigStore: vi.fn(() => mockSdkStore),
@@ -50,16 +52,16 @@ vi.mock('@/stores/mcpStore', async (importOriginal) => {
 });
 
 vi.mock('@/components/McpConfig/McpServerForm', () => ({
-  McpServerForm: ({ onSubmit }: { onSubmit: (config: unknown) => Promise<void> }) => (
+  McpServerForm: ({ onSubmit }: { onSubmit: (config: unknown) => Promise<void | boolean> }) => (
     <button
-      onClick={() => onSubmit({
+      onClick={async () => submittedResult(await onSubmit({
         type: 'Stdio',
         name: 'runtime-server',
         disabled: true,
         forbidden_tools: [],
         tool_meta: {},
         server_parameters: { command: 'echo', args: ['${input:api-key}'], env: {} },
-      })}
+      }))}
     >
       Submit mocked server
     </button>
@@ -129,11 +131,12 @@ describe('McpConfig', () => {
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText('MCP Configuration')).toBeInTheDocument();
     expect(screen.getByText('Add Server')).toBeInTheDocument();
-    expect(screen.getByText('Import Config')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'More configuration actions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Import Config' })).toBeInTheDocument();
     expect(screen.getByText('Export Config')).toBeInTheDocument();
     expect(screen.getByText('Validate Schema')).toBeInTheDocument();
     // The schema-only caveat sits on the Validate button instead of occupying the page.
-    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Validate Schema' }));
+    fireEvent.mouseEnter(screen.getByText('Validate Schema'));
     expect(await screen.findByText(/does not check commands, paths, secrets/)).toBeInTheDocument();
     expect(screen.queryByText('Start All')).not.toBeInTheDocument();
     expect(screen.queryByText('Stop All')).not.toBeInTheDocument();
@@ -144,7 +147,8 @@ describe('McpConfig', () => {
     mockSdkStore.exportConfig.mockResolvedValue(undefined);
     render(<McpConfig instanceId={instanceId} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Export Config' }));
+    fireEvent.click(screen.getByRole('button', { name: 'More configuration actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Export Config' }));
 
     expect((await screen.findAllByText('Export configuration with plaintext constants?')).length)
       .toBeGreaterThan(0);
@@ -187,9 +191,10 @@ describe('McpConfig', () => {
       validation: { valid: true, errors: [] },
     } as any);
     render(<McpConfig instanceId={instanceId} />);
-    expect(screen.getAllByText('test-stdio')).toHaveLength(2);
+    expect(screen.getAllByText('test-stdio')).toHaveLength(1);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand row' })[0]);
     expect(screen.getByText('sha256:config')).toBeInTheDocument();
-    expect(screen.getByText('local')).toBeInTheDocument();
+    expect(screen.getAllByText('User').length).toBeGreaterThan(0);
     expect(screen.getByText('The SDK configuration schema is valid.')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
     expect(screen.queryByText('Stopped')).not.toBeInTheDocument();
@@ -249,7 +254,7 @@ describe('McpConfig', () => {
     expect(mockMcpStore.fetchServers).not.toHaveBeenCalled();
   });
 
-  it('fails closed while authoritative MCP ownership is loading', () => {
+  it('fails closed while authoritative MCP ownership is loading', async () => {
     mockMcpStore.serversReady = false;
     mockMcpStore.loading = true;
     mockUseSdkConfigStore.mockReturnValue({
@@ -270,11 +275,12 @@ describe('McpConfig', () => {
     })).toBeDisabled();
     expect(screen.getByTitle('Edit')).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Import Config' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'More configuration actions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Import Config' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: 'Add Server' })).toBeDisabled();
   });
 
-  it('fails closed when authoritative MCP ownership cannot be loaded', () => {
+  it('fails closed when authoritative MCP ownership cannot be loaded', async () => {
     mockMcpStore.serversReady = false;
     mockMcpStore.error = 'ownership lookup failed';
     mockUseSdkConfigStore.mockReturnValue({
@@ -296,7 +302,8 @@ describe('McpConfig', () => {
     })).toBeDisabled();
     expect(screen.getByTitle('Edit')).toBeDisabled();
     expect(screen.getByTitle('Remove')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Import Config' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'More configuration actions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Import Config' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: 'Add Server' })).toBeDisabled();
   });
 
@@ -381,7 +388,7 @@ describe('McpConfig', () => {
 
     render(<McpConfig instanceId={instanceId} />);
 
-    expect(screen.getAllByText('plugin-tools')).toHaveLength(2);
+    expect(screen.getAllByText('plugin-tools')).toHaveLength(1);
     expect(screen.getByText('mcp.json:servers.bad: invalid transport')).toBeInTheDocument();
     expect(screen.getAllByTitle('Edit')[1]).toBeEnabled();
     expect(screen.getAllByTitle('Remove')[1]).toBeEnabled();
@@ -454,7 +461,7 @@ describe('McpConfig', () => {
     render(<McpConfig instanceId={instanceId} onOpenPlugin={onOpenPlugin} />);
 
     expect(screen.getAllByText(
-      'Managed by plugin audit from acme. Use Marketplace to manage its lifecycle.',
+      'Managed by plugin audit from acme.',
     ).length).toBeGreaterThan(0);
     expect(screen.getByText(
       'This declaration comes from the read-only plugin scope and cannot be edited here.',
@@ -563,6 +570,36 @@ describe('McpConfig', () => {
     expect(screen.queryByText('Secret required to start')).not.toBeInTheDocument();
   }, 10000);
 
+  it('reports a successful save to the retained form without replaying navigation side effects', async () => {
+    let finish!: () => void;
+    mockSdkStore.upsertServer.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const tree = (active: boolean) => <PageActivity active={active}><McpConfig instanceId={instanceId} /></PageActivity>;
+    const view = render(tree(true));
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+    await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledOnce());
+    view.rerender(tree(false));
+    await act(async () => { finish(); });
+    await waitFor(() => expect(submittedResult).toHaveBeenCalledWith(true));
+    view.rerender(tree(true));
+    expect(await screen.findByRole('button', { name: 'Submit mocked server' })).toBeInTheDocument();
+    expect(screen.queryByText('Server configuration saved')).not.toBeInTheDocument();
+  }, 15_000);
+
+  it('does not close a replacement editor after the previous editor was discarded', async () => {
+    let finish!: () => void;
+    mockSdkStore.upsertServer.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<McpConfig instanceId={instanceId} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: /Add Server/ }));
+    await act(async () => { finish(); });
+    expect(await screen.findByRole('button', { name: 'Submit mocked server' })).toBeInTheDocument();
+    expect(screen.queryByText('Server configuration saved')).not.toBeInTheDocument();
+  }, 15_000);
+
   it('keeps the MCP form open for a missing definition and succeeds after the corrected resubmit', async () => {
     mockSdkStore.upsertServer
       .mockRejectedValueOnce({
@@ -583,7 +620,7 @@ describe('McpConfig', () => {
 
     fireEvent.click(resubmit);
     await waitFor(() => expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText('Server saved; restart Runtime to apply it')).toBeInTheDocument();
+    expect(await screen.findByText('Server configuration saved')).toBeInTheDocument();
   }, 10000);
 
   it('does not synthesize a local retry when the backend reports a legacy missing input', async () => {

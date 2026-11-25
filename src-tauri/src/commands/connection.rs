@@ -1491,6 +1491,25 @@ pub(crate) async fn connect_manager_robot_target_for_policy(
             "Manager Robot policy connection failed"
         ),
     }
+    // The Computer detail action uses this policy path rather than manager_connect_smcp_core.
+    // Persist its terminal failure as well; tracing alone is not queried by the Logs page.
+    if let Err(error) = &result {
+        let target_id = manager_target_id(employee_id);
+        let error_message = error.to_string();
+        record_connection_failure(
+            state,
+            ConnectionFailureActivity {
+                instance_id,
+                operation: "connect_manager",
+                target_id: Some(&target_id),
+                target_type: "manager_robot",
+                request_id,
+                requested_at,
+                error: &error_message,
+            },
+        )
+        .await;
+    }
     result
 }
 

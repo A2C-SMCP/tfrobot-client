@@ -13,11 +13,12 @@ const { Title } = Typography;
 
 interface InputVariablesProps {
   instanceId: string;
+  embedded?: boolean;
   /** Opens Settings → Permissions & security from the password keychain notice. */
   onOpenPermissionHelp?: () => void;
 }
 
-export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariablesProps) {
+export function InputVariables({ instanceId, onOpenPermissionHelp, embedded = false }: InputVariablesProps) {
   const action = usePageAction(instanceId);
   const active = usePageActive();
   const { t } = useTranslation();
@@ -54,13 +55,14 @@ export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariab
   const [editing, setEditing] = useNavigationState<InputEntry | undefined>('inputs.editing', undefined);
   const forget = useForgetNavigationState();
   const previousInstance = useRef(instanceId);
+  const editorGeneration = useRef(0);
   useEffect(() => {
     if (previousInstance.current === instanceId) return;
     previousInstance.current = instanceId;
     setEditorOpen(false);
     setEditing(undefined);
   }, [instanceId, setEditorOpen, setEditing]);
-  const closeEditor = () => { forget(`input.${editing?.key ?? 'new'}.`); setEditorOpen(false); };
+  const closeEditor = () => { editorGeneration.current += 1; forget(`input.${editing?.key ?? 'new'}.`); setEditorOpen(false); };
   const ready = entriesLoadedInstanceId === instanceId && !entriesLoading && !entriesError;
 
   useEffect(() => {
@@ -77,20 +79,26 @@ export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariab
 
 
   const openCreate = () => {
+    editorGeneration.current += 1;
     setEditing(undefined);
     setEditorOpen(true);
   };
   const openEdit = (entry: InputEntry) => {
+    editorGeneration.current += 1;
     setEditing(entry);
     setEditorOpen(true);
   };
   const handleSubmit = async (key: string, value: string | undefined, secret: boolean) => {
-    const current = action();
-    if (!current() || !ready || (editing && !entries.some((entry) => entry.key === editing.key))) return;
+    const page = action();
+    const generation = editorGeneration.current;
+    const current = () => page() && generation === editorGeneration.current;
+    if (!current() || !ready || (editing && !entries.some((entry) => entry.key === editing.key))) return false;
     await upsertEntry(instanceId, key, value, secret);
-    if (!current()) return;
-    message.success(t(editing ? 'inputs.messages.entryUpdated' : 'inputs.messages.entryCreated'));
-    closeEditor();
+    if (current()) {
+      message.success(t(editing ? 'inputs.messages.entryUpdated' : 'inputs.messages.entryCreated'));
+      closeEditor();
+    }
+    return true;
   };
   const handleDelete = async (key: string) => {
     try {
@@ -161,7 +169,7 @@ export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariab
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>
+        {!embedded && <Title level={4} style={{ margin: 0 }}>{t('inputs.title')}</Title>}
         <Space wrap>
           <Button icon={<ReloadOutlined />} loading={entriesLoading} onClick={() => fetchEntries(instanceId)}>
             {t('common.refresh')}
@@ -172,6 +180,7 @@ export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariab
         </Space>
       </div>
 
+      <Typography.Paragraph type="secondary">{t('computer.redesign.variableImpact')}</Typography.Paragraph>
       {migrationPending && <Alert type="info" showIcon description={t('permissions.migration')}
         action={<Button loading={migrating} onClick={() => { void migrate(); }}>{t('permissions.migrate')}</Button>}
         style={{ marginBottom: 16 }} />}
@@ -198,6 +207,7 @@ export function InputVariables({ instanceId, onOpenPermissionHelp }: InputVariab
           width={440}
         >
           <InputEntryEditor
+            key={`${instanceId}:${editing?.key ?? 'new'}`}
             entry={editing}
             onOpenPermissionHelp={onOpenPermissionHelp}
             onSubmit={handleSubmit}
