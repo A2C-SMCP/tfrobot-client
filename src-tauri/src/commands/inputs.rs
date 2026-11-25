@@ -398,6 +398,7 @@ pub async fn upsert_input_entry_core(
         )
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -444,6 +445,7 @@ pub async fn delete_input_entry_core(
         migrated_input_entry_store(state, instance_id, Some(key))?.delete(key)
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -648,6 +650,7 @@ pub async fn add_or_update_input_core(
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -764,6 +767,7 @@ pub async fn remove_input_core(
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -899,6 +903,7 @@ pub async fn set_input_value_core(
         store.upsert(&id, Some(value), secret)
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -972,6 +977,7 @@ pub async fn set_runtime_input_value_core(
     .await;
     let matched_runtime_definition = result.as_ref().ok().copied();
     if result.as_ref().is_err() || matched_runtime_definition == Some(true) {
+        crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
         record_computer_activity(
             state,
             ComputerActivitySpec {
@@ -1020,6 +1026,7 @@ pub async fn remove_input_value_core(
         migrated_input_entry_store(state, instance_id, Some(id))?.delete(id)
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -1062,6 +1069,7 @@ pub async fn clear_input_values_core(state: &AppState, instance_id: &str) -> Res
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -1180,6 +1188,7 @@ pub async fn import_inputs_core(
     }
     .await;
     let imported_count = result.as_ref().ok().copied();
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {

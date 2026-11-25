@@ -12,6 +12,7 @@ const EMPTY_SKILLS: SkillRef[] = [];
 
 interface SkillsTabProps {
   instanceId: string;
+  runtimeAvailable?: boolean;
 }
 
 function groupBySource(skills: SkillRef[]) {
@@ -54,7 +55,7 @@ function renderMarkdown(markdown: string) {
   });
 }
 
-export function SkillsTab({ instanceId }: SkillsTabProps) {
+export function SkillsTab({ instanceId, runtimeAvailable = true }: SkillsTabProps) {
   const pageActive = usePageActive();
   const { t } = useTranslation();
   const { message } = App.useApp();
@@ -76,8 +77,8 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
   const skillError = record?.skillError ?? null;
 
   useEffect(() => {
-    if (pageActive) fetchSkills(instanceId);
-  }, [fetchSkills, instanceId, pageActive]);
+    if (pageActive && runtimeAvailable) fetchSkills(instanceId);
+  }, [fetchSkills, instanceId, pageActive, runtimeAvailable]);
 
   const filteredSkills = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -133,6 +134,8 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
     return renderMarkdown(selectedSkill.body);
   };
 
+  if (!runtimeAvailable) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('skills.waitingStart')} />;
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className={styles.toolbar}>
@@ -146,6 +149,8 @@ export function SkillsTab({ instanceId }: SkillsTabProps) {
           </Button>
         </Space>
       </div>
+
+      <Text type="secondary">{t('skills.runtimeHelp')}</Text>
 
       {error && <Alert type="error" showIcon message={t('common.error')} description={error} />}
 

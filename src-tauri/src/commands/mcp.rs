@@ -307,11 +307,45 @@ pub async fn start_mcp_server_core(
     .await
 }
 
+#[tauri::command]
+pub async fn restart_mcp_server_with_latest_config(
+    state: State<'_, AppState>,
+    instance_id: String,
+    bundle_id: BundleId,
+) -> Result<(), RuntimeActionError> {
+    restart_mcp_server_with_latest_config_core(&state, &instance_id, &bundle_id).await
+}
+
+pub async fn restart_mcp_server_with_latest_config_core(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+) -> Result<(), RuntimeActionError> {
+    start_mcp_server_with_operation(
+        state,
+        instance_id,
+        bundle_id,
+        RuntimeInputInteractionMode::Interactive,
+        true,
+    )
+    .await
+}
+
 async fn start_mcp_server_core_with_mode(
     state: &AppState,
     instance_id: &str,
     bundle_id: &BundleId,
     interaction_mode: RuntimeInputInteractionMode,
+) -> Result<(), RuntimeActionError> {
+    start_mcp_server_with_operation(state, instance_id, bundle_id, interaction_mode, false).await
+}
+
+async fn start_mcp_server_with_operation(
+    state: &AppState,
+    instance_id: &str,
+    bundle_id: &BundleId,
+    interaction_mode: RuntimeInputInteractionMode,
+    restart: bool,
 ) -> Result<(), RuntimeActionError> {
     let instance_id = require_instance_id(instance_id).map_err(RuntimeActionError::runtime)?;
     let started = std::time::Instant::now();
@@ -343,7 +377,11 @@ async fn start_mcp_server_core_with_mode(
                 let server_name = latest.name.clone();
                 let request = user_mcp_start_request(
                     latest,
-                    McpServerStartOperation::Start(bundle_id.clone()),
+                    if restart {
+                        McpServerStartOperation::Restart(bundle_id.clone())
+                    } else {
+                        McpServerStartOperation::Start(bundle_id.clone())
+                    },
                     &latest_inputs,
                 )?;
                 // The Computer write lease protects the durable snapshot and runtime handoff.

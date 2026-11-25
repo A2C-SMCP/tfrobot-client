@@ -203,7 +203,7 @@ describe('Computer', () => {
     expect(screen.queryByRole('button', { name: 'Open Details' })).not.toBeInTheDocument();
   });
 
-  it('opens a Computer single-page runtime workbench from the list', async () => {
+  it('opens a Computer task workbench from the list', async () => {
     render(<Computer />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'prod' }));
@@ -211,13 +211,14 @@ describe('Computer', () => {
     expect(screen.getByLabelText('Computer runtime workbench')).toBeInTheDocument();
     expect(screen.queryByText('Overview')).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Desktop Resources')).toBeInTheDocument();
-    expect(screen.getByRole('navigation', { name: 'Workbench sections' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Debug Panel' })).toBeVisible();
-    expect(screen.getByRole('region', { name: 'Logs' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Workbench' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('debug-panel')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-a');
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills and tools' }));
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-a');
+    expect(screen.getByTestId('computer-runtime')).not.toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: 'Desktop Resources' }));
     expect(screen.getByTestId('desktop-resources')).toHaveTextContent('computer-a');
   }, 20000);
 
@@ -230,7 +231,9 @@ describe('Computer', () => {
 
     expect(screen.getByRole('heading', { name: 'Second Computer' })).toBeVisible();
     expect(screen.getByTestId('computer-runtime')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills and tools' }));
     expect(screen.getByTestId('skills-tab')).toHaveTextContent('computer-b');
+    fireEvent.click(screen.getByRole('tab', { name: 'Desktop Resources' }));
     expect(screen.getByTestId('desktop-resources')).toHaveTextContent('computer-b');
   }, 20000);
 

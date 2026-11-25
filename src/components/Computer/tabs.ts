@@ -4,6 +4,7 @@ export const COMPUTER_WORKBENCH_SECTIONS = [
   'top',
   'skills',
   'resources',
+  'diagnostics',
   'debug',
   'logs',
 ] as const;
@@ -31,12 +32,12 @@ export function toComputerWorkbenchSection(
 
 export const COMPUTER_SETTINGS_SECTIONS = [
   'general',
-  'skills',
   'plugins',
   'mcp',
   'inputs',
   'connection',
   'built-in-tools',
+  'advanced',
 ] as const;
 
 export type ComputerSettingsSection = (typeof COMPUTER_SETTINGS_SECTIONS)[number];
@@ -47,11 +48,12 @@ const LEGACY_SETTINGS_TABS: Partial<Record<string, ComputerSettingsSection>> = {
   marketplace: 'plugins',
   inputs: 'inputs',
   connection: 'connection',
-  configuration: 'skills',
+  configuration: 'advanced',
   'remote-control': 'built-in-tools',
 };
 
 export function toComputerSettingsSection(value: string | undefined): ComputerSettingsSection {
+  if (value === 'skills') return 'advanced';
   return COMPUTER_SETTINGS_SECTIONS.includes(value as ComputerSettingsSection)
     ? (value as ComputerSettingsSection)
     : 'general';

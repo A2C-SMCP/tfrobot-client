@@ -29,10 +29,10 @@ use tfrobot_client_lib::commands::{
     marketplace::{
         add_marketplace_core, disable_plugin_core, enable_plugin_core,
         enable_plugin_interactive_core, get_marketplace_capabilities_core,
-        get_marketplace_governance_core, install_plugin_core, refresh_marketplace_core,
-        remove_marketplace_core, uninstall_plugin_core, update_marketplace_core,
-        AddMarketplaceRequest, MarketplaceSource, MarketplaceSourceSummary, PluginLifecycleRequest,
-        UpdateMarketplaceRequest,
+        get_marketplace_governance_core, get_marketplace_removal_plan_core, install_plugin_core,
+        refresh_marketplace_core, remove_marketplace_confirmed_core, remove_marketplace_core,
+        uninstall_plugin_core, update_marketplace_core, AddMarketplaceRequest, MarketplaceSource,
+        MarketplaceSourceSummary, PluginLifecycleRequest, UpdateMarketplaceRequest,
     },
     runtime_error::RuntimeActionError,
     sdk_config, skills,
@@ -120,6 +120,7 @@ async fn create_marketplace_test_app_state(path: &std::path::Path) -> AppState {
 struct RecordingSecretStore {
     values: Mutex<std::collections::HashMap<String, String>>,
     deleted: Mutex<Vec<String>>,
+    fail_oauth_delete: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingSecretStore {
@@ -148,6 +149,13 @@ impl SecretStore for RecordingSecretStore {
     }
 
     fn delete_secret(&self, key: &str) -> Result<(), KeychainError> {
+        if key.starts_with("mcp-oauth:")
+            && self
+                .fail_oauth_delete
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(KeychainError::Store("fixture OAuth cleanup failure".into()));
+        }
         self.values.lock().unwrap().remove(key);
         self.deleted.lock().unwrap().push(key.to_string());
         Ok(())
@@ -2378,6 +2386,343 @@ async fn marketplace_remove_requires_plugins_to_be_uninstalled_first() {
 }
 
 #[tokio::test]
+async fn confirmed_marketplace_removal_cascades_installed_contents_and_preserves_other_sources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+    fs::remove_file(repo.join("plugins/audit/mcp-servers/inputs.json")).unwrap();
+    run_git(&repo, &["add", "-u"]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "remove interactive inputs",
+        ],
+    );
+    let runtime = state
+        .computer_registry
+        .runtime(TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    runtime.start().await.unwrap();
+    for name in ["acme", "other"] {
+        add_marketplace_core(
+            &state,
+            TEST_INSTANCE_ID,
+            AddMarketplaceRequest {
+                name: name.into(),
+                source: MarketplaceSource::LocalGit {
+                    path: repo.display().to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let request = PluginLifecycleRequest {
+        marketplace: "acme".into(),
+        plugin: "audit".into(),
+    };
+    install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+        .await
+        .unwrap();
+    enable_plugin_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    assert!(mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .iter()
+        .any(|server| server.name == "audit-mcp" && server.running));
+    let plan = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    assert_eq!(plan.installed_plugins.len(), 1);
+    assert!(plan.installed_plugins[0].enabled);
+    assert!(!plan.installed_plugins[0].bundled_skills.is_empty());
+    assert_eq!(
+        plan.installed_plugins[0].bundled_mcp_servers,
+        vec!["audit-mcp"]
+    );
+    remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(plan))
+        .await
+        .unwrap();
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert_eq!(governance.marketplaces[0].name, "other");
+    assert!(!governance
+        .plugins
+        .iter()
+        .any(|plugin| plugin.marketplace == "acme" && plugin.installed));
+    let servers = mcp::get_mcp_servers_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!servers.iter().any(|server| server.name == "audit-mcp"));
+    let skills = skills::list_skills_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(!skills.iter().any(|skill| skill.source.contains("acme")));
+    assert!(
+        get_computer_instance_status_core(&state, TEST_INSTANCE_ID.to_string())
+            .await
+            .unwrap()
+            .running
+    );
+    stop_computer_instance_core(&state, TEST_INSTANCE_ID.to_string())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn confirmed_marketplace_removal_retains_source_on_plugin_cleanup_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(RecordingSecretStore::default());
+    let state = create_marketplace_test_app_state_with_store(tmp.path(), secrets.clone()).await;
+    let repo = tmp.path().join("oauth-marketplace-repo");
+    build_legacy_auto_oauth_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".into(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".into(),
+            plugin: "oauth-tools".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let credential_store = KeychainOAuthCredentialStore::new(TEST_INSTANCE_ID, secrets.clone());
+    let (index_key, credential_key) = plugin_oauth_credential_keys();
+    credential_store
+        .save(&index_key, r#"{"version":1,"issuers":[null]}"#)
+        .await
+        .unwrap();
+    credential_store
+        .save(&credential_key, "fixture-credential")
+        .await
+        .unwrap();
+    let plan = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    secrets
+        .fail_oauth_delete
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(plan))
+        .await
+        .unwrap_err();
+    assert!(error.contains("Source 'acme' was retained"));
+    let remaining = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    assert_eq!(remaining.installed_plugins.len(), 1);
+    secrets
+        .fail_oauth_delete
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(remaining))
+        .await
+        .unwrap();
+    assert_eq!(credential_store.load(&credential_key).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn confirmed_marketplace_removal_rejects_an_outdated_impact_list_without_deleting_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".into(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let old_plan = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    assert!(old_plan.installed_plugins.is_empty());
+    let mut wrong_computer = old_plan.clone();
+    wrong_computer.instance_id = "computer-b".into();
+    assert!(remove_marketplace_confirmed_core(
+        &state,
+        TEST_INSTANCE_ID,
+        "acme",
+        Some(wrong_computer)
+    )
+    .await
+    .unwrap_err()
+    .contains("contents changed"));
+
+    install_plugin_core(
+        &state,
+        TEST_INSTANCE_ID,
+        PluginLifecycleRequest {
+            marketplace: "acme".into(),
+            plugin: "audit".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let error = remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(old_plan))
+        .await
+        .unwrap_err();
+    assert!(error.contains("contents changed"));
+    let current = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    assert_eq!(current.installed_plugins.len(), 1);
+    assert!(!current.installed_plugins[0].enabled);
+    remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(current))
+        .await
+        .unwrap();
+    assert!(get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .marketplaces
+        .is_empty());
+}
+
+#[tokio::test]
+async fn confirmed_marketplace_removal_without_installed_contents_removes_only_the_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("marketplace-repo");
+    build_marketplace_repo(&repo);
+    add_marketplace_core(
+        &state,
+        TEST_INSTANCE_ID,
+        AddMarketplaceRequest {
+            name: "acme".into(),
+            source: MarketplaceSource::LocalGit {
+                path: repo.display().to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let plan = get_marketplace_removal_plan_core(&state, TEST_INSTANCE_ID, "acme")
+        .await
+        .unwrap();
+    assert!(plan.installed_plugins.is_empty());
+    remove_marketplace_confirmed_core(&state, TEST_INSTANCE_ID, "acme", Some(plan))
+        .await
+        .unwrap();
+    assert!(
+        repo.join(".git").exists(),
+        "removing a source must not delete the user's original repository"
+    );
+    assert!(get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap()
+        .marketplaces
+        .is_empty());
+}
+
+#[tokio::test]
+#[ignore = "Known upstream defect: https://github.com/A2C-SMCP/rust-sdk/issues/271; run with --include-ignored when validating an SDK upgrade"]
+async fn client_relative_plugin_reinstalls_after_disable_and_uninstall() {
+    let mut failures = Vec::new();
+    for sample in 1..=3 {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = create_marketplace_test_app_state(tmp.path()).await;
+        let repo = tmp.path().join("marketplace-repo");
+        build_marketplace_repo(&repo);
+        add_marketplace_core(
+            &state,
+            TEST_INSTANCE_ID,
+            AddMarketplaceRequest {
+                name: "acme".into(),
+                source: MarketplaceSource::LocalGit {
+                    path: repo.display().to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let request = PluginLifecycleRequest {
+            marketplace: "acme".into(),
+            plugin: "audit".into(),
+        };
+        install_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+            .await
+            .unwrap();
+        enable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+            .await
+            .unwrap();
+        disable_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+            .await
+            .unwrap();
+        uninstall_plugin_core(&state, TEST_INSTANCE_ID, request.clone())
+            .await
+            .unwrap();
+        assert!(!get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+            .await
+            .unwrap()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.installed));
+        let result = install_plugin_core(&state, TEST_INSTANCE_ID, request).await;
+        println!(
+            "case=client-reinstall sample={sample} reinstall_ok={} error={:?}",
+            result.is_ok(),
+            result.as_ref().err()
+        );
+        assert!(repo
+            .join("plugins/audit/skills/code-review/SKILL.md")
+            .is_file());
+        if let Err(error) = result {
+            failures.push(format!("sample={sample}: {error}"));
+        } else {
+            let runtime = state
+                .computer_registry
+                .runtime(TEST_INSTANCE_ID)
+                .await
+                .unwrap();
+            let inventory = runtime.sdk_governance_snapshot().await.unwrap();
+            let plugin = inventory
+                .plugins
+                .iter()
+                .find(|plugin| plugin.plugin == "audit" && plugin.installed)
+                .expect("reinstalled plugin must be present");
+            assert!(
+                !plugin.enabled,
+                "reinstallation must not implicitly enable the plugin"
+            );
+            let root = Path::new(plugin.install_path.as_deref().expect("reinstalled path"));
+            assert!(root.join("skills/code-review/SKILL.md").is_file());
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "client must allow reinstall after uninstall: {failures:#?}"
+    );
+}
+
+#[tokio::test]
 async fn marketplace_update_is_rejected_without_losing_the_existing_marketplace() {
     let tmp = tempfile::tempdir().unwrap();
     let state = create_marketplace_test_app_state(tmp.path()).await;
@@ -2497,6 +2842,59 @@ async fn local_marketplace_refresh_only_loads_committed_git_changes() {
         .plugins
         .iter()
         .any(|plugin| plugin.plugin == "notes"));
+}
+
+#[tokio::test]
+async fn unnamed_marketplace_uses_sdk_derived_name_for_governance_and_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("sdk-derived-market");
+    build_marketplace_repo(&repo);
+    let request = serde_json::from_value(serde_json::json!({
+        "source": {"type": "localGit", "path": repo.display().to_string()}
+    }))
+    .unwrap();
+
+    add_marketplace_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap();
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert_eq!(governance.marketplaces.len(), 1);
+    assert_eq!(governance.marketplaces[0].name, "sdk-derived-market");
+    assert!(governance
+        .plugins
+        .iter()
+        .any(|plugin| { plugin.marketplace == "sdk-derived-market" && plugin.plugin == "audit" }));
+    refresh_marketplace_core(&state, TEST_INSTANCE_ID, "sdk-derived-market")
+        .await
+        .unwrap();
+    remove_marketplace_core(&state, TEST_INSTANCE_ID, "sdk-derived-market")
+        .await
+        .unwrap();
+    assert!(repo.join(".git").exists());
+}
+
+#[tokio::test]
+async fn unnamed_invalid_marketplace_is_rejected_without_governance_residue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = create_marketplace_test_app_state(tmp.path()).await;
+    let repo = tmp.path().join("invalid-derived-market");
+    build_invalid_marketplace_repo(&repo);
+    let request = serde_json::from_value(serde_json::json!({
+        "source": {"type": "localGit", "path": repo.display().to_string()}
+    }))
+    .unwrap();
+    let error = add_marketplace_core(&state, TEST_INSTANCE_ID, request)
+        .await
+        .unwrap_err();
+    assert!(error.contains("add failed"));
+    let governance = get_marketplace_governance_core(&state, TEST_INSTANCE_ID)
+        .await
+        .unwrap();
+    assert!(governance.marketplaces.is_empty());
+    assert!(governance.plugins.is_empty());
 }
 
 #[tokio::test]

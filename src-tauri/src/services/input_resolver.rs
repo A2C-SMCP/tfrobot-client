@@ -31,6 +31,7 @@ struct RuntimeInputInteractionContext {
 }
 
 tokio::task_local! {
+    static INPUT_CONSUMERS: Vec<String>;
     static RUNTIME_INPUT_INTERACTION: RuntimeInputInteractionContext;
 }
 
@@ -45,6 +46,43 @@ pub struct RuntimeInputResolver {
 }
 
 impl RuntimeInputResolver {
+    pub(crate) async fn with_consumers<F: Future>(
+        &self,
+        consumers: Vec<String>,
+        future: F,
+    ) -> F::Output {
+        INPUT_CONSUMERS.scope(consumers, future).await
+    }
+    pub(crate) fn clear_consumers(&self) {
+        self.entries.observations.clear();
+    }
+    pub(crate) fn begin_consumer(&self, consumer: &str) {
+        self.entries.observations.begin_consumer(consumer);
+    }
+    pub(crate) fn finish_consumer(&self, consumer: &str, preserve_previous: bool) {
+        self.entries
+            .observations
+            .finish_consumer(consumer, preserve_previous);
+    }
+    pub(crate) fn consumer_adoption_changed(
+        &self,
+        consumer: &str,
+        referenced: &std::collections::BTreeSet<String>,
+    ) -> Option<bool> {
+        self.entries
+            .observations
+            .consumer_status(consumer, referenced)
+    }
+    pub(crate) fn invalidate_consumer(&self, consumer: &str) {
+        self.entries.observations.invalidate_consumer(consumer);
+    }
+    pub(crate) fn input_adoption_changed(&self, consumer: &str, key: &str) -> Option<bool> {
+        self.entries.observations.changed(consumer, key)
+    }
+    fn observe_value(&self, key: &str, value: &Value) {
+        let _ = INPUT_CONSUMERS
+            .try_with(|consumers| self.entries.observations.consumed(consumers, key, value));
+    }
     pub fn new(
         instance_id: impl Into<Arc<str>>,
         storage_root: impl AsRef<std::path::Path>,
@@ -317,8 +355,14 @@ impl InputValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<Value>, InputResolutionError> {
-        self.resolve_in_interaction(self.resolve_input_value(definition))
-            .await
+        let result = self
+            .resolve_in_interaction(self.resolve_input_value(definition))
+            .await;
+        if let Ok(Some(value)) = &result {
+            crate::services::computer::config_adoption::observe_resolved_input(definition);
+            self.observe_value(definition.id(), value);
+        }
+        result
     }
 }
 
@@ -328,8 +372,14 @@ impl SecretValueResolver for RuntimeInputResolver {
         &self,
         definition: &MCPServerInput,
     ) -> Result<Option<String>, InputResolutionError> {
-        self.resolve_in_interaction(self.resolve_secret_value(definition))
-            .await
+        let result = self
+            .resolve_in_interaction(self.resolve_secret_value(definition))
+            .await;
+        if let Ok(Some(value)) = &result {
+            crate::services::computer::config_adoption::observe_resolved_input(definition);
+            self.observe_value(definition.id(), &Value::String(value.clone()));
+        }
+        result
     }
 }
 

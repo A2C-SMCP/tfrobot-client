@@ -1,3 +1,4 @@
+import { useConfigAdoptionStore } from './configAdoptionStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { create } from 'zustand';
@@ -53,6 +54,7 @@ export type ComputerRuntimeEventCause =
     }
   | { kind: 'handle_replaced'; reason: string }
   | { kind: 'observation_advanced' }
+  | { kind: 'configuration_changed' }
   | { kind: 'resync'; skipped_events: number };
 
 export interface ComputerRuntimeStatusEvent {
@@ -170,6 +172,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   ...initialState,
 
   reset: () => {
+    useConfigAdoptionStore.getState().reset();
     clearAuthoritativeRuntimeSnapshots();
     resetClientConnectionAuthorities();
     set(initialState);
@@ -216,6 +219,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   },
 
   receiveEvent: (event) => {
+    useConfigAdoptionStore.getState().invalidate(event.instance_id);
     const { accepted, previous } = acceptAuthoritativeRuntimeSnapshot(
       event.instance_id,
       event.snapshot,
@@ -372,6 +376,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   },
 
   recover: async () => {
+    useConfigAdoptionStore.getState().recover();
     if (!get().initialized) await get().initialize();
     await get().resync();
   },

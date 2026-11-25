@@ -1,3 +1,4 @@
+import { ConfigAdoptionStatus } from './ConfigAdoptionStatus';
 import { usePageAction } from '@/components/Navigation/pageActivityState';
 import { PageHost } from '@/components/Navigation/PageHost';
 import { NavigationScope } from '@/components/Navigation/NavigationMemory';
@@ -43,6 +44,7 @@ import {
 const { Title, Text } = Typography;
 
 interface ComputerProps {
+  targetMcpId?: string | null;
   navigationRevision?: number;
   initialView?: 'list' | 'detail';
   initialSection?: ComputerWorkbenchSection;
@@ -110,6 +112,7 @@ function ComputerCard({
           <Text type="secondary" copyable className={styles.identifier}>{instance.id}</Text>
         </div>
       </div>
+      <ConfigAdoptionStatus key={instance.id} instance={instance} compact onOpenRuntime={onOpen} />
       <div className={styles.metadata}>
         <Tag color={computerStatusColor[instance.status]}>
           {t(`computer.status.${instance.status}`)}
@@ -186,7 +189,7 @@ function ComputerCard({
   );
 }
 
-export function Computer({ initialView = 'list', initialSection = 'top', navigationRevision = 0, onNavigate }: ComputerProps) {
+export function Computer({ targetMcpId, initialView = 'list', initialSection = 'top', navigationRevision = 0, onNavigate }: ComputerProps) {
   const action = usePageAction();
   const { t } = useTranslation();
   const { message } = App.useApp();
@@ -459,9 +462,11 @@ export function Computer({ initialView = 'list', initialSection = 'top', navigat
             <ComputerWorkbench
               instance={selectedInstance}
               loading={loading}
+              targetMcpId={targetMcpId}
               initialSection={initialSection}
               navigationRevision={navigationRevision}
               onBack={() => { setView('list'); onNavigate?.('computer'); }}
+              onNavigate={onNavigate}
               onOpenSettings={() => onNavigate?.('computer-settings:general')}
               onDelete={() => handleDelete(selectedInstance)}
               onStartStop={() => { void handleStartStop(selectedInstance); }}

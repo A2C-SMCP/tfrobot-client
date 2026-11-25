@@ -1,8 +1,8 @@
 import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
 import { useForgetNavigationState, useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, App, Button, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, App, Button, Dropdown, Descriptions, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   DeleteOutlined,
   EditOutlined,
@@ -11,6 +11,7 @@ import {
   ImportOutlined,
   ExportOutlined,
   SafetyCertificateOutlined,
+  MoreOutlined,
   AppstoreOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -31,10 +32,12 @@ const { Title } = Typography;
 
 interface McpConfigProps {
   instanceId: string;
+  embedded?: boolean;
+  onOpenRuntime?: (bundleId?: string) => void;
   onOpenPlugin?: (owner: Extract<McpServerManagedBy, { type: 'plugin' }>) => void;
 }
 
-export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
+export function McpConfig({ instanceId, onOpenPlugin, embedded = false, onOpenRuntime }: McpConfigProps) {
   const { t } = useTranslation();
   const { message } = App.useApp();
   const {
@@ -94,7 +97,9 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     return result;
   }, [managedServers]);
 
+  const editorGeneration = useRef(0);
   const closeEditor = () => {
+    editorGeneration.current += 1;
     forget(`mcp.form.${JSON.stringify(editingServer?.name ?? null)}.`);
     setFormVisible(false);
   };
@@ -110,12 +115,14 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
 
   const handleAdd = () => {
     if (!ownershipReady) return;
+    editorGeneration.current += 1;
     setEditingServer(undefined);
     setFormVisible(true);
   };
 
   const handleEdit = (record: SdkConfigServer) => {
     if (!ownershipReady) return;
+    editorGeneration.current += 1;
     setEditingServer(record.config);
     setFormVisible(true);
   };
@@ -125,16 +132,19 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
     inputChanges?: InputDefinitionChanges,
   ) => {
     if (!ownershipReady || !editingExists || configLoading || configError) return false;
-    const current = action();
+    const page = action();
+    const generation = editorGeneration.current;
+    const current = () => page() && editorGeneration.current === generation;
     if (!current()) return false;
     try {
       if (inputChanges) await upsertServer(instanceId, config, inputChanges);
       else await upsertServer(instanceId, config);
-      if (!current()) return false;
-      message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
-        name: config.name,
-      }));
-      setFormVisible(false);
+      if (current()) {
+        message.success(t(editingServer ? 'mcp.messages.updated' : 'mcp.messages.added', {
+          name: config.name,
+        }));
+        closeEditor();
+      }
       return true;
     } catch (cause) {
       if (!current()) return false;
@@ -256,7 +266,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
         return (
           <Space direction="vertical" size={2}>
             <Space size="small" wrap>
-              <Tag color={record.origin === 'plugin' ? 'purple' : 'blue'}>{record.origin}</Tag>
+              <Tag color={pluginOwner ? 'purple' : 'blue'}>{pluginOwner ? t('mcp.source.plugin', { plugin: pluginOwner.plugin }) : record.writable ? t('mcp.source.user') : t('computer.redesign.readOnlySource')}</Tag>
               {record.bundled && <Tag>{t('mcp.source.bundled')}</Tag>}
               {record.trustedOrigin && <Tag color="green">{t('mcp.source.trusted')}</Tag>}
             </Space>
@@ -276,16 +286,6 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
       title: t('mcp.table.name'),
       dataIndex: 'name',
       key: 'name',
-    },
-    {
-      title: t('mcp.form.bundleId'),
-      dataIndex: 'bundleId',
-      key: 'bundleId',
-    },
-    {
-      title: t('mcp.table.transport'),
-      key: 'transport',
-      render: (_: unknown, record: SdkConfigServer) => record.config.type,
     },
     {
       title: t('mcp.table.enabled'),
@@ -349,6 +349,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
             : t('mcp.ownershipUnavailableHint');
         return (
           <Space size="small">
+            {onOpenRuntime && <Button type="link" size="small" onClick={() => onOpenRuntime(record.bundleId)}>{t('computer.redesign.viewRuntime')}</Button>}
             <Tooltip title={actionHint}>
               <span>
                 <Button
@@ -397,14 +398,7 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           marginBottom: 16,
         }}
       >
-        <Space direction="vertical" size={0}>
-          <Title level={4} style={{ margin: 0 }}>{t('mcp.configTitle')}</Title>
-          {snapshot && (
-            <Typography.Text type="secondary">
-              {t('mcp.configRevision')}: <Typography.Text code>{snapshot.revision}</Typography.Text>
-            </Typography.Text>
-          )}
-        </Space>
+        {!embedded && <Title level={4} style={{ margin: 0 }}>{t('mcp.configTitle')}</Title>}
         <Space wrap>
           <Button
             icon={<ReloadOutlined />}
@@ -419,31 +413,12 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
           >
             {t('common.refresh')}
           </Button>
-          <Tooltip title={t('mcp.validation.schemaOnlyDescription')}>
-            <Button
-              icon={<SafetyCertificateOutlined />}
-              aria-label={t('mcp.validateConfig')}
-              onClick={() => validateConfig(instanceId)}
-              loading={validating}
-            >
-              {t('mcp.validateConfig')}
-            </Button>
-          </Tooltip>
-          <Button
-            icon={<ImportOutlined />}
-            aria-label={t('mcp.importConfig')}
-            onClick={handleImport}
-            disabled={!ownershipReady}
-          >
-            {t('mcp.importConfig')}
-          </Button>
-          <Button
-            icon={<ExportOutlined />}
-            aria-label={t('mcp.exportConfig')}
-            onClick={handleExport}
-          >
-            {t('mcp.exportConfig')}
-          </Button>
+          <Dropdown trigger={['click']} menu={{ items: [
+            { key: 'validate', icon: <SafetyCertificateOutlined aria-hidden />, label: <Tooltip title={t('mcp.validation.schemaOnlyDescription')}><span>{t('mcp.validateConfig')}</span></Tooltip>, disabled: validating, onClick: () => void validateConfig(instanceId) },
+            { key: 'import', icon: <ImportOutlined aria-hidden />, label: t('mcp.importConfig'), disabled: !ownershipReady, onClick: () => void handleImport() },
+            { key: 'export', icon: <ExportOutlined aria-hidden />, label: t('mcp.exportConfig'), onClick: handleExport },
+          ] }}><Button icon={<MoreOutlined />} aria-label={t('computer.redesign.moreConfig')}>{t('computer.redesign.moreConfig')}</Button></Dropdown>
+          {onOpenRuntime && <Button onClick={() => onOpenRuntime()}>{t('computer.redesign.viewRuntime')}</Button>}
           <Button
             type="primary"
             icon={<PlusOutlined />}
@@ -506,6 +481,11 @@ export function McpConfig({ instanceId, onOpenPlugin }: McpConfigProps) {
         pagination={false}
         size="middle"
         scroll={{ x: 'max-content' }}
+        expandable={{ expandedRowRender: (record) => <Descriptions column={1} size="small">
+          <Descriptions.Item label={t('mcp.configRevision')}>{snapshot?.revision}</Descriptions.Item>
+          <Descriptions.Item label={t('mcp.form.bundleId')}><Typography.Text code copyable>{record.bundleId}</Typography.Text></Descriptions.Item>
+          <Descriptions.Item label={t('mcp.table.transport')}>{record.config.type}</Descriptions.Item>
+        </Descriptions> }}
       />
 
       <Modal title={t('mcp.exportWarning.title')} open={exportOpen}

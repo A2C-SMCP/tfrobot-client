@@ -24,7 +24,7 @@ import {
   hasConflictingHttpAuthorization,
   preserveHttpAuthenticationOptions,
 } from '@/components/McpConfig/httpAuthentication';
-import type { HttpServerConfig } from '@/stores/mcpStore';
+import type { HttpServerConfig, StdioServerConfig } from '@/stores/mcpStore';
 
 const { fetchInputs, inputState } = vi.hoisted(() => ({
   fetchInputs: vi.fn().mockResolvedValue(undefined),
@@ -785,6 +785,32 @@ describe('McpServerForm technical fields and config value sources', () => {
     expect(await screen.findByText('LOG_LEVEL')).toBeInTheDocument();
   }, 30_000);
 
+  it.each([['success', false], ['success', true], ['failure', false], ['failure', true]] as const)('releases a retained editor when a delayed save ends with %s while hidden (unmounted: %s)', async (outcome, released) => {
+    let finish!: (saved: boolean) => void;
+    const onSubmit = vi.fn().mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }))
+      .mockResolvedValue(true);
+    const memory = new NavigationMemory();
+    const tree = (active: boolean) => <NavigationMemoryProvider memory={memory}><NavigationScope id={released && !active ? 'computer:b' : 'computer:a'} key={released && !active ? 'b' : 'a'}>
+      {released ? active ? <McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} /> : <div>Other Computer</div> : <PageActivity active={active}><McpServerForm instanceId="computer-a" onSubmit={onSubmit} onCancel={() => {}} /></PageActivity>}
+    </NavigationScope></NavigationMemoryProvider>;
+    const view = render(tree(true));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server Name' }), { target: { value: 'retained-server' } });
+    fireEvent.change(screen.getByPlaceholderText('npx, python, node...'), { target: { value: 'echo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByPlaceholderText('npx, python, node...')).toBeDisabled());
+    expect(screen.getByRole('textbox', { name: 'Server Name' })).toBeDisabled();
+    view.rerender(tree(false));
+    await act(async () => { finish(outcome === 'success'); });
+    view.rerender(tree(true));
+    expect(screen.getByPlaceholderText('npx, python, node...')).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: 'Server Name' })).toHaveValue('retained-server');
+    expect(screen.queryByText('Saving…')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(outcome === 'success' ? 'Saved' : 'Save failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+  }, 15_000);
+
   it('hydrates an existing definition when its ID is typed instead of selected', async () => {
     render(<McpServerForm instanceId="computer-a" onSubmit={async () => {}} onCancel={() => {}} />);
 
@@ -804,4 +830,28 @@ describe('McpServerForm technical fields and config value sources', () => {
     expect(screen.getByText('Options')).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: 'Password Mode' })).not.toBeInTheDocument();
   }, 20_000);
+});
+
+it('preserves imported stdio initialization timeout', async () => {
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  const initial: StdioServerConfig = {
+    type: 'Stdio',
+    name: 'slow-imported',
+    disabled: false,
+    forbidden_tools: [],
+    tool_meta: {},
+    connect_timeout_secs: 90,
+    server_parameters: { command: 'node', args: ['slow.js'], env: {} },
+  };
+  render(
+    <McpServerForm
+      instanceId="computer-a"
+      initialValues={initial}
+      onSubmit={onSubmit}
+      onCancel={() => {}}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][0]).toHaveProperty('connect_timeout_secs', 90);
 });

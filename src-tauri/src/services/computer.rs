@@ -66,6 +66,8 @@ use tokio::sync::{
 };
 use tokio::task::JoinHandle;
 
+pub(crate) mod config_adoption;
+pub use config_adoption::ConfigAdoptionStatus;
 mod connection;
 mod oauth;
 mod registry;
@@ -1030,6 +1032,10 @@ pub struct ComputerInstanceRuntime {
     activity_changed: Arc<Notify>,
     runtime_incarnation: u64,
     runtime_generation: Arc<AtomicU64>,
+    adopted_start_concurrency: Arc<AtomicUsize>,
+    consumed_declarations: Arc<RwLock<HashMap<BundleId, config_adoption::ConsumedDeclaration>>>,
+    pending_declarations: Arc<RwLock<HashMap<BundleId, config_adoption::PendingDeclaration>>>,
+    declaration_epoch: Arc<config_adoption::DeclarationEpoch>,
     runtime_snapshot_revision: Arc<AtomicU64>,
     runtime_snapshot_lock: Arc<Mutex<()>>,
     runtime_event_sink: SharedRuntimeEventSink,
@@ -1058,6 +1064,12 @@ impl ComputerInstanceRuntime {
             ComputerError::RuntimeError(message)
                 if message.starts_with("built-in command line tool failed to start:")
         )
+    }
+
+    pub(crate) async fn publish_config_change(&self) {
+        // Keep the new observation future out of every command/ClientControl dispatch frame.
+        Box::pin(self.publish_runtime_status(ComputerRuntimeEventCause::ConfigurationChanged))
+            .await;
     }
 
     pub async fn with_runtime_input_interaction<F, T>(
@@ -1136,8 +1148,13 @@ impl ComputerInstanceRuntime {
                 policy: client_control_factory_policy.clone(),
             },
         );
+        let adopted_start_concurrency = Arc::new(AtomicUsize::new(instance.mcp_start_concurrency));
         Self {
             instance,
+            adopted_start_concurrency,
+            consumed_declarations: Arc::new(RwLock::new(HashMap::new())),
+            pending_declarations: Arc::new(RwLock::new(HashMap::new())),
+            declaration_epoch: Arc::new(config_adoption::DeclarationEpoch::default()),
             inputs: Arc::new(RwLock::new(inputs)),
             plugin_runtime_inputs: Arc::new(RwLock::new(HashMap::new())),
             computer: Arc::new(RwLock::new(computer)),
@@ -1187,6 +1204,10 @@ impl ComputerInstanceRuntime {
     fn with_instance(&self, instance: ComputerInstance) -> Self {
         Self {
             instance,
+            adopted_start_concurrency: self.adopted_start_concurrency.clone(),
+            consumed_declarations: self.consumed_declarations.clone(),
+            pending_declarations: self.pending_declarations.clone(),
+            declaration_epoch: self.declaration_epoch.clone(),
             inputs: self.inputs.clone(),
             plugin_runtime_inputs: self.plugin_runtime_inputs.clone(),
             computer: self.computer.clone(),
@@ -1405,6 +1426,7 @@ impl ComputerInstanceRuntime {
         provider_is_mounted: bool,
         desired_server: Option<MCPServerConfig>,
     ) -> Result<(), ComputerRuntimeStartError> {
+        let _declaration_change = self.declaration_epoch.begin();
         let bundle_id = BundleId::try_from(bundle_id).map_err(|error| {
             ComputerRuntimeStartError::Client(format!(
                 "invalid built-in provider bundleId: {error}"
@@ -1471,6 +1493,7 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn add_or_update_plugin_server(&self, server: MCPServerConfig) -> ComputerResult<()> {
+        let _declaration_change = self.declaration_epoch.begin();
         let _guard = self.lifecycle_lock.lock().await;
         let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
@@ -1488,6 +1511,10 @@ impl ComputerInstanceRuntime {
             .await
             .mount_server(normalize_mcp_server_tool_meta(server))
             .await?;
+        // SDK governance may materialize this plugin outside client-observed start scopes.
+        // Retire prior receipts rather than attributing an old process to the new plugin lifecycle.
+        self.input_resolver.invalidate_consumer(bundle_id.as_str());
+        self.consumed_declarations.write().await.remove(&bundle_id);
         self.sdk_servers
             .write()
             .await
@@ -1552,6 +1579,7 @@ impl ComputerInstanceRuntime {
         server: MCPServerConfig,
         preserve_plugin_runtime: bool,
     ) -> ComputerResult<bool> {
+        let _declaration_change = self.declaration_epoch.begin();
         let _guard = self.lifecycle_lock.lock().await;
         let _oauth_server_guard = self.oauth_server_lifecycle_lock.lock().await;
         self.ensure_active_computer()?;
@@ -1929,6 +1957,7 @@ impl ComputerInstanceRuntime {
         &self,
         request: UserMcpServerStartRequest,
     ) -> ComputerResult<McpServerStartOperation> {
+        let _declaration_change = self.declaration_epoch.begin();
         let operation = request.operation.clone();
         self.ensure_active_computer()?;
         let bundle_id = resolve_bundle_id(&request.config);
@@ -2060,10 +2089,12 @@ impl ComputerInstanceRuntime {
             restarts,
         } = prepared;
         // Stable acquisition order prevents overlapping batches from deadlocking.
-        let ids: std::collections::BTreeSet<_> = starts.iter().chain(restarts.iter()).collect();
-        let mut _start_guards = Vec::with_capacity(ids.len());
-        for id in ids {
-            _start_guards.push(self.mcp_start_observation_lease(id).await);
+        let _start_guards = self
+            .mcp_start_observation_leases(starts.iter().chain(restarts.iter()).cloned().collect())
+            .await;
+        for id in starts.iter().chain(restarts.iter()) {
+            self.record_consumed_declaration(id, restarts.contains(id))
+                .await;
         }
         let mut outcomes = HashMap::new();
         let computer = self.computer.read().await;
@@ -2071,13 +2102,24 @@ impl ComputerInstanceRuntime {
             if starts.is_empty() {
                 Vec::new()
             } else {
-                computer.start_mcp_clients_batch(&starts).await
+                join_all(starts.iter().map(|id| async {
+                    (
+                        id.clone(),
+                        self.with_start_observation(id, Box::pin(computer.start_mcp_client(id)))
+                            .await,
+                    )
+                }))
+                .await
             }
         };
         let restart_future = join_all(restarts.iter().map(|bundle_id| async {
             (
                 bundle_id.clone(),
-                computer.restart_mcp_client(bundle_id).await,
+                self.with_start_observation(
+                    bundle_id,
+                    Box::pin(computer.restart_mcp_client(bundle_id)),
+                )
+                .await,
             )
         }));
         let (start_outcomes, restart_outcomes) = tokio::join!(start_future, restart_future);
@@ -2118,11 +2160,27 @@ impl ComputerInstanceRuntime {
     ) -> ComputerResult<()> {
         let bundle_id = operation.bundle_id();
         let _start_guard = self.mcp_start_observation_lease(bundle_id).await;
+        self.record_consumed_declaration(
+            bundle_id,
+            matches!(operation, McpServerStartOperation::Restart(_)),
+        )
+        .await;
         let computer = self.computer.read().await;
-        let result = match operation {
-            McpServerStartOperation::Start(_) => computer.start_mcp_client(bundle_id).await,
-            McpServerStartOperation::Restart(_) => computer.restart_mcp_client(bundle_id).await,
-        };
+        let result = self
+            .with_start_observation(
+                bundle_id,
+                Box::pin(async {
+                    match operation {
+                        McpServerStartOperation::Start(_) => {
+                            computer.start_mcp_client(bundle_id).await
+                        }
+                        McpServerStartOperation::Restart(_) => {
+                            computer.restart_mcp_client(bundle_id).await
+                        }
+                    }
+                }),
+            )
+            .await;
         drop(computer);
         self.observe_mcp_server_start_result(bundle_id, result)
             .await
@@ -2150,12 +2208,14 @@ impl ComputerInstanceRuntime {
         bundle_id: &BundleId,
         result: ComputerResult<()>,
     ) -> ComputerResult<()> {
+        Box::pin(self.finish_start_observation(bundle_id, &result)).await;
         if Self::is_expected_oauth_required(&result) {
             // A validated OAuth challenge is an expected runtime state, not a malformed server
             // configuration or failed import. The SDK has admitted the OAuth coordinator, so the
             // runtime status can now expose authorization and the callback will retry this start.
             self.clear_mcp_start_diagnostic(bundle_id).await;
             self.clear_mcp_config_apply_diagnostic(bundle_id).await;
+            self.publish_config_change().await;
             return Ok(());
         }
         match &result {
@@ -2170,6 +2230,9 @@ impl ComputerInstanceRuntime {
                 .await;
             }
         }
+        // SDK events can precede this client-owned handoff. Publish after committing/restoring
+        // receipts so every entry point (including existing single/batch controls) can converge.
+        self.publish_config_change().await;
         result
     }
 
@@ -2224,6 +2287,15 @@ impl ComputerInstanceRuntime {
             }
         };
         lock.lock_owned().await
+    }
+
+    async fn mcp_start_observation_leases(&self, ids: Vec<BundleId>) -> Vec<OwnedMutexGuard<()>> {
+        let ids: std::collections::BTreeSet<_> = ids.into_iter().collect();
+        let mut guards = Vec::with_capacity(ids.len());
+        for id in ids {
+            guards.push(self.mcp_start_observation_lease(&id).await);
+        }
+        guards
     }
 
     async fn record_mcp_start_diagnostic(&self, bundle_id: BundleId, message: String) {
@@ -2310,7 +2382,8 @@ impl ComputerInstanceRuntime {
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, ComputerError)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+        self.start_mcp_servers_best_effort_inner(bundle_ids, false)
+            .await
     }
 
     pub async fn start_mcp_servers_until_input_failure(
@@ -2318,12 +2391,14 @@ impl ComputerInstanceRuntime {
         bundle_ids: Vec<BundleId>,
     ) -> Vec<(BundleId, ComputerError)> {
         let _guard = self.lifecycle_lock.lock().await;
-        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+        self.start_mcp_servers_best_effort_inner(bundle_ids, false)
+            .await
     }
 
     async fn start_mcp_servers_best_effort_inner(
         &self,
         bundle_ids: Vec<BundleId>,
+        fresh_handle: bool,
     ) -> Vec<(BundleId, ComputerError)> {
         let mut preflight_failures = HashMap::new();
         let mut starts = Vec::with_capacity(bundle_ids.len());
@@ -2337,16 +2412,27 @@ impl ComputerInstanceRuntime {
             }
         }
 
+        let _start_guards = self.mcp_start_observation_leases(starts.clone()).await;
+        for id in &starts {
+            self.record_consumed_declaration(id, false).await;
+            if let Some(pending) = self.pending_declarations.write().await.get_mut(id) {
+                pending.fresh_handle = fresh_handle;
+            }
+        }
         let mut outcomes: HashMap<_, _> = if starts.is_empty() {
             HashMap::new()
         } else {
-            self.computer
-                .read()
-                .await
-                .start_mcp_clients_batch(&starts)
-                .await
-                .into_iter()
-                .collect()
+            let computer = self.computer.read().await;
+            join_all(starts.iter().map(|id| async {
+                (
+                    id.clone(),
+                    self.with_start_observation(id, Box::pin(computer.start_mcp_client(id)))
+                        .await,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect()
         };
         let mut failures = Vec::new();
         for bundle_id in bundle_ids {
@@ -2367,7 +2453,10 @@ impl ComputerInstanceRuntime {
         failures
     }
 
-    pub(super) async fn start_desired_mcp_servers_inner(&self) -> Vec<(BundleId, ComputerError)> {
+    pub(super) async fn start_desired_mcp_servers_inner(
+        &self,
+        fresh_handle: bool,
+    ) -> Vec<(BundleId, ComputerError)> {
         let bundle_ids = self
             .sdk_mcp_server_ownership_internal()
             .await
@@ -2377,7 +2466,8 @@ impl ComputerInstanceRuntime {
             })
             .filter_map(|entry| BundleId::try_from(entry.bundle_id.as_str()).ok())
             .collect();
-        self.start_mcp_servers_best_effort_inner(bundle_ids).await
+        self.start_mcp_servers_best_effort_inner(bundle_ids, fresh_handle)
+            .await
     }
 
     pub(super) fn log_mcp_start_failures(
@@ -2478,7 +2568,9 @@ impl ComputerInstanceRuntime {
             .into_iter()
             .filter_map(|entry| BundleId::try_from(entry.bundle_id).ok())
             .collect();
-        let failures = self.start_mcp_servers_best_effort_inner(bundle_ids).await;
+        let failures = self
+            .start_mcp_servers_best_effort_inner(bundle_ids, false)
+            .await;
         match failures.into_iter().next() {
             Some((_, error)) => Err(error),
             None => Ok(()),
@@ -2581,6 +2673,7 @@ impl ComputerInstanceRuntime {
     }
 
     pub async fn add_or_update_input(&self, input: MCPServerInput) -> Result<(), String> {
+        let _declaration_change = self.declaration_epoch.begin();
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active()?;
         let input_id = input.id().to_string();
@@ -2607,6 +2700,7 @@ impl ComputerInstanceRuntime {
         &self,
         inputs: Vec<MCPServerInput>,
     ) -> Result<(), String> {
+        let _declaration_change = self.declaration_epoch.begin();
         let _guard = self.lifecycle_lock.lock().await;
         self.ensure_active_computer()
             .map_err(|error| error.to_string())?;
@@ -3034,6 +3128,11 @@ impl ComputerInstanceRuntime {
             let mut computer = self.computer.write().await;
             self.runtime_generation.fetch_add(1, Ordering::AcqRel);
             *computer = new_computer;
+            self.adopted_start_concurrency
+                .store(self.instance.mcp_start_concurrency, Ordering::Release);
+            self.input_resolver.clear_consumers();
+            self.consumed_declarations.write().await.clear();
+            self.pending_declarations.write().await.clear();
             self.shutdown_completed.store(false, Ordering::Release);
         }
         *self.inputs.write().await = inputs;
@@ -3064,7 +3163,7 @@ impl ComputerInstanceRuntime {
                 }
                 return Err(start_error);
             }
-            let failures = self.start_desired_mcp_servers_inner().await;
+            let failures = self.start_desired_mcp_servers_inner(true).await;
             if let Err(error) =
                 self.handle_desired_mcp_start_failures(failures, reason, failure_policy)
             {
@@ -3198,6 +3297,7 @@ fn build_sdk_computer(
         policy: client_control_factory_policy,
     } = client_control;
     let factory: ClientFactory = Arc::new(move |config, notify| {
+        config_adoption::observe_materialization(&config);
         if config.bundle_id().map(BundleId::as_str) == Some(CLIENT_CONTROL_BUNDLE_ID) {
             let tool_policy = client_control_factory_policy
                 .read()
@@ -3377,6 +3477,7 @@ impl McpInstallHooks for RuntimeMcpHooks {
             .cancel_oauth_before_server_lifecycle_change(&bundle_id)
             .await
             .map_err(|error| McpHookError(error.to_string()))?;
+        let _declaration_change = self.runtime.declaration_epoch.begin();
         let mount_result = self
             .computer
             .read()
@@ -3453,6 +3554,7 @@ impl McpInstallHooks for RuntimeMcpHooks {
             return Ok(());
         }
 
+        let _declaration_change = self.runtime.declaration_epoch.begin();
         for input in inputs {
             self.plugin_runtime_inputs
                 .write()

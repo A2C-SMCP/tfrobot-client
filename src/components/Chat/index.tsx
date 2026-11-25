@@ -13,8 +13,10 @@ import {
 } from '@ant-design/icons';
 import {
   Alert,
+  App as AntApp,
   Button,
   Card,
+  ConfigProvider,
   Empty,
   Input,
   Select,
@@ -63,6 +65,8 @@ import {
 } from './availability';
 import styles from './Chat.module.css';
 import { useChatRestoration } from './useChatRestoration';
+import { chatWorkspaceTheme } from '@/styles/theme';
+import { useThemeStore } from '@/stores/themeStore';
 import { createChatResourcePort } from './chatResources';
 
 const { Text, Title } = Typography;
@@ -128,8 +132,9 @@ function contentStateFor(
 }
 
 function ActiveChat({ descriptor, creator, platformId }: ActiveChatProps) {
-  const { t } = useTranslation();
-  const labels = useMemo(() => chatUiLabels((key) => t(key)), [t]);
+  const { t, i18n } = useTranslation();
+  const language = i18n.resolvedLanguage ?? i18n.language;
+  const labels = useMemo(() => chatUiLabels((key) => t(key), language), [t, language]);
   const factory = useMemo(() => createClientChatFactory({
     descriptor,
     messageCreator: creator,
@@ -201,8 +206,9 @@ interface CompactChatWorkspaceProps {
  */
 export function CompactChatWorkspace({ labels, leaseId, platformId }: CompactChatWorkspaceProps) {
   const { t } = useTranslation();
+  const dark = useThemeStore((state) => state.resolved === 'dark');
   const active = usePageActive();
-  const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('auto');
+  const [detailMode, setDetailMode] = useState<'auto' | 'split' | 'modal'>('modal');
   const workspace = useConversationWorkspace({
     getDeadlineAt: getChatDeadlineAt,
     initialSelection: leaseId ? 'none' : 'first',
@@ -261,7 +267,8 @@ export function CompactChatWorkspace({ labels, leaseId, platformId }: CompactCha
   };
 
   return (
-    <>
+    <ConfigProvider theme={chatWorkspaceTheme(dark)} button={{ autoInsertSpace: false }}>
+      <AntApp style={{ height: '100%', minHeight: 0 }}>
       {restoration.error && <Alert type="warning" showIcon message={t('chat.restorePositionFailed')}
         action={<Button onClick={restoration.retry}>{t('common.retry')}</Button>} />}
       <ChatUiShell
@@ -284,7 +291,7 @@ export function CompactChatWorkspace({ labels, leaseId, platformId }: CompactCha
         pendingConversationId={snapshot.pendingConversationId}
         selectedConversationId={snapshot.selectedConversationId}
       >
-        <ChatConversationView className={styles.conversation} defaultEventDetailSplitRatio={0.64} sendShortcut="enter" getDeadlineAt={getChatDeadlineAt} labels={labels}
+        <ChatConversationView sendShortcut="enter" getDeadlineAt={getChatDeadlineAt} labels={labels}
           eventDetailMode={active ? detailMode : 'split'} onEventDetailModeChange={setDetailMode} />
       </ChatUiShell>
       <Modal
@@ -320,7 +327,8 @@ export function CompactChatWorkspace({ labels, leaseId, platformId }: CompactCha
           </label>
         </Space>
       </Modal>
-    </>
+      </AntApp>
+    </ConfigProvider>
   );
 }
 

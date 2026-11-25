@@ -118,12 +118,13 @@ async fn start_smcp_socket_server_with_join_delay(
         socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| async move {
             join_stats.join_events.fetch_add(1, Ordering::SeqCst);
             sleep(join_delay).await;
-            let _ = ack.send(&(true, Option::<String>::None));
+            let _ = ack.send(&());
         });
 
         let leave_stats = connect_stats.clone();
-        socket.on(SERVER_LEAVE_OFFICE, move || {
+        socket.on(SERVER_LEAVE_OFFICE, move |ack: AckSender| {
             leave_stats.leave_events.fetch_add(1, Ordering::SeqCst);
+            let _ = ack.send(&());
         });
 
         let disconnect_stats = connect_stats.clone();
@@ -215,7 +216,7 @@ async fn start_dynamic_auth_reconnect_server() -> DynamicAuthReconnectServer {
                     let _ = auth_tx.send(auth);
                 }
                 socket.on(SERVER_JOIN_OFFICE, |ack: AckSender| async move {
-                    let _ = ack.send(&(true, Option::<String>::None));
+                    let _ = ack.send(&());
                 });
             }
         },
@@ -436,12 +437,10 @@ async fn join_agent(client: &Client, office_id: &str, agent_name: &str) {
         .await
         .expect("agent join ack timeout")
         .expect("agent join ack channel");
-    let ok = ack
-        .as_array()
-        .and_then(|values| values.first())
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    assert!(ok, "agent join failed: {ack}");
+    assert!(
+        ack.is_null() || ack.as_array().is_some_and(|values| values.is_empty()),
+        "agent join failed: {ack}"
+    );
 }
 
 async fn emit_agent_call(client: &Client, event: &str, payload: Value) -> Value {
@@ -645,7 +644,7 @@ async fn agent_get_skills_and_get_skill_use_connected_instance_sdk_registry() {
             HashMap::new(),
             Some("smcp".to_string()),
             TEST_OFFICE_ID,
-            "Test Computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect SDK Computer to relay");
@@ -806,7 +805,7 @@ async fn agent_get_skills_reflects_connected_instance_skill_registry_refresh() {
             HashMap::new(),
             Some("smcp".to_string()),
             TEST_OFFICE_ID,
-            "Test Computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect SDK Computer to relay");
@@ -887,7 +886,7 @@ async fn close_smcp_connection_closes_underlying_socket_after_leaving_office() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "lifecycle-office",
-            "lifecycle-test-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -976,7 +975,7 @@ async fn failed_delete_quarantine_preserves_joined_runtime_and_connection() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "rollback-office",
-            "rollback-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -1069,7 +1068,7 @@ async fn delete_succeeds_while_socket_reference_is_shared() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "commit-office",
-            "commit-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -1150,7 +1149,7 @@ async fn deletion_exhausts_teardown_after_commit_cleanup_failure() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "cleanup-office",
-            "cleanup-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -1224,7 +1223,7 @@ async fn close_succeeds_while_socket_reference_is_shared() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "shared-office",
-            "shared-test-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -1284,7 +1283,7 @@ async fn runtime_metadata_update_preserves_smcp_connection_snapshot() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "rebuild-office",
-            "rebuild-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect smcp socket");
@@ -1360,7 +1359,7 @@ async fn failed_profile_switch_keeps_existing_smcp_connection() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "existing-office",
-            "existing-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect existing smcp socket");
@@ -1570,7 +1569,7 @@ async fn dynamic_auth_provider_supplies_fresh_token_on_real_network_reconnect() 
         .await
         .expect("begin connect operation");
     let office_id = "dynamic-auth-office".to_string();
-    let computer_name = "dynamic-auth-computer".to_string();
+    let computer_name = runtime.instance.name.clone();
     let connection = ConnectionState {
         profile_name: "dynamic-auth-profile".to_string(),
         url: server.url.clone(),
@@ -1642,7 +1641,7 @@ async fn remote_reconnect_does_not_block_local_mcp_lifecycle() {
         profile_name: "reconnect-test-profile".to_string(),
         url: server.url.clone(),
         office_id: TEST_OFFICE_ID.to_string(),
-        computer_name: TEST_AGENT_NAME.to_string(),
+        computer_name: runtime.instance.name.clone(),
         connected_at: chrono::Utc::now(),
         source_type: "manager_robot".to_string(),
         target_id: Some("manager-robot:reconnect-test".to_string()),
@@ -1659,7 +1658,7 @@ async fn remote_reconnect_does_not_block_local_mcp_lifecycle() {
             HashMap::new(),
             Some("/smcp".to_string()),
             TEST_OFFICE_ID,
-            TEST_AGENT_NAME,
+            &runtime.instance.name,
             connection,
         )
         .await
@@ -1972,7 +1971,7 @@ async fn disconnect_failure_fails_closed_when_transport_liveness_is_unproven() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "fail-closed-office",
-            "fail-closed-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect fail-closed socket");
@@ -2041,7 +2040,7 @@ async fn runtime_stop_bounds_pending_transport_teardown_and_clears_authority() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "stop-timeout-office",
-            "stop-timeout-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect stop-timeout socket");
@@ -2099,7 +2098,7 @@ async fn profile_switch_to_different_robot_requires_disconnect() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "old-office",
-            "old-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect old smcp socket");
@@ -2201,7 +2200,7 @@ async fn profile_connect_rejects_robot_already_connected_by_another_instance() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "shared-office",
-            "other-computer",
+            &other_runtime.instance.name,
         )
         .await
         .expect("connect other smcp socket");
@@ -2358,7 +2357,7 @@ async fn manager_context_cleanup_disconnects_manager_connection() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "manager-cleanup-office",
-            "manager-cleanup-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect manager socket");
@@ -2410,7 +2409,7 @@ async fn manager_context_cleanup_failure_still_drops_local_connection_authority(
             HashMap::new(),
             Some("/smcp".to_string()),
             "manager-failure-office",
-            "manager-failure-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect manager socket");
@@ -2469,7 +2468,7 @@ async fn manager_context_cleanup_leaves_manual_smcp_connection_untouched() {
             HashMap::new(),
             Some("/smcp".to_string()),
             "manual-preserved-office",
-            "manual-preserved-computer",
+            &runtime.instance.name,
         )
         .await
         .expect("connect manual socket");

@@ -595,7 +595,7 @@ async fn manager_routes_join_smcp_while_chat_requires_modern_bearer_contract() {
                 let joined_tx = joined_tx.clone();
                 socket.on("server:join_office", move |ack: AckSender| async move {
                     joined_tx.send(()).unwrap();
-                    ack.send(&(true, Option::<String>::None)).unwrap();
+                    ack.send(&()).unwrap();
                 });
             },
         );

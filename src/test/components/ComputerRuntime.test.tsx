@@ -96,7 +96,7 @@ describe('ComputerRuntime', () => {
     renderRuntime();
 
     expect(screen.queryByText('Connection')).not.toBeInTheDocument();
-    const capabilitySummary = screen.getByText('Active capability summary');
+    const capabilitySummary = screen.getByText('Available in this run');
     const runtimeMcp = screen.getByTestId('runtime-mcp');
     expect(
       capabilitySummary.compareDocumentPosition(runtimeMcp)
@@ -195,4 +195,27 @@ describe('ComputerRuntime', () => {
 
     expect(screen.getByTestId('runtime-mcp')).toHaveAttribute('data-disabled', 'false');
   });
+});
+
+it('keeps unobserved capabilities distinct from zero while stopped', () => {
+  renderRuntime(instance({ status: 'not_running', runtime: runtimeSnapshot({ lifecycle: 'shutdown', tools: 0, skills: 0 }) }));
+  expect(screen.getAllByText('—')).toHaveLength(3);
+  expect(screen.getByText(/Run availability will be observed after startup/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Start' })).not.toBeInTheDocument();
+});
+
+it('separates actual connection identity from the next saved target without exposing a credential URL', () => {
+  const computer = instance({
+    robotName: 'Next Robot B',
+    connectionPolicy: { target: { type: 'manager_robot', contextKey: { environment: 'staging', accountId: 'a', organizationId: 'o' }, employeeId: 12 }, auto_connect: false },
+    clientConnectionPresent: true,
+    clientConnectionContext: { profile_name: 'Current Robot A', url: 'https://user:private-token@example.test', office_id: 'o', computer_name: 'c', connected_at: '' },
+  });
+  const edit = vi.fn();
+  renderRuntime(computer, { onOpenConnectionSettings: edit });
+  expect(screen.getByText('Current Robot A')).toBeInTheDocument();
+  expect(screen.getByText('Next Robot B')).toBeInTheDocument();
+  expect(screen.queryByText(/private-token/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit connection policy' }));
+  expect(edit).toHaveBeenCalledOnce();
 });

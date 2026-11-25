@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useEffect, useMemo, useRef } from 'react';
 import { Table, Button, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   AppstoreOutlined,
@@ -20,12 +21,15 @@ type PluginMcpServerOwner = Extract<McpServerManagedBy, { type: 'plugin' }>;
 
 interface McpServerListProps {
   servers: McpServerStatus[];
+  focusedBundleId?: string | null;
+  focusRequest?: number;
   actionsDisabled?: boolean;
   actionsDisabledReason?: string;
   loading?: boolean;
   onStart?: (bundleId: string) => Promise<void>;
   onRetry?: (bundleId: string, name: string) => Promise<void>;
   onStop?: (bundleId: string, name: string) => Promise<void>;
+  onOpenBuiltIn?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   onAuthorize?: (bundleId: string) => Promise<void>;
   onCancelAuthorization?: (bundleId: string) => Promise<void>;
@@ -34,18 +38,30 @@ interface McpServerListProps {
 
 export function McpServerList({
   servers,
+  focusedBundleId,
+  focusRequest = 0,
   actionsDisabled = false,
   actionsDisabledReason,
   loading,
   onStart,
   onRetry,
   onStop,
+  onOpenBuiltIn,
   onOpenPlugin,
   onAuthorize,
   onCancelAuthorization,
   onClearAuthorization,
 }: McpServerListProps) {
   const { t } = useTranslation();
+  const active = usePageActive();
+  const table = useRef<HTMLDivElement>(null);
+  const focused = useRef<{ bundleId: string; request: number } | null>(null);
+  useEffect(() => {
+    if (!focusedBundleId) { focused.current = null; return; }
+    if (!active || loading || (focused.current?.bundleId === focusedBundleId && focused.current.request === focusRequest)) return;
+    const row = Array.from(table.current?.querySelectorAll<HTMLElement>('[data-mcp-bundle]') ?? []).find((node) => node.dataset.mcpBundle === focusedBundleId);
+    if (row) { row.scrollIntoView?.({ behavior: 'instant', block: 'center' }); row.focus({ preventScroll: true }); focused.current = { bundleId: focusedBundleId, request: focusRequest }; }
+  }, [active, focusedBundleId, focusRequest, loading, servers]);
   // Stable sorting preserves the backend's name/bundleId order within each source.
   const orderedServers = useMemo(() => [...servers].sort(
     (left, right) => SOURCE_ORDER[left.managedBy.type] - SOURCE_ORDER[right.managedBy.type],
@@ -226,9 +242,10 @@ export function McpServerList({
       render: (_: unknown, record: McpServerStatus) => {
         if (record.managedBy.type === 'built_in') {
           return (
-            <Typography.Text type="secondary">
-              {builtInManagedHint(record)}
-            </Typography.Text>
+            <Space direction="vertical" size={2}>
+              <Typography.Text type="secondary">{builtInManagedHint(record)}</Typography.Text>
+              {onOpenBuiltIn && <Button type="link" size="small" onClick={onOpenBuiltIn}>{t('computer.redesign.manageBuiltIn')}</Button>}
+            </Space>
           );
         }
         if (record.managedBy.type === 'plugin') {
@@ -297,14 +314,15 @@ export function McpServerList({
   ];
 
   return (
-    <Table
+    <div ref={table}><Table
       dataSource={orderedServers}
       columns={columns}
       rowKey="bundleId"
+      onRow={(record) => ({ 'data-mcp-bundle': record.bundleId, tabIndex: -1, 'aria-current': focusedBundleId === record.bundleId ? 'true' : undefined, style: focusedBundleId === record.bundleId ? { background: 'var(--ant-color-primary-bg)' } : undefined })}
       loading={loading}
       pagination={false}
       size="middle"
       scroll={{ x: 720 }}
-    />
+    /></div>
   );
 }
