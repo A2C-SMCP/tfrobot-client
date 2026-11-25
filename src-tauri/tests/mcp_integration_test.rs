@@ -296,7 +296,7 @@ async fn start_sync_capture_smcp_server() -> (String, Arc<SmcpSyncStats>) {
         let join_stats = connect_stats.clone();
         socket.on(SERVER_JOIN_OFFICE, move |ack: AckSender| async move {
             join_stats.join_events.fetch_add(1, Ordering::SeqCst);
-            let _ = ack.send(&(true, Option::<String>::None));
+            let _ = ack.send(&());
         });
 
         let config_stats = connect_stats.clone();

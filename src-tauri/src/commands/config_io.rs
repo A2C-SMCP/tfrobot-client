@@ -143,10 +143,13 @@ pub async fn import_config_core(
         }
     };
 
-    match fmt {
+    let result = match fmt {
         ConfigFormat::CliNative => import_cli_native(state, &instance_id, &content).await,
         ConfigFormat::ClaudeDesktop => import_claude_desktop(state, &instance_id, &content).await,
-    }
+    };
+    drop(_operation_guard);
+    crate::commands::runtime_sync::notify_config_observers(state, &instance_id).await;
+    result
 }
 
 async fn import_cli_native(

@@ -1,9 +1,13 @@
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
+import { ConfigSaveStatus } from './ConfigSaveStatus';
+import { useConfigCommit } from './useConfigCommit';
 import { usePageActive, usePageAction } from '@/components/Navigation/pageActivityState';
 import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   App,
+  Alert,
   Button,
   Checkbox,
   Divider,
@@ -13,6 +17,7 @@ import {
   Spin,
   Switch,
   Typography,
+  Tag,
 } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { NoticeBar } from '@/components/common/NoticeBar';
@@ -49,37 +54,45 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
   const action = usePageAction(instance.id);
   const { instances, fetchInstances } = useComputerStore();
   const [catalog, setCatalog] = useState<ClientControlTool[]>([]);
-  const [draftPolicy, setDraftPolicy] = useNavigationState<RemoteControlPolicy | null>('settings.remoteControl', null);
-  const [serverPolicy, setServerPolicy] = useState<RemoteControlPolicy>(
-    instance.remoteControl ?? DEFAULT_POLICY,
-  );
+  const [draftPolicy, setDraftPolicy] = useNavigationState<RemoteControlPolicy | null>(`settings.remoteControl.${instance.id}`, null);
+  const [serverPolicy, setServerPolicy] = useNavigationState<RemoteControlPolicy>(`settings.remoteControl.saved.${instance.id}`, instance.remoteControl ?? DEFAULT_POLICY);
+  const submission = useConfigCommit(`settings.remoteControl.${instance.id}.commit`, (policy: RemoteControlPolicy) => invoke<RemoteControlPolicy>('update_remote_control_policy', { request: { computerId: instance.id, policy } }));
+  const { capture } = submission;
+  const [editorOpen, setEditorOpen] = useNavigationState(`settings.remoteControl.editor.${instance.id}`, false);
   const policy = draftPolicy ?? serverPolicy;
-  const setPolicy: React.Dispatch<React.SetStateAction<RemoteControlPolicy>> = (next) => setDraftPolicy(typeof next === 'function' ? next(policy) : next);
+  const setPolicy: React.Dispatch<React.SetStateAction<RemoteControlPolicy>> = (next) => { submission.dirty(); setDraftPolicy(typeof next === 'function' ? next(policy) : next); };
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const securityNotice = useNoticeLifecycle('remote-control-security', !(loading && !loaded));
+  const [loadError, setLoadError] = useState(false);
+  const [loadRevision, setLoadRevision] = useState(0);
+  const saving = submission.state === 'saving';
+  const loadSequence = useRef(0);
+  useEffect(() => { setLoaded(false); setLoading(true); }, [instance.id]);
+  const securityNotice = useNoticeLifecycle('remote-control-security', editorOpen && !(loading && !loaded));
 
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
+    const sequence = ++loadSequence.current;
+    const current = capture();
     setLoading(true);
+    setLoadError(false);
     Promise.all([
       invoke<ClientControlTool[]>('get_client_control_catalog'),
       invoke<RemoteControlPolicy>('get_remote_control_policy', { computerId: instance.id }),
     ]).then(([nextCatalog, nextPolicy]) => {
-      if (!cancelled) {
+      if (!cancelled && sequence === loadSequence.current) {
         setLoaded(true);
         setCatalog(nextCatalog);
-        setServerPolicy(nextPolicy);
+        if (current()) setServerPolicy(nextPolicy);
       }
     }).catch((error) => {
-      if (!cancelled) void message.error(String(error));
+      if (!cancelled && sequence === loadSequence.current) { setLoadError(true); void message.error(String(error)); }
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [active, instance.id, message]);
+  }, [active, instance.id, message, capture, setServerPolicy, loadRevision]);
 
   const grouped = useMemo(() => {
     const groups = new Map<string, ClientControlTool[]>();
@@ -93,27 +106,31 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
 
   const save = async () => {
     const current = action();
-    setSaving(true);
-    try {
-      const updated = await invoke<RemoteControlPolicy>('update_remote_control_policy', {
-        request: { computerId: instance.id, policy },
-      });
-      if (!current()) return;
-      setServerPolicy(updated);
-      setDraftPolicy(null);
+    ++loadSequence.current;
+    const acknowledged = await submission.commit(policy, () => setDraftPolicy(null), (updated) => setServerPolicy(updated));
+    if (acknowledged && current()) {
+      setEditorOpen(false);
       await fetchInstances();
       if (current()) void message.success(t('computer.remoteControl.saved'));
-    } catch (error) {
-      if (current()) void message.error(String(error));
-    } finally {
-      setSaving(false);
-    }
+    } else if (current() && submission.getError()) void message.error(String(submission.getError()));
   };
 
-  if (loading && !loaded) return <Spin />;
+  if (!loaded) return loadError ? <Alert type="error" showIcon message={t('computer.redesign.loadAuthorizationFailed')} action={<Button onClick={() => setLoadRevision((revision) => revision + 1)}>{t('common.retry')}</Button>} /> : <Spin />;
 
   return (
-    <Space direction="vertical" size="large" style={{ width: '100%' }}>
+    <>
+      {loadError && <Alert type="warning" showIcon message={t('computer.redesign.savedPolicyRefreshFailed')} action={<Button onClick={() => setLoadRevision((revision) => revision + 1)}>{t('common.retry')}</Button>} />}
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Space wrap><Tag>{t(serverPolicy.enabled ? 'computer.redesign.policyEnabled' : 'computer.redesign.policyDisabled')}</Tag>
+          <Text>{t(serverPolicy.tool_scope.mode === 'all' ? 'computer.remoteControl.allTools' : 'computer.redesign.selectedTools', { count: serverPolicy.tool_scope.mode === 'custom' ? serverPolicy.tool_scope.tools.length : 0 })}</Text>
+          <Text>{t(serverPolicy.target_scope.mode === 'self_only' ? 'computer.remoteControl.selfOnly' : serverPolicy.target_scope.mode === 'all' ? 'computer.remoteControl.allComputers' : 'computer.redesign.selectedTargets', { count: serverPolicy.target_scope.mode === 'custom' ? serverPolicy.target_scope.targets.length : 0 })}</Text>
+        </Space>
+        <Text type="secondary">{t('computer.remoteControl.securitySummary')}</Text>
+        <Button onClick={() => setEditorOpen(true)}>{t('computer.redesign.editAuthorization')}</Button>
+        {!editorOpen && submission.state !== 'saved' && <ConfigSaveStatus state={submission.state} />}
+      </Space>
+      <Modal title={t('computer.redesign.editAuthorization')} open={editorOpen} footer={null} onCancel={() => { if (!saving) { setDraftPolicy(null); submission.reset(); setEditorOpen(false); } }} closable={!saving} maskClosable={!saving}>
+      <Space direction="vertical" size="large" style={{ width: '100%' }}>
       {securityNotice.visible && (
         <NoticeBar
           tone="warning"
@@ -215,9 +232,13 @@ export function RemoteControlSettings({ instance }: RemoteControlSettingsProps) 
       </div>
 
       <Text type="secondary">{t('computer.remoteControl.selfProtection')}</Text>
-      <Button type="primary" loading={saving} onClick={() => void save()}>
+      <ConfigSaveStatus state={submission.state === 'saved' && draftPolicy ? 'dirty' : submission.state} />
+      <Button disabled={saving} onClick={() => { setDraftPolicy(null); submission.reset(); setEditorOpen(false); }}>{t('common.cancel')}</Button>
+      <Button type="primary" disabled={!draftPolicy} loading={saving} onClick={() => void save()}>
         {t('common.save')}
       </Button>
-    </Space>
+      </Space>
+      </Modal>
+    </>
   );
 }

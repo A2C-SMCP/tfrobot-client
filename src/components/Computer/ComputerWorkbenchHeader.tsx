@@ -21,10 +21,11 @@ import {
   type ResolvedComputerConnection,
   usesStopAction,
 } from './computerActions';
+import { ComputerIdentity } from './ComputerIdentity';
 import { ComputerWorkbenchMoreActions } from './ComputerWorkbenchMoreActions';
 import styles from './ComputerWorkbench.module.css';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 interface ComputerWorkbenchHeaderProps {
   instance: ComputerInstance;
@@ -89,29 +90,7 @@ export function ComputerWorkbenchHeader({
         />
       </Tooltip>
 
-      <div className={styles.identity}>
-        <Title level={3} style={{ margin: 0 }}>{instance.name}</Title>
-        <div className={styles.identityMeta}>
-          <Text
-            type="secondary"
-            copyable={{
-              text: instance.id,
-              tooltips: [
-                t('computer.workbench.actions.copyId'),
-                t('computer.workbench.messages.idCopied'),
-              ],
-            }}
-          >
-            {instance.id}
-          </Text>
-          {instance.description && <Text>{instance.description}</Text>}
-          <Text type="secondary">
-            {instance.robotName
-              ? t('computer.boundRobot', { name: instance.robotName })
-              : t('computer.noRobotBound')}
-          </Text>
-        </div>
-      </div>
+      <ComputerIdentity instance={instance} />
 
       <div className={styles.headerControls}>
         <div className={styles.statuses}>
@@ -168,7 +147,7 @@ export function ComputerWorkbenchHeader({
               icon={<SettingOutlined />}
               aria-label={t('computer.settings.open')}
               onClick={onOpenSettings}
-            />
+            >{t('computer.redesign.settings')}</Button>
           </Tooltip>
           <ComputerWorkbenchMoreActions
             instance={instance}
@@ -178,10 +157,10 @@ export function ComputerWorkbenchHeader({
           />
         </div>
 
-        {(primaryDisabledReason || connectionDisabledReason) && (
+        {(primaryDisabledReason || (connectionDisabledReason && connection.actions.connect.disabled_reason !== 'not_running')) && (
           <Space direction="vertical" size={0} className={styles.actionGuidance}>
             {primaryDisabledReason && <Text type="secondary">{primaryDisabledReason}</Text>}
-            {connectionDisabledReason && <Text type="secondary">{connectionDisabledReason}</Text>}
+            {connectionDisabledReason && connection.actions.connect.disabled_reason !== 'not_running' && <Text type="secondary">{connectionDisabledReason}</Text>}
           </Space>
         )}
       </div>

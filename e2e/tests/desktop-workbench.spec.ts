@@ -20,8 +20,8 @@ test('keeps Computer information and operations available in both collection lay
   await menu.getByText('Computer', { exact: true }).click();
   await expect(page.getByRole('radio', { name: /Icons/ })).toBeChecked();
   await card.getByRole('button', { name: 'Computer A', exact: true }).click();
-  await expect(page.getByRole('navigation', { name: 'Workbench sections' })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Workbench sections' }).getByRole('button', { name: 'Skills', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Workbench', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Skill preview' })).toBeInViewport();
 });
 
@@ -39,8 +39,9 @@ for (const width of [1280, 375]) {
     await page.getByRole('button', { name: 'Computer A', exact: true }).click();
     await page.getByRole('button', { name: 'Open Computer settings' }).click();
     await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Computer A');
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
+    await page.getByRole('menu', { name: 'Computer settings sections' }).getByText('Advanced', { exact: true }).click();
     await expect(page.getByRole('spinbutton', { name: 'MCP startup concurrency' })).toHaveValue('5');
-    await expect(page.getByRole('button', { name: /Save$/ })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   });
 }

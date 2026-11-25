@@ -62,3 +62,25 @@ pub async fn get_computer_runtime_snapshots(
 ) -> Result<Vec<ComputerRuntimeSnapshotRecord>, String> {
     Ok(runtime_snapshot_records(&state).await)
 }
+
+/// The registry write lease stabilizes the saved configuration and runtime handoff together.
+#[tauri::command]
+pub async fn get_computer_config_adoption(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::services::computer::config_adoption::ConfigAdoptionStatus, String> {
+    get_computer_config_adoption_core(&state, &id).await
+}
+
+pub async fn get_computer_config_adoption_core(
+    state: &AppState,
+    id: &str,
+) -> Result<crate::services::computer::ConfigAdoptionStatus, String> {
+    let _operation = state.computer_registry.operation_lease(id).await;
+    let runtime = state
+        .computer_registry
+        .runtime(id)
+        .await
+        .ok_or_else(|| "Computer not found".to_string())?;
+    Ok(runtime.config_adoption_status().await)
+}

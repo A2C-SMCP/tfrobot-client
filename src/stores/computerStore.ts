@@ -146,6 +146,8 @@ export interface DuplicateComputerValues extends ComputerFormValues {
   skillHomeMode: DuplicateSkillHomeMode;
 }
 
+const generalPatchQueues = new Map<string, Promise<ComputerInstance>>();
+
 interface ComputerState {
   instances: ComputerInstance[];
   loading: boolean;
@@ -161,6 +163,7 @@ interface ComputerState {
   fetchInstances: () => Promise<void>;
   reconcileConnectionMetadata: (id: string) => Promise<void>;
   createInstance: (values: ComputerFormValues) => Promise<ComputerInstance>;
+  patchGeneral: (id: string, patch: { field: 'name' | 'description'; value: string } | { field: 'mcpStartConcurrency'; value: number }) => Promise<ComputerInstance>;
   updateInstance: (id: string, values: ComputerFormValues) => Promise<ComputerInstance>;
   duplicateInstance: (values: DuplicateComputerValues) => Promise<ComputerInstance>;
   deleteInstance: (id: string) => Promise<void>;
@@ -586,6 +589,45 @@ export const useComputerStore = create<ComputerState>((set, get) => ({
         };
       });
     }
+  },
+
+  patchGeneral: (id, patch) => {
+    const preceding = generalPatchQueues.get(id) ?? Promise.resolve();
+    const task = preceding.catch(() => undefined).then(async () => {
+    const profileVersion = (get().profileMutationVersions[id] ?? 0) + 1;
+    set((state) => ({
+      loading: true,
+      error: null,
+      mutationEpoch: state.mutationEpoch + 1,
+      pendingMutationCount: state.pendingMutationCount + 1,
+      profileMutationVersions: { ...state.profileMutationVersions, [id]: profileVersion },
+    }));
+    try {
+      const updated = await ingestStatus(await invoke<ComputerInstanceStatus>('patch_computer_general', { id, patch }));
+      set((state) => state.profileMutationVersions[id] === profileVersion ? {
+        instances: upsertInstance(state.instances, updated),
+        selectedInstanceId: state.selectedInstanceId,
+      } : {});
+      return requireInstance(get().instances, updated.id);
+    } catch (e) {
+      set((state) => state.profileMutationVersions[id] === profileVersion
+        ? { error: formatRuntimeActionError(e) }
+        : {});
+      throw e;
+    } finally {
+      set((state) => {
+        const pendingMutationCount = Math.max(0, state.pendingMutationCount - 1);
+        return {
+          pendingMutationCount,
+          loading: pendingMutationCount > 0,
+          mutationCompletionRevision: state.mutationCompletionRevision + 1,
+        };
+      });
+    }
+    });
+    generalPatchQueues.set(id, task);
+    void task.finally(() => { if (generalPatchQueues.get(id) === task) generalPatchQueues.delete(id); }).catch(() => undefined);
+    return task;
   },
 
   duplicateInstance: async (values) => {

@@ -29,15 +29,16 @@ test.describe('MCP Server configuration', () => {
   });
 
   test('shows Start All and Stop All buttons', async ({ page }) => {
-    await page.getByRole('button', { name: 'Back to Computer' }).click();
+    await page.getByRole('button', { name: 'Back to runtime workbench' }).click();
     await expect(page.getByLabel('Computer runtime workbench')).toBeVisible();
     await expect(page.getByText('Start All')).toBeVisible();
     await expect(page.getByText('Stop All')).toBeVisible();
   });
 
   test('shows Import and Export buttons', async ({ page }) => {
-    await expect(page.getByText('Import Config')).toBeVisible();
-    await expect(page.getByText('Export Config')).toBeVisible();
+    await page.getByRole('button', { name: 'More configuration actions' }).click();
+    await expect(page.getByRole('menuitem', { name: 'Import Config' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Export Config' })).toBeVisible();
   });
 
   test('add server opens modal', async ({ page }) => {
@@ -46,7 +47,7 @@ test.describe('MCP Server configuration', () => {
   });
 
   test('opens a second Computer and scopes MCP requests to its instanceId', async ({ page }) => {
-    await page.getByRole('button', { name: 'Back to Computer', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to runtime workbench', exact: true }).click();
     await page.getByRole('button', { name: 'Back to Computers', exact: true }).click();
     await page.getByRole('button', { name: 'Second Computer', exact: true }).click();
     const managerConnect = page.getByRole('button', { name: 'Connect', exact: true });

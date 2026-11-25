@@ -1,3 +1,5 @@
+import { NavigationMemoryProvider, NavigationScope } from '@/components/Navigation/NavigationMemory';
+import { NavigationMemory } from '@/stores/navigationStore';
 import { PageHost } from '@/components/Navigation/PageHost';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,6 +62,7 @@ describe('RemoteControlSettings', () => {
     expect(useUiNoticeStore.getState().entries['remote-control-security']).toBeUndefined();
     vi.mocked(invoke).mockImplementation(original);
     view.rerender(tree(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit authorization' }));
     await screen.findByRole('note');
     expect(useUiNoticeStore.getState().entries['remote-control-security'].impressions).toBe(1);
   });
@@ -71,6 +74,7 @@ describe('RemoteControlSettings', () => {
       ? new Promise((resolve) => { finish = resolve; }) : original(command, args));
     const tree = (active: boolean) => <PageHost name="remote" active={active}><RemoteControlSettings instance={instance} /></PageHost>;
     const view = render(tree(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit authorization' }));
     fireEvent.click(await screen.findByRole('switch', { name: 'Enable Robot control' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(finish).toBeDefined());
@@ -82,6 +86,7 @@ describe('RemoteControlSettings', () => {
 
   it('loads the exact catalog and persists an explicit enable decision', async () => {
     render(<RemoteControlSettings instance={instance} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit authorization' }));
     const toggle = await screen.findByRole('switch', { name: 'Enable Robot control' });
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -100,6 +105,40 @@ describe('RemoteControlSettings', () => {
       },
     ));
   });
+
+  it.each([['success', false], ['success', true], ['failure', false], ['failure', true], ['newer edit', false], ['newer edit', true]] as const)('confirms retained authorization saves after %s without replacing newer edits (unmounted: %s)', async (outcome, released) => {
+    let finish!: () => void;
+    let stored = instance.remoteControl!;
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === 'get_remote_control_policy') return Promise.resolve(stored);
+      if (command === 'update_remote_control_policy') return new Promise((resolve, reject) => {
+        finish = () => {
+          if (outcome === 'failure') reject(new Error('save unavailable'));
+          else { stored = { ...stored, enabled: true }; resolve(stored); }
+        };
+      });
+      return original(command, args);
+    });
+    const memory = new NavigationMemory();
+    const tree = (active: boolean) => <NavigationMemoryProvider memory={memory}><NavigationScope id={released && !active ? 'computer:b' : 'computer:a'} key={released && !active ? 'b' : 'a'}>
+      {released ? active ? <RemoteControlSettings instance={instance} /> : <div>Other Computer</div> : <PageHost name="remote" active={active}><RemoteControlSettings instance={instance} /></PageHost>}
+    </NavigationScope></NavigationMemoryProvider>;
+    const view = render(tree(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit authorization' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Enable Robot control' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    if (outcome === 'newer edit') fireEvent.click(screen.getByRole('switch', { name: 'Enable Robot control' }));
+    view.rerender(tree(false));
+    await act(async () => { finish(); });
+    view.rerender(tree(true));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(outcome === 'success' ? /^Saved$/ : outcome === 'failure' ? 'Save failed' : 'Unsaved changes'));
+    expect(screen.getByRole('switch', { name: 'Enable Robot control' })).toHaveAttribute('aria-checked', outcome === 'newer edit' ? 'false' : 'true');
+    expect(screen.getAllByRole('button', { name: /Save$/ })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Robot control policy saved')).not.toBeInTheDocument();
+  }, 15_000);
 
   it('keeps the security notice dismissed once the user turns it off', async () => {
     useUiNoticeStore.setState({ loaded: true, entries: {} });
@@ -122,6 +161,7 @@ describe('RemoteControlSettings', () => {
     });
     render(<RemoteControlSettings instance={instance} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit authorization' }));
     const notice = await screen.findByRole('note');
     expect(notice).toHaveTextContent('This grants client-level control');
     fireEvent.click(within(notice).getByRole('button', { name: "Don't show again" }));
@@ -134,4 +174,25 @@ describe('RemoteControlSettings', () => {
       updates: expect.objectContaining({ 'remote-control-security': expect.objectContaining({ dismissed: true }) }),
     }));
   });
+
+
+it('does not present an unread authorization policy as disabled and supports retry', async () => {
+  let available = false;
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === 'get_client_control_catalog') return [];
+    if (command === 'get_remote_control_policy') {
+      if (!available) throw new Error('policy read unavailable');
+      return { enabled: true, tool_scope: { mode: 'all' }, target_scope: { mode: 'self_only' } };
+    }
+    return undefined;
+  });
+  render(<RemoteControlSettings instance={instance} />);
+  expect(await screen.findByText('Could not read the saved authorization policy.')).toBeInTheDocument();
+  expect(screen.queryByText('Disabled in the saved policy')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Edit authorization' })).not.toBeInTheDocument();
+  available = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('Enabled in the saved policy')).toBeInTheDocument();
+});
+
 });

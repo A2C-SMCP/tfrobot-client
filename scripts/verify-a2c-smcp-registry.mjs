@@ -23,9 +23,9 @@ if (gitSdkPackages.length > 0) {
   );
 }
 
-if (!sdk || sdk.version !== '0.4.1' || !sdk.source?.startsWith('registry+')) {
+if (!sdk || sdk.version !== '0.5.0' || !sdk.source?.startsWith('registry+')) {
   throw new Error(
-    `a2c-smcp must resolve to crates.io 0.4.1; got ${sdk ? `${sdk.version} from ${sdk.source}` : 'no package'}`,
+    `a2c-smcp must resolve to crates.io 0.5.0; got ${sdk ? `${sdk.version} from ${sdk.source}` : 'no package'}`,
   );
 }
 

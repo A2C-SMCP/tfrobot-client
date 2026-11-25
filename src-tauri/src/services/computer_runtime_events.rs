@@ -466,6 +466,7 @@ pub enum ComputerRuntimeEventCause {
         reason: String,
     },
     ObservationAdvanced,
+    ConfigurationChanged,
     Resync {
         skipped_events: u64,
     },
@@ -538,7 +539,10 @@ impl ComputerRuntimeEventCause {
                         })
                 }) == *has_error
             }
-            Self::HandleReplaced { .. } | Self::ObservationAdvanced | Self::Resync { .. } => true,
+            Self::HandleReplaced { .. }
+            | Self::ObservationAdvanced
+            | Self::ConfigurationChanged
+            | Self::Resync { .. } => true,
         }
     }
 }

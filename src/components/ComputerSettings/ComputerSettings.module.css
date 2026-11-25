@@ -13,6 +13,12 @@
   min-width: 0;
 }
 
+.storagePath {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 174px minmax(0, 1fr);
@@ -94,4 +100,19 @@
   .navigation :global(.ant-menu-item) {
     width: auto;
   }
+}
+
+.pageDescription {
+  margin-bottom: 24px;
+  max-width: 860px;
+}
+
+.navigation :global(.ant-menu-item-group-title) {
+  padding: 14px 10px 6px;
+  font-size: 12px;
+}
+
+.moduleHeader {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
 }

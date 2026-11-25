@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { compactChatZhCN } from '@turingfocus/chat-ui-antd';
 import { info } from '@/utils/logger';
 import { createTauriChatFetch } from './chatTransport';
 export { createTauriChatFetch } from './chatTransport';
@@ -98,7 +99,7 @@ export function createClientChatFactory({
   });
 }
 
-export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
+export function chatUiLabels(t: (key: string) => string, language = 'en'): ChatUiLabelOverrides {
   const label = (key: string) => t(`chat.workspace.${key}`);
   const errorCauses: Record<ChatError['code'], string> = {
     'authentication': label('errorSummary.causes.authentication'),
@@ -113,7 +114,7 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
     'validation': label('errorSummary.causes.validation'),
   };
   const operations = ['sendText', 'sendMessage', 'interrupt', 'answerInteraction', 'uploadAttachment', 'loadConversation', 'loadHistory', 'subscribe', 'cacheStorage'];
-  return {
+  const hostLabels: ChatUiLabelOverrides = {
     formatChatError: (error) => {
       // Only translated allowlisted fields enter the summary. Raw messages,
       // details and arbitrary operation names remain outside the display path.
@@ -254,5 +255,12 @@ export function chatUiLabels(t: (key: string) => string): ChatUiLabelOverrides {
       'subscription-failed': label('lifecycle.subscription-failed'),
       degraded: label('lifecycleDegraded'),
     },
+  };
+  return {
+    ...hostLabels,
+    ...(language.startsWith('zh') ? compactChatZhCN : {}),
+    // Native diagnostics and resource failures retain the host's safe summaries.
+    formatChatError: hostLabels.formatChatError,
+    resource: hostLabels.resource,
   };
 }

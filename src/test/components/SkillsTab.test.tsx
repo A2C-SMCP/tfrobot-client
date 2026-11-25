@@ -215,4 +215,11 @@ describe('SkillsTab', () => {
     expect(screen.queryByText('stale-helper')).not.toBeInTheDocument();
     expect(mockedInvoke).toHaveBeenCalledWith('list_skills', { instanceId: 'computer-b' });
   });
+  it('hides cached skills and does not load runtime skills before the Computer starts', () => {
+    render(<SkillsTab instanceId="computer-a" runtimeAvailable={false} />);
+    expect(screen.getByText(/Start this Computer to view skills available in this run/)).toBeInTheDocument();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+  });
+
 });

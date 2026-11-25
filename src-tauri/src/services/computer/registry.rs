@@ -405,6 +405,7 @@ impl ComputerRegistry {
             }
             runtimes.insert(instance_id, runtime.clone());
         }
+        runtime.publish_config_change().await;
         Ok(runtime)
     }
 

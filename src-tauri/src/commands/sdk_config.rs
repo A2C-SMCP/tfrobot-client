@@ -348,6 +348,7 @@ pub async fn upsert_computer_mcp_config_core(
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -490,6 +491,7 @@ pub async fn upsert_computer_mcp_config_with_inputs_core(
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {
@@ -719,6 +721,7 @@ async fn remove_computer_mcp_core(
         Ok(())
     }
     .await;
+    crate::commands::runtime_sync::notify_config_observers(state, instance_id).await;
     record_computer_activity(
         state,
         ComputerActivitySpec {

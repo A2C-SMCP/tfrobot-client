@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { ConfigSaveStatus } from '@/components/ComputerSettings/ConfigSaveStatus';
+import { useNavigationState, useForgetNavigationState } from '@/components/Navigation/navigationMemoryState';
+import { useConfigCommit } from '@/components/ComputerSettings/useConfigCommit';
 import { Button, Select, Space } from 'antd';
 import { Input } from '@/components/common/Input';
 import { useTranslation } from 'react-i18next';
@@ -15,8 +17,13 @@ interface InputValueEditorProps {
 
 export function InputValueEditor({ inputId, inputs, currentValue, disabled = false, onSubmit, onCancel }: InputValueEditorProps) {
   const { t } = useTranslation();
-  const [value, setValue] = useState<string | undefined>(currentValue !== undefined ? String(currentValue) : undefined);
-  const [submitting, setSubmitting] = useState(false);
+  const prefix = `input.${inputId}.`;
+  const [value, setValue] = useNavigationState<string | undefined>(`${prefix}editValue`, currentValue !== undefined ? String(currentValue) : undefined);
+  const submission = useConfigCommit(`${prefix}valueCommit`, (value: string) => onSubmit(value));
+  const submitting = submission.state === 'saving';
+  const forget = useForgetNavigationState();
+  const edit = (next: string) => { setValue(next); submission.dirty(); };
+  const cancel = () => { forget(prefix); onCancel(); };
 
   const input = inputs.find((i) => i.id === inputId);
   const validPickSelection = input?.type !== 'PickString'
@@ -25,12 +32,8 @@ export function InputValueEditor({ inputId, inputs, currentValue, disabled = fal
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
-    setSubmitting(true);
-    try {
-      await onSubmit(value ?? '');
-    } finally {
-      setSubmitting(false);
-    }
+    await submission.commit(value ?? '');
+
   };
 
   // PickString: render as Select
@@ -40,7 +43,7 @@ export function InputValueEditor({ inputId, inputs, currentValue, disabled = fal
         <Select
           style={{ width: '100%', marginBottom: 16 }}
           value={value}
-          onChange={(v) => setValue(v)}
+          onChange={edit}
           disabled={disabled || submitting}
           placeholder={t('inputs.selectValue')}
         >
@@ -50,9 +53,10 @@ export function InputValueEditor({ inputId, inputs, currentValue, disabled = fal
             </Select.Option>
           ))}
         </Select>
-        <Space>
+        <ConfigSaveStatus state={submission.state} />
+      <Space>
           <Button type="primary" onClick={handleSubmit} loading={submitting} disabled={!canSubmit}>{t('common.save')}</Button>
-          <Button onClick={onCancel}>{t('common.cancel')}</Button>
+          <Button disabled={submitting} onClick={cancel}>{t('common.cancel')}</Button>
         </Space>
       </div>
     );
@@ -64,15 +68,16 @@ export function InputValueEditor({ inputId, inputs, currentValue, disabled = fal
       <Input
         style={{ marginBottom: 16 }}
         value={value ?? ''}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => edit(e.target.value)}
         disabled={disabled || submitting}
         placeholder={t('inputs.enterValue')}
         type={input?.type === 'PromptString' && input.password ? 'password' : 'text'}
         onPressEnter={handleSubmit}
       />
+      <ConfigSaveStatus state={submission.state} />
       <Space>
         <Button type="primary" onClick={handleSubmit} loading={submitting} disabled={!canSubmit}>{t('common.save')}</Button>
-        <Button onClick={onCancel}>{t('common.cancel')}</Button>
+        <Button disabled={submitting} onClick={cancel}>{t('common.cancel')}</Button>
       </Space>
     </div>
   );
