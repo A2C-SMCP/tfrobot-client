@@ -57,7 +57,11 @@ test('restores the window scroll of each Settings tab', async ({ page }) => {
   await page.getByRole('tab', { name: 'Runtime', exact: true }).click();
   await page.getByText('Custom Paths', { exact: true }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(700);
-  await page.evaluate(() => window.scrollTo(0, 160));
+  await page.evaluate(() => {
+    window.scrollTo(0, 160);
+    // Let the page host record the browser's scroll event before leaving the tab.
+    return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(160);
   // DOM clicks avoid Playwright scrolling the old tab into view before switching.
   await page.getByRole('tab', { name: 'About', exact: true }).evaluate((node: HTMLElement) => node.click());
