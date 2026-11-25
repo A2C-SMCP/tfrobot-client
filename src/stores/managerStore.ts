@@ -61,13 +61,8 @@ export type LoginResult =
   | { kind: 'account_selection_required'; accounts: AccountOption[] }
   | { kind: 'onboarding_required'; userId: string };
 
-export type ManagerEnvironment = 'test' | 'staging' | 'prod';
-
-export interface ManagerEnvironmentPolicy {
-  buildMode: 'development' | 'production';
-  allowedEnvironments: ManagerEnvironment[];
-  defaultEnvironment: ManagerEnvironment;
-}
+export const MANAGER_ENVIRONMENTS = ['prod', 'staging', 'test'] as const;
+export type ManagerEnvironment = (typeof MANAGER_ENVIRONMENTS)[number];
 export type ManagerAuthState =
   | 'signed_out'
   | 'account_selection_required'
@@ -131,7 +126,7 @@ export type ManagerError =
   | { kind: 'no_session' }
   | { kind: 'context_changed' }
   | { kind: 'missing_base_url' }
-  | { kind: 'environment_not_allowed' }
+  | { kind: 'login_environment_changed' }
   | { kind: 'invalid_response'; detail: string }
   | { kind: 'keychain_error'; detail: string }
   | { kind: 'token_exchange'; detail: { error: string; description?: string } }
@@ -159,6 +154,10 @@ export interface ManagerState {
   context: ManagerContextSnapshot;
   contextInitialized: boolean;
   pendingAccountSelection: AccountOption[] | null;
+  loginEnvironment: ManagerEnvironment | null;
+  loginEnvironmentLoadFailed: boolean;
+  loginEnvironmentChanging: boolean;
+  signInRequest: number;
   identityLoading: boolean;
   restoreAttempted: boolean;
   identityError: ManagerError | null;
@@ -170,6 +169,8 @@ export interface ManagerState {
 
   applyContext: (snapshot: ManagerContextSnapshot) => boolean;
   refreshContext: () => Promise<ManagerContextSnapshot>;
+  loadLoginEnvironment: () => Promise<void>;
+  changeLoginEnvironment: (environment: ManagerEnvironment, confirmedRevision: number | null) => Promise<void>;
   restoreSession: () => Promise<RestoredManagerSession | null>;
   login: (
     environment: ManagerEnvironment,
@@ -209,6 +210,10 @@ const initialState = {
   context: SIGNED_OUT_MANAGER_CONTEXT,
   contextInitialized: false,
   pendingAccountSelection: null as AccountOption[] | null,
+  loginEnvironment: null as ManagerEnvironment | null,
+  loginEnvironmentLoadFailed: false,
+  loginEnvironmentChanging: false,
+  signInRequest: 0,
   identityLoading: false,
   restoreAttempted: false,
   identityError: null as ManagerError | null,
@@ -303,8 +308,54 @@ function requestStillCurrent(state: ManagerState, scope: string): boolean {
   return managerContextScope(state.context) === scope;
 }
 
+let latestEnvironmentRead = 0;
+
 export const useManagerStore = create<ManagerState>((set, get) => ({
   ...initialState,
+
+  loadLoginEnvironment: async () => {
+    if (get().loginEnvironmentChanging) return;
+    const read = ++latestEnvironmentRead;
+    set({ loginEnvironmentLoadFailed: false });
+    try {
+      const environment = await invoke<ManagerEnvironment>('get_manager_login_environment');
+      if (!MANAGER_ENVIRONMENTS.includes(environment)) {
+        throw new Error('Invalid Manager login environment');
+      }
+      if (read === latestEnvironmentRead) set({ loginEnvironment: environment });
+    } catch {
+      if (read === latestEnvironmentRead) {
+        set({ loginEnvironment: null, loginEnvironmentLoadFailed: true });
+      }
+    }
+  },
+
+  changeLoginEnvironment: async (environment, confirmedRevision) => {
+    latestEnvironmentRead += 1;
+    set({ loginEnvironmentChanging: true });
+    let error: ManagerError | null = null;
+    try {
+      await invoke('set_manager_login_environment', { environment, confirmedRevision });
+      set({ loginEnvironment: environment, loginEnvironmentLoadFailed: false });
+    } catch (e) {
+      error = toManagerError(e);
+    }
+    try {
+      await get().refreshContext();
+    } catch (e) {
+      error ??= toManagerError(e);
+    }
+    set({ loginEnvironmentChanging: false });
+    if (error) await get().loadLoginEnvironment();
+    if (
+      confirmedRevision !== null
+      && get().context.authState === 'signed_out'
+      && get().loginEnvironment === environment
+    ) {
+      set((state) => ({ signInRequest: state.signInRequest + 1, identityError: error }));
+    }
+    if (error) throw error;
+  },
 
   applyContext: (snapshot) => {
     if (!contextIsValid(snapshot)) {
@@ -401,7 +452,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     set({ identityLoading: true, identityError: null, pendingAccountSelection: null });
     try {
       const result = await invoke<LoginResult>('manager_login', {
-        environment,
+        expectedEnvironment: environment,
         identifier,
         password,
       });
@@ -418,6 +469,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     } catch (e) {
       const err = toManagerError(e);
       warn(`manager: login failed, kind=${err.kind}`);
+      if (err.kind === 'login_environment_changed') await get().loadLoginEnvironment();
       set({ identityError: err, identityLoading: false });
       throw err;
     }

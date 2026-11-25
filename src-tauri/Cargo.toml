@@ -83,6 +83,7 @@ hyper = { version = "1", features = ["server", "http1", "full"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "full"] }
 smcp-server-core = "=0.5.0"
 socketioxide = { version = "0.16.3", features = ["state"] }
+tauri = { version = "2", features = ["test"] }
 tf-rust-socketio = "0.9.0"
 tower = { version = "0.5", features = ["util"] }
 

@@ -3,7 +3,7 @@
  * `settings:<tab>` or `settings:<tab>:<anchor>`. Keep this list in sync with the Tabs rendered by
  * `Settings`.
  */
-export const SETTINGS_TABS = ['appearance', 'runtime', 'data', 'permissions', 'about'] as const;
+export const SETTINGS_TABS = ['appearance', 'login-environment', 'runtime', 'data', 'permissions', 'about'] as const;
 
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 

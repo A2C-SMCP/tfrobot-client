@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Select and remember the Manager sign-in environment in Settings across development and packaged builds. New installations default to Production.
+
 ## 0.3.0 — 2026-10-19
 
 - Fix Linux AppImage packaging by resolving Tcl/Tk libraries from bundled Python, and verify that the packaged tfbash runtime starts.

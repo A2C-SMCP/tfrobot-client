@@ -161,7 +161,7 @@ describe('managerStore authoritative Context', () => {
     await useManagerStore.getState().login('staging', 'user@example.com', 'secret');
 
     expect(mockedInvoke).toHaveBeenNthCalledWith(1, 'manager_login', {
-      environment: 'staging',
+      expectedEnvironment: 'staging',
       identifier: 'user@example.com',
       password: 'secret',
     });
@@ -188,6 +188,35 @@ describe('managerStore authoritative Context', () => {
 
     useManagerStore.getState().applyContext(authenticatedContext(2, 'account-b', 'organization-b'));
     expect(useManagerStore.getState().pendingAccountSelection).toBeNull();
+  });
+
+  it('does not let an older environment read overwrite a completed switch', async () => {
+    const previousEnvironment = deferred<string>();
+    mockedInvoke
+      .mockReturnValueOnce(previousEnvironment.promise)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(signedOutContext(2));
+    useManagerStore.getState().applyContext(authenticatedContext(1));
+    const loading = useManagerStore.getState().loadLoginEnvironment();
+
+    await useManagerStore.getState().changeLoginEnvironment('test', 1);
+    previousEnvironment.resolve('staging');
+    await loading;
+
+    expect(mockedInvoke).toHaveBeenNthCalledWith(2, 'set_manager_login_environment', {
+      environment: 'test', confirmedRevision: 1,
+    });
+    expect(useManagerStore.getState()).toMatchObject({
+      context: signedOutContext(2), loginEnvironment: 'test', signInRequest: 1,
+    });
+  });
+
+  it('keeps sign-in unavailable when the backend returns an invalid environment', async () => {
+    mockedInvoke.mockResolvedValueOnce('invalid');
+    await useManagerStore.getState().loadLoginEnvironment();
+    expect(useManagerStore.getState()).toMatchObject({
+      loginEnvironment: null, loginEnvironmentLoadFailed: true,
+    });
   });
 
   it('restores only after reconciling the backend Context snapshot', async () => {

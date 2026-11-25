@@ -148,12 +148,17 @@ pub(crate) async fn fixture(status: u16, hold_upload: bool) -> Fixture {
         }
     });
     let directory = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::new(directory.path().to_path_buf()));
+    settings
+        .set_manager_environment(ManagerEnvironment::Staging)
+        .unwrap();
+    let manager_base = base.clone();
     let manager = Arc::new(ManagerContextCoordinator::new_with_base_url_override(
         Arc::new(ManagerClient::new_with_secret_store(
             InMemorySecretStore::shared(),
         )),
-        Arc::new(SettingsService::new(directory.path().to_path_buf())),
-        base.clone(),
+        settings,
+        move |_| manager_base.clone(),
     ));
     manager
         .login(

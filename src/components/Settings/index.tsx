@@ -5,6 +5,7 @@ import { Tabs, Typography } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { AppearanceSettings } from './AppearanceSettings';
+import { LoginEnvironmentSettings } from './LoginEnvironmentSettings';
 import { RuntimeSettings } from './RuntimeSettings';
 import { DataSettings } from './DataSettings';
 import { PermissionsSettings } from './PermissionsSettings';
@@ -61,6 +62,7 @@ export function Settings({
         onChange={changeTab}
         items={[
           { key: 'appearance', label: t('settings.appearance'), children: <PageHost name="settings-tab-appearance" active={activeTab === 'appearance'}><AppearanceSettings /></PageHost> },
+          { key: 'login-environment', label: t('settings.loginEnvironment'), children: <PageHost name="settings-tab-login-environment" active={activeTab === 'login-environment'}><LoginEnvironmentSettings /></PageHost> },
           { key: 'runtime', label: t('settings.runtime'), children: <PageHost name="settings-tab-runtime" active={activeTab === 'runtime'}><RuntimeSettings /></PageHost> },
           { key: 'data', label: t('settings.data'), children: <PageHost name="settings-tab-data" active={activeTab === 'data'}><DataSettings /></PageHost> },
           { key: 'permissions', label: t('settings.permissions'), children: <PageHost name="settings-tab-permissions" active={activeTab === 'permissions'}><PermissionsSettings focusAnchor={focusAnchor} focusRevision={navigationRevision} /></PageHost> },
