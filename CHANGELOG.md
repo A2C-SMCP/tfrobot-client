@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Select and remember the Manager sign-in environment in Settings across development and packaged builds. New installations default to Production.
+- Select and remember the Manager sign-in environment in Settings across development and packaged builds. New installations default to Production. Custom environments accept a Manager server address.
 
 ## 0.3.0 — 2026-10-19
 

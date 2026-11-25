@@ -243,7 +243,8 @@ describe('ManagerAccount', () => {
 
       applyMock({ loginEnvironment: 'test', loadLoginEnvironment });
       view.rerender(<LoginForm />);
-      expect(screen.getByText('Test')).toBeInTheDocument();
+      expect(screen.getByText('Custom environment')).toBeInTheDocument();
+      expect(screen.getByText('https://rest.test.turingfocus.cn')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Sign In/i })).toBeEnabled();
     });
 

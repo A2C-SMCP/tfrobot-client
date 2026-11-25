@@ -29,7 +29,7 @@ use crate::services::manager_token_bridge::{
     ManagerTokenHttpResponse,
 };
 use crate::services::observability::{
-    redact_text, ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityService,
+    ActivityEventDraft, ActivityLevel, ActivityOutcome, ObservabilityService,
 };
 use crate::AppState;
 
@@ -398,7 +398,7 @@ pub async fn set_manager_login_environment(
     state: State<'_, AppState>,
     environment: ManagerEnvironment,
     confirmed_revision: Option<u64>,
-) -> Result<(), ManagerError> {
+) -> Result<ManagerEnvironment, ManagerError> {
     state
         .manager_context
         .set_login_environment(environment, confirmed_revision)
@@ -412,10 +412,10 @@ async fn manager_login_core(
     password: String,
 ) -> Result<LoginResult, ManagerError> {
     let started = std::time::Instant::now();
-    log::info!("manager_login: environment={environment:?}");
+    log::info!("manager_login: environment={}", environment.kind());
     let result = state
         .manager_context
-        .login(environment, &identifier, &password)
+        .login(environment.clone(), &identifier, &password)
         .await;
     record_manager_activity(
         state,
@@ -571,12 +571,11 @@ async fn record_manager_activity<T>(
     result: &Result<T, ManagerError>,
 ) {
     let snapshot = state.manager_context.snapshot().await;
-    let (level, outcome, message, error_code, error) = match result {
+    let (level, outcome, message, error_code) = match result {
         Ok(_) => (
             ActivityLevel::Info,
             ActivityOutcome::Succeeded,
             format!("Manager {} succeeded", context.operation),
-            None,
             None,
         ),
         Err(error) => {
@@ -589,7 +588,6 @@ async fn record_manager_activity<T>(
                     .get("kind")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
-                Some(redact_text(&error.to_string())),
             )
         }
     };
@@ -604,14 +602,13 @@ async fn record_manager_activity<T>(
     activity.fields = Some(serde_json::json!({
         "app_version": env!("CARGO_PKG_VERSION"),
         "trigger": context.trigger,
-        "environment": context.requested_environment.or(snapshot.environment),
+        "environment": context.requested_environment.or(snapshot.environment).as_ref().map(ManagerEnvironment::kind),
         "target_id": context.target_account_id,
         "account_id": snapshot.context_key.as_ref().map(|context| &context.account_id),
         "organization_id": snapshot.context_key.as_ref().map(|context| &context.organization_id),
         "auth_state": snapshot.auth_state,
         "duration_ms": context.started.elapsed().as_millis(),
         "error_code": error_code,
-        "error": error,
     }));
     activity.correlation_id = Some(uuid::Uuid::new_v4().to_string());
     if let Err(error) = state.observability.record_activity_async(activity).await {
@@ -672,7 +669,7 @@ mod tests {
                 target_account_id: None,
             },
             &Err::<(), ManagerError>(ManagerError::InvalidCredentials {
-                message: "password=super-secret".to_string(),
+                message: "server text\nsuper-secret".to_string(),
             }),
         )
         .await;

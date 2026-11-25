@@ -101,14 +101,24 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(ManagerEnvironment::deserialize(&value).unwrap_or_default())
+    Ok(parse_manager_environment(&value).unwrap_or_default())
 }
 
-fn manager_environment_from_settings(document: &serde_json::Value) -> ManagerEnvironment {
+fn parse_manager_environment(value: &serde_json::Value) -> serde_json::Result<ManagerEnvironment> {
+    let environment = ManagerEnvironment::deserialize(value)
+        .map(ManagerEnvironment::preserve_legacy_test_identity);
+    if value.get("custom").is_some() || value.as_str() == Some("custom") {
+        return environment;
+    }
+    Ok(environment.unwrap_or_default())
+}
+
+fn manager_environment_from_settings(
+    document: &serde_json::Value,
+) -> serde_json::Result<ManagerEnvironment> {
     document
         .get(MANAGER_ENVIRONMENT_FIELD)
-        .and_then(|value| ManagerEnvironment::deserialize(value).ok())
-        .unwrap_or_default()
+        .map_or(Ok(ManagerEnvironment::default()), parse_manager_environment)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -370,14 +380,18 @@ impl SettingsService {
             return AppSettings::default();
         };
         Self::decode_settings(&document).unwrap_or_else(|_| AppSettings {
-            manager_environment: manager_environment_from_settings(&document),
+            manager_environment: manager_environment_from_settings(&document).unwrap_or_default(),
             ..AppSettings::default()
         })
     }
 
     fn read_settings(&self) -> std::io::Result<AppSettings> {
         match self.read_settings_document()? {
-            Some(document) => Self::decode_settings(&document).map_err(std::io::Error::other),
+            Some(document) => {
+                // A full-document update must keep a malformed custom selection available for repair.
+                manager_environment_from_settings(&document)?;
+                Self::decode_settings(&document).map_err(std::io::Error::other)
+            }
             None => Ok(AppSettings::default()),
         }
     }
@@ -424,10 +438,13 @@ impl SettingsService {
 
     pub(crate) fn manager_environment(&self) -> std::io::Result<ManagerEnvironment> {
         let document = self.read_settings_document()?;
-        Ok(document.as_ref().map_or_else(
-            ManagerEnvironment::default,
-            manager_environment_from_settings,
-        ))
+        document
+            .as_ref()
+            .map_or(
+                Ok(ManagerEnvironment::default()),
+                manager_environment_from_settings,
+            )
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     }
 
     pub fn load_legacy_for_migration(&self) -> Result<AppSettings, ManagerSessionConfigError> {
@@ -441,6 +458,20 @@ impl SettingsService {
             ));
         }
         Ok(serde_json::from_str(&content)?)
+    }
+
+    pub(crate) fn clear_legacy_manager_session(&self) -> std::io::Result<()> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("settings lock is poisoned"))?;
+        let Some(serde_json::Value::Object(mut document)) = self.read_settings_document()? else {
+            return Ok(());
+        };
+        if document.remove("manager_session").is_some() {
+            write_json_atomically(&self.settings_file, &document).map_err(std::io::Error::other)?;
+        }
+        Ok(())
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
@@ -686,7 +717,7 @@ impl SettingsService {
             entry.employee_id = employee_id;
         } else {
             preferences.entries.push(ChatPreferenceEntry {
-                environment: context.environment,
+                environment: context.environment.clone(),
                 account_id: context.account_id.clone(),
                 organization_id: context.organization_id.clone(),
                 employee_id,
@@ -735,7 +766,7 @@ impl SettingsService {
             Some(index) => &mut preferences.entries[index],
             None => {
                 preferences.entries.push(ChatPreferenceEntry {
-                    environment: context.environment,
+                    environment: context.environment.clone(),
                     account_id: context.account_id.clone(),
                     organization_id: context.organization_id.clone(),
                     employee_id,
@@ -803,7 +834,7 @@ impl SettingsService {
             .position(|entry| entry.matches(context))
             .unwrap_or_else(|| {
                 preferences.entries.push(ChatPreferenceEntry {
-                    environment: context.environment,
+                    environment: context.environment.clone(),
                     account_id: context.account_id.clone(),
                     organization_id: context.organization_id.clone(),
                     employee_id,

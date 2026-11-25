@@ -3,11 +3,10 @@ TFRobot Client - A cross-platform desktop application for A2C-SMCP Computer
 
 ## Manager environments
 
-The desktop client uses the following fixed Manager API endpoints.
+The desktop client offers two preset Manager API endpoints and a custom address.
 
 | Environment | Manager API |
 |-------------|-------------|
-| `test` | `https://rest.test.turingfocus.cn` |
 | `staging` | `https://api-staging.turingfocus.cn` |
 | `prod` (including Beta) | `https://api.turingfocus.cn` |
 
@@ -17,12 +16,14 @@ sign-in requires the native backend.
 
 Computers are local to this machine, independent of the Manager login environment. Development
 and packaged builds use the same application identifier (`com.tfrobot.client`), original app
-data directory, and `tfrobot-client` keychain service. Signing in to Test, Staging, or Production
+data directory, and `tfrobot-client` keychain service. Changing the sign-in environment
 keeps the same Computer profiles, MCP configuration, local inputs, and stored Computer secrets.
 Existing Computers appear directly without copying or recreating them. Manager credentials
-remain scoped to their API origin, and environment changes use the existing sign-out cleanup.
+remain scoped to the full Manager base URL, and environment changes use the existing sign-out cleanup.
 
-Open **Settings → Sign-in environment** to select Production, Staging, or Test in either build.
+Open **Settings → Sign-in environment** to select Production, Staging, or Custom environment
+in either build. Enter the Manager server URL and select **Save** for a custom environment.
+Existing Test settings appear under Custom environment with their previous address.
 Production is the default. The choice is saved as `manager_environment` in the shared
 `settings.json` and the sign-in screen shows the saved environment. Changing it while signed in
 requires confirmation and a new sign-in. On startup, the client restores a session only when

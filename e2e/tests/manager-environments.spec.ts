@@ -29,30 +29,42 @@ test('uses the saved sign-in environment from Settings after reloading', async (
 
   const settings = await openEnvironmentSettings(page);
   await expect(settings.getByText('Production (including Beta)', { exact: true })).toBeVisible();
-  await chooseEnvironment(page, 'Staging');
-  await expect(settings.locator('.ant-select-selection-item')).toHaveText('Staging');
+  await chooseEnvironment(page, 'Custom environment');
+  const address = settings.getByLabel('Manager server address');
+  await address.fill('ftp://manager.example.com');
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(settings.getByText(/Enter a complete HTTP or HTTPS URL/)).toBeVisible();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([]);
+
+  const environment = { custom: 'https://manager.example.com/gateway' };
+  await address.fill('HTTPS://MANAGER.EXAMPLE.COM/gateway/');
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(address).toHaveValue(environment.custom);
   expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
-    { environment: 'staging', confirmedRevision: null },
+    { environment, confirmedRevision: null },
   ]);
 
   await page.reload();
   await page.getByRole('button', { name: /Sign In/i }).click();
   const dialog = page.getByRole('dialog', { name: 'Manager Account' });
-  await expect(dialog.getByText('Staging', { exact: true })).toBeVisible();
+  await expect(dialog.getByText(environment.custom, { exact: true })).toBeVisible();
   await expect(dialog.getByRole('combobox')).toHaveCount(0);
   await dialog.getByLabel('Phone or email').fill('client@example.com');
   await dialog.getByLabel('Password', { exact: true }).fill('fixture-password');
   await dialog.getByRole('button', { name: /Sign In/i }).click();
   await expect.poll(() => observedInvokes(page, 'manager_login')).toEqual([
-    { expectedEnvironment: 'staging', identifier: 'client@example.com', password: 'fixture-password' },
+    { expectedEnvironment: environment, identifier: 'client@example.com', password: 'fixture-password' },
   ]);
 });
 
-test('confirms a signed-in environment switch and opens the new sign-in form', async ({ page }) => {
+test('confirms a signed-in custom address change and opens the new sign-in form', async ({ page }) => {
+  const original = { custom: 'https://old-manager.example.com' };
+  const environment = { custom: 'https://new-manager.example.com' };
   await setupInvokeMock(page, {
+    get_manager_login_environment: original,
     manager_get_context: {
-      revision: 8, authState: 'authenticated', environment: 'prod',
-      contextKey: { environment: 'prod', accountId: '16', organizationId: '42' },
+      revision: 8, authState: 'authenticated', environment: original,
+      contextKey: { environment: original, accountId: '16', organizationId: '42' },
       user: { id: '9', nickname: 'Fixture', email: '', phone: '' },
       account: { id: '16', name: 'Fixture Account', nickname: '', avatar: '', employeeNo: '' },
       organization: { id: '42', name: 'Fixture Organization', organizationType: 'enterprise' },
@@ -62,19 +74,39 @@ test('confirms a signed-in environment switch and opens the new sign-in form', a
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Fixture Organization, Fixture Account' })).toBeVisible();
   const settings = await openEnvironmentSettings(page);
-  await expect(settings.getByText('Production (including Beta)', { exact: true })).toBeVisible();
-
+  const address = settings.getByLabel('Manager server address');
+  await expect(address).toHaveValue(original.custom);
+  await address.fill(environment.custom);
+  const save = settings.getByRole('button', { name: 'Save' });
   const confirmation = page.getByRole('dialog', { name: 'Change the sign-in environment?' });
-  await chooseEnvironment(page, 'Test');
+  await save.click();
+  await expect(confirmation.getByText(new RegExp(environment.custom))).toBeVisible();
   await confirmation.getByRole('button', { name: 'Cancel' }).click();
   await expect(confirmation).toBeHidden();
   expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([]);
 
-  await chooseEnvironment(page, 'Test');
+  await save.click();
   await confirmation.getByRole('button', { name: 'Switch and sign out' }).click();
   const signIn = page.getByRole('dialog', { name: 'Manager Account' });
-  await expect(signIn.getByText('Test', { exact: true })).toBeVisible();
+  await expect(signIn.getByText(environment.custom, { exact: true })).toBeVisible();
   expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
-    { environment: 'test', confirmedRevision: 8 },
+    { environment, confirmedRevision: 8 },
+  ]);
+});
+
+test('can replace an invalid stored custom address from Settings', async ({ page }) => {
+  await setupInvokeMock(page, { get_manager_login_environment: { custom: null } });
+  await page.goto('/');
+  const settings = await openEnvironmentSettings(page);
+  await expect(settings.getByText('Could not load the sign-in environment.')).toBeVisible();
+
+  await chooseEnvironment(page, 'Custom environment');
+  const environment = { custom: 'https://manager.example.com' };
+  const address = settings.getByLabel('Manager server address');
+  await address.fill(environment.custom);
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(settings.getByText('Could not load the sign-in environment.')).toBeHidden();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
+    { environment, confirmedRevision: null },
   ]);
 });

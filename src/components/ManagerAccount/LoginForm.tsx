@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import { Input } from '@/components/common/Input';
 import { LoginOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useManagerStore, type ManagerError } from '@/stores/managerStore';
+import { managerCustomAddress, managerEnvironmentKind, useManagerStore, type ManagerError } from '@/stores/managerStore';
 
 const { Title, Text } = Typography;
 
@@ -29,6 +29,8 @@ export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
     loginEnvironmentChanging,
     loadLoginEnvironment,
   } = useManagerStore();
+  const customAddress = managerCustomAddress(loginEnvironment);
+  const environmentKind = loginEnvironment && managerEnvironmentKind(loginEnvironment);
 
   useEffect(() => {
     void loadLoginEnvironment();
@@ -36,7 +38,7 @@ export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
 
   useEffect(() => {
     form.resetFields(['password']);
-  }, [form, loginEnvironment]);
+  }, [form, environmentKind, customAddress]);
 
   const handleFinish = async ({ identifier, password }: { identifier: string; password: string }) => {
     if (!loginEnvironment || loginEnvironmentChanging) return;
@@ -66,8 +68,6 @@ export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
             description={
               identityError.kind === 'network_error'
                 ? identityError.detail
-                : identityError.kind === 'invalid_credentials'
-                ? identityError.detail.message
                 : identityError.kind === 'other'
                 ? `HTTP ${identityError.detail.status}: ${identityError.detail.body}`
                 : undefined
@@ -89,10 +89,15 @@ export function LoginForm({ onSubmitted, embedded = false }: LoginFormProps) {
           />}
           <Form.Item
             label={t('managerAccount.login.environment')}
-            extra={t('managerAccount.login.environmentHint')}
+            extra={customAddress?.startsWith('http://')
+              ? t('managerAccount.login.insecureCustomAddress')
+              : t('managerAccount.login.environmentHint')}
           >
-            {loginEnvironment
-              ? <Text>{t(`managerAccount.login.environments.${loginEnvironment}`)}</Text>
+            {environmentKind
+              ? <Space direction="vertical" size={0}>
+                <Text>{t(`managerAccount.login.environments.${environmentKind}`)}</Text>
+                {customAddress && <Text style={{ overflowWrap: 'anywhere' }}>{customAddress}</Text>}
+              </Space>
               : !loginEnvironmentLoadFailed && <Spin size="small" />}
           </Form.Item>
           <Form.Item

@@ -534,10 +534,7 @@ fn finalize_legacy_cleanup(
 ) -> Result<(), MigrationError> {
     archive_legacy_file(config.legacy_computer_instances_path())?;
     archive_legacy_file(config.legacy_connection_targets_path())?;
-    let mut legacy_settings = settings.load_legacy_for_migration()?;
-    if legacy_settings.manager_session.take().is_some() {
-        settings.save(&legacy_settings)?;
-    }
+    settings.clear_legacy_manager_session()?;
     Ok(())
 }
 

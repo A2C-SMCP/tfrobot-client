@@ -50,6 +50,7 @@ struct ScriptedResponse {
     body: String,
     content_type: &'static str, // 默认 "application/json"
     response_delay: Duration,
+    redirect_location: Option<String>,
 }
 
 type Captured = Arc<Mutex<Vec<CapturedRequest>>>;
@@ -266,8 +267,11 @@ async fn spawn_mock_manager(
                 let resp = match matched {
                     Some(r) => {
                         tokio::time::sleep(r.response_delay).await;
+                        let location = r.redirect_location.map_or_else(String::new, |location| {
+                            format!("Location: {location}\r\n")
+                        });
                         format!(
-                            "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{location}Connection: close\r\n\r\n{}",
                             r.status_line,
                             r.content_type,
                             r.body.len(),
@@ -296,6 +300,7 @@ fn json_script(
         body: body.to_string(),
         content_type: "application/json",
         response_delay: Duration::ZERO,
+        redirect_location: None,
     }
 }
 
@@ -311,6 +316,7 @@ fn raw_script(
         body: body.to_string(),
         content_type,
         response_delay: Duration::ZERO,
+        redirect_location: None,
     }
 }
 
@@ -326,6 +332,7 @@ fn delayed_raw_script(
         body: body.to_string(),
         content_type: "application/json",
         response_delay: delay,
+        redirect_location: None,
     }
 }
 
@@ -341,6 +348,7 @@ fn delayed_json_script(
         body: body.to_string(),
         content_type: "application/json",
         response_delay: delay,
+        redirect_location: None,
     }
 }
 
@@ -791,7 +799,7 @@ async fn manager_routes_join_smcp_while_chat_requires_modern_bearer_contract() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn switching_manager_environment_routes_auth_to_the_new_origin() {
+async fn switching_manager_environment_routes_auth_to_the_new_base_url() {
     use serde_json::json;
     use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
     use tfrobot_client_lib::commands::manager;
@@ -800,43 +808,59 @@ async fn switching_manager_environment_routes_auth_to_the_new_origin() {
     };
     use tfrobot_client_lib::AppState;
 
-    let manager_responses = |token| {
+    let manager_responses = |login_path, profile_path, token| {
         vec![
             json_script(
-                "/auth/login-by-password",
+                login_path,
                 "HTTP/1.1 200 OK",
                 envelope(single_account_login_data(token)),
             ),
             json_script(
-                "/api/v1/auth/me",
+                profile_path,
                 "HTTP/1.1 200 OK",
                 envelope(current_user_data()),
             ),
         ]
     };
-    let (prod_url, prod_requests, _prod_server) =
-        spawn_mock_manager(manager_responses("prod-jwt")).await;
-    let (test_url, test_requests, _test_server) =
-        spawn_mock_manager(manager_responses("test-jwt")).await;
+    let mut routes = [
+        manager_responses(
+            "/first/auth/login-by-password",
+            "/first/api/v1/auth/me",
+            "first-jwt",
+        ),
+        manager_responses(
+            "/second/auth/login-by-password",
+            "/second/api/v1/auth/me",
+            "second-jwt",
+        ),
+    ]
+    .concat();
+    for path in [
+        "/second/api/v1/digital-employees/42/connection-info",
+        "/second/api/v1/digital-employees",
+    ] {
+        routes.push(json_script(
+            path,
+            "HTTP/1.1 402 Payment Required",
+            json!({
+                "message": "upstream text\nsecond-jwt",
+                "redirectUrl": "https://example.com/second-jwt",
+            }),
+        ));
+    }
+    let (base_url, requests, _server) = spawn_mock_manager(routes).await;
     let directory = tempfile::tempdir().unwrap();
     let secrets = InMemorySecretStore::shared();
-    let mut state = AppState::new_with_secret_store(
+    let state = AppState::new_with_secret_store(
         ConfigService::new(directory.path().to_path_buf()).unwrap(),
         ObservabilityService::new(directory.path()).unwrap(),
         SettingsService::new(directory.path().to_path_buf()),
         secrets.clone(),
     );
     let settings = state.settings_service.clone();
-    let coordinator = Arc::new(ManagerContextCoordinator::new_with_base_url_override(
-        Arc::new(ManagerClient::new_with_secret_store(secrets)),
-        settings.clone(),
-        move |environment| match environment {
-            ManagerEnvironment::Prod => prod_url.clone(),
-            ManagerEnvironment::Test => test_url.clone(),
-            ManagerEnvironment::Staging => panic!("unexpected staging request"),
-        },
-    ));
-    state.manager_context = coordinator.clone();
+    let coordinator = state.manager_context.clone();
+    let first = json!({ "custom": format!("{base_url}/first") });
+    let second = json!({ "custom": format!("{base_url}/second") });
     let app = mock_builder()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -875,35 +899,46 @@ async fn switching_manager_environment_routes_auth_to_the_new_origin() {
             .unwrap(),
         "prod"
     );
-    let prod_login = json!({
-        "expectedEnvironment": "prod", "identifier": "prod@example.com", "password": "secret",
+    assert_eq!(
+        invoke(
+            "set_manager_login_environment",
+            json!({ "environment": first, "confirmedRevision": null })
+        )
+        .unwrap()
+        .deserialize::<serde_json::Value>()
+        .unwrap(),
+        first
+    );
+    let first_login = json!({
+        "expectedEnvironment": first, "identifier": "prod@example.com", "password": "secret",
     });
     assert_eq!(
-        invoke("manager_login", prod_login.clone())
+        invoke("manager_login", first_login.clone())
             .unwrap()
             .deserialize::<serde_json::Value>()
             .unwrap()["kind"],
         "authenticated"
     );
-    let production = coordinator.snapshot().await;
+    let original = coordinator.snapshot().await;
+    let original_session = settings.load_global_manager_session().unwrap();
 
     assert_eq!(
         invoke(
             "set_manager_login_environment",
-            json!({ "environment": "test", "confirmedRevision": null })
+            json!({ "environment": second, "confirmedRevision": null })
         )
         .unwrap_err()["kind"],
         "context_changed"
     );
-    assert_eq!(coordinator.snapshot().await, production);
+    assert_eq!(coordinator.snapshot().await, original);
     assert_eq!(
-        settings.load().manager_environment,
-        ManagerEnvironment::Prod
+        serde_json::to_value(settings.load().manager_environment).unwrap(),
+        first
     );
 
     invoke(
         "set_manager_login_environment",
-        json!({ "environment": "test", "confirmedRevision": production.revision }),
+        json!({ "environment": second, "confirmedRevision": original.revision }),
     )
     .unwrap();
     assert_eq!(
@@ -915,8 +950,8 @@ async fn switching_manager_environment_routes_auth_to_the_new_origin() {
         Err(ManagerError::NoSession)
     ));
     assert_eq!(
-        settings.load().manager_environment,
-        ManagerEnvironment::Test
+        serde_json::to_value(settings.load().manager_environment).unwrap(),
+        second
     );
     assert!(settings
         .load_global_manager_session()
@@ -925,54 +960,165 @@ async fn switching_manager_environment_routes_auth_to_the_new_origin() {
         .is_none());
     assert_eq!(
         lifecycle.contexts.lock().unwrap().last(),
-        Some(&production.context_key)
+        Some(&original.context_key)
     );
     assert_eq!(
-        invoke("manager_login", prod_login).unwrap_err()["kind"],
+        invoke("manager_login", first_login).unwrap_err()["kind"],
         "login_environment_changed"
     );
+    settings
+        .save_global_manager_session(&original_session)
+        .unwrap();
     assert!(invoke("manager_restore_session", json!({}))
         .unwrap()
         .deserialize::<Option<serde_json::Value>>()
         .unwrap()
         .is_none());
-    assert!(test_requests.lock().await.is_empty());
+    assert_eq!(requests.lock().await.len(), 2);
 
-    let test_login = json!({
-        "expectedEnvironment": "test", "identifier": "test@example.com", "password": "secret",
+    let second_login = json!({
+        "expectedEnvironment": second, "identifier": "test@example.com", "password": "secret",
     });
     let settings_path = directory.path().join("settings.json");
     let valid_settings = std::fs::read(&settings_path).unwrap();
     std::fs::write(&settings_path, "[]").unwrap();
     assert!(invoke("get_manager_login_environment", json!({})).is_err());
-    assert!(invoke("manager_login", test_login.clone()).is_err());
+    assert!(invoke("manager_login", second_login.clone()).is_err());
     assert!(invoke("manager_restore_session", json!({})).is_err());
-    assert!(test_requests.lock().await.is_empty());
+    assert_eq!(requests.lock().await.len(), 2);
     std::fs::write(settings_path, valid_settings).unwrap();
 
     assert_eq!(
-        invoke("manager_login", test_login)
+        invoke("manager_login", second_login)
             .unwrap()
             .deserialize::<serde_json::Value>()
             .unwrap()["kind"],
         "authenticated"
     );
     assert_eq!(
-        coordinator.snapshot().await.environment,
-        Some(ManagerEnvironment::Test)
+        serde_json::to_value(coordinator.snapshot().await.environment).unwrap(),
+        second
     );
-    let prod = prod_requests.lock().await;
-    let test = test_requests.lock().await;
-    assert_eq!(prod.len(), 2);
-    assert_eq!(test.len(), 2);
-    assert!(prod[0].request_line.contains("/auth/login-by-password"));
-    assert!(prod[0].body.contains("prod@example.com"));
-    assert!(test[0].request_line.contains("/auth/login-by-password"));
-    assert!(test[0].body.contains("test@example.com"));
+    for error in [
+        coordinator.list_digital_employees().await.unwrap_err(),
+        coordinator.get_connection_info(42).await.unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            ManagerError::PaymentRequired {
+                redirect_url: None,
+                ..
+            }
+        ));
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains("second-jwt"));
+    }
+    let captured = requests.lock().await;
+    assert_eq!(captured.len(), 6);
+    assert!(captured[0]
+        .request_line
+        .starts_with("POST /first/auth/login-by-password "));
+    assert!(captured[0].body.contains("prod@example.com"));
+    assert!(captured[1]
+        .request_line
+        .starts_with("GET /first/api/v1/auth/me "));
+    assert!(captured[2]
+        .request_line
+        .starts_with("POST /second/auth/login-by-password "));
+    assert!(captured[2].body.contains("test@example.com"));
+    assert!(captured[3]
+        .request_line
+        .starts_with("GET /second/api/v1/auth/me "));
     assert_eq!(
-        test[1].headers.get("authorization").map(String::as_str),
-        Some("Bearer test-jwt")
+        captured[3].headers.get("authorization").map(String::as_str),
+        Some("Bearer second-jwt")
     );
+    assert!(captured[4..].iter().all(|request| request
+        .headers
+        .get("authorization")
+        .map(String::as_str)
+        == Some("Bearer second-jwt")));
+}
+
+#[tokio::test]
+async fn manager_login_errors_do_not_return_reflected_credentials() {
+    let (base, _, _server) = spawn_mock_manager(
+        ["HTTP/1.1 401 Unauthorized", "HTTP/1.1 402 Payment Required"]
+            .into_iter()
+            .map(|status| {
+                json_script(
+                    "/auth/login-by-password",
+                    status,
+                    serde_json::json!({
+                        "message": "upstream text\nfixture-secret",
+                        "redirectUrl": "https://example.com/fixture-secret"
+                    }),
+                )
+            })
+            .collect(),
+    )
+    .await;
+    let client = test_manager_client();
+    let unauthorized = client
+        .login(Some(base.clone()), "fixture@example.com", "fixture-secret")
+        .await
+        .unwrap_err();
+    let payment = client
+        .login(Some(base), "fixture@example.com", "fixture-secret")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unauthorized,
+        ManagerError::InvalidCredentials { .. }
+    ));
+    assert!(matches!(
+        payment,
+        ManagerError::PaymentRequired {
+            redirect_url: None,
+            ..
+        }
+    ));
+    for error in [unauthorized, payment] {
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains("fixture-secret"));
+    }
+}
+
+#[tokio::test]
+async fn manager_credentials_do_not_follow_redirects_to_other_base_urls() {
+    let (target, captured, _target_server) = spawn_mock_manager(Vec::new()).await;
+    for redirect in [
+        "/second/auth/login-by-password?reflected=fixture-password".to_owned(),
+        format!("{target}/auth/login-by-password"),
+    ] {
+        let mut response = raw_script(
+            "/first/auth/login-by-password",
+            "HTTP/1.1 307 Temporary Redirect",
+            "",
+            "text/plain",
+        );
+        response.redirect_location = Some(redirect);
+        let (base, requests, _server) = spawn_mock_manager(vec![response]).await;
+        let error = test_manager_client()
+            .login(
+                Some(format!("{base}/first")),
+                "fixture@example.com",
+                "fixture-password",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ManagerError::Other { status: 307, .. }),
+            "{error:?}"
+        );
+        assert_eq!(requests.lock().await.len(), 1);
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains("fixture-password"));
+    }
+    assert!(captured.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -1024,11 +1170,15 @@ async fn manager_environments_share_local_computers_across_login_restore_and_log
         .await;
         let first = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
         first
-            .set_login_environment(environment, None)
+            .set_login_environment(environment.clone(), None)
             .await
             .unwrap();
         first
-            .login(environment, "client@example.com", "fixture-password")
+            .login(
+                environment.clone(),
+                "client@example.com",
+                "fixture-password",
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -3149,10 +3299,10 @@ async fn retired_beta_restore_does_not_reuse_credentials_and_allows_fresh_login(
         ])
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let settings = Arc::new(settings_for_environment(&directory, environment));
+        let settings = Arc::new(settings_for_environment(&directory, environment.clone()));
         let secrets = InMemorySecretStore::shared();
         let old = test_context_coordinator(base.clone(), settings.clone(), secrets.clone());
-        old.login(environment, "client@example.com", "secret")
+        old.login(environment.clone(), "client@example.com", "secret")
             .await
             .unwrap();
         let path = settings.global_manager_session_path();
@@ -3169,7 +3319,7 @@ async fn retired_beta_restore_does_not_reuse_credentials_and_allows_fresh_login(
         assert!(snapshot.context_key.is_none());
         assert!(snapshot.environment.is_none());
         upgraded
-            .login(environment, "client@example.com", "fresh-password")
+            .login(environment.clone(), "client@example.com", "fresh-password")
             .await
             .unwrap();
         assert_eq!(

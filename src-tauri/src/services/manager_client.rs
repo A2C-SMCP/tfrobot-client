@@ -679,6 +679,9 @@ impl ManagerClient {
         // - Manager 调用本身很少（login + list + connection-info），性能影响可忽略
         let http = reqwest::Client::builder()
             .user_agent(user_agent)
+            // Redirects can forward credentials outside the selected Manager base URL,
+            // even between gateway deployments on the same host.
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(0)
             .tcp_keepalive(std::time::Duration::from_secs(10))
             .build()
@@ -882,14 +885,15 @@ impl ManagerClient {
             .read()
             .await
             .as_ref()
-            .and_then(|s| s.environment)
+            .and_then(|s| s.environment.clone())
     }
 
     pub async fn restore_session(
         &self,
         environment: ManagerEnvironment,
     ) -> Result<bool, ManagerError> {
-        self.restore_session_from_base_url(environment, environment.base_url().to_string())
+        let base_url = environment.base_url().to_owned();
+        self.restore_session_from_base_url(environment, base_url)
             .await
     }
 
@@ -928,6 +932,29 @@ impl ManagerClient {
     }
 
     // ───────── HTTP 错误归一化 ─────────
+
+    async fn classify_auth_error(&self, response: reqwest::Response) -> ManagerError {
+        if response.status() == StatusCode::PAYMENT_REQUIRED {
+            // Sign-in endpoints handle credentials. Do not surface server-supplied text or URLs
+            // that could reflect the password or authentication token.
+            return ManagerError::PaymentRequired {
+                message: "Manager payment required".into(),
+                redirect_url: None,
+            };
+        }
+        self.classify_error(response).await
+    }
+
+    async fn classify_session_error(
+        &self,
+        session: &Session,
+        response: reqwest::Response,
+    ) -> ManagerError {
+        if matches!(session.environment, Some(ManagerEnvironment::Custom(_))) {
+            return self.classify_auth_error(response).await;
+        }
+        self.classify_error(response).await
+    }
 
     async fn classify_error(&self, resp: reqwest::Response) -> ManagerError {
         let status = resp.status();
@@ -1001,6 +1028,28 @@ impl ManagerClient {
     ) -> Result<LoginResult, ManagerError> {
         let base = Self::resolve_base_url(base_url)?;
         let environment = ManagerEnvironment::from_base_url(&base);
+        self.login_to_endpoint(base, environment, identifier, password)
+            .await
+    }
+
+    pub(crate) async fn login_in_environment(
+        &self,
+        base: String,
+        environment: ManagerEnvironment,
+        identifier: &str,
+        password: &str,
+    ) -> Result<LoginResult, ManagerError> {
+        self.login_to_endpoint(base, Some(environment), identifier, password)
+            .await
+    }
+
+    async fn login_to_endpoint(
+        &self,
+        base: String,
+        environment: Option<ManagerEnvironment>,
+        identifier: &str,
+        password: &str,
+    ) -> Result<LoginResult, ManagerError> {
         let url = format!("{base}/auth/login-by-password");
         let (phone, email) = if identifier.contains('@') {
             (None, Some(identifier))
@@ -1021,14 +1070,12 @@ impl ManagerClient {
             .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
-            let body = resp.text().await.unwrap_or_default();
             return Err(ManagerError::InvalidCredentials {
-                message: extract_message(&body)
-                    .unwrap_or_else(|| "用户名、邮箱或密码错误".to_string()),
+                message: "invalid credentials".into(),
             });
         }
         if !resp.status().is_success() {
-            return Err(self.classify_error(resp).await);
+            return Err(self.classify_auth_error(resp).await);
         }
 
         let envelope: ApiEnvelope<LoginData> = resp
@@ -1089,7 +1136,7 @@ impl ManagerClient {
             .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
         if !resp.status().is_success() {
-            return Err(self.classify_error(resp).await);
+            return Err(self.classify_auth_error(resp).await);
         }
 
         let envelope: ApiEnvelope<AuthenticatedPayload> = resp
@@ -1126,7 +1173,7 @@ impl ManagerClient {
                 .await
                 .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
             if !resp.status().is_success() {
-                return Err(self.classify_error(resp).await);
+                return Err(self.classify_auth_error(resp).await);
             }
             let envelope: ApiEnvelope<ManagerCurrentUser> = resp
                 .json()
@@ -1157,7 +1204,7 @@ impl ManagerClient {
                 .await
                 .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
             if !response.status().is_success() {
-                return Err(self.classify_error(response).await);
+                return Err(self.classify_auth_error(response).await);
             }
             let envelope: ApiEnvelope<ManagerAccountListPayload> = response
                 .json()
@@ -1191,7 +1238,7 @@ impl ManagerClient {
             .await
             .map_err(|error| ManagerError::NetworkError(flatten_reqwest_err(error)))?;
         if !response.status().is_success() {
-            return Err(self.classify_error(response).await);
+            return Err(self.classify_auth_error(response).await);
         }
         let envelope: ApiEnvelope<SwitchAccountPayload> = response
             .json()
@@ -1235,7 +1282,7 @@ impl ManagerClient {
                 .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
             if !resp.status().is_success() {
-                return Err(self.classify_error(resp).await);
+                return Err(self.classify_session_error(&session, resp).await);
             }
             let envelope: ApiEnvelope<ListResponse<DigitalEmployeeBrief>> = resp
                 .json()
@@ -1280,7 +1327,7 @@ impl ManagerClient {
                 .map_err(|e| ManagerError::NetworkError(flatten_reqwest_err(e)))?;
 
             if !resp.status().is_success() {
-                return Err(self.classify_error(resp).await);
+                return Err(self.classify_session_error(&session, resp).await);
             }
             let envelope: ApiEnvelope<ConnectionInfoResponse> = resp
                 .json()
@@ -1337,19 +1384,6 @@ fn extract_error_code(body: &str) -> Option<String> {
         .ok()
         .and_then(|p| p.error_code)
         .filter(|s| !s.is_empty())
-}
-
-/// 登录错误响应沿用 Manager 的用户可读 message，避免把凭据错误误报成会话过期。
-fn extract_message(body: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct MessageProbe {
-        #[serde(default)]
-        message: Option<String>,
-    }
-    serde_json::from_str::<MessageProbe>(body)
-        .ok()
-        .and_then(|probe| probe.message)
-        .filter(|message| !message.trim().is_empty())
 }
 
 fn strip_trailing_slash(url: String) -> String {
