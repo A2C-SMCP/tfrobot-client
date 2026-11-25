@@ -1368,6 +1368,14 @@
   "settings": {
     "title": "Settings",
     "appearance": "Appearance",
+    "loginEnvironment": "Sign-in environment",
+    "loginEnvironmentHint": "Development builds and installed builds on this device use this selection.",
+    "managerCustomAddress": "Manager server address",
+    "managerCustomAddressInvalid": "Enter a complete HTTP or HTTPS URL without credentials, a query, or a fragment.",
+    "loginEnvironmentConfirmTitle": "Change the sign-in environment?",
+    "loginEnvironmentConfirmDescription": "You’ll be signed out and active Manager connections will close. Sign in again to use {{environment}}.",
+    "loginEnvironmentConfirm": "Switch and sign out",
+    "loginEnvironmentSaveFailed": "Could not switch the sign-in environment. Check the current selection and try again.",
     "runtime": "Runtime",
     "data": "Data",
     "permissions": "Permissions & security",
@@ -1437,7 +1445,7 @@
       "keychain_error": "Failed to read or write the secure credential store.",
       "token_exchange": "Could not obtain a connection token for this robot. Please try again.",
       "signing_unavailable": "Secure connect is temporarily unavailable (token signing not ready). Please try again shortly.",
-      "environment_not_allowed": "This build does not support that environment. Sign in to Production."
+      "login_environment_changed": "The sign-in environment changed. Check the selected environment and enter your password again."
     }
   },
   "managerAccount": {
@@ -1460,12 +1468,12 @@
       "description": "Sign in to pick a digital employee and auto-fill the SMCP connection.",
       "credentialHint": "Signing in reads saved credentials from your system keychain. Declining stops this sign-in only.",
       "environment": "Environment",
-      "environmentHint": "The client configures the Manager address for the selected environment.",
-      "environmentRequired": "Environment is required",
+      "environmentHint": "Change the sign-in environment in Settings.",
+      "insecureCustomAddress": "This HTTP address sends sign-in credentials without encryption.",
       "environments": {
         "staging": "Staging",
         "prod": "Production (including Beta)",
-        "test": "Test"
+        "custom": "Custom environment"
       },
       "identifier": "Phone or email",
       "identifierRequired": "Phone or email is required",
@@ -1474,8 +1482,7 @@
       "submit": "Sign In",
       "logout": "Sign Out",
       "logoutSuccess": "Signed out successfully",
-      "productionOnly": "Distributed builds connect to Production only.",
-      "environmentPolicyFailed": "Could not load the environment policy. Please retry."
+      "environmentLoadFailed": "Could not load the sign-in environment."
     },
     "accountSelection": {
       "title": "Choose an account",

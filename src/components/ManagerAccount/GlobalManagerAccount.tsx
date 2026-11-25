@@ -22,7 +22,9 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  managerCustomAddress,
   managerContextScope,
+  managerEnvironmentKind,
   useManagerStore,
   type ManagerError,
 } from '@/stores/managerStore';
@@ -48,6 +50,8 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const {
+    signInRequest,
+    loginEnvironmentChanging,
     context,
     pendingAccountSelection,
     identityLoading,
@@ -63,6 +67,14 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
     && context.account !== null
     && context.organization !== null;
   const authenticatedScope = managerContextScope(context);
+  const customAddress = managerCustomAddress(context.environment);
+
+  const handledSignInRequest = useRef(signInRequest);
+  useEffect(() => {
+    if (handledSignInRequest.current === signInRequest) return;
+    handledSignInRequest.current = signInRequest;
+    setOpen(true);
+  }, [signInRequest]);
 
   useEffect(() => {
     if (!open || authenticatedScope === null) return;
@@ -123,7 +135,10 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
             key: 'environment',
             label: t('managerAccount.global.environment'),
             children: context.environment
-              ? t(`managerAccount.login.environments.${context.environment}`)
+              ? <Space direction="vertical" size={0}>
+                <Text>{t(`managerAccount.login.environments.${managerEnvironmentKind(context.environment)}`)}</Text>
+                {customAddress && <Text style={{ overflowWrap: 'anywhere' }}>{customAddress}</Text>}
+              </Space>
               : '—',
           },
           {
@@ -161,7 +176,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
                   <Button
                     type="text"
                     className={styles.accountAction}
-                    disabled={identityLoading || current}
+                    disabled={identityLoading || loginEnvironmentChanging || current}
                     aria-current={current ? 'true' : undefined}
                     onClick={() => void handleSwitch(account.accountId)}
                   >
@@ -192,6 +207,7 @@ export function GlobalManagerAccount({ onOpenPermissionHelp }: GlobalManagerAcco
           className={styles.logoutButton}
           icon={<LogoutOutlined />}
           loading={identityLoading}
+          disabled={loginEnvironmentChanging}
           onClick={() => void handleLogout()}
         >
           {t('managerAccount.login.logout')}
