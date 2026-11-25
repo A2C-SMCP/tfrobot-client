@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792235522826,
+  "lastUpdate": 1795607034719,
   "repoUrl": "https://github.com/A2C-SMCP/tfrobot-client",
   "entries": {
     "Benchmark": [
@@ -671,6 +671,88 @@ window.BENCHMARK_DATA = {
             "name": "sdk_config/add_config",
             "value": 871693,
             "range": "± 11709",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "8985917+huruize007@user.noreply.gitee.com",
+            "name": "huruize"
+          },
+          "committer": {
+            "email": "8985917+huruize007@user.noreply.gitee.com",
+            "name": "huruize"
+          },
+          "distinct": true,
+          "id": "0e87990d1ce05d482ae87cb025e01c34558ba8eb",
+          "message": "chore(chat): upgrade Chat Kit to 0.13.0\n\nPort the existing diagnostic-mode regression tests from the 0.11.0 migration.",
+          "timestamp": "2026-11-25T19:30:38+08:00",
+          "tree_id": "46df4441f066ed6f6aaa7e05948d4da9e0e63d18",
+          "url": "https://github.com/A2C-SMCP/tfrobot-client/commit/0e87990d1ce05d482ae87cb025e01c34558ba8eb"
+        },
+        "date": 1795607034067,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "log_write_single",
+            "value": 104545,
+            "range": "± 48224",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/10",
+            "value": 19864,
+            "range": "± 320",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/100",
+            "value": 93091,
+            "range": "± 1475",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_limit/1000",
+            "value": 423498,
+            "range": "± 6742",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_keyword_filter",
+            "value": 2175731,
+            "range": "± 122921",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_query/with_level_filter",
+            "value": 535128,
+            "range": "± 6355",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "log_cleanup_10k",
+            "value": 9282818,
+            "range": "± 1165802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/load_50_configs",
+            "value": 242271,
+            "range": "± 4789",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/save_50_configs",
+            "value": 424062,
+            "range": "± 34839",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sdk_config/add_config",
+            "value": 689161,
+            "range": "± 11232",
             "unit": "ns/iter"
           }
         ]
