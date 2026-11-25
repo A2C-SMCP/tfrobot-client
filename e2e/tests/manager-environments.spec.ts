@@ -1,46 +1,112 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { setupInvokeMock } from '../fixtures/mock-invoke';
 
-test('development offers fixed environments and remembers selection across launches', async ({ page }) => {
-  await setupInvokeMock(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: /Sign In/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Manager Account' });
-  await expect(dialog.getByText('Test', { exact: true })).toBeVisible();
-  await dialog.getByText('Test', { exact: true }).click();
-  const options = page.locator('.ant-select-item-option');
-  await expect(options.filter({ hasText: /^Test$/ })).toBeVisible();
-  await expect(options.filter({ hasText: /^Production \(including Beta\)$/ })).toBeVisible();
-  await options.filter({ hasText: /^Staging$/ }).click();
-  await page.reload();
-  await page.getByRole('button', { name: /Sign In/ }).click();
-  await expect(dialog.getByText('Staging', { exact: true })).toBeVisible();
-  await dialog.getByLabel('Phone or email').fill('client@example.com');
-  await dialog.getByLabel('Password', { exact: true }).fill('fixture-password');
-  await dialog.getByRole('button', { name: /Sign In/ }).click();
-  await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_INVOKES__: { cmd: string; args?: unknown }[] }).__TAURI_INVOKES__;
-    return calls.find((call) => call.cmd === 'manager_login')?.args;
-  })).toEqual({ environment: 'staging', identifier: 'client@example.com', password: 'fixture-password' });
-});
+async function openEnvironmentSettings(page: Page) {
+  await page.getByRole('menuitem', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Sign-in environment' }).click();
+  return page.getByRole('tabpanel', { name: 'Sign-in environment' });
+}
 
-test('packaged UI ignores saved test choice and sends only prod', async ({ page }) => {
+async function chooseEnvironment(page: Page, name: string) {
+  await page.getByRole('combobox', { name: 'Sign-in environment' }).press('ArrowDown');
+  await page.locator('.ant-select-item-option').filter({ hasText: name }).click();
+}
+
+function observedInvokes(page: Page, command: string) {
+  return page.evaluate((cmd) => {
+    const calls = (window as unknown as { __TAURI_INVOKES__: { cmd: string; args?: unknown }[] }).__TAURI_INVOKES__;
+    return calls.filter((call) => call.cmd === cmd).map((call) => call.args);
+  }, command);
+}
+
+test('uses the saved sign-in environment from Settings after reloading', async ({ page }) => {
   await setupInvokeMock(page, {
-    get_manager_environment_policy: {
-      buildMode: 'production', allowedEnvironments: ['prod'], defaultEnvironment: 'prod',
-    },
+    manager_login: { kind: 'authenticated', user: { userId: '9', accountId: '16', accountName: 'fixture' } },
   });
+  // The retired development-only browser preference must not select the server on upgrade.
   await page.addInitScript(() => localStorage.setItem('tfrobot-client.development.managerEnvironment', 'test'));
   await page.goto('/');
-  await page.getByRole('button', { name: /Sign In/ }).click();
+
+  const settings = await openEnvironmentSettings(page);
+  await expect(settings.getByText('Production (including Beta)', { exact: true })).toBeVisible();
+  await chooseEnvironment(page, 'Custom environment');
+  const address = settings.getByLabel('Manager server address');
+  await address.fill('ftp://manager.example.com');
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(settings.getByText(/Enter a complete HTTP or HTTPS URL/)).toBeVisible();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([]);
+
+  const environment = { custom: 'https://manager.example.com/gateway' };
+  await address.fill('HTTPS://MANAGER.EXAMPLE.COM/gateway/');
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(address).toHaveValue(environment.custom);
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
+    { environment, confirmedRevision: null },
+  ]);
+
+  await page.reload();
+  await page.getByRole('button', { name: /Sign In/i }).click();
   const dialog = page.getByRole('dialog', { name: 'Manager Account' });
-  await expect(dialog.getByText('Production (including Beta)', { exact: true })).toBeVisible();
+  await expect(dialog.getByText(environment.custom, { exact: true })).toBeVisible();
   await expect(dialog.getByRole('combobox')).toHaveCount(0);
   await dialog.getByLabel('Phone or email').fill('client@example.com');
   await dialog.getByLabel('Password', { exact: true }).fill('fixture-password');
-  await dialog.getByRole('button', { name: /Sign In/ }).click();
-  await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_INVOKES__: { cmd: string; args?: { environment: string } }[] }).__TAURI_INVOKES__;
-    return calls.find((call) => call.cmd === 'manager_login')?.args?.environment;
-  })).toBe('prod');
+  await dialog.getByRole('button', { name: /Sign In/i }).click();
+  await expect.poll(() => observedInvokes(page, 'manager_login')).toEqual([
+    { expectedEnvironment: environment, identifier: 'client@example.com', password: 'fixture-password' },
+  ]);
+});
+
+test('confirms a signed-in custom address change and opens the new sign-in form', async ({ page }) => {
+  const original = { custom: 'https://old-manager.example.com' };
+  const environment = { custom: 'https://new-manager.example.com' };
+  await setupInvokeMock(page, {
+    get_manager_login_environment: original,
+    manager_get_context: {
+      revision: 8, authState: 'authenticated', environment: original,
+      contextKey: { environment: original, accountId: '16', organizationId: '42' },
+      user: { id: '9', nickname: 'Fixture', email: '', phone: '' },
+      account: { id: '16', name: 'Fixture Account', nickname: '', avatar: '', employeeNo: '' },
+      organization: { id: '42', name: 'Fixture Organization', organizationType: 'enterprise' },
+      permissions: [],
+    },
+  });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Fixture Organization, Fixture Account' })).toBeVisible();
+  const settings = await openEnvironmentSettings(page);
+  const address = settings.getByLabel('Manager server address');
+  await expect(address).toHaveValue(original.custom);
+  await address.fill(environment.custom);
+  const save = settings.getByRole('button', { name: 'Save' });
+  const confirmation = page.getByRole('dialog', { name: 'Change the sign-in environment?' });
+  await save.click();
+  await expect(confirmation.getByText(new RegExp(environment.custom))).toBeVisible();
+  await confirmation.getByRole('button', { name: 'Cancel' }).click();
+  await expect(confirmation).toBeHidden();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([]);
+
+  await save.click();
+  await confirmation.getByRole('button', { name: 'Switch and sign out' }).click();
+  const signIn = page.getByRole('dialog', { name: 'Manager Account' });
+  await expect(signIn.getByText(environment.custom, { exact: true })).toBeVisible();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
+    { environment, confirmedRevision: 8 },
+  ]);
+});
+
+test('can replace an invalid stored custom address from Settings', async ({ page }) => {
+  await setupInvokeMock(page, { get_manager_login_environment: { custom: null } });
+  await page.goto('/');
+  const settings = await openEnvironmentSettings(page);
+  await expect(settings.getByText('Could not load the sign-in environment.')).toBeVisible();
+
+  await chooseEnvironment(page, 'Custom environment');
+  const environment = { custom: 'https://manager.example.com' };
+  const address = settings.getByLabel('Manager server address');
+  await address.fill(environment.custom);
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(settings.getByText('Could not load the sign-in environment.')).toBeHidden();
+  expect(await observedInvokes(page, 'set_manager_login_environment')).toEqual([
+    { environment, confirmedRevision: null },
+  ]);
 });

@@ -54,11 +54,7 @@ const signedOutManagerContext = {
 };
 
 export const mockResponses: Record<string, unknown> = {
-  get_manager_environment_policy: {
-    buildMode: 'development',
-    allowedEnvironments: ['test', 'staging', 'prod'],
-    defaultEnvironment: 'test',
-  },
+  get_manager_login_environment: 'prod',
   manager_get_context: signedOutManagerContext,
   manager_restore_session: null,
   enable_computer_runtime_events: [
@@ -497,7 +493,24 @@ export async function setupInvokeMock(page: Page, overrides?: Record<string, unk
   await page.addInitScript((data) => {
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallbackId = 1;
+    const environmentPreference = 'fixture.managerLoginEnvironment';
     const getMockResponse = (responses: Record<string, unknown>, cmd: string, args?: unknown) => {
+      if (cmd === 'get_manager_login_environment') {
+        const saved = localStorage.getItem(environmentPreference);
+        return saved ? JSON.parse(saved) : responses[cmd];
+      }
+      if (cmd === 'set_manager_login_environment') {
+        const { environment } = args as { environment: string | { custom: string } };
+        localStorage.setItem(environmentPreference, JSON.stringify(environment));
+        const previous = responses.manager_get_context as { revision: number };
+        responses.manager_get_context = {
+          revision: previous.revision + 1,
+          authState: 'signed_out',
+          environment: null, contextKey: null, user: null, account: null, organization: null,
+          permissions: [],
+        };
+        return environment;
+      }
       if (cmd === 'get_mcp_servers') {
         const instanceId = typeof args === 'object' && args !== null && 'instanceId' in args
           ? String((args as { instanceId: unknown }).instanceId)

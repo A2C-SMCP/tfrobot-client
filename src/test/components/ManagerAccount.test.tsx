@@ -8,13 +8,17 @@ import type {
   ManagerAccountSummary,
   ManagerContextSnapshot,
   ManagerError,
-  ManagerEnvironmentPolicy,
+  ManagerEnvironment,
 } from '@/stores/managerStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import i18n from '@/i18n';
 
 type ManagerStoreMock = {
   environment: 'staging' | 'prod' | null;
+  loginEnvironment: ManagerEnvironment | null;
+  loginEnvironmentLoadFailed: boolean;
+  loginEnvironmentChanging: boolean;
+  loadLoginEnvironment: ReturnType<typeof vi.fn>;
   session: UserInfo | null;
   pendingAccountSelection: AccountOption[] | null;
   onboardingUserId: string | null;
@@ -44,6 +48,10 @@ type ManagerStoreMock = {
 
 const mockStore: ManagerStoreMock = {
   environment: null,
+  loginEnvironment: 'prod',
+  loginEnvironmentLoadFailed: false,
+  loginEnvironmentChanging: false,
+  loadLoginEnvironment: vi.fn(),
   session: null,
   pendingAccountSelection: null,
   onboardingUserId: null,
@@ -92,12 +100,6 @@ import { GlobalManagerAccount } from '@/components/ManagerAccount/GlobalManagerA
 
 const mockUseManagerStore = vi.mocked(useManagerStore);
 const mockedInvoke = vi.mocked(invoke);
-const developmentPolicy: ManagerEnvironmentPolicy = {
-  buildMode: 'development',
-  allowedEnvironments: ['test', 'staging', 'prod'],
-  defaultEnvironment: 'test',
-};
-
 function adaptMock(store: ManagerStoreMock) {
   let context: ManagerContextSnapshot;
   if (store.session) {
@@ -188,9 +190,7 @@ function applyMock(overrides: Partial<ManagerStoreMock> = {}) {
 describe('ManagerAccount', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorage.clear();
-    mockedInvoke.mockImplementation(async (command) => command === 'get_manager_environment_policy'
-      ? developmentPolicy : { connected: false });
+    mockedInvoke.mockResolvedValue({ connected: false });
     // connectionStore 是真实 store（未 mock），复位到断开状态，让 EmployeeList 默认渲染"连接"而非"已连接"
     useConnectionStore.setState({
       statuses: {},
@@ -201,21 +201,17 @@ describe('ManagerAccount', () => {
   });
 
   describe('LoginForm', () => {
-    it.each([false, true])('offers only supported environments (embedded=%s)', async (embedded) => {
+    it.each([false, true])('displays the configured environment (embedded=%s)', (embedded) => {
+      applyMock({ loginEnvironment: 'staging' });
       render(<LoginForm embedded={embedded} />);
-      fireEvent.mouseDown(await screen.findByRole('combobox'));
-      expect(screen.getAllByText('Test').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Staging').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Production (including Beta)').length).toBeGreaterThan(0);
-      expect(screen.queryByText('Beta')).not.toBeInTheDocument();
+      expect(screen.getByText('Staging')).toBeInTheDocument();
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     });
 
     it('renders the sign-in heading and environment hint', () => {
       render(<LoginForm />);
       expect(screen.getByText('Sign in to TFRSManager')).toBeInTheDocument();
-      expect(
-        screen.getByText('The client configures the Manager address for the selected environment.'),
-      ).toBeInTheDocument();
+      expect(screen.getByText('Change the sign-in environment in Settings.')).toBeInTheDocument();
     });
 
     it('calls login with form values', async () => {
@@ -233,44 +229,33 @@ describe('ManagerAccount', () => {
       fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
 
       await waitFor(() => {
-        expect(login).toHaveBeenCalledWith('test', '13800138008', 'Test@123456');
+        expect(login).toHaveBeenCalledWith('prod', '13800138008', 'Test@123456');
       });
     });
 
-    it.each(['staging', 'prod'])('remembers development choice %s', async (environment) => {
-      localStorage.setItem('tfrobot-client.development.managerEnvironment', environment);
-      render(<LoginForm />);
-      await screen.findByRole('combobox');
-      expect(screen.getByText(environment === 'staging' ? 'Staging' : 'Production (including Beta)')).toBeInTheDocument();
+    it('disables sign-in and offers retry when the environment is unavailable', () => {
+      const loadLoginEnvironment = vi.fn();
+      applyMock({ loginEnvironment: null, loginEnvironmentLoadFailed: true, loadLoginEnvironment });
+      const view = render(<LoginForm />);
+      expect(screen.getByRole('button', { name: /Sign In/i })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(loadLoginEnvironment).toHaveBeenCalledTimes(2);
+
+      applyMock({ loginEnvironment: 'test', loadLoginEnvironment });
+      view.rerender(<LoginForm />);
+      expect(screen.getByText('Custom environment')).toBeInTheDocument();
+      expect(screen.getByText('https://rest.test.turingfocus.cn')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Sign In/i })).toBeEnabled();
     });
 
-    it('ignores development preferences in a packaged client and submits prod', async () => {
-      localStorage.setItem('tfrobot-client.development.managerEnvironment', 'staging');
-      mockedInvoke.mockResolvedValue({ buildMode: 'production', allowedEnvironments: ['prod'], defaultEnvironment: 'prod' });
-      const login = vi.fn().mockResolvedValue({ kind: 'authenticated' });
-      applyMock({ login });
-      render(<LoginForm />);
-      await screen.findByText('Production (including Beta)');
-      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-      fireEvent.change(screen.getByLabelText('Phone or email'), { target: { value: 'client@example.com' } });
+    it('clears the password when the displayed environment changes', () => {
+      const view = render(<LoginForm />);
       fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
-      fireEvent.click(screen.getByRole('button', { name: /Sign In/i }));
-      await waitFor(() => expect(login).toHaveBeenCalledWith('prod', 'client@example.com', 'secret'));
+      expect(screen.getByLabelText('Password')).toHaveValue('secret');
+      applyMock({ loginEnvironment: 'staging' });
+      view.rerender(<LoginForm />);
+      expect(screen.getByLabelText('Password')).toHaveValue('');
     });
-
-    it.each([null, { buildMode: 'production', allowedEnvironments: ['staging'], defaultEnvironment: 'staging' }])(
-      'fails closed on an unavailable or invalid backend policy', async (response) => {
-        mockedInvoke.mockResolvedValue(response);
-        render(<LoginForm />);
-        await screen.findByRole('button', { name: 'Retry' });
-        expect(screen.getByRole('button', { name: /Sign In/i })).toBeDisabled();
-        expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-        mockedInvoke.mockResolvedValue(developmentPolicy);
-        fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-        await screen.findByRole('combobox');
-        expect(screen.getByRole('button', { name: /Sign In/i })).toBeEnabled();
-      },
-    );
 
     it('renders localized error message', () => {
       applyMock({ error: { kind: 'unauthorized' } });

@@ -1,22 +1,69 @@
 use serde::{Deserialize, Serialize};
 
 /// Canonical Manager deployments. Beta uses Production, never a separate credential scope.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ManagerEnvironment {
+    // Retain the old Test identity for saved sessions and Computer bindings.
     Test,
     Staging,
     // Beta 当前就是正式环境，统一使用 prod 的服务地址和凭据作用域，不单独划分环境。
+    #[default]
     #[serde(alias = "beta")]
     Prod,
+    Custom(ManagerBaseUrl),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(try_from = "String")]
+pub struct ManagerBaseUrl(String);
+
+impl TryFrom<String> for ManagerBaseUrl {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let input = value.trim();
+        let error =
+            "Use an absolute HTTP or HTTPS Manager URL without credentials, a query, or a fragment";
+        let url = url::Url::parse(input).map_err(|_| error)?;
+        if !input
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(url.scheme()))
+            || !matches!(url.scheme(), "http" | "https")
+            || !url.has_host()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(error);
+        }
+        Ok(Self(url.as_str().trim_end_matches('/').to_owned()))
+    }
 }
 
 impl ManagerEnvironment {
-    pub const fn base_url(self) -> &'static str {
+    pub(crate) fn preserve_legacy_test_identity(self) -> Self {
+        if matches!(&self, Self::Custom(url) if url.0 == Self::Test.base_url()) {
+            return Self::Test;
+        }
+        self
+    }
+
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Test | Self::Custom(_) => "custom",
+            Self::Staging => "staging",
+            Self::Prod => "prod",
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
         match self {
             Self::Test => "https://rest.test.turingfocus.cn",
             Self::Staging => "https://api-staging.turingfocus.cn",
             Self::Prod => "https://api.turingfocus.cn",
+            Self::Custom(url) => &url.0,
         }
     }
 
@@ -25,57 +72,6 @@ impl ManagerEnvironment {
         [Self::Test, Self::Staging, Self::Prod]
             .into_iter()
             .find(|environment| environment.base_url() == normalized)
-    }
-}
-
-/// Tauri's `dev` cfg distinguishes a dev server from packaged builds, including `build --debug`.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ClientBuildMode {
-    Development,
-    Production,
-}
-
-impl ClientBuildMode {
-    pub const fn current() -> Self {
-        if cfg!(dev) {
-            Self::Development
-        } else {
-            Self::Production
-        }
-    }
-
-    pub fn policy(self) -> ManagerEnvironmentPolicy {
-        match self {
-            Self::Development => ManagerEnvironmentPolicy {
-                build_mode: self,
-                allowed_environments: vec![
-                    ManagerEnvironment::Test,
-                    ManagerEnvironment::Staging,
-                    ManagerEnvironment::Prod,
-                ],
-                default_environment: ManagerEnvironment::Test,
-            },
-            Self::Production => ManagerEnvironmentPolicy {
-                build_mode: self,
-                allowed_environments: vec![ManagerEnvironment::Prod],
-                default_environment: ManagerEnvironment::Prod,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManagerEnvironmentPolicy {
-    pub build_mode: ClientBuildMode,
-    pub allowed_environments: Vec<ManagerEnvironment>,
-    pub default_environment: ManagerEnvironment,
-}
-
-impl ManagerEnvironmentPolicy {
-    pub fn allows(&self, environment: ManagerEnvironment) -> bool {
-        self.allowed_environments.contains(&environment)
     }
 }
 
@@ -123,19 +119,29 @@ mod tests {
     }
 
     #[test]
-    fn packaged_policy_only_accepts_production() {
-        let policy = ClientBuildMode::Production.policy();
-        assert_eq!(policy.default_environment, ManagerEnvironment::Prod);
-        assert!(policy.allows(ManagerEnvironment::Prod));
-        assert!(!policy.allows(ManagerEnvironment::Test));
-        assert!(!policy.allows(ManagerEnvironment::Staging));
-    }
+    fn custom_environment_normalizes_urls_and_rejects_invalid_addresses() {
+        let custom = serde_json::json!({ "custom": " HTTPS://MANAGER.EXAMPLE.COM:443/gateway/ " });
+        let environment: ManagerEnvironment = serde_json::from_value(custom).unwrap();
+        assert_eq!(
+            environment.base_url(),
+            "https://manager.example.com/gateway"
+        );
+        assert_eq!(
+            serde_json::to_value(environment).unwrap(),
+            serde_json::json!({ "custom": "https://manager.example.com/gateway" })
+        );
 
-    #[test]
-    fn development_policy_offers_all_manager_environments() {
-        let policy = ClientBuildMode::Development.policy();
-        assert_eq!(policy.allowed_environments.len(), 3);
-        assert_eq!(policy.default_environment, ManagerEnvironment::Test);
+        for invalid in [
+            "",
+            "manager.example.com",
+            "ftp://manager.example.com",
+            "https://user:password@manager.example.com",
+            "https://manager.example.com?",
+            "https://manager.example.com#",
+        ] {
+            let value = serde_json::json!({ "custom": invalid });
+            assert!(serde_json::from_value::<ManagerEnvironment>(value).is_err());
+        }
     }
 
     #[test]
@@ -150,17 +156,5 @@ mod tests {
         if let Some(identifier) = development.get("identifier") {
             assert_eq!(identifier, &installed["identifier"]);
         }
-    }
-
-    #[test]
-    fn current_policy_matches_tauri_build_mode_not_debug_assertions() {
-        assert_eq!(
-            ClientBuildMode::current(),
-            if cfg!(feature = "custom-protocol") {
-                ClientBuildMode::Production
-            } else {
-                ClientBuildMode::Development
-            }
-        );
     }
 }
