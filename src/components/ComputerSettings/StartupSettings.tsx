@@ -9,7 +9,8 @@ export function StartupSettings({ instance }: { instance: ComputerInstance }) {
   const { t } = useTranslation();
   const [form] = Form.useForm<{ concurrency: number }>();
   const patch = useComputerStore((state) => state.patchGeneral);
-  const draft = useNavigationForm('settings.startup', form, { concurrency: instance.mcpStartConcurrency ?? 5 });
+  const initialValues = { concurrency: instance.mcpStartConcurrency ?? 5 };
+  const draft = useNavigationForm('settings.startup', form, initialValues);
   const submission = useConfigCommit(`${instance.id}:concurrency`, (value: number) => patch(instance.id, { field: 'mcpStartConcurrency', value }));
   const save = async () => {
     if (!draft.dirtyFields.length && submission.state !== 'error') return;
@@ -22,7 +23,7 @@ export function StartupSettings({ instance }: { instance: ComputerInstance }) {
   return <Card size="small" title={t('computer.redesign.startupTitle')}>
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Typography.Text type="secondary">{t('computer.redesign.autoSaveHint')}</Typography.Text>
-      <Form form={form} name={`computer-startup-${instance.id}`} layout="vertical" onValuesChange={(changed) => { draft.onValuesChange(changed); submission.dirty(); }}>
+      <Form form={form} initialValues={initialValues} name={`computer-startup-${instance.id}`} layout="vertical" onValuesChange={(changed) => { draft.onValuesChange(changed); submission.dirty(); }}>
         <Form.Item name="concurrency" label={t('computer.form.mcpStartConcurrency')}
           rules={[{ required: true, type: 'number', min: 1, max: 64 }]}
           extra={<Space direction="vertical">{t('computer.form.mcpStartConcurrencyHint')}<ConfigSaveStatus state={submission.state === 'saved' && draft.dirtyFields.length ? 'dirty' : submission.state} onRetry={() => void save()} /></Space>}>
