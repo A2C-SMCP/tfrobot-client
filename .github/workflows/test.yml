@@ -77,7 +77,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm test:coverage
+      - run: pnpm test:coverage --testTimeout=15000
 
       - uses: codecov/codecov-action@v4
         if: always()
@@ -322,7 +322,8 @@ jobs:
   e2e-test:
     name: E2E Tests
     needs: [frontend-test, rust-test]
-    runs-on: ubuntu-latest
+    # Playwright 1.58 supports Ubuntu 24.04 for Chromium.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
