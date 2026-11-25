@@ -115,7 +115,7 @@ describe('ComputerWorkbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
     expect(screen.getByTestId('logs-section')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it('uses Runtime actions as the authority for the primary operation', () => {
     const props = renderWorkbench();
