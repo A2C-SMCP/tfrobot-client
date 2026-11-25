@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-11-25
 
 - Select and remember the Manager sign-in environment in Settings across development and packaged builds. New installations default to Production. Custom environments accept a Manager server address.
+
+- Track whether saved Computer configuration has been applied to a running instance.
+- Update Chat Kit to 0.13.0 and the A2C-SMCP Rust SDK to 0.5.0.
 
 ## 0.3.0 — 2026-10-19
 
