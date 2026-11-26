@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — 2026-11-26
+
+- Make Computer names easier to scan and open, with compact icon actions for starting and connecting.
+- Reorganize Computer details into Workbench, Skills and tools, Desktop Resources, and Logs. Simplify connection and MCP runtime panels.
+- Search skills, filter tools and desktop resources by MCP server, and preview full desktop resource text. Jump from a test call to its log entry.
+
 ## 0.3.1 — 2026-11-25
 
 - Select and remember the Manager sign-in environment in Settings across development and packaged builds. New installations default to Production. Custom environments accept a Manager server address.

@@ -215,7 +215,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # GitHub only exposes draft releases to callers with push access.
+      contents: write
     steps:
       - name: Verify release assets
         env:
