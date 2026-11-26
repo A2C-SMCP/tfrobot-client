@@ -204,7 +204,7 @@ describe('RuntimeInputPrompt', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-    expect(await screen.findByText('The value could not be saved. Retry or view Runtime diagnostics or logs.'))
+    expect(await screen.findByText('The value could not be saved. Retry or open Logs.'))
       .toBeInTheDocument();
     expect(useRuntimeInputStore.getState().requests).toHaveLength(1);
   });
