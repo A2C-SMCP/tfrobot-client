@@ -20,7 +20,15 @@
 }
 
 .identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   min-width: 0;
+}
+
+.identityText {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .identityMeta {
