@@ -1,214 +1,292 @@
-.listHeader {
+.collectionArea {
+  --list-columns: minmax(0, 1.7fr) minmax(140px, .85fr) minmax(106px, .8fr) 110px;
+}
+
+.listHeader, .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 16px;
-  margin: 16px 0 24px;
+  gap: 12px;
 }
 
+.listHeader { margin: 16px 0 22px; }
+.listHeader .listTitle { margin: 0 0 4px; }
+.toolbar { margin-bottom: 14px; }
+.search { width: min(100%, 300px); }
+
 .collectionList {
-  overflow: hidden;
   border: 1px solid var(--ant-color-border-secondary);
   border-radius: 12px;
   background: var(--ant-color-bg-container);
   box-shadow: 0 2px 7px #00000008;
 }
 
-.computerCard {
-  min-width: 0;
-}
-
+.computerCard { min-width: 0; }
 .collectionList .computerCard {
   border: 0;
+  border-block-start: 1px solid var(--ant-color-border-secondary);
   border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
 
-.collectionList .computerCard + .computerCard {
-  border-top: 1px solid var(--ant-color-border-secondary);
+.columnHeaders, .collectionList .cardBody {
+  display: grid;
+  grid-template-columns: var(--list-columns);
+  align-items: center;
+  column-gap: 14px;
+  padding-inline: 18px;
 }
 
-.cardBody {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 185px 240px;
-  align-items: center;
-  gap: 22px;
-  padding: 24px 22px !important;
+.columnHeaders {
+  min-height: 42px;
+  border-radius: 11px 11px 0 0;
+  background: var(--ant-color-fill-alter);
+  color: var(--ant-color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.columnHeaders > :last-child { text-align: end; }
+
+.collectionList .cardBody {
+  min-height: 85px;
+  padding: 14px 18px !important;
 }
 
 .identity {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  align-items: start;
+  gap: 10px;
+  width: 100%;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ant-color-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+@supports (color: color-mix(in srgb, blue, black)) {
+  .identity { color: color-mix(in srgb, var(--ant-color-primary) 60%, var(--ant-color-text)); }
+}
+
+.identity:hover .name { text-decoration-thickness: 2px; }
+.identity:focus-visible {
+  outline: 2px solid var(--ant-color-primary);
+  outline-offset: 3px;
 }
 
 .deviceIcon {
   display: grid;
   place-items: center;
-  flex: 0 0 48px;
-  height: 48px;
-  border: 1px solid var(--ant-color-border-secondary);
-  border-radius: 11px;
-  background: var(--ant-color-fill-alter);
-  color: var(--ant-color-text-secondary);
-  font-size: 27px;
+  flex: 0 0 34px;
+  height: 40px;
+}
+
+.compactComputer {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: 22px;
+  height: 27px;
+  border: 1px solid #706556;
+  border-radius: 4px 4px 3px 3px;
+  background: linear-gradient(135deg, #fff5df 12%, #e5d2b3 75%);
+  box-shadow: inset -2px 0 0 #a8865b45, 0 1px 2px #352c3640;
+}
+.compactComputer::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 1px;
+  height: 2px;
+  border-top: 1px solid #a18b70;
+  background: #c0a98b;
+}
+.monitorScreen {
+  position: absolute;
+  top: 3px;
+  left: 2px;
+  width: 15px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 1px solid #3d4748;
+  border-radius: 3px;
+  background: linear-gradient(145deg, #d6e5db, #a9c4b9 57%, #91aca0);
+  box-shadow: inset 0 0 0 1px #283e4b20, 0 0 0 1px #a8947b;
+}
+.floppySlot {
+  position: absolute;
+  top: 18px;
+  right: 2px;
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: #655c51;
 }
 
 .identityText {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+  display: grid;
+  flex: 1;
+  grid-template-rows: 23px 18px;
   min-width: 0;
 }
-
+.nameLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.nameLine > :global(.anticon) { flex: none; }
+.name, .description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .name {
-  height: auto;
-  max-width: 100%;
-  padding: 0;
-  color: var(--ant-color-text);
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.3px;
-  white-space: normal;
-  text-align: start;
+  font-size: 15px;
+  line-height: 23px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
-
-.description {
+.descriptionLine {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ant-color-text-secondary);
   font-size: 12px;
+  line-height: 18px;
 }
-
-.identifier {
-  margin-top: 5px;
+.idSuffix {
+  flex: none;
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 11px;
-  letter-spacing: -0.3px;
-  overflow-wrap: anywhere;
 }
 
-.metadata {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 7px;
+.status {
+  display: grid;
+  gap: 3px;
+  justify-items: start;
   min-width: 0;
   font-size: 12px;
 }
-
-.metadata :global(.ant-tag) {
+.status :global(.ant-tag) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   margin-inline-end: 0;
 }
+.status :global(.ant-tag)::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.adoption, .adoption :global(.ant-typography), .adoption :global(.ant-btn) {
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 20px;
+}
+.adoption :global(.ant-typography), .adoption :global(.ant-btn) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adoption :global(.ant-btn) {
+  height: 20px;
+  padding: 0 0 1px;
+  border: 0;
+}
+
+.employee { min-width: 0; }
+.employee .employeeLabel { display: none; flex: none; font-size: 12px; }
 
 .actions {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  align-items: start;
-  gap: 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  justify-content: flex-end;
 }
-
-.actions :global(.ant-btn) {
-  grid-column: span 2;
-  height: 28px;
-  padding: 4px 5px;
-  font-size: 11px;
-  color: var(--ant-color-text-secondary);
-}
-
-.actions > :nth-child(-n + 2) {
-  grid-column: span 3;
-}
-
-.actions :global(.ant-btn-dangerous) {
-  color: var(--ant-color-error);
-}
-
-.actions :global(.ant-btn:disabled) {
-  color: var(--ant-color-text-disabled);
-}
-
-.actions .runtimeAction {
+.actions .runtimeAction:not(:disabled):not(:global(.ant-btn-dangerous)) {
   background: var(--ant-color-primary-bg);
+  border-color: var(--ant-color-primary-border);
   color: var(--ant-color-primary);
 }
-
-.actions .runtimeAction:global(.ant-btn-dangerous) {
-  background: var(--ant-color-error-bg);
-  color: var(--ant-color-error);
+.actions .runtimeAction:not(:disabled):not(:global(.ant-btn-dangerous)):hover {
+  background: var(--ant-color-primary-bg-hover);
 }
 
 .collectionGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
 }
-
-.collectionGrid .computerCard {
-  box-shadow: 0 2px 7px #00000008;
-}
-
+.collectionGrid .computerCard { box-shadow: 0 2px 7px #00000008; }
 .collectionGrid .cardBody {
-  grid-template-columns: minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'identity status' 'employee employee' 'actions actions';
+  grid-template-rows: auto 1fr auto;
+  align-items: start;
+  gap: 12px;
   height: 100%;
-  align-content: start;
-  gap: 20px;
+  padding: 16px 15px 12px !important;
 }
-
-.collectionGrid .deviceIcon {
-  color: var(--ant-color-primary);
-  background: var(--ant-color-primary-bg);
-  border-color: transparent;
-}
-
-.collectionGrid .metadata {
-  padding-inline-start: 64px;
-}
-
-.collectionGrid .actions {
+.collectionGrid .identity { grid-area: identity; }
+.collectionGrid .status { grid-area: status; justify-items: end; max-width: 113px; }
+.collectionGrid .employee {
+  grid-area: employee;
   display: flex;
-  flex-wrap: wrap;
-  margin-top: auto;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 8px;
+}
+.collectionGrid .employeeLabel { display: inline; }
+.collectionGrid .actions {
+  grid-area: actions;
+  justify-content: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid var(--ant-color-border-secondary);
+}
+.collectionGrid .actions > :last-child { margin-inline-start: auto; }
+
+@media (max-width: 1360px) {
+  .collectionGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.collectionGrid .actions .runtimeAction {
-  margin-inline-end: auto;
-}
-
-@media (max-width: 1180px) {
-  .cardBody {
-    grid-template-columns: minmax(0, 1fr) 180px;
-    gap: 18px;
+@media (max-width: 1050px) {
+  .columnHeaders { display: none; }
+  .collectionList .computerCard:first-child { border-block-start: 0; }
+  .collectionList .cardBody {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'identity status' 'employee employee' 'actions actions';
+    align-items: start;
+    gap: 10px;
   }
-  .collectionList .actions {
-    grid-column: 1 / -1;
+  .collectionList .identity { grid-area: identity; }
+  .collectionList .status { grid-area: status; justify-items: end; max-width: 150px; }
+  .collectionList .employee {
+    grid-area: employee;
     display: flex;
-    flex-wrap: wrap;
-    padding-inline-start: 64px;
+    justify-content: space-between;
+    gap: 8px;
   }
-  .collectionList .actions .runtimeAction {
-    margin-inline-end: auto;
+  .collectionList .employeeLabel { display: inline; }
+  .collectionList .actions {
+    grid-area: actions;
+    justify-content: flex-start;
+    padding-top: 8px;
+    border-top: 1px solid var(--ant-color-border-secondary);
   }
+  .collectionList .actions > :last-child { margin-inline-start: auto; }
 }
 
-@media (max-width: 760px) {
-  .collectionGrid {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
-  }
-  .cardBody {
-    grid-template-columns: minmax(0, 1fr);
-    padding: 20px 16px !important;
-    gap: 16px;
-  }
-  .metadata {
-    padding-inline-start: 64px;
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
-  .collectionList .actions {
-    padding-inline-start: 0;
-  }
+@media (max-width: 960px) {
+  .collectionGrid { grid-template-columns: minmax(0, 1fr); }
 }

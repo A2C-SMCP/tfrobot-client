@@ -259,6 +259,18 @@
     "attachmentRetryHint": "可在所属消息中重新加载该附件。"
   },
   "computer": {
+    "collection": {
+      "count": "{{count}} 台计算机",
+      "running": "{{count}} 台运行中",
+      "search": "搜索名称或描述",
+      "noMatches": "没有找到匹配的计算机",
+      "status": "运行状态",
+      "employee": "数字员工",
+      "actions": "操作",
+      "more": "{{name}} 更多操作",
+      "editIdentity": "修改名称和描述",
+      "copyIdFailed": "无法复制计算机 ID"
+    },
     "views": {
       "label": "计算机视图",
       "list": "列表",
@@ -640,6 +652,8 @@
       "retry": "重新确认状态",
       "openPlugin": "前往插件 {{name}} 管理",
       "compact": {
+        "pending": "{{count}} 项待采用",
+        "unknown": "采用状态待确认",
         "current": "配置已采用",
         "waiting_start": "等待启动采用",
         "checking": "正在确认配置"
