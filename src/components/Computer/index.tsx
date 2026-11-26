@@ -548,7 +548,6 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
               initialSection={initialSection}
               navigationRevision={navigationRevision}
               onBack={() => { setView('list'); onNavigate?.('computer'); }}
-              onNavigate={onNavigate}
               onOpenSettings={() => onNavigate?.('computer-settings:general')}
               onDelete={() => handleDelete(selectedInstance)}
               onStartStop={() => { void handleStartStop(selectedInstance); }}

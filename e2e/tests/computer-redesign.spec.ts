@@ -7,7 +7,7 @@ async function openComputer(page: Page) {
   await page.getByRole('button', { name: 'Computer A', exact: true }).click();
 }
 
-test('shows one global start action and distinguishes unobserved capabilities from zero', async ({ page }, testInfo) => {
+test('shows one global start action and a compact workbench while stopped', async ({ page }, testInfo) => {
   const instances = mockResponses.list_computer_instances as Array<Record<string, unknown>>;
   await setupInvokeMock(page, {
     list_computer_instances: [{ ...instances[0], running: false, runtime: shutdownRuntime, connected: false, connection: null }],
@@ -21,8 +21,9 @@ test('shows one global start action and distinguishes unobserved capabilities fr
   await expect(page.getByRole('button', { name: 'Start Runtime', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Start All', exact: true })).toHaveCount(0);
   await expect(page.getByText('Not running · Saved configuration will be used on start', { exact: true })).toBeVisible();
-  const capabilities = page.locator('.ant-card').filter({ has: page.getByText('Available in this run', { exact: true }) });
-  await expect(capabilities.getByText('—', { exact: true })).toHaveCount(3);
+  await expect(page.getByText('Available in this run', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Auto-connect on startup', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'MCP Runtime', exact: true })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Workbench', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('Advanced Runtime Diagnostics')).toHaveCount(0);
   await page.getByRole('button', { name: 'Language', exact: true }).click();
@@ -36,6 +37,11 @@ test('switches actual task panels and returns from settings to the selected skil
   await expect(page.getByText('Connection overview', { exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Skill preview' })).toHaveCount(0);
   await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
+  const skills = page.locator('[data-page=workbench-capability-skills]');
+  await expect(skills.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible();
+  await expect(skills.getByRole('button', { name: /Open Local Root/ })).toBeVisible();
+  await expect(skills.getByText('Capabilities available in this run', { exact: true })).toHaveCount(0);
+  await expect(skills.getByRole('button', { name: 'Manage plugins', exact: true })).toHaveCount(0);
   await page.getByPlaceholder('Search skills').fill('keyboard');
   await expect(page.getByText('Connection overview', { exact: true })).toBeHidden();
   await page.getByRole('button', { name: 'Open Computer settings' }).click();

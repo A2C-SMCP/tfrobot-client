@@ -105,35 +105,13 @@
   align-items: start;
 }
 
-.runtimeProblems, .capabilitySummary {
+.runtimeProblems {
   grid-column: 1 / -1;
   min-width: 0;
 }
 
 .runtimeProblems:empty {
   display: none;
-}
-
-.capabilitySummary {
-  background: var(--ant-color-fill-alter);
-  border: 0;
-  box-shadow: none !important;
-}
-
-.capabilitySummary :global(.ant-card-head) {
-  min-height: 0;
-}
-
-.capabilitySummary :global(.ant-card-head-title) {
-  padding: 13px 0 0;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ant-color-text-secondary);
-}
-
-.capabilitySummary :global(.ant-card-body) {
-  padding-top: 12px;
-  padding-bottom: 16px;
 }
 
 .runtimeMcp, .skillsPane {
@@ -190,14 +168,9 @@
 
 .connectionSummary {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.moduleToolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+.connectionSummary :global(.ant-descriptions-item-content) {
   flex-wrap: wrap;
-  margin-bottom: 16px;
-  width: 100%;
 }

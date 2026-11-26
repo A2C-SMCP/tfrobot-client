@@ -31,10 +31,12 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
     await expect(workbench.getByRole('button', { name: /keyboard-helper/i })).toBeVisible();
     await page.getByRole('tab', { name: 'Workbench', exact: true }).click();
-    await expect(workbench.getByText('Available in this run', { exact: true })).toBeVisible();
+    await expect(workbench.getByText('Available in this run', { exact: true })).toHaveCount(0);
     await expect(workbench.getByText('Connection overview', { exact: true })).toBeVisible();
     for (const configurationAction of [
       'Add Server',
+      'Edit connection policy',
+      'Manage MCP configuration',
       'Import Config',
       'Export Config',
       'Add Variable',
@@ -99,10 +101,7 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
   });
 
   test('projects runtime status events into the active Computer view and refreshes consumers', async ({ page }) => {
-    const toolsCount = page.locator('.ant-statistic')
-      .filter({ has: page.getByText('Available tools', { exact: true }) })
-      .locator('.ant-statistic-content');
-    await expect(toolsCount).toHaveText('0');
+    await expect(page.getByRole('heading', { name: 'MCP Runtime', exact: true })).toBeVisible();
 
     await expect.poll(() => page.evaluate(() => {
       const invokes = (window as any).__TAURI_INVOKES__ as Array<{
@@ -161,7 +160,6 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
       });
     });
 
-    await expect(toolsCount).toHaveText('1');
     await expect.poll(async () => page.evaluate(() => (
       (window as any).__TAURI_INVOKES__ as Array<{ cmd: string; args?: unknown }>
     ).filter((entry) => entry.cmd === 'get_mcp_servers'
