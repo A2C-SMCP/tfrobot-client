@@ -3109,7 +3109,7 @@ async fn test_blank_default_tool_meta_alias_does_not_collide_on_first_start() {
 }
 
 #[tokio::test]
-async fn test_debug_get_available_tools_keeps_unknown_server_for_multiple_running_servers() {
+async fn test_debug_get_available_tools_resolves_multiple_running_servers() {
     require_node();
     let tmp = tempfile::tempdir().unwrap();
     let state = create_mcp_test_app_state(tmp.path()).await;
@@ -3142,11 +3142,10 @@ async fn test_debug_get_available_tools_keeps_unknown_server_for_multiple_runnin
 
     assert!(tools
         .iter()
-        .any(|tool| tool.name == "debug-tools-one__echo"));
+        .any(|tool| tool.name == "debug-tools-one__echo" && tool.server == "debug-tools-one"));
     assert!(tools
         .iter()
-        .any(|tool| tool.name == "debug-tools-two__slow_echo"));
-    assert!(tools.iter().all(|tool| tool.server == "unknown"));
+        .any(|tool| tool.name == "debug-tools-two__slow_echo" && tool.server == "debug-tools-two"));
 }
 
 #[tokio::test]
