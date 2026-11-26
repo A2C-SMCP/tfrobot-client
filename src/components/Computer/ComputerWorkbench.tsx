@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { Button, Card, Empty, Segmented, Tabs } from 'antd';
+import { Card, Empty, Segmented, Tabs } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { ConfigAdoptionStatus } from './ConfigAdoptionStatus';
 import { PageHost } from '@/components/Navigation/PageHost';
@@ -34,10 +34,9 @@ interface ComputerWorkbenchProps {
   onDisconnect: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   onOpenPermissionHelp?: () => void;
-  onNavigate?: (key: string) => void;
 }
 
-export function ComputerWorkbench({ instance, targetMcpId, loading, initialSection, navigationRevision, onBack, onOpenSettings, onDelete, onStartStop, onRestart, onConnect, onDisconnect, onOpenPlugin, onOpenPermissionHelp, onNavigate }: ComputerWorkbenchProps) {
+export function ComputerWorkbench({ instance, targetMcpId, loading, initialSection, navigationRevision, onBack, onOpenSettings, onDelete, onStartStop, onRestart, onConnect, onDisconnect, onOpenPlugin, onOpenPermissionHelp }: ComputerWorkbenchProps) {
   const { t } = useTranslation();
   const managerContext = useManagerStore((state) => state.context.contextKey);
   const connection = resolveComputerConnection(instance, managerContext);
@@ -56,21 +55,15 @@ export function ComputerWorkbench({ instance, targetMcpId, loading, initialSecti
         { key: 'top', label: t('computer.redesign.overview'), children: <PageHost name="workbench-top" active={activeSection === 'top'}>
         <ComputerRuntime focusRequest={focusRequest} focusedMcp={focusedMcp} instance={instance} connection={connection} loading={loading}
           onStartStop={onStartStop} onRestart={onRestart} onConnect={onConnect} onDisconnect={onDisconnect}
-          onViewLogs={() => { setLogFocus({}); openSection('logs'); }} onOpenPlugin={onOpenPlugin} onOpenPermissionHelp={onOpenPermissionHelp}
-          onOpenConnectionSettings={() => onNavigate?.('computer-settings:connection')}
-          onOpenMcpSettings={() => onNavigate?.('computer-settings:mcp')} />
+          onViewLogs={() => { setLogFocus({}); openSection('logs'); }} onOpenPlugin={onOpenPlugin} onOpenPermissionHelp={onOpenPermissionHelp} />
       </PageHost> },
         { key: 'skills', label: t('computer.redesign.skillsTools'), children: <PageHost name="workbench-skills" active={activeSection === 'skills'}>
         <Segmented className={styles.capabilityTabs} value={capability} onChange={setCapability} aria-label={t('computer.redesign.skillsTools')}
           options={[{ value: 'skills', label: t('skills.title') }, { value: 'tools', label: t('debug.tabs.tools') }]} />
         <PageHost name="workbench-capability-skills" active={capability === 'skills'}>
-        <Card className={styles.sectionCard}>
-          <div className={styles.moduleToolbar}>
-            <span>{t('computer.redesign.activeCapabilities')}</span>
-            <Button onClick={() => onNavigate?.('computer-settings:plugins')}>{t('computer.redesign.manageCapabilities')}</Button>
-          </div>
-          <SkillsTab instanceId={instance.id} runtimeAvailable={running} />
-        </Card>
+          <Card className={styles.sectionCard}>
+            <SkillsTab instanceId={instance.id} runtimeAvailable={running} />
+          </Card>
         </PageHost>
         <PageHost name="workbench-capability-tools" active={capability === 'tools'}>
           <Card className={styles.sectionCard}>
