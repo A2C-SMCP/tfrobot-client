@@ -60,6 +60,7 @@ export function ConfigAdoptionStatus({ instance, compact, quiet, summaryOnly, on
     </Typography.Text>;
   }
   if (quiet && (state === 'checking' || state === 'current' || state === 'waiting_start') && !status?.changes.length && !status?.unknown_resources.length) {
+    if (state === 'current') return null;
     return <Typography.Paragraph type="secondary" role="status" style={{ marginBottom: 24 }}>{t(`computer.adoption.settings.${state}`)}</Typography.Paragraph>;
   }
   return <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>

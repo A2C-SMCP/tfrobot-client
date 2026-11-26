@@ -64,8 +64,8 @@ function renderDesktop(
   );
 }
 
-function firstRowExpandButton(): Element {
-  const button = document.querySelector('.ant-table-row-expand-icon');
+function firstWindowButton(): Element {
+  const button = document.querySelector('.ant-table-row button');
   expect(button).toBeInTheDocument();
   return button!;
 }
@@ -177,7 +177,8 @@ describe('DesktopResources', () => {
     expect(mockedInvoke).not.toHaveBeenCalled();
   });
 
-  it('reads one resource only when its row is expanded', async () => {
+  it('opens a resource on demand and shows the full text in its dialog', async () => {
+    const content = `${'Long window text '.repeat(80)}End of window`;
     setDesktopState('computer-a', { windows, loaded: true });
     mockedInvoke.mockResolvedValueOnce({
       bundleId: 'desktop-bundle',
@@ -185,13 +186,13 @@ describe('DesktopResources', () => {
       title: 'Main Window',
       server: 'Desktop MCP',
       contents: [
-        { type: 'text', uri: 'window://main', mime_type: 'text/plain', text: 'Hello World' },
+        { type: 'text', uri: 'window://main', mime_type: 'text/plain', text: content },
       ],
     });
     renderDesktop();
 
     expect(mockedInvoke).not.toHaveBeenCalled();
-    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstWindowButton());
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledTimes(1);
@@ -201,7 +202,7 @@ describe('DesktopResources', () => {
         uri: 'window://main',
       });
     });
-    expect(await screen.findByText('Hello World')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Main Window' })).toHaveTextContent(content);
   });
 
   it('does not claim an unverified empty enumeration is a real empty resource set', async () => {
@@ -216,7 +217,7 @@ describe('DesktopResources', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('does not read a cached detail again after collapse and re-expand', async () => {
+  it('reuses the cached detail when the dialog is reopened', async () => {
     const detail = {
       bundleId: 'desktop-bundle',
       uri: 'window://main',
@@ -232,15 +233,15 @@ describe('DesktopResources', () => {
     });
     renderDesktop();
 
-    fireEvent.click(firstRowExpandButton());
-    fireEvent.click(firstRowExpandButton());
-    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstWindowButton());
+    fireEvent.click(screen.getAllByRole('button', { name: /^Close$/ }).at(-1)!);
+    fireEvent.click(firstWindowButton());
 
     expect(mockedInvoke).not.toHaveBeenCalled();
     expect(screen.getByText('No content available')).toBeInTheDocument();
   });
 
-  it('renders detail failures inline with an explicit retry', async () => {
+  it('renders detail failures in the dialog with an explicit retry', async () => {
     const key = desktopWindowKey(windows[0]);
     setDesktopState('computer-a', {
       windows,
@@ -254,17 +255,15 @@ describe('DesktopResources', () => {
       contents: [],
     });
     renderDesktop();
-    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstWindowButton());
 
     expect(screen.getByText('Read failed')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByText('Retry', { selector: 'button span' }));
 
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
-        instanceId: 'computer-a',
-        bundleId: 'desktop-bundle',
-        uri: 'window://main',
-      });
+    expect(mockedInvoke).toHaveBeenCalledWith('get_window_detail', {
+      instanceId: 'computer-a',
+      bundleId: 'desktop-bundle',
+      uri: 'window://main',
     });
   });
 
@@ -288,7 +287,7 @@ describe('DesktopResources', () => {
       },
     });
     const { unmount } = renderDesktop();
-    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstWindowButton());
 
     expect(screen.getByAltText('Desktop resource preview')).toHaveAttribute(
       'src',
@@ -317,7 +316,7 @@ describe('DesktopResources', () => {
       },
     });
     renderDesktop();
-    fireEvent.click(firstRowExpandButton());
+    fireEvent.click(firstWindowButton());
 
     expect(screen.queryByAltText('Desktop resource preview')).not.toBeInTheDocument();
     expect(screen.getByText('Binary data is not rendered (11 bytes)')).toBeInTheDocument();

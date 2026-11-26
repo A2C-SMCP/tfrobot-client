@@ -19,14 +19,35 @@
   overflow: auto;
 }
 
+.toolRow {
+  padding: 0 !important;
+}
+
 .tool {
-  padding: 8px 12px !important;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  text-align: start;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
-.selected {
+.tool:hover {
+  background: var(--ant-color-fill-alter);
+}
+
+.tool[aria-pressed='true'] {
+  border-color: var(--ant-color-primary-border);
   background: var(--ant-color-primary-bg);
-  border-radius: 6px;
+}
+
+.tool[aria-pressed='true'] .toolName {
+  color: var(--ant-color-primary-text);
 }
 
 .schema {

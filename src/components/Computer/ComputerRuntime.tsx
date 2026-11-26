@@ -34,7 +34,6 @@ interface ComputerRuntimeProps {
   onConnect: () => void;
   onDisconnect: () => void;
   onViewLogs: () => void;
-  onOpenBuiltIn?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   /** Opens Settings → Permissions & security from the keychain notice. */
   onOpenPermissionHelp?: () => void;
@@ -54,7 +53,6 @@ export function ComputerRuntime({
   onConnect,
   onDisconnect,
   onViewLogs,
-  onOpenBuiltIn,
   onOpenPlugin,
   onOpenPermissionHelp,
   onOpenConnectionSettings,
@@ -119,7 +117,6 @@ export function ComputerRuntime({
           capability={actions.manage_mcp}
           onStartRuntime={onStartStop}
           onRestartRuntime={onRestart}
-          onOpenBuiltIn={onOpenBuiltIn}
           onOpenPlugin={onOpenPlugin}
           onOpenPermissionHelp={onOpenPermissionHelp}
         />

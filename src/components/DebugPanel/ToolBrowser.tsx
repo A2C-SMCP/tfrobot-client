@@ -1,7 +1,9 @@
 import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { useEffect, useMemo, useRef } from 'react';
-import { Button, Select, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
+import { usePageActive } from '@/components/Navigation/pageActivityState';
+import { useEffect, useMemo } from 'react';
+import { Alert, Button, Space, List, Tag, Typography, Empty, Spin, Divider } from 'antd';
 import { Input } from '@/components/common/Input';
+import { McpSourceFilter } from '@/components/McpConfig/McpSourceFilter';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useDebugStore, type ToolInfo } from '@/stores/debugStore';
@@ -14,49 +16,44 @@ const EMPTY_TOOLS: ToolInfo[] = [];
 
 interface ToolBrowserProps {
   instanceId: string;
+  onViewLog?: (correlationId: string) => void;
 }
 
-export function ToolBrowser({ instanceId }: ToolBrowserProps) {
+const sourceId = (tool: ToolInfo) => tool.bundleId ?? tool.server;
+
+export function ToolBrowser({ instanceId, onViewLog }: ToolBrowserProps) {
   const { t } = useTranslation();
+  const active = usePageActive();
   const state = useDebugStore();
   const { fetchTools, selectTool } = state;
   const ownsTools = state.activeInstanceId === instanceId && state.toolsLoadedInstanceId === instanceId;
   const tools = ownsTools ? state.tools : EMPTY_TOOLS;
   const toolsLoading = state.toolsLoading || !ownsTools;
-  const selectedTool = ownsTools ? state.selectedTool : null;
   const authoritative = ownsTools && !state.toolsLoading && !state.error;
   const [selectedName, setSelectedName] = useNavigationState<string | null>('debug.selectedTool', null);
   const [search, setSearch] = useNavigationState('debug.search', '');
-  const [serverFilter, setServerFilter] = useNavigationState<string | undefined>('debug.server', undefined);
-
-  const restoredSelection = useRef(selectedName);
-  useEffect(() => {
-    if (!restoredSelection.current) selectTool(null);
-    fetchTools(instanceId);
-  }, [fetchTools, instanceId, selectTool]);
+  const [serverFilter, setServerFilter] = useNavigationState<string[] | undefined>('debug.servers', undefined);
 
   useEffect(() => {
-    if (selectedName && authoritative) selectTool(tools.find((tool) => tool.name === selectedName) ?? null);
-  }, [selectedName, tools, authoritative, selectTool]);
+    if (active) void fetchTools(instanceId);
+  }, [active, fetchTools, instanceId]);
 
   const servers = useMemo(
-    () => [...new Set(tools.map((t) => t.server).filter((server) => server && server !== UNKNOWN_SERVER))],
-    [tools],
+    () => [...new Map(tools.map((tool) => [sourceId(tool), tool.server === UNKNOWN_SERVER ? t('debug.unknownServer') : tool.server]))]
+      .map(([value, label]) => ({ value, label })),
+    [t, tools],
   );
-
+  const term = search.trim().toLowerCase();
+  const filtered = tools.filter((tool) =>
+    (serverFilter === undefined || serverFilter.includes(sourceId(tool))) &&
+    [tool.name, tool.displayName, tool.description, tool.server].some((value) => value.toLowerCase().includes(term)));
+  const nextSelection = filtered.find((tool) => tool.name === selectedName) ?? filtered[0] ?? null;
   useEffect(() => {
-    if (authoritative && serverFilter && !servers.includes(serverFilter)) {
-      setServerFilter(undefined);
+    if (active && authoritative && nextSelection?.name !== state.selectedTool?.name) {
+      selectTool(nextSelection);
     }
-  }, [serverFilter, servers, setServerFilter, authoritative]);
-
-  const filtered = tools.filter((tool) => {
-    if (search && !tool.displayName.toLowerCase().includes(search.toLowerCase()) && !tool.description.toLowerCase().includes(search.toLowerCase())) {
-      return false;
-    }
-    if (serverFilter && tool.server !== serverFilter) return false;
-    return true;
-  });
+  }, [active, authoritative, nextSelection, selectTool, state.selectedTool?.name]);
+  const selectedTool = nextSelection?.name === state.selectedTool?.name ? nextSelection : null;
 
   return (
     <div className={styles.browser}>
@@ -71,22 +68,18 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
               onChange={(e) => setSearch(e.target.value)}
               allowClear
             />
-            <Button icon={<ReloadOutlined />} onClick={() => fetchTools(instanceId)} loading={toolsLoading} />
+            <Button aria-label={t('common.refresh')} icon={<ReloadOutlined />} onClick={() => fetchTools(instanceId)}
+              loading={state.activeInstanceId === instanceId && state.toolsLoading} />
           </Space.Compact>
           {servers.length > 0 && (
-            <Select
-              style={{ width: '100%' }}
-              placeholder={t('debug.allServers')}
-              value={serverFilter}
-              onChange={setServerFilter}
-              allowClear
-              options={servers.map((s) => ({ label: s, value: s }))}
-            />
+            <McpSourceFilter options={servers} selection={serverFilter} onChange={setServerFilter} />
           )}
         </Space>
 
         <div data-navigation-scroll="tools-list" style={{ flex: 1, overflow: 'auto' }}>
-          {toolsLoading && tools.length === 0 ? (
+          {state.activeInstanceId === instanceId && state.error ? (
+            <Alert type="error" message={state.error} />
+          ) : toolsLoading && tools.length === 0 ? (
             <Spin style={{ display: 'block', marginTop: 40 }} />
           ) : filtered.length === 0 ? (
             <Empty description={t('debug.noTools')} />
@@ -95,23 +88,13 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
               size="small"
               dataSource={filtered}
               renderItem={(tool) => (
-                <List.Item
-                  onClick={() => { setSelectedName(tool.name); selectTool(tool); }}
-                  className={`${styles.tool} ${selectedTool?.name === tool.name ? styles.selected : ''}`}
-                >
-                  <List.Item.Meta
-                    title={
-                      <Space>
-                        <Text strong>{tool.displayName}</Text>
-                        {tool.server !== UNKNOWN_SERVER && <Tag>{tool.server}</Tag>}
-                      </Space>
-                    }
-                    description={
-                      <Text type="secondary" ellipsis>
-                        {tool.description}
-                      </Text>
-                    }
-                  />
+                <List.Item className={styles.toolRow}>
+                  <button type="button" className={styles.tool}
+                    aria-pressed={selectedTool?.name === tool.name}
+                    onClick={() => setSelectedName(tool.name)}>
+                    <Text strong className={styles.toolName}>{tool.displayName}</Text>
+                    {tool.server !== UNKNOWN_SERVER && <Text type="secondary">{tool.server}</Text>}
+                  </button>
                 </List.Item>
               )}
             />
@@ -122,7 +105,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
       {/* Right: Tool Detail + Call Test */}
       <div data-navigation-scroll="tools-detail" className={styles.detail}>
         {selectedTool ? (
-          <ToolDetail instanceId={instanceId} tool={selectedTool} />
+          <ToolDetail instanceId={instanceId} tool={selectedTool} onViewLog={onViewLog} />
         ) : (
           <Empty description={t('debug.selectTool')} style={{ marginTop: 80 }} />
         )}
@@ -131,7 +114,7 @@ export function ToolBrowser({ instanceId }: ToolBrowserProps) {
   );
 }
 
-function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
+function ToolDetail({ instanceId, tool, onViewLog }: { instanceId: string; tool: ToolInfo; onViewLog?: ToolBrowserProps['onViewLog'] }) {
   const { t } = useTranslation();
 
   return (
@@ -149,7 +132,7 @@ function ToolDetail({ instanceId, tool }: { instanceId: string; tool: ToolInfo }
       </pre>
 
       <Divider orientation="left">{t('debug.callTest')}</Divider>
-      <ToolCallTest key={tool.name} instanceId={instanceId} tool={tool} />
+      <ToolCallTest key={tool.name} instanceId={instanceId} tool={tool} onViewLog={onViewLog} />
     </div>
   );
 }

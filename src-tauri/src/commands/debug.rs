@@ -41,6 +41,8 @@ pub struct ToolInfo {
 pub struct ToolCallResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<CallToolResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -325,12 +327,12 @@ pub async fn execute_tool_core(
                 "result_recorded": false,
                 "error": error,
             }));
-            if let Err(persist_error) = state
+            let recorded = state
                 .observability
                 .record_tool_call_async(
                     activity,
                     ToolCallHistoryDraft {
-                        req_id,
+                        req_id: req_id.clone(),
                         computer_instance_id: instance_id.clone(),
                         server,
                         tool: history_tool,
@@ -340,13 +342,14 @@ pub async fn execute_tool_core(
                         error: history_error,
                     },
                 )
-                .await
-            {
+                .await;
+            if let Err(ref persist_error) = recorded {
                 log::error!("failed to persist tool call history: {persist_error}");
             }
             let response_result = redact_tool_call_result_for_display(&call_result);
             Ok(ToolCallResponse {
                 success,
+                correlation_id: recorded.is_ok().then_some(req_id),
                 result: Some(response_result),
                 error: None,
                 duration_ms,
@@ -378,12 +381,12 @@ pub async fn execute_tool_core(
                 "result_recorded": false,
                 "error": redacted_error,
             }));
-            if let Err(persist_error) = state
+            let recorded = state
                 .observability
                 .record_tool_call_async(
                     activity,
                     ToolCallHistoryDraft {
-                        req_id,
+                        req_id: req_id.clone(),
                         computer_instance_id: instance_id.clone(),
                         server,
                         tool: history_tool,
@@ -393,12 +396,13 @@ pub async fn execute_tool_core(
                         error: Some(redacted_error.clone()),
                     },
                 )
-                .await
-            {
+                .await;
+            if let Err(ref persist_error) = recorded {
                 log::error!("failed to persist failed tool call history: {persist_error}");
             }
             Ok(ToolCallResponse {
                 success: false,
+                correlation_id: recorded.is_ok().then_some(req_id),
                 result: None,
                 error: Some(redacted_error),
                 duration_ms,
@@ -481,7 +485,16 @@ fn tool_server(tool: &Tool, running_servers: &[(BundleId, ServerName)]) -> Strin
         .and_then(|m| m.get("server_name"))
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
-        .or_else(|| (running_servers.len() == 1).then(|| running_servers[0].1.clone()))
+        .or_else(|| {
+            let bundle_id = tool_bundle_id(tool, running_servers)?;
+            Some(
+                running_servers
+                    .iter()
+                    .find(|(id, _)| *id == bundle_id)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| bundle_id.to_string()),
+            )
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -517,12 +530,15 @@ fn require_instance_id(instance_id: &str) -> Result<&str, String> {
 pub async fn get_tool_history(
     state: State<'_, AppState>,
     instance_id: String,
+    request_id: Option<String>,
 ) -> Result<Vec<ToolCallHistoryRecord>, String> {
     let instance_id = require_instance_id(&instance_id)?.to_string();
     let service = state.observability.as_ref().clone();
-    tauri::async_runtime::spawn_blocking(move || service.tool_history(&instance_id, 100))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        service.query_tool_history(&instance_id, request_id.as_deref(), 100)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub fn get_tool_history_core(
@@ -543,6 +559,26 @@ mod tests {
         assert_eq!(display_tool_name("bundle__tool"), "tool");
         assert_eq!(display_tool_name("bundle__foo__bar"), "foo__bar");
         assert_eq!(display_tool_name("unprefixed"), "unprefixed");
+    }
+
+    #[test]
+    fn resolves_server_names_from_tool_prefixes_when_metadata_is_missing() {
+        let running_servers = [
+            (
+                BundleId::try_from("documents").unwrap(),
+                "Document Assistant".into(),
+            ),
+            (BundleId::try_from("desktop").unwrap(), "Desktop".into()),
+        ];
+        let documents = Tool::new("documents__preview", "Preview", serde_json::Map::new());
+        let desktop = Tool::new("desktop__list", "List windows", serde_json::Map::new());
+        let unmatched = Tool::new("retired__read", "Read", serde_json::Map::new());
+        assert_eq!(
+            tool_server(&documents, &running_servers),
+            "Document Assistant"
+        );
+        assert_eq!(tool_server(&desktop, &running_servers), "Desktop");
+        assert_eq!(tool_server(&unmatched, &running_servers), "retired");
     }
 
     #[test]

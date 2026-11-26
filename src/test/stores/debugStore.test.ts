@@ -186,8 +186,7 @@ describe('debugStore', () => {
         result: { content: [{ type: 'text', text: 'hello' }], isError: false },
         duration_ms: 42,
       };
-      mockedInvoke.mockResolvedValueOnce(mockResult);  // execute_tool
-      mockedInvoke.mockResolvedValueOnce([]);           // fetchHistory (auto-triggered)
+      mockedInvoke.mockResolvedValueOnce(mockResult);
 
       const result = await useDebugStore.getState().executeTool(instanceId, 'read_file', { path: '/tmp' });
 
@@ -200,11 +199,11 @@ describe('debugStore', () => {
       expect(result).toEqual(mockResult);
       expect(useDebugStore.getState().lastCallResult).toEqual(mockResult);
       expect(useDebugStore.getState().calling).toBe(false);
+      expect(mockedInvoke).toHaveBeenCalledTimes(1);
     });
 
     it('passes timeout when provided', async () => {
       mockedInvoke.mockResolvedValueOnce({ success: true, duration_ms: 0 });
-      mockedInvoke.mockResolvedValueOnce([]);
 
       await useDebugStore.getState().executeTool(instanceId, 'tool', {}, 30);
 

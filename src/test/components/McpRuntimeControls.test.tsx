@@ -195,7 +195,7 @@ describe('McpRuntimeControls', () => {
     fireEvent.click(screen.getByTitle('Start'));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   });
@@ -326,7 +326,7 @@ describe('McpRuntimeControls', () => {
       'Start complete: 3 candidates, 1 started, 1 unchanged, 2 plugin-managed excluded, 1 failed.',
     )).toBeInTheDocument();
     expect(screen.getByText(
-      'Broken server (broken): operation failed. View Runtime diagnostics or logs for details.',
+      'Broken server (broken): operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText('process exited')).not.toBeInTheDocument();
   });
@@ -352,7 +352,7 @@ describe('McpRuntimeControls', () => {
       'Stop complete: 3 candidates, 1 stopped, 1 unchanged, 2 plugin-managed excluded, 1 failed.',
     )).toBeInTheDocument();
     expect(screen.getByText(
-      'Broken server (broken): operation failed. View Runtime diagnostics or logs for details.',
+      'Broken server (broken): operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText('disconnect failed')).not.toBeInTheDocument();
   });

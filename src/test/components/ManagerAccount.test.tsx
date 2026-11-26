@@ -686,7 +686,7 @@ describe('ManagerAccount', () => {
         'A stale connection must be cleaned up before reconnecting.',
       )).toBeInTheDocument();
       expect(screen.getByText(
-        'Retry the disconnect action. If cleanup still fails, view Runtime diagnostics or logs.',
+        'Retry the disconnect action. If cleanup still fails, open Logs.',
       )).toBeInTheDocument();
       expect(screen.queryByText('Socket cleanup failed')).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Disconnect/i })).toBeEnabled();
@@ -716,7 +716,7 @@ describe('ManagerAccount', () => {
       fireEvent.click(screen.getByRole('button', { name: /Disconnect/i }));
 
       expect(await screen.findByText(
-        'The connection operation failed. View Runtime diagnostics or logs for details.',
+        'The connection operation failed. Open Logs for details.',
       )).toBeInTheDocument();
       expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
     }, 10000);
