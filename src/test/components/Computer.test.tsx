@@ -189,9 +189,9 @@ describe('Computer', () => {
 
     expect(screen.getByText('prod')).toBeInTheDocument();
     expect(screen.getByText('Production computer')).toBeInTheDocument();
-    expect(screen.getByText('Bound robot: Robot A')).toBeInTheDocument();
-    expect(screen.getByText('Connection profile: prod')).toBeInTheDocument();
-    expect(screen.getByText('5 MCP servers')).toBeInTheDocument();
+    expect(screen.getByText('Robot A')).toBeInTheDocument();
+    expect(screen.getByTitle('Connection profile: prod')).toBeInTheDocument();
+    expect(screen.queryByText('5 MCP servers')).not.toBeInTheDocument();
   });
 
   it('renders an empty state when the Computer list is empty', async () => {
@@ -565,13 +565,15 @@ describe('Computer', () => {
 
     render(<Computer />);
 
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions for prod' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit name and description' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Updated Computer' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Updated description' } });
     fireEvent.click(last(screen.getAllByText('OK')));
     expect(await screen.findByText('Updated Computer')).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Duplicate' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'More actions for Updated Computer' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Duplicate' }));
     expect(screen.getByLabelText('Copy Robot binding')).toBeChecked();
     expect(screen.queryByLabelText('Connection target')).not.toBeInTheDocument();
     fireEvent.click(last(screen.getAllByText('OK')));
@@ -586,11 +588,7 @@ describe('Computer', () => {
       },
     });
 
-    const originalComputerCard = () => {
-      const card = screen.getByText('computer-a').closest<HTMLElement>('.ant-card');
-      expect(card).not.toBeNull();
-      return card!;
-    };
+    const originalComputerCard = () => screen.getByRole('group', { name: 'Updated Computer' });
 
     await waitFor(() => {
       const stopButton = within(originalComputerCard()).getByRole('button', { name: 'Stop' });
@@ -607,9 +605,7 @@ describe('Computer', () => {
     fireEvent.click(within(originalComputerCard()).getByRole('button', { name: 'Start' }));
     await waitFor(() => {
       expect(within(originalComputerCard()).getByText('Running')).toBeInTheDocument();
-      const deleteButton = within(originalComputerCard()).getByRole('button', { name: 'Delete' });
-      expect(deleteButton).toBeEnabled();
-      expect(deleteButton).not.toHaveClass('ant-btn-loading');
+      expect(within(originalComputerCard()).getByRole('button', { name: 'More actions for Updated Computer' })).toBeEnabled();
     });
   }, 80000);
 
@@ -622,23 +618,16 @@ describe('Computer', () => {
 
     render(<Computer />);
 
-    const computerId = await screen.findByText('computer-a');
-    const computerCard = computerId.closest<HTMLElement>('.ant-card');
-    expect(computerCard).not.toBeNull();
-    await waitFor(() => {
-      const deleteButton = within(computerCard!).getByRole('button', { name: 'Delete' });
-      expect(deleteButton).toBeEnabled();
-      expect(deleteButton).not.toHaveClass('ant-btn-loading');
-    });
-
-    fireEvent.click(within(computerCard!).getByRole('button', { name: 'Delete' }));
-    const deleteConfirmation = await screen.findByText('Delete this Computer?');
-    const deletePopover = deleteConfirmation.closest<HTMLElement>('.ant-popover');
-    expect(deletePopover).not.toBeNull();
-    fireEvent.click(within(deletePopover!).getByRole('button', { name: 'OK' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions for prod' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const deleteTitle = await screen.findByText('Delete this Computer?');
+    const deleteConfirmation = deleteTitle.closest<HTMLElement>('[role="dialog"]');
+    expect(deleteConfirmation).not.toBeNull();
+    expect(mockInvoke).not.toHaveBeenCalledWith('delete_computer_instance', expect.anything());
+    fireEvent.click(within(deleteConfirmation!).getByRole('button', { name: 'Delete' }));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('delete_computer_instance', { id: 'computer-a' });
-      expect(screen.queryByText('computer-a')).not.toBeInTheDocument();
+      expect(screen.queryByRole('group', { name: 'prod' })).not.toBeInTheDocument();
     });
   });
 

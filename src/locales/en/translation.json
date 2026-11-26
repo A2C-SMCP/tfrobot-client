@@ -267,6 +267,19 @@
     "title": "Computer",
     "create": "Create Computer",
     "empty": "No Computer instances",
+    "collection": {
+      "count_one": "{{count}} computer",
+      "count_other": "{{count}} computers",
+      "running": "{{count}} running",
+      "search": "Search by name or description",
+      "noMatches": "No matching computers",
+      "status": "Runtime status",
+      "employee": "Digital employee",
+      "actions": "Actions",
+      "more": "More actions for {{name}}",
+      "editIdentity": "Edit name and description",
+      "copyIdFailed": "Could not copy the Computer ID"
+    },
     "openDetails": "Open Details",
     "backToList": "Back to Computers",
     "start": "Start",
@@ -642,9 +655,12 @@
       "pending_one": "{{count}} configuration change not yet adopted",
       "pending_other": "{{count}} configuration changes not yet adopted",
       "compact": {
-        "current": "Configuration adopted",
-        "waiting_start": "Waiting to adopt on start",
-        "checking": "Checking configuration"
+        "pending_one": "{{count}} change pending",
+        "pending_other": "{{count}} changes pending",
+        "unknown": "Adoption unknown",
+        "current": "Config adopted",
+        "waiting_start": "On next start",
+        "checking": "Checking config"
       },
       "settings": {
         "checking": "Checking saved configuration and runtime…",

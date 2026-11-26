@@ -46,7 +46,19 @@ export function ConfigAdoptionStatus({ instance, compact, quiet, summaryOnly, on
       {failed && <Button size="small" onClick={() => useConfigAdoptionStore.getState().invalidate(instance.id)}>{t('computer.adoption.retry')}</Button>}
     </Space>;
   }
-  if (compact) return state === 'pending' || state === 'unknown' ? <Button type="link" size="small" onClick={onOpenRuntime}>{t(`computer.adoption.${state}`, { count: status?.changes.length ?? 0 })}</Button> : <Typography.Text type="secondary" role="status">{t(`computer.adoption.compact.${state}`)}</Typography.Text>;
+  if (compact) {
+    if (state === 'pending' || state === 'unknown') {
+      const count = status?.changes.length ?? 0;
+      const label = t(`computer.adoption.${state}`, { count });
+      return <Button type="link" size="small" title={label} aria-label={label} onClick={onOpenRuntime}>
+        {t(`computer.adoption.compact.${state}`, { count })}
+      </Button>;
+    }
+    const label = t(`computer.adoption.settings.${state}`);
+    return <Typography.Text type="secondary" role="status" title={label} aria-label={label}>
+      {t(`computer.adoption.compact.${state}`)}
+    </Typography.Text>;
+  }
   if (quiet && (state === 'checking' || state === 'current' || state === 'waiting_start') && !status?.changes.length && !status?.unknown_resources.length) {
     return <Typography.Paragraph type="secondary" role="status" style={{ marginBottom: 24 }}>{t(`computer.adoption.settings.${state}`)}</Typography.Paragraph>;
   }

@@ -1,25 +1,26 @@
-import { ConfigAdoptionStatus } from './ConfigAdoptionStatus';
-import { usePageAction } from '@/components/Navigation/pageActivityState';
+import { usePageAction, usePageActive } from '@/components/Navigation/pageActivityState';
 import { PageHost } from '@/components/Navigation/PageHost';
 import { NavigationScope } from '@/components/Navigation/NavigationMemory';
 import { useNavigationForm, useNavigationState } from '@/components/Navigation/navigationMemoryState';
-import { PageModal as Modal, PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
-import { App, Button, Card, Empty, Form, Input, Select, Segmented, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd';
+import { PageModal as Modal } from '@/components/Navigation/PageOverlays';
+import { App, Button, Card, Dropdown, Empty, Form, Input, Select, Segmented, Skeleton, Space, Switch, Tag, Tooltip, Typography, type MenuProps } from 'antd';
 import {
-  ApiOutlined,
   AppstoreOutlined,
   BarsOutlined,
   CopyOutlined,
-  DesktopOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
+  EllipsisOutlined,
   LinkOutlined,
   PlayCircleOutlined,
+  RightOutlined,
+  SearchOutlined,
+  SettingOutlined,
   StopOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ComponentRef } from 'react';
 import {
   useComputerStore,
   type ComputerInstance,
@@ -33,6 +34,8 @@ import {
   type ComputerWorkbenchSection,
 } from './tabs';
 import { ComputerWorkbench } from './ComputerWorkbench';
+import { ComputerDeviceIcon } from './ComputerIdentity';
+import { ConfigAdoptionStatus } from './ConfigAdoptionStatus';
 import styles from './Computer.module.css';
 import {
   computerStatusColor,
@@ -51,30 +54,70 @@ interface ComputerProps {
   onNavigate?: (key: string) => void;
 }
 
+async function copyComputerId(id: string) {
+  try {
+    await navigator.clipboard.writeText(id);
+  } catch {
+    // The desktop webview may not expose the async clipboard on its app origin.
+    const previousFocus = document.activeElement;
+    const field = document.createElement('textarea');
+    field.value = id;
+    field.readOnly = true;
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.append(field);
+    try {
+      field.select();
+      if (!document.execCommand('copy')) throw new Error('Clipboard unavailable');
+    } finally {
+      field.remove();
+      if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
+    }
+  }
+}
+
 function ComputerCard({
   instance,
+  ambiguousName,
   onOpen,
+  onOpenSettings,
   onEdit,
   onDuplicate,
-  onStart,
-  onStop,
+  onStartStop,
   onConnect,
   onDisconnect,
   onDelete,
   loading,
 }: {
   instance: ComputerInstance;
+  ambiguousName: boolean;
   onOpen: () => void;
+  onOpenSettings?: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
-  onStart: () => void;
-  onStop: () => void;
+  onStartStop: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
-  onDelete: () => void;
+  onDelete: () => Promise<void>;
   loading: boolean;
 }) {
   const { t } = useTranslation();
+  const { message } = App.useApp();
+  const active = usePageActive();
+  const menuTrigger = useRef<ComponentRef<typeof Button>>(null);
+  const menuId = useId();
+  const descriptionId = useId();
+  const detailsHintId = useId();
+  const nameWithId = ambiguousName ? `${instance.name} (${instance.id.slice(-8)})` : instance.name;
+  const moreLabel = t('computer.collection.more', { name: nameWithId });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setMenuOpen(false);
+      setDeleteOpen(false);
+    }
+  }, [active]);
   const currentManagerContext = useManagerStore((state) => state.context.contextKey);
   const stopAction = usesStopAction(instance.status);
   const startStopLabel = instance.status === 'starting'
@@ -85,7 +128,6 @@ function ComputerCard({
         ? t('computer.stop')
         : t('computer.start');
   const startStopIcon = stopAction ? <StopOutlined /> : <PlayCircleOutlined />;
-  const startStopAction = stopAction ? onStop : onStart;
   const startStopCapability = stopAction
     ? instance.runtime.actions.stop
     : instance.runtime.actions.start;
@@ -101,90 +143,122 @@ function ComputerCard({
   const connectDisabledReason = connectDisabledReasonKey
     ? t(connectDisabledReasonKey)
     : undefined;
+  const menuItems: MenuProps['items'] = [
+    onOpenSettings ? { key: 'settings', icon: <SettingOutlined aria-hidden="true" />, label: t('computer.redesign.settings') } : null,
+    { key: 'edit', icon: <EditOutlined aria-hidden="true" />, label: t('computer.collection.editIdentity') },
+    { key: 'copy-id', icon: <CopyOutlined aria-hidden="true" />, label: t('computer.workbench.actions.copyId') },
+    { key: 'duplicate', icon: <CopyOutlined aria-hidden="true" />, label: t('computer.duplicate') },
+    { type: 'divider' },
+    { key: 'delete', icon: <DeleteOutlined aria-hidden="true" />, danger: true, label: t('computer.delete') },
+  ];
+  const handleMenuAction: MenuProps['onClick'] = async ({ key }) => {
+    setMenuOpen(false);
+    menuTrigger.current?.focus();
+    switch (key) {
+      case 'settings':
+        onOpenSettings?.();
+        break;
+      case 'edit':
+        onEdit();
+        break;
+      case 'copy-id':
+        try {
+          await copyComputerId(instance.id);
+          message.success(t('computer.workbench.messages.idCopied'));
+        } catch {
+          message.error(t('computer.collection.copyIdFailed'));
+        }
+        break;
+      case 'duplicate':
+        onDuplicate();
+        break;
+      case 'delete':
+        setDeleteOpen(true);
+        break;
+    }
+  };
 
   return (
-    <Card className={styles.computerCard} classNames={{ body: styles.cardBody }}>
-      <div className={styles.identity}>
-        <div className={styles.deviceIcon} aria-hidden="true"><DesktopOutlined /></div>
-        <div className={styles.identityText}>
-          <Button type="text" onClick={onOpen} className={styles.name}>{instance.name}</Button>
-          {instance.description && <Text className={styles.description}>{instance.description}</Text>}
-          <Text type="secondary" copyable className={styles.identifier}>{instance.id}</Text>
-        </div>
-      </div>
-      <ConfigAdoptionStatus key={instance.id} instance={instance} compact onOpenRuntime={onOpen} />
-      <div className={styles.metadata}>
+    <Card role="group" aria-label={nameWithId} className={styles.computerCard} classNames={{ body: styles.cardBody }}>
+      <button type="button" onClick={onOpen} className={styles.identity} aria-label={nameWithId}
+        aria-describedby={instance.description ? `${detailsHintId} ${descriptionId}` : detailsHintId}
+        title={t('computer.openDetails')}>
+        <span id={detailsHintId} hidden>{t('computer.openDetails')}</span>
+        <ComputerDeviceIcon />
+        <span className={styles.identityText}>
+          <span className={styles.nameLine}>
+            <span className={styles.name} title={instance.name}>{instance.name}</span>
+            <RightOutlined aria-hidden="true" />
+          </span>
+          <span className={styles.descriptionLine}>
+            <span className={styles.description} id={descriptionId} title={instance.description}>{instance.description}</span>
+            {ambiguousName && <span className={styles.idSuffix} title={instance.id} aria-hidden="true">{instance.id.slice(-8)}</span>}
+          </span>
+        </span>
+      </button>
+      <div className={styles.status}>
         <Tag color={computerStatusColor[instance.status]}>
           {t(`computer.status.${instance.status}`)}
         </Tag>
-        <Space wrap size={[4, 6]}>
-          <Tag color={connection.status === 'connected' ? 'green' : 'default'}>
-            {t(`computer.connection.${connection.status}`)}
-          </Tag>
-          <Tag icon={<ApiOutlined />}>
-            {t('computer.mcpServers', { count: instance.mcpServerCount })}
-          </Tag>
-        </Space>
-        <Text type="secondary">
-          {instance.robotName
-            ? t('computer.boundRobot', { name: instance.robotName })
-            : t('computer.noRobotBound')}
+        <Text type="secondary" title={connection.status === 'connected' && instance.connectionProfile
+          ? t('computer.connectionProfile', { name: instance.connectionProfile }) : undefined}>
+          {t(`computer.connection.${connection.status}`)}
         </Text>
-        {instance.connectionStatus === 'connected' && instance.connectionProfile && (
-          <Text type="secondary">
-            {t('computer.connectionProfile', { name: instance.connectionProfile })}
-          </Text>
-        )}
+        <div className={styles.adoption}>
+          <ConfigAdoptionStatus instance={instance} compact onOpenRuntime={onOpen} />
+        </div>
+      </div>
+      <div className={styles.employee}>
+        <Text type="secondary" className={styles.employeeLabel}>{t('computer.collection.employee')}</Text>
+        <Text ellipsis={{ tooltip: instance.robotName }} type={instance.robotName ? undefined : 'secondary'}>
+          {instance.robotName || t('computer.noRobotBound')}
+        </Text>
       </div>
       <div className={styles.actions}>
         <Tooltip title={startStopDisabledReason ?? startStopLabel}>
           <Button
             aria-label={startStopLabel}
-            type="text"
             danger={stopAction}
             className={styles.runtimeAction}
             icon={startStopIcon}
             disabled={!canStartStop}
             loading={loading}
-            onClick={startStopAction}
-          >{startStopLabel}</Button>
+            onClick={onStartStop}
+          />
         </Tooltip>
         {connection.showDisconnect ? (
           <Tooltip title={disconnectDisabledReason ?? t('connection.disconnect')}>
             <Button
               aria-label={t('connection.disconnect')}
-              type="text"
-              danger
               icon={<DisconnectOutlined />}
               disabled={!connection.actions.disconnect.enabled}
               loading={connection.isDisconnecting}
               onClick={onDisconnect}
-            >{t('connection.disconnect')}</Button>
+            />
           </Tooltip>
         ) : (
           <Tooltip title={connectDisabledReason ?? t('connection.connect')}>
             <Button
               aria-label={t('connection.connect')}
-              type="text"
               icon={<LinkOutlined />}
               disabled={!connection.canConnect}
               loading={connection.isConnecting}
               onClick={onConnect}
-            >{t('connection.connect')}</Button>
+            />
           </Tooltip>
         )}
-        <Button aria-label={t('computer.edit')} type="text" icon={<EditOutlined />} onClick={onEdit}>
-          {t('computer.edit')}
-        </Button>
-        <Button aria-label={t('computer.duplicate')} type="text" icon={<CopyOutlined />} onClick={onDuplicate}>
-          {t('computer.duplicate')}
-        </Button>
-        <Popconfirm title={t('computer.confirmDelete')} onConfirm={onDelete}>
-          <Button aria-label={t('computer.delete')} type="text" danger icon={<DeleteOutlined />} loading={loading}>
-            {t('computer.delete')}
-          </Button>
-        </Popconfirm>
+        <Dropdown trigger={['click']} open={active && menuOpen} onOpenChange={setMenuOpen} destroyOnHidden
+          menu={{ id: menuId, 'aria-label': moreLabel, items: menuItems, onClick: handleMenuAction }} placement="bottomRight" autoFocus>
+          <Button ref={menuTrigger} icon={<EllipsisOutlined />} aria-label={moreLabel}
+            aria-haspopup="menu" aria-expanded={active && menuOpen} aria-controls={active && menuOpen ? menuId : undefined} />
+        </Dropdown>
       </div>
+      <Modal title={t('computer.confirmDelete')} open={deleteOpen} okText={t('computer.delete')}
+        okButtonProps={{ danger: true }} confirmLoading={loading}
+        onCancel={() => setDeleteOpen(false)} onOk={async () => { await onDelete(); setDeleteOpen(false); }}>
+        <Text>{t('computer.workbench.deleteDescription', { name: instance.name })}</Text>
+        {ambiguousName && <div><Text code>{instance.id}</Text></div>}
+      </Modal>
     </Card>
   );
 }
@@ -212,6 +286,7 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
   const { inspecting, inspectPackage } = usePortableConfigStore();
   const [view, setView] = useNavigationState<'list' | 'detail'>('computer.view', initialView);
   const [collectionLayout, setCollectionLayout] = useNavigationState<'list' | 'grid'>('computer.collectionLayout', 'list');
+  const [search, setSearch] = useNavigationState('computer.search', '');
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'duplicate' | null>(null);
   const [targetInstance, setTargetInstance] = useState<ComputerInstance | null>(null);
   const [importPath, setImportPath] = useState<string | null>(null);
@@ -234,6 +309,13 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
 
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId) ?? instances[0];
   const showDetail = view === 'detail' && selectedInstance;
+  const query = search.trim().toLocaleLowerCase();
+  const visibleInstances = instances.filter(({ name, description }) =>
+    name.toLocaleLowerCase().includes(query) || description?.toLocaleLowerCase().includes(query),
+  );
+  const nameCounts = new Map<string, number>();
+  for (const { name } of instances) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  const runningCount = instances.filter((instance) => usesStopAction(instance.status) && instance.status !== 'stopping').length;
 
   const openCreateModal = () => {
     setTargetInstance(null);
@@ -385,7 +467,7 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
   const modalTitle = modalMode === 'create'
     ? t('computer.create')
     : modalMode === 'edit'
-      ? t('computer.edit')
+      ? t('computer.collection.editIdentity')
       : t('computer.duplicate');
 
   const renderComputerModal = () => (
@@ -480,9 +562,17 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
         </NavigationScope>
       )}
       <PageHost name="computer-list" active={!showDetail}>
-        <div className={styles.listHeader}>
-          <Title level={4} style={{ margin: 0 }}>{t('computer.title')}</Title>
-          <Space wrap>
+        <div className={styles.collectionArea}>
+          <div className={styles.listHeader}>
+            <div>
+              <Title level={3} className={styles.listTitle}>{t('computer.title')}</Title>
+              <Text type="secondary">{t('computer.collection.count', { count: instances.length })} · {t('computer.collection.running', { count: runningCount })}</Text>
+            </div>
+            <Button type="primary" onClick={openCreateModal}>{t('computer.create')}</Button>
+          </div>
+          <div className={styles.toolbar}>
+            <Input type="search" className={styles.search} value={search} onChange={(event) => setSearch(event.target.value)}
+              prefix={<SearchOutlined />} placeholder={t('computer.collection.search')} aria-label={t('computer.collection.search')} />
             <Segmented
               aria-label={t('computer.views.label')}
               value={collectionLayout}
@@ -492,35 +582,43 @@ export function Computer({ targetMcpId, initialView = 'list', initialSection = '
                 { value: 'grid', label: t('computer.views.grid'), icon: <AppstoreOutlined /> },
               ]}
             />
-            <Button type="primary" onClick={openCreateModal}>{t('computer.create')}</Button>
-          </Space>
-        </div>
-
-        {instances.length === 0 ? (
-          <Empty description={t('computer.empty')} />
-        ) : (
-          <div className={collectionLayout === 'grid' ? styles.collectionGrid : styles.collectionList}>
-            {instances.map((instance) => (
-              <ComputerCard
-                key={instance.id}
-                instance={instance}
-                onOpen={() => {
-                  selectInstance(instance.id);
-                  setView('detail');
-                  onNavigate?.('computer-detail:top');
-                }}
-                onEdit={() => openEditModal(instance)}
-                onDuplicate={() => openDuplicateModal(instance)}
-                onStart={() => handleStartStop(instance)}
-                onStop={() => handleStartStop(instance)}
-                onConnect={() => handleConnect(instance)}
-                onDisconnect={() => handleDisconnect(instance)}
-                onDelete={() => handleDelete(instance)}
-                loading={loading}
-              />
-            ))}
           </div>
-        )}
+          {visibleInstances.length === 0 ? (
+            <Empty description={t(instances.length === 0 ? 'computer.empty' : 'computer.collection.noMatches')} />
+          ) : (
+            <div className={collectionLayout === 'grid' ? styles.collectionGrid : styles.collectionList}>
+              {collectionLayout === 'list' && <div className={styles.columnHeaders} aria-hidden="true">
+                <span>{t('computer.title')}</span>
+                <span>{t('computer.collection.status')}</span>
+                <span>{t('computer.collection.employee')}</span>
+                <span>{t('computer.collection.actions')}</span>
+              </div>}
+              {visibleInstances.map((instance) => (
+                <ComputerCard
+                  key={instance.id}
+                  instance={instance}
+                  ambiguousName={(nameCounts.get(instance.name) ?? 0) > 1}
+                  onOpen={() => {
+                    selectInstance(instance.id);
+                    setView('detail');
+                    onNavigate?.('computer-detail:top');
+                  }}
+                  onOpenSettings={onNavigate && (() => {
+                    selectInstance(instance.id);
+                    onNavigate(computerSettingsNavigationKey('general'));
+                  })}
+                  onEdit={() => openEditModal(instance)}
+                  onDuplicate={() => openDuplicateModal(instance)}
+                  onStartStop={() => handleStartStop(instance)}
+                  onConnect={() => handleConnect(instance)}
+                  onDisconnect={() => handleDisconnect(instance)}
+                  onDelete={() => handleDelete(instance)}
+                  loading={loading}
+                />
+              ))}
+            </div>
+          )}
+        </div>
         {renderComputerModal()}
       </PageHost>
     </div>

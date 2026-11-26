@@ -64,9 +64,9 @@ describe('Computer list adoption summary', () => {
     expect(screen.getByText(/Configuration adoption for the resources below/)).toBeInTheDocument();
   });
   it.each([
-    ['current', 'Configuration adopted'],
-    ['waiting_start', 'Waiting to adopt on start'],
-    ['checking', 'Checking configuration'],
+    ['current', 'Config adopted'],
+    ['waiting_start', 'On next start'],
+    ['checking', 'Checking config'],
   ])('keeps %s visible on the list card', async (state, label) => {
     const { invoke } = await import('@tauri-apps/api/core');
     const { useConfigAdoptionStore } = await import('@/stores/configAdoptionStore');
