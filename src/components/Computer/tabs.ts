@@ -4,8 +4,7 @@ export const COMPUTER_WORKBENCH_SECTIONS = [
   'top',
   'skills',
   'resources',
-  'diagnostics',
-  'debug',
+  'tools',
   'logs',
 ] as const;
 
@@ -16,7 +15,8 @@ const LEGACY_WORKBENCH_SECTIONS: Record<string, ComputerWorkbenchSection> = {
   runtime: 'top',
   skills: 'skills',
   resources: 'resources',
-  debug: 'debug',
+  diagnostics: 'logs',
+  debug: 'tools',
   logs: 'logs',
 };
 

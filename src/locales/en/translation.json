@@ -259,6 +259,14 @@
     "attachmentRetryHint": "Retry the attachment from the message it belongs to."
   },
   "computer": {
+    "sourceFilter": {
+      "label": "Filter by MCP server",
+      "all": "MCP servers · All",
+      "selected": "MCP servers · {{count}} selected",
+      "none": "MCP servers · None selected",
+      "selectAll": "Select all",
+      "clear": "Clear selection"
+    },
     "views": {
       "label": "Computer view",
       "list": "List",
@@ -610,8 +618,8 @@
       "started": "Computer started",
       "stopped": "Computer stopped",
       "restarted": "Computer restarted",
-      "runtimeOperationFailed": "The Runtime operation failed. View Runtime diagnostics or logs for details.",
-      "connectionOperationFailed": "The connection operation failed. View Runtime diagnostics or logs for details."
+      "runtimeOperationFailed": "The Runtime operation failed. Open Logs for details.",
+      "connectionOperationFailed": "The connection operation failed. Open Logs for details."
     },
     "configSave": {
       "saved": "Saved",
@@ -692,6 +700,7 @@
       "activeCapabilities": "Capabilities available in this run",
       "manageCapabilities": "Manage plugins",
       "desktopWaiting": "Desktop resources can be read after this Computer starts.",
+      "toolsWaiting": "Start the Computer to see available tools.",
       "connectionOverview": "Connection overview",
       "currentConnection": "Current connection",
       "nextConnection": "Saved target for the next connection",
@@ -994,7 +1003,7 @@
     "batch": {
       "startSummary": "Start complete: {{candidates}} candidates, {{actual}} started, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
       "stopSummary": "Stop complete: {{candidates}} candidates, {{actual}} stopped, {{unchanged}} unchanged, {{excluded}} plugin-managed excluded, {{failed}} failed.",
-      "failure": "{{name}} ({{bundleId}}): operation failed. View Runtime diagnostics or logs for details."
+      "failure": "{{name}} ({{bundleId}}): operation failed. Open Logs for details."
     },
     "disabledGuidance": {
       "title": "MCP lifecycle actions are unavailable",
@@ -1006,6 +1015,8 @@
       "start": "Start",
       "retry": "Retry connection",
       "stop": "Stop",
+      "stopServer": "Stop {{name}}",
+      "startServer": "Start {{name}}",
       "managePlugin": "Manage {{plugin}}",
       "edit": "Edit",
       "remove": "Remove",
@@ -1100,7 +1111,7 @@
       "started": "Server {{name}} started",
       "reconnected": "Server {{name}} reconnected",
       "stopped": "Server {{name}} stopped",
-      "operationFailed": "The MCP operation failed. View Runtime diagnostics or logs for details.",
+      "operationFailed": "The MCP operation failed. Open Logs for details.",
       "missingInputDefinition": "MCP {{name}} references Input {{id}}, but its definition is missing. Define it in the MCP editor before saving.",
       "statusLoadFailed": "MCP status could not be loaded. Retry or view logs for details.",
       "allStarted": "All servers started",
@@ -1173,7 +1184,7 @@
       "storeAsSecret": "Save as secret",
       "requestedBy": "Requested by MCP {{name}} ({{id}})",
       "loadFailed": "The Input could not be loaded. Retry or view logs for details.",
-      "submitFailed": "The value could not be saved. Retry or view Runtime diagnostics or logs.",
+      "submitFailed": "The value could not be saved. Retry or open Logs.",
       "completionFailed": "The Runtime Input request ended before it could be completed. Retry the original action."
     },
     "table": {
@@ -1265,6 +1276,8 @@
     "refresh": "Refresh"
   },
   "desktop": {
+    "searchWindows": "Search desktop windows",
+    "noMatchingWindows": "No matching desktop windows",
     "title": "Desktop Resources",
     "loadResources": "Load resources",
     "windowUri": "URI",
@@ -1286,7 +1299,7 @@
     "failedToLoadDetail": "Failed to load resource content",
     "enumerationFailed": "Failed to load Desktop Resources",
     "enumerationIndeterminate": "Desktop Resources could not be determined",
-    "enumerationIndeterminateDescription": "The current SDK cannot distinguish an empty result from an unsupported capability or a per-server enumeration failure. You can retry or inspect MCP diagnostics.",
+    "enumerationIndeterminateDescription": "The current SDK cannot distinguish an empty result from an unsupported capability or a per-server enumeration failure. You can retry or open Logs.",
     "enumerationUnverified": "Some Desktop Resources may be missing",
     "enumerationUnverifiedDescription": "The current SDK returned resources but cannot report whether another MCP failed during enumeration.",
     "runtimeUnavailable": "Runtime is not ready",
@@ -1296,9 +1309,11 @@
     "noActiveMcpDescription": "Start or configure an MCP server before loading Desktop Resources.",
     "manageMcp": "Manage MCP Servers",
     "runtimeDegraded": "Runtime is limited",
-    "runtimeDegradedDescription": "Available resources may be incomplete. You can retry or inspect Runtime diagnostics."
+    "runtimeDegradedDescription": "Available resources may be incomplete. You can retry or open Logs."
   },
   "debug": {
+    "unknownServer": "Unknown server",
+    "viewInLogs": "View in logs",
     "description": "Tool browser and call testing.",
     "tabs": {
       "tools": "Tools",
@@ -1333,6 +1348,11 @@
     "loadMoreResources": "Load more"
   },
   "logs": {
+    "source": "Source",
+    "allOutcomes": "All outcomes",
+    "failureReason": "Failure reason",
+    "toolDetailsUnavailable": "Could not load tool call details",
+    "clearCallFocus": "Back to logs",
     "title": "Logs",
     "export": "Export",
     "clear": "Clear logs",
@@ -1517,7 +1537,7 @@
       "connected": "Connected",
       "disconnect": "Disconnect",
       "connectionCleanupRequired": "A stale connection must be cleaned up before reconnecting.",
-      "connectionCleanupGuidance": "Retry the disconnect action. If cleanup still fails, view Runtime diagnostics or logs.",
+      "connectionCleanupGuidance": "Retry the disconnect action. If cleanup still fails, open Logs.",
       "disconnectSuccess": "Disconnected from SMCP server",
       "connectSuccess": "Connecting to {{name}}…",
       "noRobotAccount": "This robot can't be connected securely yet (no robot account ID).",

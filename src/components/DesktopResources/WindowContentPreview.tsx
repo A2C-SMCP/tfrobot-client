@@ -5,7 +5,6 @@ import type { WindowContent } from '@/stores/desktopStore';
 
 const { Text } = Typography;
 
-const MAX_TEXT_PREVIEW_LENGTH = 500;
 const MAX_IMAGE_PREVIEW_BYTES = 2 * 1024 * 1024;
 const SAFE_IMAGE_MIME_TYPES = new Set([
   'image/gif',
@@ -52,7 +51,7 @@ export function WindowContentPreview({ contents }: WindowContentPreviewProps) {
             </Text>
             <div
               style={{
-                backgroundColor: '#f5f5f5',
+                backgroundColor: 'var(--ant-color-fill-alter)',
                 padding: '8px 12px',
                 borderRadius: 4,
                 marginTop: 4,
@@ -63,14 +62,12 @@ export function WindowContentPreview({ contents }: WindowContentPreviewProps) {
               <Text
                 code
                 style={{
-                  wordBreak: 'break-all',
+                  overflowWrap: 'anywhere',
                   whiteSpace: 'pre-wrap',
                   fontSize: 12,
                 }}
               >
-                {content.text.length > MAX_TEXT_PREVIEW_LENGTH
-                  ? `${content.text.slice(0, MAX_TEXT_PREVIEW_LENGTH)}…`
-                  : content.text}
+                {content.text}
               </Text>
             </div>
           </div>

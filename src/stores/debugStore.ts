@@ -37,6 +37,7 @@ export interface ToolCallResponse {
   result?: CallToolResult;
   error?: string;
   duration_ms: number;
+  correlation_id?: string;
 }
 
 export interface ToolCallHistoryRecord {
@@ -188,7 +189,12 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     }
   },
 
-  selectTool: (tool) => set({ selectedTool: tool, lastCallResult: null }),
+  selectTool: (tool) => set((state) => state.selectedTool?.name === tool?.name ? { selectedTool: tool } : {
+    selectedTool: tool,
+    lastCallResult: null,
+    calling: false,
+    executionRequestId: state.executionRequestId + 1,
+  }),
 
   executeTool: async (instanceId, toolName, params, timeout) => {
     const requestId = get().executionRequestId + 1;
@@ -208,9 +214,6 @@ export const useDebugStore = create<DebugState>((set, get) => ({
       });
       if (get().executionRequestId === requestId && get().activeInstanceId === instanceId) {
         set({ lastCallResult: result, calling: false });
-      }
-      if (get().executionRequestId === requestId && get().activeInstanceId === instanceId) {
-        get().fetchHistory(instanceId);
       }
       return result;
     } catch (e) {

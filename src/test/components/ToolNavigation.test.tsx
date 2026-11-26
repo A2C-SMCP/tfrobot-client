@@ -9,7 +9,9 @@ vi.mock('@/components/DebugPanel/ToolCallTest', () => ({ ToolCallTest: () => nul
 
 it('restores a Computer filter after another Computer has populated the shared debug store', async () => {
   useDebugStore.getState().reset();
-  const tools = (id: string): ToolInfo[] => [{ name: id, displayName: id, description: '', inputSchema: {}, server: `server-${id}` }];
+  const tools = (id: string): ToolInfo[] => [`${id}-one`, `${id}-two`].map(name => ({
+    name, displayName: name, description: '', inputSchema: {}, server: `server-${name}`,
+  }));
   let aVisits = 0;
   let finish!: (tools: ToolInfo[]) => void;
   vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -23,14 +25,16 @@ it('restores a Computer filter after another Computer has populated the shared d
     <NavigationScope id={`computer:${id}`} key={id}><ToolBrowser instanceId={id} /></NavigationScope>
   </NavigationMemoryProvider>;
   const view = render(tree('a'));
+  await screen.findByRole('button', { name: /a-two/ });
   fireEvent.mouseDown(await screen.findByRole('combobox'));
-  const options = await screen.findAllByText('server-a');
+  const options = await screen.findAllByText('server-a-two');
   fireEvent.click(options[options.length - 1]);
-  await waitFor(() => expect(view.container.querySelector('.ant-select-selection-item')).toHaveTextContent('server-a'));
+  await waitFor(() => expect(screen.queryByRole('button', { name: /a-two/ })).not.toBeInTheDocument());
   view.rerender(tree('b'));
   await waitFor(() => expect(useDebugStore.getState().toolsLoadedInstanceId).toBe('b'));
   view.rerender(tree('a'));
   await waitFor(() => expect(finish).toBeDefined());
   await act(async () => { finish(tools('a')); });
-  await waitFor(() => expect(view.container.querySelector('.ant-select-selection-item')).toHaveTextContent('server-a'));
+  expect(await screen.findByRole('button', { name: /a-one/ })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /a-two/ })).not.toBeInTheDocument();
 });

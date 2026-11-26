@@ -30,6 +30,8 @@ export interface ActivityQuery {
   levels?: ActivityEvent['level'][];
   categories?: string[];
   keyword?: string;
+  outcome?: ActivityEvent['outcome'];
+  correlation_id?: string;
   scope: ActivityScopeFilter;
   limit?: number;
   offset?: number;
@@ -52,6 +54,8 @@ export interface ActivityState {
   query: ActivityQuery;
   requestId: number;
   setQueryAndFetch: (query: Partial<ActivityQuery>) => Promise<void>;
+  focusToolCall: (correlationId: string) => Promise<void>;
+  clearToolFocus: () => Promise<void>;
   fetchActivity: () => Promise<void>;
   exportActivity: (path: string) => Promise<void>;
   clearActivity: (scope?: ActivityScopeFilter) => Promise<void>;
@@ -72,6 +76,7 @@ const initialState = {
 export function createActivityStore(scope: ActivityScopeFilter = { kind: 'all' }) {
   let serial = 0;
   let lifetime = 0;
+  let queryBeforeFocus: ActivityQuery | undefined;
   return create<ActivityState>((set, get) => {
   const fetchWithQuery = async (query: ActivityQuery) => {
     const requestId = ++serial;
@@ -91,9 +96,23 @@ export function createActivityStore(scope: ActivityScopeFilter = { kind: 'all' }
   return {
     ...initialState,
     query: { ...initialState.query, scope },
-    reset: () => { lifetime += 1; set({ ...initialState, query: { ...initialState.query, scope }, requestId: ++serial }); },
+    reset: () => {
+      lifetime += 1;
+      queryBeforeFocus = undefined;
+      set({ ...initialState, query: { ...initialState.query, scope }, requestId: ++serial });
+    },
     setQueryAndFetch: async (partial) => {
       await fetchWithQuery({ ...get().query, ...partial });
+    },
+    focusToolCall: (correlationId) => {
+      const query = get().query;
+      if (!query.correlation_id) queryBeforeFocus = query;
+      return fetchWithQuery({ scope, limit: query.limit, offset: 0, correlation_id: correlationId, categories: ['tool'] });
+    },
+    clearToolFocus: () => {
+      const restored = queryBeforeFocus ?? { scope, limit: get().query.limit, offset: 0 };
+      queryBeforeFocus = undefined;
+      return fetchWithQuery(restored);
     },
     fetchActivity: async () => {
       await fetchWithQuery(get().query);

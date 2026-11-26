@@ -60,20 +60,20 @@ describe('ToolBrowser', () => {
     };
   });
 
-  it('clears selected tool and refetches tools when computer instance changes', async () => {
+  it('only exposes tools owned by the current computer when the instance changes', async () => {
     const { rerender } = render(<ToolBrowser instanceId="computer-a" />);
 
     await waitFor(() => {
-      expect(mockDebugStore.selectTool).toHaveBeenCalledWith(null);
       expect(mockDebugStore.fetchTools).toHaveBeenCalledWith('computer-a');
     });
+    expect(screen.getByTestId('tool-call-test')).toBeVisible();
 
     rerender(<ToolBrowser instanceId="computer-b" />);
 
     await waitFor(() => {
-      expect(mockDebugStore.selectTool).toHaveBeenCalledTimes(2);
       expect(mockDebugStore.fetchTools).toHaveBeenCalledWith('computer-b');
     });
+    expect(screen.queryByTestId('tool-call-test')).not.toBeInTheDocument();
   });
 
   it('renders known server names for tools', () => {
@@ -83,7 +83,7 @@ describe('ToolBrowser', () => {
     expect(screen.getAllByText('desktop').length).toBeGreaterThan(0);
   });
 
-  it('hides unknown server labels and server filter', () => {
+  it('keeps unattributed tools available in default and filtered views', () => {
     mockDebugStore.tools = [
       {
         name: 'echo',
@@ -105,7 +105,7 @@ describe('ToolBrowser', () => {
 
     expect(screen.getAllByText('echo').length).toBeGreaterThan(0);
     expect(screen.queryByText('unknown')).not.toBeInTheDocument();
-    expect(screen.queryByText('All Servers')).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Filter by MCP server' })).toBeInTheDocument();
   });
 
   it('renders OAuth authorization-required results from the SDK wire contract', () => {

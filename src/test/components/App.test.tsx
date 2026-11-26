@@ -322,7 +322,7 @@ describe('App', () => {
       ['Open legacy Runtime', 'top'],
       ['Open legacy Skills', 'skills'],
       ['Open legacy Resources', 'resources'],
-      ['Open legacy Debug', 'debug'],
+      ['Open legacy Debug', 'tools'],
       ['Open legacy Logs', 'logs'],
     ] as const;
 

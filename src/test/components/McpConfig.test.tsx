@@ -174,7 +174,7 @@ describe('McpConfig', () => {
     } as any);
     render(<McpConfig instanceId={instanceId} />);
     expect(screen.getByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   });
@@ -635,7 +635,7 @@ describe('McpConfig', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Configure api-key' })).not.toBeInTheDocument();
     expect(mockSdkStore.upsertServer).toHaveBeenCalledTimes(1);
@@ -651,7 +651,7 @@ describe('McpConfig', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/add|token=private/)).not.toBeInTheDocument();
   });
@@ -675,7 +675,7 @@ describe('McpConfig', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Submit mocked server' }));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/edit|token=private/)).not.toBeInTheDocument();
   });
@@ -700,7 +700,7 @@ describe('McpConfig', () => {
     }));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
   });
@@ -724,7 +724,7 @@ describe('McpConfig', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Yes' }));
 
     expect(await screen.findByText(
-      'The MCP operation failed. View Runtime diagnostics or logs for details.',
+      'The MCP operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/remove|token=private/)).not.toBeInTheDocument();
   });

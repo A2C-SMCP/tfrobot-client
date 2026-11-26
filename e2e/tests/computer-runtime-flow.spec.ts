@@ -91,9 +91,8 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await expect(page.getByRole('button', { name: 'Import Config' })).not.toBeVisible();
     await expect(page.getByRole('button', { name: 'Export Config' })).not.toBeVisible();
 
-    await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
-    await page.getByRole('tab', { name: 'Debug Panel', exact: true }).click();
-    await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
+    await page.getByRole('tab', { name: 'Skills and tools', exact: true }).click();
+    await page.getByRole('radiogroup', { name: 'Skills and tools' }).getByText('Tools', { exact: true }).click();
     await expect(page.getByPlaceholder('Search tools...')).toBeVisible();
     await page.getByRole('tab', { name: 'Logs', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible();
@@ -266,10 +265,9 @@ test.describe('Computer configuration, runtime, and diagnostics boundaries', () 
     await page.keyboard.press('Enter');
     await expect(page.getByRole('heading', { name: 'Keyboard Helper' })).toBeVisible();
 
-    await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
-    const debugPanel = page.getByRole('tab', { name: 'Debug Panel', exact: true });
-    await debugPanel.focus();
+    const logs = page.getByRole('tab', { name: /Logs$/ });
+    await logs.focus();
     await page.keyboard.press('Enter');
-    await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toBeVisible();
+    await expect(logs).toHaveAttribute('aria-selected', 'true');
   });
 });
