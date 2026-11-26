@@ -29,7 +29,6 @@ interface McpServerListProps {
   onStart?: (bundleId: string) => Promise<void>;
   onRetry?: (bundleId: string, name: string) => Promise<void>;
   onStop?: (bundleId: string, name: string) => Promise<void>;
-  onOpenBuiltIn?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   onAuthorize?: (bundleId: string) => Promise<void>;
   onCancelAuthorization?: (bundleId: string) => Promise<void>;
@@ -46,7 +45,6 @@ export function McpServerList({
   onStart,
   onRetry,
   onStop,
-  onOpenBuiltIn,
   onOpenPlugin,
   onAuthorize,
   onCancelAuthorization,
@@ -244,7 +242,6 @@ export function McpServerList({
           return (
             <Space direction="vertical" size={2}>
               <Typography.Text type="secondary">{builtInManagedHint(record)}</Typography.Text>
-              {onOpenBuiltIn && <Button type="link" size="small" onClick={onOpenBuiltIn}>{t('computer.redesign.manageBuiltIn')}</Button>}
             </Space>
           );
         }
@@ -286,9 +283,11 @@ export function McpServerList({
               <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
                 <span>
                   <Button
-                    type="text"
+                    color="danger"
+                    variant="filled"
                     icon={<PauseCircleOutlined />}
                     onClick={() => onStop?.(record.bundleId, record.name)}
+                    aria-label={t('mcp.actions.stopServer', { name: record.name })}
                     title={t('mcp.actions.stop')}
                     disabled={actionsDisabled}
                   />
@@ -298,9 +297,11 @@ export function McpServerList({
               <Tooltip title={actionsDisabled ? actionsDisabledReason : undefined}>
                 <span>
                   <Button
-                    type="text"
+                    color="primary"
+                    variant="filled"
                     icon={<PlayCircleOutlined />}
                     onClick={() => handleStart(record.bundleId)}
+                    aria-label={t('mcp.actions.startServer', { name: record.name })}
                     title={t('mcp.actions.start')}
                     disabled={actionsDisabled}
                   />

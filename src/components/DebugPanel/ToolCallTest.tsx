@@ -9,10 +9,11 @@ import { SchemaForm } from './SchemaForm';
 
 const { Text } = Typography;
 
-export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: ToolInfo }) {
+export function ToolCallTest({ instanceId, tool, onViewLog }: { instanceId: string; tool: ToolInfo; onViewLog?: (correlationId: string) => void }) {
   const { t } = useTranslation();
   const action = usePageAction(JSON.stringify([instanceId, tool.name]));
   const { executeTool, lastCallResult, calling } = useDebugStore();
+  const correlationId = lastCallResult?.correlation_id;
   const [form] = Form.useForm();
   const [mode, setMode] = useNavigationState<'form' | 'json'>(`debug.${tool.name}.mode`, 'form');
   const [jsonText, setJsonText] = useNavigationState(`debug.${tool.name}.json`, '{}');
@@ -79,7 +80,7 @@ export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: T
           addonAfter="s"
           style={{ width: 160 }}
         />
-        <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleExecute} loading={calling}>
+        <Button type="primary" aria-label={t('debug.execute')} icon={<PlayCircleOutlined />} onClick={handleExecute} loading={calling}>
           {t('debug.execute')}
         </Button>
       </Space>
@@ -104,7 +105,11 @@ export function ToolCallTest({ instanceId, tool }: { instanceId: string; tool: T
         </Form.Item>
       )}
 
-      {lastCallResult && <ToolCallResultView response={lastCallResult} />}
+      {lastCallResult && <>
+        <ToolCallResultView response={lastCallResult} />
+        {onViewLog && correlationId && <Button type="link"
+          onClick={() => onViewLog(correlationId)}>{t('debug.viewInLogs')}</Button>}
+      </>}
     </div>
   );
 }

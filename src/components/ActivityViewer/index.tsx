@@ -3,10 +3,11 @@ import { useStore } from 'zustand';
 import { usePageActive } from '@/components/Navigation/pageActivityState';
 import { useNavigationState } from '@/components/Navigation/navigationMemoryState';
 import { PagePopconfirm as Popconfirm } from '@/components/Navigation/PageOverlays';
-import { useEffect, useMemo } from 'react';
-import { Button, Input, Select, Space, Table, Tag, Typography } from 'antd';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Input, Select, Space, Spin, Table, Tag, Typography } from 'antd';
 import { DeleteOutlined, ExportOutlined, ReloadOutlined } from '@ant-design/icons';
 import { save } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import dayjs from 'dayjs';
 import { useTranslation } from 'react-i18next';
 import {
@@ -15,6 +16,7 @@ import {
   type ActivityScopeFilter,
 } from '@/stores/activityStore';
 import { useComputerStore } from '@/stores/computerStore';
+import type { ToolCallHistoryRecord } from '@/stores/debugStore';
 import { ACTIVITY_CATEGORIES } from './categories';
 
 const { Search } = Input;
@@ -29,16 +31,52 @@ const TIME_PRESETS = [
 ];
 interface ActivityViewerProps {
   instanceId?: string;
+  focusRequest?: { correlationId?: string };
 }
 
-export function ActivityViewer({ instanceId }: ActivityViewerProps) {
+function fieldsOf(record: ActivityEvent) {
+  return record.fields && typeof record.fields === 'object' ? record.fields as Record<string, unknown> : {};
+}
+
+function ToolActivityDetails({ instanceId, requestId, record }: { instanceId: string; requestId: string; record: ActivityEvent }) {
+  const { t } = useTranslation();
+  const active = usePageActive();
+  const [details, setDetails] = useState<ToolCallHistoryRecord | null>();
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    let current = true;
+    setFailed(false);
+    setDetails(undefined);
+    void invoke<ToolCallHistoryRecord[]>('get_tool_history', { instanceId, requestId }).then((records) => {
+      if (current) setDetails(records?.find(row => row.req_id === requestId && row.computer_instance_id === instanceId) ?? null);
+    }).catch(() => { if (current) setFailed(true); });
+    return () => { current = false; };
+  }, [active, instanceId, requestId]);
+
+  const activityError = fieldsOf(record).error;
+  const reason = details?.error ?? (typeof activityError === 'string' ? activityError : undefined);
+  return <Space direction="vertical" style={{ width: '100%' }}>
+    {reason && <Alert type="error" message={t('logs.failureReason')} description={reason} />}
+    {failed ? <Alert type="warning" message={t('logs.toolDetailsUnavailable')} /> : details === undefined ? <Spin /> : details && <>
+      <Typography.Text strong>{t('debug.historyColumns.params')}</Typography.Text>
+      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(details.parameters, null, 2)}</pre>
+    </>}
+  </Space>;
+}
+
+export function ActivityViewer({ instanceId, focusRequest }: ActivityViewerProps) {
   const action = usePageAction();
   const { t } = useTranslation();
   const store = useMemo(() => activityViewStore(instanceId), [instanceId]);
   const active = usePageActive();
-  const { items, total, loading, query, invalidated, setQueryAndFetch, fetchActivity, exportActivity, clearActivity } = useStore(store);
+  const { items, total, loading, error, query, invalidated, setQueryAndFetch, focusToolCall, clearToolFocus,
+    fetchActivity, exportActivity, clearActivity } = useStore(store);
   const { instances, fetchInstances } = useComputerStore();
   const [searchText, setSearchText] = useNavigationState('activity.search', query.keyword ?? '');
+  const handledFocus = useRef<ActivityViewerProps['focusRequest']>(undefined);
+  const expandedFocus = useRef<ActivityViewerProps['focusRequest']>(undefined);
+  const tableRef = useRef<HTMLDivElement>(null);
   const categoryOptions = [...new Set([
     ...ACTIVITY_CATEGORIES,
     ...items.map((item) => item.category),
@@ -46,8 +84,22 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
   const categoryLabel = (category: string) => t(`logs.categories.${category}`, { defaultValue: category });
 
   useEffect(() => {
-    if (active) void fetchActivity();
-  }, [active, fetchActivity]);
+    if (!active) return;
+    if (focusRequest && focusRequest !== handledFocus.current) {
+      handledFocus.current = focusRequest;
+      if (focusRequest.correlationId) {
+        setSearchText('');
+        void focusToolCall(focusRequest.correlationId);
+        return;
+      }
+      if (store.getState().query.correlation_id) {
+        void clearToolFocus();
+        setSearchText(store.getState().query.keyword ?? '');
+        return;
+      }
+    }
+    void fetchActivity();
+  }, [active, fetchActivity, focusRequest, focusToolCall, clearToolFocus, setSearchText, store]);
 
   useEffect(() => {
     if (active && invalidated && !loading) void fetchActivity();
@@ -58,6 +110,18 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
   }, [active, fetchInstances, instanceId]);
 
   const [expandedRows, setExpandedRows] = useNavigationState<React.Key[]>('activity.expanded', []);
+  useEffect(() => {
+    if (!active || loading || !focusRequest?.correlationId || expandedFocus.current === focusRequest) return;
+    if (query.correlation_id !== focusRequest.correlationId) return;
+    const matching = items.find((record) => record.correlation_id === focusRequest.correlationId && record.event_type === 'tool_call');
+    if (matching) {
+      expandedFocus.current = focusRequest;
+      setExpandedRows((rows) => rows.includes(matching.id) ? rows : [...rows, matching.id]);
+      const row = tableRef.current?.querySelector<HTMLElement>(`[data-activity-id="${matching.id}"]`);
+      row?.scrollIntoView?.({ block: 'nearest' });
+      row?.focus({ preventScroll: true });
+    }
+  }, [active, loading, focusRequest, query.correlation_id, items, setExpandedRows]);
 
   const changeScope = (value: string) => {
     const scope: ActivityScopeFilter = value === 'all'
@@ -92,7 +156,13 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
         <Tag color={OUTCOME_COLORS[outcome]}>{t(`logs.outcomes.${outcome}`)}</Tag>
       ),
     },
-    {
+    instanceId ? {
+      title: t('logs.source'), key: 'source', width: 140,
+      render: (_: unknown, record: ActivityEvent) => {
+        const { server_name: server, bundle_id: bundle } = fieldsOf(record);
+        return typeof server === 'string' ? server : typeof bundle === 'string' ? bundle : t('logs.client');
+      },
+    } : {
       title: t('logs.scope'), dataIndex: 'scope', width: 160,
       render: (scope: ActivityEvent['scope']) => scope.kind === 'client' ? t('logs.client') : scope.computer_id,
     },
@@ -140,6 +210,14 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
           onChange={(categories) => void setQueryAndFetch({ categories: categories.length ? categories : undefined, offset: 0 })}
           options={categoryOptions.map((category) => ({ label: categoryLabel(category), value: category }))}
         />
+        {instanceId && <Select<ActivityEvent['outcome'] | 'all'>
+          aria-label={t('logs.outcome')}
+          value={query.outcome ?? 'all'} onChange={(value) => void setQueryAndFetch({ outcome: value === 'all' ? undefined : value, offset: 0 })}
+          options={[
+            { value: 'all' as const, label: t('logs.allOutcomes') },
+            ...(['succeeded', 'failed', 'unknown'] as const).map(outcome => ({ value: outcome, label: t(`logs.outcomes.${outcome}`) })),
+          ]}
+        />}
         {!instanceId && (
           <Select
             aria-label={t('logs.filterScope')}
@@ -162,15 +240,24 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
           style={{ width: 200 }}
         />
         <Button icon={<ReloadOutlined />} onClick={() => void fetchActivity()}>{t('common.refresh')}</Button>
+        {query.correlation_id && <Button type="link" onClick={() => {
+          void clearToolFocus();
+          setSearchText(store.getState().query.keyword ?? '');
+        }}>
+          {t('logs.clearCallFocus')}
+        </Button>}
         <Button icon={<ExportOutlined />} onClick={() => void handleExport()}>{t('logs.export')}</Button>
         <Popconfirm title={t('logs.confirmClear')} onConfirm={() => void clearActivity()}>
           <Button danger icon={<DeleteOutlined />}>{t('logs.clear')}</Button>
         </Popconfirm>
       </Space>
+      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
+      <div ref={tableRef}>
       <Table<ActivityEvent>
         columns={columns}
         dataSource={items}
         rowKey="id"
+        onRow={(record) => ({ 'data-activity-id': record.id, tabIndex: -1 })}
         loading={loading}
         size="small"
         scroll={{ x: 900 }}
@@ -178,13 +265,18 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
           expandedRowKeys: expandedRows,
           onExpandedRowsChange: (keys) => setExpandedRows([...keys]),
           expandedRowRender: (record) => (
-            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              {instanceId && record.event_type === 'tool_call' && record.correlation_id && expandedRows.includes(record.id) && (
+                <ToolActivityDetails key={record.correlation_id} instanceId={instanceId} requestId={record.correlation_id} record={record} />
+              )}
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
               {JSON.stringify({
                 event_type: record.event_type,
                 correlation_id: record.correlation_id,
                 fields: record.fields,
               }, null, 2)}
-            </pre>
+              </pre>
+            </Space>
           ),
           rowExpandable: (record) => record.fields !== undefined || record.correlation_id !== undefined,
         }}
@@ -197,6 +289,7 @@ export function ActivityViewer({ instanceId }: ActivityViewerProps) {
           pageSizeOptions: [20, 50, 100],
         }}
       />
+      </div>
     </div>
   );
 }

@@ -29,7 +29,6 @@ interface McpRuntimeControlsProps {
   onStartRuntime?: () => void;
   onRestartRuntime?: () => void;
   showRuntimeGuidance?: boolean;
-  onOpenBuiltIn?: () => void;
   onOpenPlugin?: (owner: PluginMcpServerOwner) => void;
   /** Opens Settings → Permissions & security, where the keychain copy lives in full. */
   onOpenPermissionHelp?: () => void;
@@ -54,7 +53,6 @@ export function McpRuntimeControls({
   onStartRuntime,
   onRestartRuntime,
   showRuntimeGuidance = true,
-  onOpenBuiltIn,
   onOpenPlugin,
   onOpenPermissionHelp,
 }: McpRuntimeControlsProps) {
@@ -245,6 +243,8 @@ export function McpRuntimeControls({
           {(showRuntimeGuidance || !disabled) && <>
           <Button
             icon={<PlayCircleOutlined />}
+            color="primary"
+            variant="filled"
             onClick={() => runtimeActions.run({ kind: 'startAll' })}
             disabled={disabled}
             loading={loading}
@@ -253,6 +253,8 @@ export function McpRuntimeControls({
           </Button>
           <Button
             icon={<PauseCircleOutlined />}
+            color="danger"
+            variant="filled"
             onClick={handleStopAll}
             disabled={disabled}
             loading={loading}
@@ -311,7 +313,6 @@ export function McpRuntimeControls({
         actionsDisabled={disabled}
         actionsDisabledReason={disabledReason}
         loading={loading}
-        onOpenBuiltIn={onOpenBuiltIn}
         onOpenPlugin={onOpenPlugin}
         onAuthorize={(bundleId) => runAuthorizationAction(authorizeServer, bundleId)}
         onCancelAuthorization={(bundleId) => runAuthorizationAction(cancelAuthorization, bundleId)}

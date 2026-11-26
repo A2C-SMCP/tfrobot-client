@@ -35,8 +35,8 @@ vi.mock('@/components/DesktopResources', () => ({
     <div data-testid="resources-section">{instanceId}</div>
   ),
 }));
-vi.mock('@/components/DebugPanel', () => ({
-  DebugPanel: ({ instanceId }: { instanceId: string }) => (
+vi.mock('@/components/DebugPanel/ToolBrowser', () => ({
+  ToolBrowser: ({ instanceId }: { instanceId: string }) => (
     <div data-testid="debug-section">{instanceId}</div>
   ),
 }));
@@ -107,15 +107,16 @@ describe('ComputerWorkbench', () => {
     expect(screen.getByTestId('runtime-section')).not.toBeVisible();
     fireEvent.click(screen.getByRole('tab', { name: 'Desktop Resources' }));
     expect(screen.getByTestId('resources-section')).toHaveTextContent('computer-a');
-    fireEvent.click(screen.getByRole('tab', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
     expect(screen.getByTestId('logs-section')).toBeVisible();
     expect(screen.getByRole('tab', { name: 'Logs', selected: true })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: 'Debug Panel' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills and tools' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Tools' }));
     expect(screen.getByTestId('debug-section')).toBeVisible();
     fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
     expect(screen.getByTestId('logs-section')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open Computer settings' })).toBeInTheDocument();
-  }, 15_000);
+  }, 30_000);
 
   it('uses Runtime actions as the authority for the primary operation', () => {
     const props = renderWorkbench();

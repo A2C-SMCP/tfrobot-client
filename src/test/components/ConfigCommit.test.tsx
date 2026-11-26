@@ -84,7 +84,7 @@ describe('Computer list adoption summary', () => {
 describe('Settings adoption presentation', () => {
   it.each([
     ['waiting_start', 'Not running · Saved configuration will be used on start'],
-    ['current', 'This runtime has adopted the saved configuration'],
+    ['current', null],
   ])('shows %s as an ordinary status line', async (state, label) => {
     const { invoke } = await import('@tauri-apps/api/core');
     const { useConfigAdoptionStore } = await import('@/stores/configAdoptionStore');
@@ -93,7 +93,11 @@ describe('Settings adoption presentation', () => {
     useConfigAdoptionStore.getState().reset();
     vi.mocked(invoke).mockResolvedValue({ incarnation: 1, generation: 1, state, changes: [], unknown_resources: [] });
     render(<ConfigAdoptionStatus quiet instance={{ id: 'quiet', name: 'Quiet', status: 'running', connectionStatus: 'disconnected', connectionPolicy: { auto_connect: false }, mcpServerCount: 0, runtime: runtimeSnapshot() }} onOpenRuntime={vi.fn()} />);
-    expect(await screen.findByText(label)).toBeInTheDocument();
+    if (label) expect(await screen.findByText(label)).toBeInTheDocument();
+    else {
+      await waitFor(() => expect(useConfigAdoptionStore.getState().statuses.quiet?.state).toBe('current'));
+      expect(screen.queryByText('This runtime has adopted the saved configuration')).not.toBeInTheDocument();
+    }
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open runtime workbench' })).not.toBeInTheDocument();
   });

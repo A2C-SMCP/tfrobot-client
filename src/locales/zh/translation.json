@@ -259,6 +259,14 @@
     "attachmentRetryHint": "可在所属消息中重新加载该附件。"
   },
   "computer": {
+    "sourceFilter": {
+      "label": "按 MCP 服务器筛选",
+      "all": "MCP 服务器 · 全部",
+      "selected": "MCP 服务器 · 已选 {{count}} 个",
+      "none": "MCP 服务器 · 未选择",
+      "selectAll": "全选",
+      "clear": "清空"
+    },
     "collection": {
       "count": "{{count}} 台计算机",
       "running": "{{count}} 台运行中",
@@ -609,8 +617,8 @@
       "started": "计算机已启动",
       "stopped": "计算机已停止",
       "restarted": "计算机已重启",
-      "runtimeOperationFailed": "运行时操作失败，请查看运行时诊断或日志了解详情。",
-      "connectionOperationFailed": "连接操作失败，请查看运行时诊断或日志了解详情。"
+      "runtimeOperationFailed": "运行时操作失败，请查看日志了解详情。",
+      "connectionOperationFailed": "连接操作失败，请查看日志了解详情。"
     },
     "configSave": {
       "saved": "已保存",
@@ -688,6 +696,7 @@
       "activeCapabilities": "本次运行可用的能力",
       "manageCapabilities": "管理插件",
       "desktopWaiting": "启动计算机后可读取桌面资源。",
+      "toolsWaiting": "启动计算机后可查看可用工具。",
       "connectionOverview": "连接概况",
       "currentConnection": "当前连接",
       "nextConnection": "下次连接目标",
@@ -990,7 +999,7 @@
     "batch": {
       "startSummary": "批量启动完成：候选 {{candidates}} 个，实际启动 {{actual}} 个，未变化 {{unchanged}} 个，排除插件托管 {{excluded}} 个，失败 {{failed}} 个。",
       "stopSummary": "批量停止完成：候选 {{candidates}} 个，实际停止 {{actual}} 个，未变化 {{unchanged}} 个，排除插件托管 {{excluded}} 个，失败 {{failed}} 个。",
-      "failure": "{{name}}（{{bundleId}}）：操作失败，请查看运行时诊断或日志了解详情。"
+      "failure": "{{name}}（{{bundleId}}）：操作失败，请查看日志了解详情。"
     },
     "disabledGuidance": {
       "title": "当前无法启动或停止 MCP 服务器",
@@ -1002,6 +1011,8 @@
       "start": "启动",
       "retry": "重试连接",
       "stop": "停止",
+      "stopServer": "停止 {{name}}",
+      "startServer": "启动 {{name}}",
       "managePlugin": "管理 {{plugin}}",
       "edit": "编辑",
       "remove": "删除",
@@ -1096,7 +1107,7 @@
       "started": "服务器 {{name}} 已启动",
       "reconnected": "服务器 {{name}} 已重新连接",
       "stopped": "服务器 {{name}} 已停止",
-      "operationFailed": "MCP 操作失败，请查看运行时诊断或日志了解详情。",
+      "operationFailed": "MCP 操作失败，请查看日志了解详情。",
       "missingInputDefinition": "MCP {{name}} 引用了输入项 {{id}}，但缺少定义。请先在 MCP 编辑器中补全定义再保存。",
       "statusLoadFailed": "无法加载 MCP 状态，请重试或查看日志了解详情。",
       "allStarted": "所有服务器已启动",
@@ -1169,7 +1180,7 @@
       "storeAsSecret": "设为密钥",
       "requestedBy": "由 MCP {{name}}（{{id}}）请求此输入项",
       "loadFailed": "无法加载输入项，请重试或查看日志了解详情。",
-      "submitFailed": "无法保存变量值，请重试或查看运行时诊断或日志。",
+      "submitFailed": "无法保存变量值，请重试或查看日志。",
       "completionFailed": "运行时输入请求已结束，未能完成处理。请重试原操作。"
     },
     "table": {
@@ -1261,6 +1272,8 @@
     "refresh": "刷新"
   },
   "desktop": {
+    "searchWindows": "搜索桌面窗口",
+    "noMatchingWindows": "没有匹配的桌面窗口",
     "title": "桌面资源",
     "loadResources": "加载资源",
     "windowUri": "URI",
@@ -1282,7 +1295,7 @@
     "failedToLoadDetail": "加载资源内容失败",
     "enumerationFailed": "加载桌面资源失败",
     "enumerationIndeterminate": "无法确定桌面资源状态",
-    "enumerationIndeterminateDescription": "当前 SDK 无法确认资源为空、未声明资源能力，还是部分服务器加载失败。请重试或查看 MCP 诊断。",
+    "enumerationIndeterminateDescription": "当前 SDK 无法确认资源为空、未声明资源能力，还是部分服务器加载失败。请重试或查看日志。",
     "enumerationUnverified": "部分桌面资源可能缺失",
     "enumerationUnverifiedDescription": "当前 SDK 已返回资源，但无法报告是否有其他 MCP 在枚举时失败。",
     "runtimeUnavailable": "运行时尚未就绪",
@@ -1292,9 +1305,11 @@
     "noActiveMcpDescription": "请先启动或配置 MCP 服务器，再加载桌面资源。",
     "manageMcp": "管理 MCP 服务器",
     "runtimeDegraded": "运行时运行受限",
-    "runtimeDegradedDescription": "可用资源可能不完整，你可以重试或查看运行时诊断。"
+    "runtimeDegradedDescription": "可用资源可能不完整，你可以重试或查看日志。"
   },
   "debug": {
+    "unknownServer": "未知服务器",
+    "viewInLogs": "在日志中查看",
     "description": "工具浏览与调用测试。",
     "tabs": {
       "tools": "工具",
@@ -1329,6 +1344,11 @@
     "loadMoreResources": "加载更多"
   },
   "logs": {
+    "source": "来源",
+    "allOutcomes": "全部结果",
+    "failureReason": "失败原因",
+    "toolDetailsUnavailable": "无法加载工具调用详情",
+    "clearCallFocus": "返回日志列表",
     "title": "日志",
     "export": "导出",
     "clear": "清空日志",
@@ -1520,7 +1540,7 @@
       "connected": "已连接",
       "disconnect": "断开连接",
       "connectionCleanupRequired": "重新连接前需要先清理残留连接。",
-      "connectionCleanupGuidance": "请重试断开操作；若清理仍失败，请查看运行时诊断或日志。",
+      "connectionCleanupGuidance": "请重试断开操作；若清理仍失败，请查看日志。",
       "disconnectSuccess": "已断开 SMCP 连接",
       "connectSuccess": "正在连接 {{name}}…",
       "noRobotAccount": "此数字员工暂不支持安全连接（缺少数字员工账号 ID）。",

@@ -417,6 +417,8 @@ pub struct ActivityQuery {
     pub levels: Option<Vec<ActivityLevel>>,
     pub categories: Option<Vec<String>>,
     pub keyword: Option<String>,
+    pub outcome: Option<ActivityOutcome>,
+    pub correlation_id: Option<String>,
     #[serde(default)]
     pub scope: ActivityScopeFilter,
     pub limit: Option<i64>,
@@ -431,6 +433,8 @@ impl Default for ActivityQuery {
             levels: None,
             categories: None,
             keyword: None,
+            outcome: None,
+            correlation_id: None,
             scope: ActivityScopeFilter::All,
             limit: Some(50),
             offset: Some(0),

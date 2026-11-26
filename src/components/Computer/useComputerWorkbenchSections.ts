@@ -3,27 +3,25 @@ import { useNavigationState } from '@/components/Navigation/navigationMemoryStat
 import { usePageActive } from '@/components/Navigation/pageActivityState';
 import type { ComputerWorkbenchSection } from './tabs';
 
-export type WorkbenchTab = 'top' | 'skills' | 'resources' | 'diagnostics';
-export type DiagnosticTab = 'debug' | 'logs';
-const tabFor = (section: ComputerWorkbenchSection): WorkbenchTab => section === 'debug' || section === 'logs' ? 'diagnostics' : section;
+type WorkbenchTab = Exclude<ComputerWorkbenchSection, 'tools'>;
+const tabFor = (section: ComputerWorkbenchSection): WorkbenchTab => section === 'tools' ? 'skills' : section;
 
 /** Per-Computer task selection survives settings navigation and subtree release. */
 export function useComputerWorkbenchSections(initialSection: ComputerWorkbenchSection, navigationRevision = 0) {
   const active = usePageActive();
-  const [activeSection, setActiveSection] = useNavigationState<WorkbenchTab>('workbench.section', tabFor(initialSection));
-  const [savedDiagnosticTab, setDiagnosticTab] = useNavigationState('workbench.diagnosticTab', initialSection === 'debug' ? 'debug' : 'logs');
-  const diagnosticTab: DiagnosticTab = savedDiagnosticTab === 'debug' ? 'debug' : 'logs';
+  const [savedSection, setActiveSection] = useNavigationState<WorkbenchTab | 'diagnostics'>('workbench.section', tabFor(initialSection));
+  const activeSection = savedSection === 'diagnostics' ? 'logs' : savedSection;
+  const [capability, setCapability] = useNavigationState<'skills' | 'tools'>('workbench.capability', initialSection === 'tools' ? 'tools' : 'skills');
   const [appliedRevision, setAppliedRevision] = useNavigationState<number | null>('workbench.navigationRevision', null);
-  const openSection = (section: ComputerWorkbenchSection) => {
+  const openSection = (section: WorkbenchTab) => {
     if (!active) return;
-    if (section === 'debug' || section === 'logs') setDiagnosticTab(section);
-    setActiveSection(tabFor(section));
+    setActiveSection(section);
   };
   useEffect(() => {
     if (!active || appliedRevision === navigationRevision) return;
     setAppliedRevision(navigationRevision);
-    if (initialSection === 'debug' || initialSection === 'logs') setDiagnosticTab(initialSection);
+    if (initialSection === 'tools' || initialSection === 'skills') setCapability(initialSection);
     setActiveSection(tabFor(initialSection));
-  }, [active, appliedRevision, initialSection, navigationRevision, setActiveSection, setAppliedRevision, setDiagnosticTab]);
-  return { activeSection, diagnosticTab, setDiagnosticTab, openSection };
+  }, [active, appliedRevision, initialSection, navigationRevision, setActiveSection, setAppliedRevision, setCapability]);
+  return { activeSection, capability, setCapability, openSection };
 }

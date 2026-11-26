@@ -353,31 +353,43 @@ impl ObservabilityService {
         computer_instance_id: &str,
         limit: i64,
     ) -> Result<Vec<ToolCallHistoryRecord>, String> {
+        self.query_tool_history(computer_instance_id, None, limit)
+    }
+
+    pub(crate) fn query_tool_history(
+        &self,
+        computer_instance_id: &str,
+        request_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ToolCallHistoryRecord>, String> {
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp, req_id, computer_instance_id, server, tool, parameters_json,
                         timeout, success, error
-                 FROM tool_call_history WHERE computer_instance_id = ?1
+                 FROM tool_call_history WHERE computer_instance_id = ?1 AND (?3 IS NULL OR req_id = ?3)
                  ORDER BY timestamp DESC, id DESC LIMIT ?2",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map(params![computer_instance_id, limit.clamp(1, 500)], |row| {
-                let parameters: String = row.get(5)?;
-                Ok(ToolCallHistoryRecord {
-                    timestamp: row.get(0)?,
-                    req_id: row.get(1)?,
-                    computer_instance_id: row.get(2)?,
-                    server: row.get(3)?,
-                    tool: row.get(4)?,
-                    parameters: serde_json::from_str(&parameters)
-                        .unwrap_or(serde_json::Value::Null),
-                    timeout: row.get(6)?,
-                    success: row.get(7)?,
-                    error: row.get(8)?,
-                })
-            })
+            .query_map(
+                params![computer_instance_id, limit.clamp(1, 500), request_id],
+                |row| {
+                    let parameters: String = row.get(5)?;
+                    Ok(ToolCallHistoryRecord {
+                        timestamp: row.get(0)?,
+                        req_id: row.get(1)?,
+                        computer_instance_id: row.get(2)?,
+                        server: row.get(3)?,
+                        tool: row.get(4)?,
+                        parameters: serde_json::from_str(&parameters)
+                            .unwrap_or(serde_json::Value::Null),
+                        timeout: row.get(6)?,
+                        success: row.get(7)?,
+                        error: row.get(8)?,
+                    })
+                },
+            )
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
@@ -539,12 +551,22 @@ fn activity_where_clause(query: &ActivityQuery) -> (String, Vec<SqlValue>) {
             serde_json::to_string(categories).unwrap_or_else(|_| "[]".to_string()),
         ));
     }
+    if let Some(outcome) = &query.outcome {
+        clauses.push("outcome = ?");
+        values.push(SqlValue::Text(outcome.as_str().to_string()));
+    }
+    if let Some(correlation_id) = &query.correlation_id {
+        clauses.push("correlation_id = ?");
+        values.push(SqlValue::Text(correlation_id.clone()));
+    }
     if let Some(keyword) = query.keyword.as_ref().filter(|value| !value.is_empty()) {
-        clauses.push("(message LIKE ? ESCAPE '\\' OR operation LIKE ? ESCAPE '\\')");
+        clauses.push("(message LIKE ? ESCAPE '\\' OR operation LIKE ? ESCAPE '\\'
+            OR coalesce(json_extract(fields_json, '$.server_name'), json_extract(fields_json, '$.bundle_id')) LIKE ? ESCAPE '\\')");
         let escaped = keyword
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
+        values.push(SqlValue::Text(format!("%{escaped}%")));
         values.push(SqlValue::Text(format!("%{escaped}%")));
         values.push(SqlValue::Text(format!("%{escaped}%")));
     }
@@ -710,6 +732,76 @@ mod tests {
             .unwrap();
         service.clear_activity(&ActivityScopeFilter::All).unwrap();
         assert_eq!(service.tool_history("computer-1", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tool_call_lookup_remains_scoped_to_the_computer() {
+        let dir = tempdir().unwrap();
+        let service = ObservabilityService::new(dir.path()).unwrap();
+        for (computer, request, outcome) in [
+            ("computer-1", "request-1", ActivityOutcome::Failed),
+            ("computer-1", "request-2", ActivityOutcome::Succeeded),
+            ("computer-2", "request-1", ActivityOutcome::Failed),
+        ] {
+            let mut activity = ActivityEventDraft::computer(
+                computer,
+                ActivityLevel::Info,
+                "tool",
+                "tool_call",
+                "echo",
+                outcome.clone(),
+                "called",
+            );
+            activity.correlation_id = Some(request.into());
+            activity.merge_fields(serde_json::json!({"server_name": "mcp_echo"}));
+            service
+                .record_tool_call(
+                    &activity,
+                    &ToolCallHistoryDraft {
+                        req_id: request.into(),
+                        computer_instance_id: computer.into(),
+                        server: "mcp_echo".into(),
+                        tool: "echo".into(),
+                        parameters: serde_json::json!({"text": computer}),
+                        timeout: None,
+                        success: outcome == ActivityOutcome::Succeeded,
+                        error: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let scope = ActivityScopeFilter::Computer {
+            computer_id: "computer-1".into(),
+        };
+        let page = service
+            .query_activity(&ActivityQuery {
+                scope: scope.clone(),
+                correlation_id: Some("request-1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].correlation_id.as_deref(), Some("request-1"));
+        let page = service
+            .query_activity(&ActivityQuery {
+                scope,
+                keyword: Some("mcp_echo".into()),
+                outcome: Some(ActivityOutcome::Succeeded),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].correlation_id.as_deref(), Some("request-2"));
+        let history = service
+            .query_tool_history("computer-1", Some("request-1"), 1)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].parameters["text"], "computer-1");
+        assert!(service
+            .query_tool_history("computer-2", Some("request-2"), 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

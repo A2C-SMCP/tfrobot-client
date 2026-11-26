@@ -109,8 +109,8 @@ function last<T>(items: T[]): T {
 vi.mock('@/components/DesktopResources', () => ({
   DesktopResources: ({ instanceId }: { instanceId: string }) => <div data-testid="desktop-resources">DesktopResources:{instanceId}</div>,
 }));
-vi.mock('@/components/DebugPanel', () => ({
-  DebugPanel: ({ instanceId }: { instanceId: string }) => <div data-testid="debug-panel">DebugPanel:{instanceId}</div>,
+vi.mock('@/components/DebugPanel/ToolBrowser', () => ({
+  ToolBrowser: ({ instanceId }: { instanceId: string }) => <div data-testid="debug-panel">DebugPanel:{instanceId}</div>,
 }));
 vi.mock('@/components/ActivityViewer', () => ({
   ActivityViewer: ({ instanceId }: { instanceId?: string }) => <div data-testid="log-viewer">ActivityViewer:{instanceId}</div>,
@@ -289,7 +289,7 @@ describe('Computer', () => {
   });
 
   it('maps the legacy debug destination to the expanded workbench section', async () => {
-    render(<Computer initialView="detail" initialSection="debug" />);
+    render(<Computer initialView="detail" initialSection="tools" />);
 
     expect(await screen.findByText('prod')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back to Computers' })).toBeInTheDocument();
@@ -362,7 +362,7 @@ describe('Computer', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: 'Start' }))[0]);
 
     expect(await screen.findByText(
-      'The Runtime operation failed. View Runtime diagnostics or logs for details.',
+      'The Runtime operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/secret\/path|token=private/)).not.toBeInTheDocument();
   }, 20000);
@@ -425,7 +425,7 @@ describe('Computer', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
 
     expect(await screen.findByText(
-      'The connection operation failed. View Runtime diagnostics or logs for details.',
+      'The connection operation failed. Open Logs for details.',
     )).toBeInTheDocument();
     expect(screen.queryByText(/private\.example|token=private/)).not.toBeInTheDocument();
   }, 20000);
